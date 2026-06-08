@@ -19,6 +19,7 @@ members = [
     "crates/tile-storage",
     "crates/tile-observability",
     "crates/tile-test-support",
+    "xtask",
 ]
 
 [workspace.package]
