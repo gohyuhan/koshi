@@ -1,0 +1,37 @@
+repos:
+  # Generic file hygiene.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=1536"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+
+  # Rust toolchain hooks (run via local cargo, no network).
+  - repo: local
+    hooks:
+      - id: fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: check
+        name: cargo check
+        entry: cargo check --workspace --all-targets
+        language: system
+        always_run: true
+        pass_filenames: false

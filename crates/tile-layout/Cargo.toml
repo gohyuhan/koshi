@@ -1,0 +1,6 @@
+[package]
+name = "tile-layout"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
