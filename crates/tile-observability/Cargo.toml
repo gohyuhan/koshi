@@ -1,0 +1,6 @@
+[package]
+name = "tile-observability"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

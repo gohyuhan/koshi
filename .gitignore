@@ -1,5 +1,6 @@
 target/
 .tile-arch/
 .repowise/
+.claude/
 
 .DS_Store

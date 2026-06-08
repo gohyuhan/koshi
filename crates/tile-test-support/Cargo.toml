@@ -1,0 +1,6 @@
+[package]
+name = "tile-test-support"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

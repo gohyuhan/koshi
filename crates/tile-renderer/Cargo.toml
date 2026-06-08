@@ -1,0 +1,6 @@
+[package]
+name = "tile-renderer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

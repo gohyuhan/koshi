@@ -1,0 +1,6 @@
+[package]
+name = "tile-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

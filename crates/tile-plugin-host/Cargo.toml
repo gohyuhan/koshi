@@ -1,0 +1,6 @@
+[package]
+name = "tile-plugin-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

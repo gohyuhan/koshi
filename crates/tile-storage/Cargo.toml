@@ -1,0 +1,6 @@
+[package]
+name = "tile-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

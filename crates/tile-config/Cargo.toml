@@ -1,0 +1,6 @@
+[package]
+name = "tile-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

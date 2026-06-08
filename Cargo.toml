@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tile-cli",
+    "crates/tile-core",
+    "crates/tile-runtime",
+    "crates/tile-session",
+    "crates/tile-layout",
+    "crates/tile-pane",
+    "crates/tile-pty",
+    "crates/tile-terminal",
+    "crates/tile-renderer",
+    "crates/tile-input",
+    "crates/tile-config",
+    "crates/tile-plugin-api",
+    "crates/tile-plugin-host",
+    "crates/tile-plugin-manager",
+    "crates/tile-ipc",
+    "crates/tile-storage",
+    "crates/tile-observability",
+    "crates/tile-test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
