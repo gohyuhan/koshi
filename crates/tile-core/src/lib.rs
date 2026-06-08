@@ -2,4 +2,5 @@
 //! lifecycle states, protocol DTOs, input-privacy DTOs, and error categories.
 
 pub mod error;
+pub mod ids;
 pub mod types;
