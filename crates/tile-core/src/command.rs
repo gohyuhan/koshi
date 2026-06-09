@@ -13,6 +13,7 @@
 //! No raw OS handles, no `&mut` references, and command identity is never a
 //! free-form `String`.
 
+use crate::event::RejectReason;
 use crate::geometry::Direction;
 use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
@@ -601,45 +602,6 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
 // with an observable [`RejectReason`]. [`CliExitCode`] is the placeholder
 // core-side mapping the external CLI turns a result into a process exit status
 // with (full wiring lives in the CLI layer).
-
-/// Why a command was rejected instead of applied. Rejection is an explicit,
-/// observable fact, never a silent no-op (see `TILE_04` / `TILE_17A`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RejectReason {
-    /// The resolved target disappeared before the mutation was applied; the
-    /// command is never redirected to a different or current target.
-    TargetGone,
-    /// An explicit target matched more than one entity; the runtime never
-    /// guesses and asks for an unambiguous id instead.
-    TargetAmbiguous,
-    /// An explicit target matched nothing.
-    TargetNotFound,
-    /// A client-scoped command whose source client has detached.
-    SourceClientStale,
-    /// A capability or authorization check failed.
-    Unauthorized,
-    /// The command is not valid in the current state; the string describes the
-    /// specific cause (e.g. closing the last pane under a keep-one policy).
-    InvalidState(String),
-    /// A resize would take the target below its minimum size.
-    MinSize,
-}
-
-impl std::fmt::Display for RejectReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RejectReason::TargetGone => f.write_str("target no longer exists"),
-            RejectReason::TargetAmbiguous => {
-                f.write_str("target matched more than one; specify an explicit id")
-            }
-            RejectReason::TargetNotFound => f.write_str("no target matched"),
-            RejectReason::SourceClientStale => f.write_str("source client has detached"),
-            RejectReason::Unauthorized => f.write_str("command not permitted"),
-            RejectReason::InvalidState(detail) => write!(f, "invalid state: {detail}"),
-            RejectReason::MinSize => f.write_str("below minimum size"),
-        }
-    }
-}
 
 /// The outcome of dispatching one command, keyed back to its originating
 /// [`CommandEnvelope`] by `command_id`.

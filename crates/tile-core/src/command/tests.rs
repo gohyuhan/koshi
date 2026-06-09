@@ -1,6 +1,7 @@
 //! Tests for the canonical command vocabulary.
 
 use super::*;
+use crate::event::RejectReason;
 use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -411,9 +412,7 @@ fn reject_reason_roundtrips() {
     roundtrip(&RejectReason::TargetNotFound);
     roundtrip(&RejectReason::SourceClientStale);
     roundtrip(&RejectReason::Unauthorized);
-    roundtrip(&RejectReason::InvalidState(
-        "close last pane under KeepOneShell".to_string(),
-    ));
+    roundtrip(&RejectReason::InvalidState);
     roundtrip(&RejectReason::MinSize);
 }
 
@@ -435,8 +434,8 @@ fn command_result_roundtrips() {
     });
 }
 
-/// Every reason produces a non-empty human string, and `InvalidState` carries
-/// its detail through. Pins the diagnostic helper to the real variant set.
+/// Every reason produces a human string. Pins the diagnostic helper to the
+/// real variant set; any added/renamed reason breaks this.
 #[test]
 fn reject_reason_diagnostics_are_human() {
     let cases: Vec<(RejectReason, &str)> = vec![
@@ -451,10 +450,7 @@ fn reject_reason_diagnostics_are_human() {
             "source client has detached",
         ),
         (RejectReason::Unauthorized, "command not permitted"),
-        (
-            RejectReason::InvalidState("close last pane".to_string()),
-            "invalid state: close last pane",
-        ),
+        (RejectReason::InvalidState, "invalid in the current state"),
         (RejectReason::MinSize, "below minimum size"),
     ];
     assert_eq!(cases.len(), 7);
