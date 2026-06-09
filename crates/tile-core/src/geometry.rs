@@ -1,4 +1,4 @@
-//! Terminal-cell geometry (FND-005).
+//! Terminal-cell geometry.
 //!
 //! All coordinates and dimensions are measured in terminal **cells**, never
 //! pixels. The origin `(0, 0)` is the top-left cell; `x` grows rightward

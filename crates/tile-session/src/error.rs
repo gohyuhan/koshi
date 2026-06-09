@@ -1,1 +1,1 @@
-//! Error categories. Placeholder per `TILE_01` standard source layout (FND-003).
+//! Error categories. Placeholder per standard source layout.

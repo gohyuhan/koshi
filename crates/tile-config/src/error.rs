@@ -1,4 +1,4 @@
-//! Config domain error. Classifies into [`DomainCategory::Config`] (`TILE_12`).
+//! Config domain error. Classifies into [`DomainCategory::Config`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

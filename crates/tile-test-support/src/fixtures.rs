@@ -1,1 +1,1 @@
-//! Test fixtures. Placeholder per `TILE_01` standard source layout (FND-003).
+//! Test fixtures. Placeholder per standard source layout.

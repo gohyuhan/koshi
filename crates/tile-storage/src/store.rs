@@ -1,4 +1,4 @@
-//! `store` domain — skeleton per `TILE_01` standard source layout (FND-003).
+//! `store` domain — skeleton per standard source layout.
 
 pub mod state;
 

@@ -1,4 +1,4 @@
-//! IPC domain error. Classifies into [`DomainCategory::Ipc`] (`TILE_12`).
+//! IPC domain error. Classifies into [`DomainCategory::Ipc`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

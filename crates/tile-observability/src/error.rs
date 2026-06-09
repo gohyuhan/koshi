@@ -1,6 +1,6 @@
 //! Aggregate error. [`TileError`] wraps any crate's domain error so the runtime
 //! and diagnostics can handle one type while preserving its category and
-//! severity (`TILE_12`). It lives here, not in `tile-core`, because wrapping the
+//! severity. It lives here, not in `tile-core`, because wrapping the
 //! concrete per-crate errors would otherwise cycle back through `tile-core`.
 
 use thiserror::Error;

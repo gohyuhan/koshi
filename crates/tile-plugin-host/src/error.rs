@@ -1,10 +1,10 @@
-//! Plugin domain error. Classifies into [`DomainCategory::Plugin`] (`TILE_12`).
+//! Plugin domain error. Classifies into [`DomainCategory::Plugin`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};
 
 /// A failure loading or running a plugin. Recoverable: a failed plugin is
-/// isolated and disabled without crashing the session (`TILE_12`).
+/// isolated and disabled without crashing the session.
 #[derive(Debug, Error)]
 pub enum PluginError {
     /// The plugin module could not be loaded or instantiated.

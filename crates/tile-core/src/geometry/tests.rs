@@ -1,4 +1,4 @@
-//! Tests for terminal-cell geometry (FND-005).
+//! Tests for terminal-cell geometry.
 
 use super::*;
 

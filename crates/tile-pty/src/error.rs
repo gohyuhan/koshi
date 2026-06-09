@@ -1,11 +1,10 @@
-//! PTY domain error. Classifies into [`DomainCategory::Pty`] (`TILE_12`).
+//! PTY domain error. Classifies into [`DomainCategory::Pty`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};
 
 /// A failure spawning or driving a child PTY. Pane-level failures are
-/// recoverable: a dead PTY closes its pane without crashing the session
-/// (`TILE_12`).
+/// recoverable: a dead PTY closes its pane without crashing the session.
 #[derive(Debug, Error)]
 pub enum PtyError {
     /// The child process could not be spawned.

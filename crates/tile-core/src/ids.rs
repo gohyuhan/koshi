@@ -1,4 +1,4 @@
-//! Typed identifiers (FND-004).
+//! Typed identifiers.
 //!
 //! Newtype wrappers around UUIDv7, giving each domain entity a distinct,
 //! non-interchangeable identifier type. UUIDv7 is time-ordered, so freshly

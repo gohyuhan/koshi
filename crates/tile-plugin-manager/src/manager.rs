@@ -1,4 +1,4 @@
-//! `manager` domain — skeleton per `TILE_01` standard source layout (FND-003).
+//! `manager` domain — skeleton per standard source layout.
 
 pub mod command;
 pub mod event;

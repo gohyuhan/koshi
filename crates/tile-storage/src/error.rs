@@ -1,11 +1,11 @@
-//! Storage domain error. Classifies into [`DomainCategory::Storage`] (`TILE_12`).
+//! Storage domain error. Classifies into [`DomainCategory::Storage`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};
 
 /// A failure persisting or loading state. I/O failures are recoverable (retry
 /// or skip the snapshot); a corrupt store means core state is unusable and is
-/// session-fatal (`TILE_12`).
+/// session-fatal.
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// Reading or writing the store failed.

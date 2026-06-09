@@ -1,11 +1,11 @@
 //! Error categories and severity. Every crate's domain error classifies into a
-//! shared [`DomainCategory`] and [`Severity`] (`TILE_12`), so observability and
+//! shared [`DomainCategory`] and [`Severity`], so observability and
 //! diagnostics can reason about failures uniformly without knowing concrete types.
 
 use serde::{Deserialize, Serialize};
 
-/// The domain a failure originated from. One variant per typed-error domain in
-/// `TILE_12`; this is classification only and carries no payload.
+/// The domain a failure originated from. One variant per typed-error domain;
+/// this is classification only and carries no payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainCategory {
     Config,
@@ -34,9 +34,8 @@ impl std::fmt::Display for DomainCategory {
 }
 
 /// How far a failure propagates. Ordered from least to most fatal, so callers
-/// can compare (`severity >= Severity::SessionFatal`) to decide containment
-/// (`TILE_12`): a pane or plugin failure stays `Recoverable` and must not crash
-/// the session.
+/// can compare (`severity >= Severity::SessionFatal`) to decide containment:
+/// a pane or plugin failure stays `Recoverable` and must not crash the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Severity {
     /// Contained; the session keeps running (pane failed, plugin failed,

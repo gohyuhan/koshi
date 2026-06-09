@@ -1,4 +1,4 @@
-//! `config` domain — skeleton per `TILE_01` standard source layout (FND-003).
+//! `config` domain — skeleton per standard source layout.
 
 pub mod state;
 

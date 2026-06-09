@@ -1,4 +1,4 @@
-//! Layout domain error. Classifies into [`DomainCategory::Layout`] (`TILE_12`).
+//! Layout domain error. Classifies into [`DomainCategory::Layout`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

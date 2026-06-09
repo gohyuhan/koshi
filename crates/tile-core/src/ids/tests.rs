@@ -1,4 +1,4 @@
-//! Tests for typed identifiers (FND-004).
+//! Tests for typed identifiers.
 
 use super::*;
 use std::collections::HashSet;

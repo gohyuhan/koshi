@@ -387,8 +387,8 @@ pub struct ReloadPluginArgs {
 ///
 /// `ExternalCli` carries only an optional session target: an external command
 /// with no explicit target is rejected for current-pane operations and never
-/// falls back to the focused pane (see `TILE_04` / `TILE_17A`). `Plugin` and
-/// `Internal` have no associated client.
+/// falls back to the focused pane. `Plugin` and `Internal` have no associated
+/// client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
     /// A keybinding fired by an attached client.

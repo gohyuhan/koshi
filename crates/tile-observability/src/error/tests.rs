@@ -1,7 +1,7 @@
 use super::*;
 
 // Display snapshots + severity assignments for every domain error, exercised
-// both directly and after wrapping into the aggregate (`TILE_12`).
+// both directly and after wrapping into the aggregate.
 
 #[test]
 fn config_error_classifies_and_displays() {
