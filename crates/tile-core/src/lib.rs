@@ -4,4 +4,5 @@
 pub mod error;
 pub mod geometry;
 pub mod ids;
+pub mod process;
 pub mod types;
