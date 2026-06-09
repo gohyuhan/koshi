@@ -4,3 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror = "2.0.18"
+tile-cli = { version = "0.1.0", path = "../tile-cli" }
+tile-config = { version = "0.1.0", path = "../tile-config" }
+tile-core = { version = "0.1.0", path = "../tile-core" }
+tile-ipc = { version = "0.1.0", path = "../tile-ipc" }
+tile-layout = { version = "0.1.0", path = "../tile-layout" }
+tile-plugin-host = { version = "0.1.0", path = "../tile-plugin-host" }
+tile-pty = { version = "0.1.0", path = "../tile-pty" }
+tile-storage = { version = "0.1.0", path = "../tile-storage" }
+tile-terminal = { version = "0.1.0", path = "../tile-terminal" }

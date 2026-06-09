@@ -12,3 +12,5 @@ name = "tile"
 path = "src/main.rs"
 
 [dependencies]
+thiserror = "2.0.18"
+tile-core = { version = "0.1.0", path = "../tile-core" }

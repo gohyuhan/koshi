@@ -334,10 +334,18 @@ dependencies = [
 [[package]]
 name = "tile-cli"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-config"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-core"
@@ -355,14 +363,34 @@ version = "0.1.0"
 [[package]]
 name = "tile-ipc"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-layout"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-observability"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-cli",
+ "tile-config",
+ "tile-core",
+ "tile-ipc",
+ "tile-layout",
+ "tile-plugin-host",
+ "tile-pty",
+ "tile-storage",
+ "tile-terminal",
+]
 
 [[package]]
 name = "tile-pane"
@@ -375,6 +403,10 @@ version = "0.1.0"
 [[package]]
 name = "tile-plugin-host"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-plugin-manager"
@@ -383,6 +415,10 @@ version = "0.1.0"
 [[package]]
 name = "tile-pty"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-renderer"
@@ -399,10 +435,18 @@ version = "0.1.0"
 [[package]]
 name = "tile-storage"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-terminal"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-test-support"
