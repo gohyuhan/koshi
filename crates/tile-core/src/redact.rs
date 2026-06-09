@@ -53,13 +53,21 @@ impl std::fmt::Debug for RedactedValue {
 /// A known sensitive substring to scrub out of free-form text. Holds the literal
 /// value (e.g. the actual context token) so [`redact_string`] removes it before a
 /// command line or log line is recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Marker(String);
 
 impl Marker {
     /// A marker matching every occurrence of `value` exactly.
     pub fn literal(value: impl Into<String>) -> Self {
         Marker(value.into())
+    }
+}
+
+// A marker holds a real secret, so its `Debug` must never reveal the literal:
+// tracing a struct that carries markers, or an assertion failure, prints `***`.
+impl std::fmt::Debug for Marker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REDACTED)
     }
 }
 
@@ -93,12 +101,18 @@ pub fn redact_env_map(env: &BTreeMap<String, String>) -> BTreeMap<String, Redact
 /// Replace every occurrence of each marker's literal with `***`. Used to scrub
 /// known secret values out of text before it is logged or dumped.
 pub fn redact_string(input: &str, markers: &[Marker]) -> String {
+    let mut secret_literals: Vec<&str> = markers
+        .iter()
+        .map(|marker| marker.0.as_str())
+        .filter(|literal| !literal.is_empty())
+        .collect();
+    // Longest first: a short secret replaced before a longer overlapping one
+    // would leave the longer one's tail visible ("abc" before "abcd" -> "***d").
+    secret_literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
+
     let mut out = input.to_string();
-    for marker in markers {
-        if marker.0.is_empty() {
-            continue;
-        }
-        out = out.replace(&marker.0, REDACTED);
+    for literal in secret_literals {
+        out = out.replace(literal, REDACTED);
     }
     out
 }

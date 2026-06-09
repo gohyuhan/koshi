@@ -79,6 +79,19 @@ fn redact_string_applies_multiple_markers() {
 }
 
 #[test]
+fn redact_string_redacts_longer_overlapping_marker_fully() {
+    // Shorter marker first must not leave the longer secret's tail visible.
+    let out = redact_string("abcd", &[Marker::literal("abc"), Marker::literal("abcd")]);
+    assert_eq!(out, "***");
+}
+
+#[test]
+fn marker_debug_does_not_leak_literal() {
+    let marker = Marker::literal("super-secret");
+    assert_eq!(format!("{marker:?}"), "***");
+}
+
+#[test]
 fn redact_string_is_noop_without_markers() {
     assert_eq!(redact_string("nothing here", &[]), "nothing here");
 }
