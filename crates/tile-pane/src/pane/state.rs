@@ -1,1 +1,1 @@
-//! State model. Placeholder per `TILE_01` standard source layout (FND-003).
+//! State model. Placeholder per standard source layout.

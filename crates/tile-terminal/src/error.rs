@@ -1,4 +1,4 @@
-//! Terminal domain error. Classifies into [`DomainCategory::Terminal`] (`TILE_12`).
+//! Terminal domain error. Classifies into [`DomainCategory::Terminal`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

@@ -1,4 +1,4 @@
-//! `input` domain — skeleton per `TILE_01` standard source layout (FND-003).
+//! `input` domain — skeleton per standard source layout.
 
 pub mod event;
 pub mod state;

@@ -1,1 +1,1 @@
-//! Commands. Placeholder per `TILE_01` standard source layout (FND-003).
+//! Commands. Placeholder per standard source layout.

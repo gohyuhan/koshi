@@ -1,1 +1,1 @@
-//! Events. Placeholder per `TILE_01` standard source layout (FND-003).
+//! Events. Placeholder per standard source layout.

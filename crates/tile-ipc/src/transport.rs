@@ -1,4 +1,4 @@
-//! `transport` domain — skeleton per `TILE_01` standard source layout (FND-003).
+//! `transport` domain — skeleton per standard source layout.
 
 pub mod state;
 
