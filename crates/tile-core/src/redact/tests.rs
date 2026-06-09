@@ -93,6 +93,13 @@ fn redact_string_redacts_partially_overlapping_markers_fully() {
 }
 
 #[test]
+fn redact_string_keeps_trailing_non_secret_text() {
+    // A char past the match is not the marker, so it stays.
+    let out = redact_string("secc", &[Marker::literal("sec")]);
+    assert_eq!(out, "***c");
+}
+
+#[test]
 fn marker_debug_does_not_leak_literal() {
     let marker = Marker::literal("super-secret");
     assert_eq!(format!("{marker:?}"), "***");
