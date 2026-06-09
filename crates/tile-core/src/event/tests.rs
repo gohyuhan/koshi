@@ -52,8 +52,7 @@ fn input_privacy_events_roundtrip() {
         tab_id: TabId::new(),
         session_id: SessionId::new(),
         client_id: ClientId::new(),
-        classification: InputClassification::Safe,
-        payload: TypedPayload::Public('a'),
+        payload: TypedPayload::SafePublic('a'),
         timestamp: fixed_time(),
     }));
     roundtrip(&Event::PaneEnterPressed(PaneEnterPressed {
@@ -61,8 +60,7 @@ fn input_privacy_events_roundtrip() {
         tab_id: TabId::new(),
         session_id: SessionId::new(),
         client_id: ClientId::new(),
-        classification: InputClassification::Sensitive,
-        line: SubmittedLinePayload::Redacted,
+        line: SubmittedLinePayload::SensitiveRedacted,
         timestamp: fixed_time(),
     }));
 }
@@ -163,21 +161,38 @@ fn sensitive_blocked_tier_carries_no_content() {
 /// `Unknown` lines fail closed to `MetadataOnly`.
 #[test]
 fn payload_tier_accessors_map_to_privacy_tier() {
-    assert_eq!(TypedPayload::Public('x').tier(), PrivacyTier::Public);
-    assert_eq!(TypedPayload::MetadataOnly.tier(), PrivacyTier::MetadataOnly);
-    assert_eq!(TypedPayload::Redacted.tier(), PrivacyTier::Redacted);
+    assert_eq!(TypedPayload::SafePublic('x').tier(), PrivacyTier::Public);
+    assert_eq!(
+        TypedPayload::SensitiveRedacted.tier(),
+        PrivacyTier::Redacted
+    );
+    assert_eq!(
+        TypedPayload::AlternateScreenMetadataOnly.tier(),
+        PrivacyTier::MetadataOnly
+    );
+    assert_eq!(
+        TypedPayload::RawModeMetadataOnly.tier(),
+        PrivacyTier::MetadataOnly
+    );
+    assert_eq!(
+        TypedPayload::UnknownMetadataOnly.tier(),
+        PrivacyTier::MetadataOnly
+    );
     assert_eq!(
         TypedPayload::SensitiveBlocked.tier(),
         PrivacyTier::SensitiveBlocked
     );
 
     assert_eq!(
-        SubmittedLinePayload::Public("ls".to_string()).tier(),
+        SubmittedLinePayload::SafePublic("ls".to_string()).tier(),
         PrivacyTier::Public
     );
-    assert_eq!(SubmittedLinePayload::Redacted.tier(), PrivacyTier::Redacted);
     assert_eq!(
-        SubmittedLinePayload::Unknown.tier(),
+        SubmittedLinePayload::SensitiveRedacted.tier(),
+        PrivacyTier::Redacted
+    );
+    assert_eq!(
+        SubmittedLinePayload::UnknownMetadataOnly.tier(),
         PrivacyTier::MetadataOnly
     );
     assert_eq!(
@@ -285,8 +300,7 @@ fn event_variant_names_are_canonical() {
                 tab_id: TabId::new(),
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
-                classification: InputClassification::Safe,
-                payload: TypedPayload::Redacted,
+                payload: TypedPayload::SensitiveRedacted,
                 timestamp: fixed_time(),
             }),
             "PaneTyped",
@@ -297,8 +311,7 @@ fn event_variant_names_are_canonical() {
                 tab_id: TabId::new(),
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
-                classification: InputClassification::Unknown,
-                line: SubmittedLinePayload::Unknown,
+                line: SubmittedLinePayload::UnknownMetadataOnly,
                 timestamp: fixed_time(),
             }),
             "PaneEnterPressed",

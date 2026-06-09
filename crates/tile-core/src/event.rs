@@ -13,10 +13,11 @@
 //! is opaque across processes; timestamps use `SystemTime`. No raw OS handles
 //! and no `&mut` references.
 //!
-//! Privacy is structural, not advisory: each input payload variant *is* its
-//! [`PrivacyTier`] (there is no separate tier field that could disagree with
-//! the content), and the blocked and redacted variants are unit-shaped with no
-//! content field, so sensitive text cannot ride along.
+//! Privacy is structural, not advisory: each input payload variant encodes the
+//! classified context and the resulting [`PrivacyTier`] together, so there is no
+//! separate classification or tier field that could disagree with the content,
+//! and every non-public variant is unit-shaped with no content field, so
+//! sensitive text cannot ride along.
 
 use crate::command::{CopyTarget, GridPos, SelectionKind};
 use crate::geometry::Point;
@@ -26,8 +27,13 @@ use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 /// A completed fact emitted by the runtime.
+///
+/// Variants are grouped to match the sections further down the file: pane/tab
+/// lifecycle, input modes, input privacy, mouse, delivery, copy/search, and
+/// plugins. Each variant wraps a like-named payload struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
+    // Pane and tab lifecycle.
     /// A pane was created and registered.
     PaneCreated(PaneCreated),
     /// A pane's child process exited.
@@ -48,14 +54,20 @@ pub enum Event {
     TabClosed(TabClosed),
     /// Focus moved to a tab.
     TabFocused(TabFocused),
+
+    // Input modes and keybindings.
     /// The active input mode changed (e.g. normal, locked, copy).
     InputModeChanged(InputModeChanged),
     /// A keybinding matched and resolved to a command.
     KeybindingMatched(KeybindingMatched),
+
+    // Input privacy.
     /// A printable character was accepted for a focused pane (privacy-gated).
     PaneTyped(PaneTyped),
     /// Enter was accepted for a focused pane (privacy-gated).
     PaneEnterPressed(PaneEnterPressed),
+
+    // Mouse input.
     /// A mouse button was pressed (client-local, hit-tested).
     MousePressed(MousePressed),
     /// A mouse button was released.
@@ -68,12 +80,16 @@ pub enum Event {
     PaneMouseForwarded(PaneMouseForwarded),
     /// A mouse event was delivered to a capable plugin.
     PluginMouseInput(PluginMouseInput),
+
+    // Delivery and rejection.
     /// A pane's bounded scrollback dropped lines on overflow.
     PaneScrollbackTruncated(PaneScrollbackTruncated),
     /// A subscriber's bounded queue overflowed and dropped events.
     SubscriberLagged(SubscriberLagged),
     /// A command was rejected by validation or target resolution.
     CommandRejected(CommandRejected),
+
+    // Copy mode, selection, and search.
     /// Copy mode was entered for a pane.
     CopyModeEntered(CopyModeEntered),
     /// Copy mode was exited for a pane.
@@ -84,9 +100,15 @@ pub enum Event {
     Copied(Copied),
     /// Search state changed (new query, match navigation).
     SearchUpdated(SearchUpdated),
+
+    // Plugin lifecycle.
     /// A plugin lifecycle fact.
     Plugin(PluginEvent),
 }
+
+// ============================================================================
+// Pane and tab lifecycle
+// ============================================================================
 
 /// Payload for [`Event::PaneCreated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +190,10 @@ pub struct TabFocused {
     pub tab_id: TabId,
 }
 
+// ============================================================================
+// Input modes and keybindings
+// ============================================================================
+
 /// The input mode a pane is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
@@ -197,6 +223,14 @@ pub struct KeybindingMatched {
     pub command_id: CommandId,
 }
 
+// ============================================================================
+// Input privacy: typed characters and submitted lines
+//
+// The classified context and privacy tier of an input event live *inside* its
+// payload variant, never in a separate field — so the two can never disagree,
+// and non-public variants are unit-shaped and cannot carry text.
+// ============================================================================
+
 /// The privacy tier the runtime computes for an input event before delivery.
 ///
 /// Tier is authoritative over plugin capability: capability can only narrow
@@ -217,41 +251,28 @@ pub enum PrivacyTier {
     SensitiveBlocked,
 }
 
-/// The classifier's verdict on a pane's input context.
-///
-/// Drives whether a payload may carry raw content. Unknown contexts fail
-/// closed (treated as unsafe).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputClassification {
-    /// Echo-enabled, normal shell line mode: content is safe to expose.
-    Safe,
-    /// Password/secret heuristic or a protected input window: redact.
-    Sensitive,
-    /// A full-screen alternate-screen application.
-    AlternateScreen,
-    /// A raw/cbreak-mode application.
-    RawMode,
-    /// Context could not be classified; treated as unsafe.
-    Unknown,
-}
-
 /// The character payload of a [`PaneTyped`] event.
 ///
-/// The variant *is* the event's privacy tier: it maps one-to-one onto
-/// [`PrivacyTier`], so there is no separate tier field that could disagree with
-/// the content. [`SensitiveBlocked`] and the other withholding variants are
-/// unit-shaped, so a blocked input physically cannot carry a character.
+/// The variant captures the classified input context *and* the resulting
+/// privacy tier in one value, so the two can never disagree — there is no
+/// separate classification or tier field to contradict the content. A character
+/// is only present in [`SafePublic`]; every other context is unit-shaped, so a
+/// non-public input physically cannot carry one.
 ///
-/// [`SensitiveBlocked`]: TypedPayload::SensitiveBlocked
+/// [`SafePublic`]: TypedPayload::SafePublic
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedPayload {
-    /// Public tier: a printable character, only when the context is safe.
-    Public(char),
-    /// Metadata-only tier: a key was accepted but no character is exposed.
-    MetadataOnly,
-    /// Redacted tier: content existed but is withheld.
-    Redacted,
-    /// Sensitive-blocked tier: not even metadata leaves core; no content.
+    /// Safe context (echo-enabled shell line mode): the printable character.
+    SafePublic(char),
+    /// Sensitive context (password heuristic or protected window): redacted.
+    SensitiveRedacted,
+    /// Alternate-screen application: metadata only, no character.
+    AlternateScreenMetadataOnly,
+    /// Raw/cbreak-mode application: metadata only, no character.
+    RawModeMetadataOnly,
+    /// Context could not be classified (fails closed): metadata only.
+    UnknownMetadataOnly,
+    /// Sensitive context that must not leave core: no content, not even metadata.
     SensitiveBlocked,
 }
 
@@ -261,9 +282,11 @@ impl TypedPayload {
     #[must_use]
     pub const fn tier(&self) -> PrivacyTier {
         match self {
-            TypedPayload::Public(_) => PrivacyTier::Public,
-            TypedPayload::MetadataOnly => PrivacyTier::MetadataOnly,
-            TypedPayload::Redacted => PrivacyTier::Redacted,
+            TypedPayload::SafePublic(_) => PrivacyTier::Public,
+            TypedPayload::SensitiveRedacted => PrivacyTier::Redacted,
+            TypedPayload::AlternateScreenMetadataOnly
+            | TypedPayload::RawModeMetadataOnly
+            | TypedPayload::UnknownMetadataOnly => PrivacyTier::MetadataOnly,
             TypedPayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
         }
     }
@@ -271,11 +294,9 @@ impl TypedPayload {
 
 /// Payload for [`Event::PaneTyped`].
 ///
-/// A privacy-gated domain event, not a raw key event: the privacy tier is the
-/// `payload` variant itself ([`TypedPayload`] maps one-to-one onto
-/// [`PrivacyTier`]), so a character is only present in the [`Public`] case.
-///
-/// [`Public`]: TypedPayload::Public
+/// A privacy-gated domain event, not a raw key event: the classified context
+/// and privacy tier both live in the `payload` variant, so a character is only
+/// present when the context was safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTyped {
     /// The pane that received the input.
@@ -286,9 +307,7 @@ pub struct PaneTyped {
     pub session_id: SessionId,
     /// The client that produced the input.
     pub client_id: ClientId,
-    /// The classified input context.
-    pub classification: InputClassification,
-    /// The privacy-tiered character payload.
+    /// The classified, privacy-tiered character payload.
     pub payload: TypedPayload,
     /// When the input was accepted.
     pub timestamp: SystemTime,
@@ -296,32 +315,34 @@ pub struct PaneTyped {
 
 /// The submitted-line payload of a [`PaneEnterPressed`] event.
 ///
-/// As with [`TypedPayload`], the variant carries the privacy decision: every
-/// withholding variant is unit-shaped and physically cannot hold the line text.
+/// As with [`TypedPayload`], the variant captures both the classified context
+/// and the privacy tier: the line text is only present in [`SafePublic`], and
+/// every other variant is unit-shaped so it physically cannot hold the line.
+///
+/// [`SafePublic`]: SubmittedLinePayload::SafePublic
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmittedLinePayload {
-    /// Public tier: a safely reconstructed shell command line.
-    Public(String),
-    /// Redacted tier: content withheld because the line may contain a secret.
-    Redacted,
-    /// The line could not be confidently reconstructed.
-    Unknown,
-    /// Sensitive-blocked tier: not even metadata leaves core; no content.
+    /// Safe context: a reconstructed shell command line.
+    SafePublic(String),
+    /// Sensitive context (the line may contain a secret): redacted.
+    SensitiveRedacted,
+    /// The line could not be confidently reconstructed (fails closed): metadata only.
+    UnknownMetadataOnly,
+    /// Sensitive context that must not leave core: no content, not even metadata.
     SensitiveBlocked,
 }
 
 impl SubmittedLinePayload {
-    /// The [`PrivacyTier`] this payload encodes. [`Unknown`] fails closed to
-    /// [`MetadataOnly`]: a line was submitted, but its content is never exposed.
+    /// The [`PrivacyTier`] this payload encodes. [`UnknownMetadataOnly`] fails
+    /// closed: a line was submitted, but its content is never exposed.
     ///
-    /// [`Unknown`]: SubmittedLinePayload::Unknown
-    /// [`MetadataOnly`]: PrivacyTier::MetadataOnly
+    /// [`UnknownMetadataOnly`]: SubmittedLinePayload::UnknownMetadataOnly
     #[must_use]
     pub const fn tier(&self) -> PrivacyTier {
         match self {
-            SubmittedLinePayload::Public(_) => PrivacyTier::Public,
-            SubmittedLinePayload::Redacted => PrivacyTier::Redacted,
-            SubmittedLinePayload::Unknown => PrivacyTier::MetadataOnly,
+            SubmittedLinePayload::SafePublic(_) => PrivacyTier::Public,
+            SubmittedLinePayload::SensitiveRedacted => PrivacyTier::Redacted,
+            SubmittedLinePayload::UnknownMetadataOnly => PrivacyTier::MetadataOnly,
             SubmittedLinePayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
         }
     }
@@ -338,13 +359,15 @@ pub struct PaneEnterPressed {
     pub session_id: SessionId,
     /// The client that produced the input.
     pub client_id: ClientId,
-    /// The classified input context.
-    pub classification: InputClassification,
-    /// The privacy-tiered submitted-line payload.
+    /// The classified, privacy-tiered submitted-line payload.
     pub line: SubmittedLinePayload,
     /// When Enter was accepted.
     pub timestamp: SystemTime,
 }
+
+// ============================================================================
+// Mouse input
+// ============================================================================
 
 /// A mouse button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +459,10 @@ pub struct PluginMouseInput {
     pub plugin_id: PluginId,
 }
 
+// ============================================================================
+// Delivery and rejection
+// ============================================================================
+
 /// Payload for [`Event::PaneScrollbackTruncated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneScrollbackTruncated {
@@ -492,6 +519,10 @@ pub struct CommandRejected {
     /// Why it was rejected.
     pub reason: RejectReason,
 }
+
+// ============================================================================
+// Copy mode, selection, and search
+// ============================================================================
 
 /// Payload for [`Event::CopyModeEntered`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,6 +582,10 @@ pub struct SearchUpdated {
     /// The zero-based index of the active match, if any.
     pub current_match: Option<usize>,
 }
+
+// ============================================================================
+// Plugin lifecycle
+// ============================================================================
 
 /// Plugin lifecycle facts. Internal/runtime events; not delivered to plugins
 /// without management-read capability.
