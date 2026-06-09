@@ -483,8 +483,37 @@ impl CommandSource {
     }
 }
 
+/// Why a [`CommandEnvelope`] is not internally consistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEnvelopeError {
+    /// `client_id` does not match the client named by `source` (or names a
+    /// client for a source that has none). A malformed or hostile peer could
+    /// otherwise misattribute a command to another client.
+    ClientIdMismatch,
+}
+
+impl std::fmt::Display for CommandEnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandEnvelopeError::ClientIdMismatch => {
+                f.write_str("envelope client_id does not match its source")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommandEnvelopeError {}
+
 /// One command crossing a boundary, with its identity, origin, and timestamp.
+///
+/// `client_id` is redundant with the client named by `source`; the two must
+/// agree. Deserialization is routed through [`CommandEnvelopeWire`] and rejects
+/// any envelope where they disagree, so a value decoded from the IPC socket or
+/// a plugin can never carry a forged `client_id`. In-process construction
+/// should use [`CommandEnvelope::new`] (which derives the field) or pass a
+/// hand-built value through [`CommandEnvelope::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
     /// Unique id for this command transaction.
     pub id: CommandId,
@@ -519,6 +548,49 @@ impl CommandEnvelope {
             issued_at,
             command,
         }
+    }
+
+    /// Check that `client_id` matches the client named by `source`, returning
+    /// the envelope unchanged when it does. This is the gate every untrusted
+    /// envelope (deserialized or hand-built) must pass before the runtime
+    /// trusts its attribution.
+    ///
+    /// # Errors
+    /// Returns [`CommandEnvelopeError::ClientIdMismatch`] if the two disagree.
+    pub fn validate(self) -> Result<Self, CommandEnvelopeError> {
+        if self.client_id == self.source.client_id() {
+            Ok(self)
+        } else {
+            Err(CommandEnvelopeError::ClientIdMismatch)
+        }
+    }
+}
+
+/// Unvalidated wire shape for [`CommandEnvelope`]. Deserialization lands here
+/// first, then [`CommandEnvelope::validate`] rejects inconsistent attribution
+/// via the `try_from` conversion below — so the consistency invariant holds for
+/// every decoded envelope, not just those built through `new`.
+#[derive(Deserialize)]
+struct CommandEnvelopeWire {
+    id: CommandId,
+    source: CommandSource,
+    client_id: Option<ClientId>,
+    issued_at: SystemTime,
+    command: Command,
+}
+
+impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
+    type Error = CommandEnvelopeError;
+
+    fn try_from(wire: CommandEnvelopeWire) -> Result<Self, Self::Error> {
+        CommandEnvelope {
+            id: wire.id,
+            source: wire.source,
+            client_id: wire.client_id,
+            issued_at: wire.issued_at,
+            command: wire.command,
+        }
+        .validate()
     }
 }
 

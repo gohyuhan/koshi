@@ -360,3 +360,46 @@ fn command_source_variant_names_are_canonical() {
         assert_eq!(&variant_name(value), name);
     }
 }
+
+#[test]
+fn deserialize_rejects_client_id_mismatch() {
+    // `Internal` names no client, but a hostile peer claims one on the wire.
+    let forged = CommandEnvelope {
+        id: CommandId::new(),
+        source: CommandSource::Internal,
+        client_id: Some(ClientId::new()),
+        issued_at: fixed_time(),
+        command: Command::ToggleLockMode,
+    };
+    let json = serde_json::to_string(&forged).expect("serialize");
+    let decoded: Result<CommandEnvelope, _> = serde_json::from_str(&json);
+    assert!(decoded.is_err(), "mismatched envelope must not deserialize");
+}
+
+#[test]
+fn validate_rejects_client_id_mismatch() {
+    let forged = CommandEnvelope {
+        id: CommandId::new(),
+        source: CommandSource::KeyBinding {
+            client_id: ClientId::new(),
+        },
+        client_id: Some(ClientId::new()), // a different client than the source
+        issued_at: fixed_time(),
+        command: Command::ToggleLockMode,
+    };
+    assert_eq!(
+        forged.validate(),
+        Err(CommandEnvelopeError::ClientIdMismatch)
+    );
+}
+
+#[test]
+fn validate_accepts_consistent_envelope() {
+    let env = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::Internal,
+        fixed_time(),
+        Command::ToggleLockMode,
+    );
+    assert!(env.validate().is_ok());
+}
