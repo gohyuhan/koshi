@@ -3,6 +3,7 @@
 
 pub mod command;
 pub mod error;
+pub mod event;
 pub mod geometry;
 pub mod ids;
 pub mod process;
