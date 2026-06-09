@@ -101,19 +101,49 @@ pub fn redact_env_map(env: &BTreeMap<String, String>) -> BTreeMap<String, Redact
 /// Replace every occurrence of each marker's literal with `***`. Used to scrub
 /// known secret values out of text before it is logged or dumped.
 pub fn redact_string(input: &str, markers: &[Marker]) -> String {
-    let mut secret_literals: Vec<&str> = markers
-        .iter()
-        .map(|marker| marker.0.as_str())
-        .filter(|literal| !literal.is_empty())
-        .collect();
-    // Longest first: a short secret replaced before a longer overlapping one
-    // would leave the longer one's tail visible ("abc" before "abcd" -> "***d").
-    secret_literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
-
-    let mut out = input.to_string();
-    for literal in secret_literals {
-        out = out.replace(literal, REDACTED);
+    // A byte range of `input` that holds a secret and must become `***`.
+    struct Span {
+        start: usize,
+        end: usize,
     }
+
+    // 1. Find every span a secret covers.
+    let mut spans: Vec<Span> = Vec::new();
+    for marker in markers {
+        let secret = marker.0.as_str();
+        if secret.is_empty() {
+            continue;
+        }
+        for (start, found) in input.match_indices(secret) {
+            spans.push(Span {
+                start,
+                end: start + found.len(),
+            });
+        }
+    }
+
+    // 2. Merge overlapping spans, so an overlap is redacted once as a whole.
+    spans.sort_by_key(|span| span.start);
+    let mut merged: Vec<Span> = Vec::new();
+    for span in spans {
+        if let Some(last) = merged.last_mut() {
+            if span.start <= last.end {
+                last.end = last.end.max(span.end);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+
+    // 3. Rebuild: copy the text between spans, replace each span with `***`.
+    let mut out = String::new();
+    let mut cursor = 0;
+    for span in merged {
+        out.push_str(&input[cursor..span.start]);
+        out.push_str(REDACTED);
+        cursor = span.end;
+    }
+    out.push_str(&input[cursor..]);
     out
 }
 

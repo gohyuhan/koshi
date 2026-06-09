@@ -79,9 +79,16 @@ fn redact_string_applies_multiple_markers() {
 }
 
 #[test]
-fn redact_string_redacts_longer_overlapping_marker_fully() {
+fn redact_string_redacts_contained_overlapping_marker_fully() {
     // Shorter marker first must not leave the longer secret's tail visible.
     let out = redact_string("abcd", &[Marker::literal("abc"), Marker::literal("abcd")]);
+    assert_eq!(out, "***");
+}
+
+#[test]
+fn redact_string_redacts_partially_overlapping_markers_fully() {
+    // Equal-length partial overlap: neither end may survive.
+    let out = redact_string("abcd", &[Marker::literal("abc"), Marker::literal("bcd")]);
     assert_eq!(out, "***");
 }
 
