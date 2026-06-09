@@ -255,6 +255,20 @@ pub enum TypedPayload {
     SensitiveBlocked,
 }
 
+impl TypedPayload {
+    /// The [`PrivacyTier`] this payload encodes. Delivery and filtering compare
+    /// against this single mapping instead of re-matching the variants.
+    #[must_use]
+    pub const fn tier(&self) -> PrivacyTier {
+        match self {
+            TypedPayload::Public(_) => PrivacyTier::Public,
+            TypedPayload::MetadataOnly => PrivacyTier::MetadataOnly,
+            TypedPayload::Redacted => PrivacyTier::Redacted,
+            TypedPayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
+        }
+    }
+}
+
 /// Payload for [`Event::PaneTyped`].
 ///
 /// A privacy-gated domain event, not a raw key event: the privacy tier is the
@@ -294,6 +308,23 @@ pub enum SubmittedLinePayload {
     Unknown,
     /// Sensitive-blocked tier: not even metadata leaves core; no content.
     SensitiveBlocked,
+}
+
+impl SubmittedLinePayload {
+    /// The [`PrivacyTier`] this payload encodes. [`Unknown`] fails closed to
+    /// [`MetadataOnly`]: a line was submitted, but its content is never exposed.
+    ///
+    /// [`Unknown`]: SubmittedLinePayload::Unknown
+    /// [`MetadataOnly`]: PrivacyTier::MetadataOnly
+    #[must_use]
+    pub const fn tier(&self) -> PrivacyTier {
+        match self {
+            SubmittedLinePayload::Public(_) => PrivacyTier::Public,
+            SubmittedLinePayload::Redacted => PrivacyTier::Redacted,
+            SubmittedLinePayload::Unknown => PrivacyTier::MetadataOnly,
+            SubmittedLinePayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
+        }
+    }
 }
 
 /// Payload for [`Event::PaneEnterPressed`].

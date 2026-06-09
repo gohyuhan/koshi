@@ -159,6 +159,33 @@ fn sensitive_blocked_tier_carries_no_content() {
     }
 }
 
+/// The `tier()` accessor maps each payload variant to its privacy tier, and
+/// `Unknown` lines fail closed to `MetadataOnly`.
+#[test]
+fn payload_tier_accessors_map_to_privacy_tier() {
+    assert_eq!(TypedPayload::Public('x').tier(), PrivacyTier::Public);
+    assert_eq!(TypedPayload::MetadataOnly.tier(), PrivacyTier::MetadataOnly);
+    assert_eq!(TypedPayload::Redacted.tier(), PrivacyTier::Redacted);
+    assert_eq!(
+        TypedPayload::SensitiveBlocked.tier(),
+        PrivacyTier::SensitiveBlocked
+    );
+
+    assert_eq!(
+        SubmittedLinePayload::Public("ls".to_string()).tier(),
+        PrivacyTier::Public
+    );
+    assert_eq!(SubmittedLinePayload::Redacted.tier(), PrivacyTier::Redacted);
+    assert_eq!(
+        SubmittedLinePayload::Unknown.tier(),
+        PrivacyTier::MetadataOnly
+    );
+    assert_eq!(
+        SubmittedLinePayload::SensitiveBlocked.tier(),
+        PrivacyTier::SensitiveBlocked
+    );
+}
+
 /// The variant name from a value's Debug repr: everything before the first `(`
 /// (data variants) or the whole string (unit variants). Anchors a name snapshot
 /// to the real enum — a rename changes the Debug output and fails the assert.
