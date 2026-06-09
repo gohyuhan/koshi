@@ -1,0 +1,371 @@
+//! Canonical command vocabulary.
+//!
+//! [`Command`] and its nested enums are the single source of truth for every
+//! requested mutation. These are pure data shells: no handlers, no behaviour,
+//! no runtime state. Validation, target resolution, and execution all live in
+//! higher layers (the session runtime); this module only names *what* may be
+//! requested.
+//!
+//! Commands cross process boundaries (CLI IPC and plugins), so every variant
+//! and arg struct contains only serde-friendly, cross-process-meaningful
+//! types. **No `Instant`** — it is not `Serialize` and is opaque across
+//! processes; use `SystemTime` or epoch units where a timestamp is needed.
+//! No raw OS handles, no `&mut` references, and command identity is never a
+//! free-form `String`.
+
+use crate::geometry::Direction;
+use crate::ids::{PaneId, PluginId, TabId};
+use crate::process::SpawnSpec;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// A requested mutation. The trailing group (`TogglePaneFullscreen`,
+/// `RenamePane`, `MoveTab`, `RenameSession`) is included now so the wire schema
+/// does not break when those land later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Command {
+    /// Split-create a pane; CLI `new-pane`.
+    NewPane(NewPaneArgs),
+    /// Close a pane (defaults to the focused one).
+    ClosePane(ClosePaneArgs),
+    /// Grow or shrink a pane along one edge.
+    ResizePane(ResizePaneArgs),
+    /// Move focus to a pane.
+    FocusPane(FocusPaneArgs),
+    /// Create a new tab.
+    NewTab(NewTabArgs),
+    /// Close a tab (defaults to the focused one).
+    CloseTab(CloseTabArgs),
+    /// Rename a tab.
+    RenameTab(RenameTabArgs),
+    /// Move focus to a tab; next/prev/index all resolve to this.
+    FocusTab(FocusTabArgs),
+    /// Write raw bytes into a pane's input.
+    WriteToPane(WriteToPaneArgs),
+    /// Toggle the lock (pass-through) mode of the focused pane.
+    ToggleLockMode,
+    /// Set the lock mode explicitly.
+    SetLockMode(LockModeArgs),
+    /// Spawn a command in a new pane.
+    RunCommandPane(RunCommandPaneArgs),
+    /// Copy mode, selection, and search.
+    CopyMode(CopyModeCommand),
+    /// Plugin lifecycle management.
+    Plugin(PluginCommand),
+    /// Toggle fullscreen for the focused pane.
+    TogglePaneFullscreen,
+    /// Rename a pane.
+    RenamePane(RenamePaneArgs),
+    /// Move a tab to a new index.
+    MoveTab(MoveTabArgs),
+    /// Rename the current session.
+    RenameSession(RenameSessionArgs),
+}
+
+/// Arguments for [`Command::NewPane`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NewPaneArgs {
+    /// Pane to split from; `None` uses the focused pane.
+    pub source: Option<PaneId>,
+    /// Split direction; `None` lets the layout decide.
+    pub direction: Option<Direction>,
+    /// Stack the new pane onto the source instead of splitting space.
+    pub stacked: bool,
+    /// Replace the source pane in place rather than splitting.
+    pub in_place: bool,
+    /// Optional display name.
+    pub name: Option<String>,
+    /// Working directory; `None` inherits.
+    pub cwd: Option<PathBuf>,
+    /// Command to run; `None` launches the default shell.
+    pub command: Option<SpawnSpec>,
+}
+
+/// Arguments for [`Command::ClosePane`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClosePaneArgs {
+    /// Pane to close; `None` closes the focused pane.
+    pub pane: Option<PaneId>,
+}
+
+/// Arguments for [`Command::ResizePane`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizePaneArgs {
+    /// Pane to resize; `None` resizes the focused pane.
+    pub pane: Option<PaneId>,
+    /// Edge to move.
+    pub direction: Direction,
+    /// Number of cells to move the edge by.
+    pub amount: u16,
+}
+
+/// Arguments for [`Command::FocusPane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusPaneArgs {
+    /// Pane to focus.
+    pub pane: PaneId,
+}
+
+/// Arguments for [`Command::NewTab`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NewTabArgs {
+    /// Optional tab name.
+    pub name: Option<String>,
+    /// Working directory for the tab's first pane; `None` inherits.
+    pub cwd: Option<PathBuf>,
+}
+
+/// Arguments for [`Command::CloseTab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CloseTabArgs {
+    /// Tab to close; `None` closes the focused tab.
+    pub tab: Option<TabId>,
+}
+
+/// Arguments for [`Command::RenameTab`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameTabArgs {
+    /// Tab to rename; `None` renames the focused tab.
+    pub tab: Option<TabId>,
+    /// New name.
+    pub name: String,
+}
+
+/// Where [`Command::FocusTab`] should move focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabTarget {
+    /// The next tab, wrapping around.
+    Next,
+    /// The previous tab, wrapping around.
+    Prev,
+    /// A zero-based tab index.
+    Index(usize),
+    /// A specific tab.
+    Id(TabId),
+}
+
+/// Arguments for [`Command::FocusTab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusTabArgs {
+    /// Which tab to focus.
+    pub target: TabTarget,
+}
+
+/// Arguments for [`Command::WriteToPane`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WriteToPaneArgs {
+    /// Pane to write to; `None` writes to the focused pane.
+    pub pane: Option<PaneId>,
+    /// Raw bytes to inject into the pane's input.
+    pub data: Vec<u8>,
+}
+
+/// Arguments for [`Command::SetLockMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockModeArgs {
+    /// Whether the pane should be locked (input passed through verbatim).
+    pub locked: bool,
+}
+
+/// Arguments for [`Command::RunCommandPane`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCommandPaneArgs {
+    /// The command to spawn.
+    pub command: SpawnSpec,
+    /// Optional display name.
+    pub name: Option<String>,
+    /// Working directory; `None` inherits.
+    pub cwd: Option<PathBuf>,
+}
+
+/// Arguments for [`Command::RenamePane`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenamePaneArgs {
+    /// Pane to rename; `None` renames the focused pane.
+    pub pane: Option<PaneId>,
+    /// New name.
+    pub name: String,
+}
+
+/// Arguments for [`Command::MoveTab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveTabArgs {
+    /// Tab to move; `None` moves the focused tab.
+    pub tab: Option<TabId>,
+    /// Destination zero-based index.
+    pub index: usize,
+}
+
+/// Arguments for [`Command::RenameSession`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameSessionArgs {
+    /// New session name.
+    pub name: String,
+}
+
+/// Copy mode, selection, and search commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyModeCommand {
+    /// Enter copy mode.
+    Enter,
+    /// Leave copy mode.
+    Exit,
+    /// Move the copy cursor.
+    MoveCursor(MoveCursorArgs),
+    /// Begin or extend a selection.
+    SetSelection(SetSelectionArgs),
+    /// Clear the active selection.
+    ClearSelection,
+    /// Copy the current selection to a clipboard target.
+    Copy(CopyArgs),
+    /// Start a search.
+    Search(SearchArgs),
+    /// Jump to the next match.
+    SearchNext,
+    /// Jump to the previous match.
+    SearchPrev,
+}
+
+/// The unit a copy-cursor move advances by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MoveUnit {
+    /// A single cell.
+    Cell,
+    /// A word boundary.
+    Word,
+    /// A logical line.
+    Line,
+    /// A page (viewport height).
+    Page,
+}
+
+/// Arguments for [`CopyModeCommand::MoveCursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveCursorArgs {
+    /// How far each step moves.
+    pub unit: MoveUnit,
+    /// Which way to move.
+    pub direction: Direction,
+}
+
+/// The shape of a selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SelectionKind {
+    /// A contiguous character range across wrapped lines.
+    Character,
+    /// Endpoints snapped to word boundaries.
+    Word,
+    /// Whole logical lines.
+    Line,
+    /// A rectangular column range across rows.
+    Block,
+}
+
+/// A scrollback-relative grid position (combined scrollback + visible grid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GridPos {
+    /// Scrollback-relative row.
+    pub row: u64,
+    /// Column in cells.
+    pub col: u16,
+}
+
+/// Arguments for [`CopyModeCommand::SetSelection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSelectionArgs {
+    /// Selection shape.
+    pub kind: SelectionKind,
+    /// The fixed end of the selection.
+    pub anchor: GridPos,
+    /// The moving end of the selection.
+    pub cursor: GridPos,
+}
+
+/// Which clipboard a copy targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyTarget {
+    /// OSC 52 to the outer terminal (default, dependency-free).
+    Osc52,
+    /// The native OS clipboard (behind the `native` feature).
+    Native,
+}
+
+/// Arguments for [`CopyModeCommand::Copy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyArgs {
+    /// Where the copied text should go.
+    pub target: CopyTarget,
+}
+
+/// Arguments for [`CopyModeCommand::Search`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchArgs {
+    /// The query text.
+    pub query: String,
+    /// Treat `query` as a regular expression rather than a literal.
+    pub regex: bool,
+    /// Match case-sensitively.
+    pub case_sensitive: bool,
+}
+
+/// Plugin lifecycle commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginCommand {
+    /// Install a plugin from a source.
+    Install(InstallPluginArgs),
+    /// Remove an installed plugin.
+    Uninstall(UninstallPluginArgs),
+    /// Enable an installed plugin.
+    Enable(EnablePluginArgs),
+    /// Disable an installed plugin.
+    Disable(DisablePluginArgs),
+    /// Update a plugin to its latest version.
+    Update(UpdatePluginArgs),
+    /// Reload a plugin in place.
+    Reload(ReloadPluginArgs),
+}
+
+/// Arguments for [`PluginCommand::Install`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallPluginArgs {
+    /// Where to fetch the plugin from (path, URL, or registry ref).
+    pub source: String,
+}
+
+/// Arguments for [`PluginCommand::Uninstall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallPluginArgs {
+    /// The plugin to remove.
+    pub plugin: PluginId,
+}
+
+/// Arguments for [`PluginCommand::Enable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnablePluginArgs {
+    /// The plugin to enable.
+    pub plugin: PluginId,
+}
+
+/// Arguments for [`PluginCommand::Disable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisablePluginArgs {
+    /// The plugin to disable.
+    pub plugin: PluginId,
+}
+
+/// Arguments for [`PluginCommand::Update`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatePluginArgs {
+    /// The plugin to update.
+    pub plugin: PluginId,
+}
+
+/// Arguments for [`PluginCommand::Reload`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReloadPluginArgs {
+    /// The plugin to reload.
+    pub plugin: PluginId,
+}
+
+#[cfg(test)]
+mod tests;

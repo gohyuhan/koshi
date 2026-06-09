@@ -1,4 +1,4 @@
-//! Tests for process lifecycle and spawn types (FND-019).
+//! Tests for process lifecycle and spawn types.
 
 use super::*;
 use std::path::Path;

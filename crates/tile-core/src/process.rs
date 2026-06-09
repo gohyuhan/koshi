@@ -1,4 +1,4 @@
-//! Process lifecycle and spawn types (FND-019).
+//! Process lifecycle and spawn types.
 //!
 //! These types live in `tile-core` so the PTY layer, pane layer, and session
 //! close policy all share one definition instead of redefining them per crate
