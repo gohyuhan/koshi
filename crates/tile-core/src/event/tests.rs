@@ -53,8 +53,7 @@ fn input_privacy_events_roundtrip() {
         session_id: SessionId::new(),
         client_id: ClientId::new(),
         classification: InputClassification::Safe,
-        tier: PrivacyTier::Public,
-        payload: TypedPayload::Character('a'),
+        payload: TypedPayload::Public('a'),
         timestamp: fixed_time(),
     }));
     roundtrip(&Event::PaneEnterPressed(PaneEnterPressed {
@@ -63,7 +62,6 @@ fn input_privacy_events_roundtrip() {
         session_id: SessionId::new(),
         client_id: ClientId::new(),
         classification: InputClassification::Sensitive,
-        tier: PrivacyTier::Redacted,
         line: SubmittedLinePayload::Redacted,
         timestamp: fixed_time(),
     }));
@@ -142,15 +140,23 @@ fn plugin_events_roundtrip() {
     })));
 }
 
-/// The privacy guarantee is structural: `SensitiveBlocked` is a unit variant
-/// with no payload, so sensitive text cannot be attached to a tier that must
-/// never leave core. The absence of a `(` in its Debug repr proves it carries
-/// no data field — if someone adds one, this fails.
+/// The privacy guarantee is structural, not advisory. The tier of an input
+/// event is the payload variant itself — there is no independent `tier` field
+/// that could be set to `SensitiveBlocked` alongside a character or line of
+/// text. Every withholding case (`SensitiveBlocked` on the tier and on both
+/// input payloads) is unit-shaped: the absence of a `(` in its Debug repr
+/// proves it holds no data field, so adding one would fail this test.
 #[test]
 fn sensitive_blocked_tier_carries_no_content() {
-    let repr = format!("{:?}", PrivacyTier::SensitiveBlocked);
-    assert_eq!(repr, "SensitiveBlocked");
-    assert!(!repr.contains('('), "SensitiveBlocked must hold no payload");
+    let blocked = [
+        format!("{:?}", PrivacyTier::SensitiveBlocked),
+        format!("{:?}", TypedPayload::SensitiveBlocked),
+        format!("{:?}", SubmittedLinePayload::SensitiveBlocked),
+    ];
+    for repr in &blocked {
+        assert_eq!(repr, "SensitiveBlocked");
+        assert!(!repr.contains('('), "{repr} must hold no payload");
+    }
 }
 
 /// The variant name from a value's Debug repr: everything before the first `(`
@@ -253,7 +259,6 @@ fn event_variant_names_are_canonical() {
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
                 classification: InputClassification::Safe,
-                tier: PrivacyTier::Public,
                 payload: TypedPayload::Redacted,
                 timestamp: fixed_time(),
             }),
@@ -266,7 +271,6 @@ fn event_variant_names_are_canonical() {
                 session_id: SessionId::new(),
                 client_id: ClientId::new(),
                 classification: InputClassification::Unknown,
-                tier: PrivacyTier::MetadataOnly,
                 line: SubmittedLinePayload::Unknown,
                 timestamp: fixed_time(),
             }),

@@ -13,9 +13,10 @@
 //! is opaque across processes; timestamps use `SystemTime`. No raw OS handles
 //! and no `&mut` references.
 //!
-//! Privacy is structural, not advisory: input payloads carry a
-//! [`PrivacyTier`], and the [`PrivacyTier::SensitiveBlocked`] tier is a unit
-//! variant with no content field so sensitive text cannot ride along.
+//! Privacy is structural, not advisory: each input payload variant *is* its
+//! [`PrivacyTier`] (there is no separate tier field that could disagree with
+//! the content), and the blocked and redacted variants are unit-shaped with no
+//! content field, so sensitive text cannot ride along.
 
 use crate::command::{CopyTarget, GridPos, SelectionKind};
 use crate::geometry::Point;
@@ -235,21 +236,32 @@ pub enum InputClassification {
 }
 
 /// The character payload of a [`PaneTyped`] event.
+///
+/// The variant *is* the event's privacy tier: it maps one-to-one onto
+/// [`PrivacyTier`], so there is no separate tier field that could disagree with
+/// the content. [`SensitiveBlocked`] and the other withholding variants are
+/// unit-shaped, so a blocked input physically cannot carry a character.
+///
+/// [`SensitiveBlocked`]: TypedPayload::SensitiveBlocked
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedPayload {
-    /// A printable character, only when the context is classified safe.
-    Character(char),
-    /// Content withheld because the context may be sensitive.
-    Redacted,
-    /// Char content is not meaningful or should not be exposed.
+    /// Public tier: a printable character, only when the context is safe.
+    Public(char),
+    /// Metadata-only tier: a key was accepted but no character is exposed.
     MetadataOnly,
+    /// Redacted tier: content existed but is withheld.
+    Redacted,
+    /// Sensitive-blocked tier: not even metadata leaves core; no content.
+    SensitiveBlocked,
 }
 
 /// Payload for [`Event::PaneTyped`].
 ///
-/// A privacy-gated domain event, not a raw key event: `payload` defaults to a
-/// safe shape and only carries a character when the classifier marks the
-/// context safe.
+/// A privacy-gated domain event, not a raw key event: the privacy tier is the
+/// `payload` variant itself ([`TypedPayload`] maps one-to-one onto
+/// [`PrivacyTier`]), so a character is only present in the [`Public`] case.
+///
+/// [`Public`]: TypedPayload::Public
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTyped {
     /// The pane that received the input.
@@ -262,23 +274,26 @@ pub struct PaneTyped {
     pub client_id: ClientId,
     /// The classified input context.
     pub classification: InputClassification,
-    /// The privacy tier computed before delivery.
-    pub tier: PrivacyTier,
-    /// The (privacy-safe) character payload.
+    /// The privacy-tiered character payload.
     pub payload: TypedPayload,
     /// When the input was accepted.
     pub timestamp: SystemTime,
 }
 
 /// The submitted-line payload of a [`PaneEnterPressed`] event.
+///
+/// As with [`TypedPayload`], the variant carries the privacy decision: every
+/// withholding variant is unit-shaped and physically cannot hold the line text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmittedLinePayload {
-    /// A safely reconstructed shell command line.
-    Line(String),
-    /// Content withheld because the line may contain a secret.
+    /// Public tier: a safely reconstructed shell command line.
+    Public(String),
+    /// Redacted tier: content withheld because the line may contain a secret.
     Redacted,
     /// The line could not be confidently reconstructed.
     Unknown,
+    /// Sensitive-blocked tier: not even metadata leaves core; no content.
+    SensitiveBlocked,
 }
 
 /// Payload for [`Event::PaneEnterPressed`].
@@ -294,9 +309,7 @@ pub struct PaneEnterPressed {
     pub client_id: ClientId,
     /// The classified input context.
     pub classification: InputClassification,
-    /// The privacy tier computed before delivery.
-    pub tier: PrivacyTier,
-    /// The (privacy-safe) submitted-line payload.
+    /// The privacy-tiered submitted-line payload.
     pub line: SubmittedLinePayload,
     /// When Enter was accepted.
     pub timestamp: SystemTime,
