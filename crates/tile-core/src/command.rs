@@ -14,10 +14,11 @@
 //! free-form `String`.
 
 use crate::geometry::Direction;
-use crate::ids::{PaneId, PluginId, TabId};
+use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// A requested mutation. The trailing group (`TogglePaneFullscreen`,
 /// `RenamePane`, `MoveTab`, `RenameSession`) is included now so the wire schema
@@ -369,6 +370,156 @@ pub struct UpdatePluginArgs {
 pub struct ReloadPluginArgs {
     /// The plugin to reload.
     pub plugin: PluginId,
+}
+
+// === Command envelope and source metadata ===
+//
+// Every command that crosses a boundary (keybinding dispatch, IPC socket,
+// plugin host call, internal lifecycle) travels inside one [`CommandEnvelope`].
+// The envelope carries the identity, origin, and timestamp the runtime needs
+// for permissions, focus context, and diagnostics; the [`Command`] itself stays
+// a pure "what" with no provenance baked in. `issued_at` is `SystemTime` (never
+// `Instant`) because the envelope is serialized across processes.
+
+/// Where a command came from. The runtime uses this to resolve focus context,
+/// enforce permissions, and attribute diagnostics.
+///
+/// `ExternalCli` carries only an optional session target: an external command
+/// with no explicit target is rejected for current-pane operations and never
+/// falls back to the focused pane (see `TILE_04` / `TILE_17A`). `Plugin` and
+/// `Internal` have no associated client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandSource {
+    /// A keybinding fired by an attached client.
+    KeyBinding {
+        /// The client whose keypress triggered the command.
+        client_id: ClientId,
+    },
+    /// A mouse action from an attached client.
+    Mouse {
+        /// The client that generated the mouse event.
+        client_id: ClientId,
+    },
+    /// An in-session CLI command delivered over the runtime socket. Always
+    /// targets the source pane's current runtime context.
+    InSessionCli {
+        /// Session the issuing CLI process belongs to.
+        session_id: SessionId,
+        /// Client owning the pane the command was issued from.
+        client_id: ClientId,
+        /// Pane the command was issued from.
+        pane_id: PaneId,
+        /// OS path of the runtime socket the command arrived on.
+        socket_path: PathBuf,
+    },
+    /// An external CLI invocation, optionally naming a target session.
+    ExternalCli {
+        /// Explicit target session; `None` means no session was resolved.
+        session_id: Option<SessionId>,
+    },
+    /// A command issued by a plugin.
+    Plugin {
+        /// The plugin that issued the command.
+        plugin_id: PluginId,
+    },
+    /// A command the runtime issued to itself (lifecycle, internal wiring).
+    Internal,
+}
+
+impl CommandSource {
+    /// The client this source is attributed to, if any. `InSessionCli`,
+    /// `KeyBinding`, and `Mouse` name a client; `ExternalCli`, `Plugin`, and
+    /// `Internal` do not.
+    #[must_use]
+    pub const fn client_id(&self) -> Option<ClientId> {
+        match self {
+            CommandSource::KeyBinding { client_id }
+            | CommandSource::Mouse { client_id }
+            | CommandSource::InSessionCli { client_id, .. } => Some(*client_id),
+            CommandSource::ExternalCli { .. }
+            | CommandSource::Plugin { .. }
+            | CommandSource::Internal => None,
+        }
+    }
+
+    /// Construct a [`CommandSource::KeyBinding`].
+    #[must_use]
+    pub const fn key_binding(client_id: ClientId) -> Self {
+        CommandSource::KeyBinding { client_id }
+    }
+
+    /// Construct a [`CommandSource::Mouse`].
+    #[must_use]
+    pub const fn mouse(client_id: ClientId) -> Self {
+        CommandSource::Mouse { client_id }
+    }
+
+    /// Construct a [`CommandSource::InSessionCli`].
+    #[must_use]
+    pub const fn in_session_cli(
+        session_id: SessionId,
+        client_id: ClientId,
+        pane_id: PaneId,
+        socket_path: PathBuf,
+    ) -> Self {
+        CommandSource::InSessionCli {
+            session_id,
+            client_id,
+            pane_id,
+            socket_path,
+        }
+    }
+
+    /// Construct a [`CommandSource::ExternalCli`].
+    #[must_use]
+    pub const fn external_cli(session_id: Option<SessionId>) -> Self {
+        CommandSource::ExternalCli { session_id }
+    }
+
+    /// Construct a [`CommandSource::Plugin`].
+    #[must_use]
+    pub const fn plugin(plugin_id: PluginId) -> Self {
+        CommandSource::Plugin { plugin_id }
+    }
+}
+
+/// One command crossing a boundary, with its identity, origin, and timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandEnvelope {
+    /// Unique id for this command transaction.
+    pub id: CommandId,
+    /// Where the command originated.
+    pub source: CommandSource,
+    /// Client the command is attributed to; mirrors the source's client when it
+    /// names one, and is `None` for sources that do not.
+    pub client_id: Option<ClientId>,
+    /// When the command was issued. `SystemTime`, never `Instant`, because the
+    /// envelope crosses process boundaries.
+    pub issued_at: SystemTime,
+    /// The requested mutation.
+    pub command: Command,
+}
+
+impl CommandEnvelope {
+    /// Build an envelope, deriving `client_id` from the source so the two can
+    /// never disagree. Callers supply `id` and `issued_at` so the type stays
+    /// clock- and randomness-free (and tests stay deterministic).
+    #[must_use]
+    pub fn new(
+        id: CommandId,
+        source: CommandSource,
+        issued_at: SystemTime,
+        command: Command,
+    ) -> Self {
+        let client_id = source.client_id();
+        CommandEnvelope {
+            id,
+            source,
+            client_id,
+            issued_at,
+            command,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! Tests for the canonical command vocabulary.
 
 use super::*;
-use crate::ids::PaneId;
+use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId};
+use std::time::{Duration, UNIX_EPOCH};
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
 fn roundtrip<T>(value: &T)
@@ -111,7 +112,8 @@ fn plugin_commands_roundtrip() {
 /// to the real enum — a rename changes the Debug output and fails the assert.
 fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
     let repr = format!("{value:?}");
-    repr.split('(').next().unwrap_or(&repr).to_string()
+    let cut = repr.find(['(', '{', ' ']).unwrap_or(repr.len());
+    repr[..cut].to_string()
 }
 
 /// One instance per top-level variant, paired with its canonical name. Renaming
@@ -248,6 +250,112 @@ fn copy_mode_variant_names_are_canonical() {
         (CopyModeCommand::SearchPrev, "SearchPrev"),
     ];
     assert_eq!(cases.len(), 9);
+    for (value, name) in &cases {
+        assert_eq!(&variant_name(value), name);
+    }
+}
+
+/// A fixed timestamp so envelope roundtrips stay deterministic.
+fn fixed_time() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+}
+
+#[test]
+fn command_source_variants_roundtrip() {
+    roundtrip(&CommandSource::KeyBinding {
+        client_id: ClientId::new(),
+    });
+    roundtrip(&CommandSource::Mouse {
+        client_id: ClientId::new(),
+    });
+    roundtrip(&CommandSource::InSessionCli {
+        session_id: SessionId::new(),
+        client_id: ClientId::new(),
+        pane_id: PaneId::new(),
+        socket_path: PathBuf::from("/run/tile/session.sock"),
+    });
+    roundtrip(&CommandSource::ExternalCli {
+        session_id: Some(SessionId::new()),
+    });
+    roundtrip(&CommandSource::ExternalCli { session_id: None });
+    roundtrip(&CommandSource::Plugin {
+        plugin_id: PluginId::new(),
+    });
+    roundtrip(&CommandSource::Internal);
+}
+
+#[test]
+fn command_envelope_roundtrips() {
+    roundtrip(&CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::InSessionCli {
+            session_id: SessionId::new(),
+            client_id: ClientId::new(),
+            pane_id: PaneId::new(),
+            socket_path: PathBuf::from("/run/tile/session.sock"),
+        },
+        fixed_time(),
+        Command::ToggleLockMode,
+    ));
+}
+
+#[test]
+fn envelope_client_id_mirrors_source() {
+    let client = ClientId::new();
+    let with_client = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id: client },
+        fixed_time(),
+        Command::TogglePaneFullscreen,
+    );
+    assert_eq!(with_client.client_id, Some(client));
+
+    let without_client = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::Internal,
+        fixed_time(),
+        Command::TogglePaneFullscreen,
+    );
+    assert_eq!(without_client.client_id, None);
+}
+
+#[test]
+fn command_source_variant_names_are_canonical() {
+    let cases: Vec<(CommandSource, &str)> = vec![
+        (
+            CommandSource::KeyBinding {
+                client_id: ClientId::new(),
+            },
+            "KeyBinding",
+        ),
+        (
+            CommandSource::Mouse {
+                client_id: ClientId::new(),
+            },
+            "Mouse",
+        ),
+        (
+            CommandSource::InSessionCli {
+                session_id: SessionId::new(),
+                client_id: ClientId::new(),
+                pane_id: PaneId::new(),
+                socket_path: PathBuf::from("/run/tile/session.sock"),
+            },
+            "InSessionCli",
+        ),
+        (
+            CommandSource::ExternalCli { session_id: None },
+            "ExternalCli",
+        ),
+        (
+            CommandSource::Plugin {
+                plugin_id: PluginId::new(),
+            },
+            "Plugin",
+        ),
+        (CommandSource::Internal, "Internal"),
+    ];
+    assert_eq!(cases.len(), 6);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
