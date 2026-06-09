@@ -106,58 +106,149 @@ fn plugin_commands_roundtrip() {
     })));
 }
 
-/// Snapshot of the canonical top-level variant names. If a variant is renamed,
-/// added, or removed, this list must change in lockstep with the spec.
+/// The variant name from a value's Debug repr: everything before the first `(`
+/// (data variants) or the whole string (unit variants). Anchors a name snapshot
+/// to the real enum — a rename changes the Debug output and fails the assert.
+fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
+    let repr = format!("{value:?}");
+    repr.split('(').next().unwrap_or(&repr).to_string()
+}
+
+/// One instance per top-level variant, paired with its canonical name. Renaming
+/// any variant breaks the corresponding `variant_name` assert below, and
+/// adding/removing one breaks the count — neither passes on a detached list.
 #[test]
 fn command_variant_names_are_canonical() {
-    let names: Vec<&str> = vec![
-        "NewPane",
-        "ClosePane",
-        "ResizePane",
-        "FocusPane",
-        "NewTab",
-        "CloseTab",
-        "RenameTab",
-        "FocusTab",
-        "WriteToPane",
-        "ToggleLockMode",
-        "SetLockMode",
-        "RunCommandPane",
-        "CopyMode",
-        "Plugin",
-        "TogglePaneFullscreen",
-        "RenamePane",
-        "MoveTab",
-        "RenameSession",
+    let cases: Vec<(Command, &str)> = vec![
+        (Command::NewPane(NewPaneArgs::default()), "NewPane"),
+        (Command::ClosePane(ClosePaneArgs::default()), "ClosePane"),
+        (
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Up,
+                amount: 1,
+            }),
+            "ResizePane",
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                pane: PaneId::new(),
+            }),
+            "FocusPane",
+        ),
+        (Command::NewTab(NewTabArgs::default()), "NewTab"),
+        (Command::CloseTab(CloseTabArgs::default()), "CloseTab"),
+        (
+            Command::RenameTab(RenameTabArgs {
+                tab: None,
+                name: "t".to_string(),
+            }),
+            "RenameTab",
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                target: TabTarget::Next,
+            }),
+            "FocusTab",
+        ),
+        (
+            Command::WriteToPane(WriteToPaneArgs::default()),
+            "WriteToPane",
+        ),
+        (Command::ToggleLockMode, "ToggleLockMode"),
+        (
+            Command::SetLockMode(LockModeArgs { locked: true }),
+            "SetLockMode",
+        ),
+        (
+            Command::RunCommandPane(RunCommandPaneArgs {
+                command: SpawnSpec {
+                    program: std::path::PathBuf::from("ls"),
+                    args: vec![],
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    shell_kind: crate::process::ShellKind::Other("x".to_string()),
+                },
+                name: None,
+                cwd: None,
+            }),
+            "RunCommandPane",
+        ),
+        (Command::CopyMode(CopyModeCommand::Enter), "CopyMode"),
+        (
+            Command::Plugin(PluginCommand::Reload(ReloadPluginArgs {
+                plugin: PluginId::new(),
+            })),
+            "Plugin",
+        ),
+        (Command::TogglePaneFullscreen, "TogglePaneFullscreen"),
+        (
+            Command::RenamePane(RenamePaneArgs {
+                pane: None,
+                name: "p".to_string(),
+            }),
+            "RenamePane",
+        ),
+        (
+            Command::MoveTab(MoveTabArgs {
+                tab: None,
+                index: 0,
+            }),
+            "MoveTab",
+        ),
+        (
+            Command::RenameSession(RenameSessionArgs {
+                name: "s".to_string(),
+            }),
+            "RenameSession",
+        ),
     ];
-    assert_eq!(names.len(), 18);
-
-    // Spot-check that a unit variant's Debug repr is exactly its name, anchoring
-    // the snapshot to the real enum rather than a detached string list.
-    assert_eq!(format!("{:?}", Command::ToggleLockMode), "ToggleLockMode");
-    assert_eq!(
-        format!("{:?}", Command::TogglePaneFullscreen),
-        "TogglePaneFullscreen"
-    );
+    assert_eq!(cases.len(), 18);
+    for (value, name) in &cases {
+        assert_eq!(&variant_name(value), name);
+    }
 }
 
 #[test]
 fn copy_mode_variant_names_are_canonical() {
-    let names: Vec<&str> = vec![
-        "Enter",
-        "Exit",
-        "MoveCursor",
-        "SetSelection",
-        "ClearSelection",
-        "Copy",
-        "Search",
-        "SearchNext",
-        "SearchPrev",
+    let cases: Vec<(CopyModeCommand, &str)> = vec![
+        (CopyModeCommand::Enter, "Enter"),
+        (CopyModeCommand::Exit, "Exit"),
+        (
+            CopyModeCommand::MoveCursor(MoveCursorArgs {
+                unit: MoveUnit::Cell,
+                direction: Direction::Down,
+            }),
+            "MoveCursor",
+        ),
+        (
+            CopyModeCommand::SetSelection(SetSelectionArgs {
+                kind: SelectionKind::Character,
+                anchor: GridPos { row: 0, col: 0 },
+                cursor: GridPos { row: 0, col: 1 },
+            }),
+            "SetSelection",
+        ),
+        (CopyModeCommand::ClearSelection, "ClearSelection"),
+        (
+            CopyModeCommand::Copy(CopyArgs {
+                target: CopyTarget::Osc52,
+            }),
+            "Copy",
+        ),
+        (
+            CopyModeCommand::Search(SearchArgs {
+                query: "q".to_string(),
+                regex: false,
+                case_sensitive: false,
+            }),
+            "Search",
+        ),
+        (CopyModeCommand::SearchNext, "SearchNext"),
+        (CopyModeCommand::SearchPrev, "SearchPrev"),
     ];
-    assert_eq!(names.len(), 9);
-    assert_eq!(format!("{:?}", CopyModeCommand::Enter), "Enter");
-    assert_eq!(
-        format!("{:?}", CopyModeCommand::ClearSelection),
-        "ClearSelection"
-    );
+    assert_eq!(cases.len(), 9);
+    for (value, name) in &cases {
+        assert_eq!(&variant_name(value), name);
+    }
 }

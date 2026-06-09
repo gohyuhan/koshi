@@ -237,6 +237,10 @@ pub enum MoveUnit {
     Line,
     /// A page (viewport height).
     Page,
+    /// Jump to the top of scrollback (absolute; `direction` is ignored).
+    Top,
+    /// Jump to the bottom of scrollback (absolute; `direction` is ignored).
+    Bottom,
 }
 
 /// Arguments for [`CopyModeCommand::MoveCursor`].
