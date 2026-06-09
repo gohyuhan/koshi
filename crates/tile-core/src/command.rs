@@ -14,7 +14,7 @@
 //! free-form `String`.
 
 use crate::geometry::Direction;
-use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
+use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -591,6 +591,112 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
             command: wire.command,
         }
         .validate()
+    }
+}
+
+// === Command results and rejection ===
+//
+// A command never silently no-ops: dispatching one always yields a
+// [`CommandResult`], either applied (with the events it emitted) or rejected
+// with an observable [`RejectReason`]. [`CliExitCode`] is the placeholder
+// core-side mapping the external CLI turns a result into a process exit status
+// with (full wiring lives in the CLI layer).
+
+/// Why a command was rejected instead of applied. Rejection is an explicit,
+/// observable fact, never a silent no-op (see `TILE_04` / `TILE_17A`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RejectReason {
+    /// The resolved target disappeared before the mutation was applied; the
+    /// command is never redirected to a different or current target.
+    TargetGone,
+    /// An explicit target matched more than one entity; the runtime never
+    /// guesses and asks for an unambiguous id instead.
+    TargetAmbiguous,
+    /// An explicit target matched nothing.
+    TargetNotFound,
+    /// A client-scoped command whose source client has detached.
+    SourceClientStale,
+    /// A capability or authorization check failed.
+    Unauthorized,
+    /// The command is not valid in the current state; the string describes the
+    /// specific cause (e.g. closing the last pane under a keep-one policy).
+    InvalidState(String),
+    /// A resize would take the target below its minimum size.
+    MinSize,
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::TargetGone => f.write_str("target no longer exists"),
+            RejectReason::TargetAmbiguous => {
+                f.write_str("target matched more than one; specify an explicit id")
+            }
+            RejectReason::TargetNotFound => f.write_str("no target matched"),
+            RejectReason::SourceClientStale => f.write_str("source client has detached"),
+            RejectReason::Unauthorized => f.write_str("command not permitted"),
+            RejectReason::InvalidState(detail) => write!(f, "invalid state: {detail}"),
+            RejectReason::MinSize => f.write_str("below minimum size"),
+        }
+    }
+}
+
+/// The outcome of dispatching one command, keyed back to its originating
+/// [`CommandEnvelope`] by `command_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandResult {
+    /// The command was applied, emitting the listed events.
+    Ok {
+        /// Id of the command that was applied.
+        command_id: CommandId,
+        /// Events the command produced, in emission order.
+        emitted_events: Vec<EventId>,
+    },
+    /// The command was rejected and applied nothing.
+    Rejected {
+        /// Id of the command that was rejected.
+        command_id: CommandId,
+        /// Why the command was rejected.
+        reason: RejectReason,
+        /// Optional human-facing hint for resolving the rejection.
+        help: Option<String>,
+    },
+}
+
+/// Process exit status the external CLI reports. This is the placeholder
+/// core-side enumeration; the full result-to-exit-code wiring lives in the CLI
+/// layer. Discriminants are the actual exit numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliExitCode {
+    /// The command succeeded.
+    Success = 0,
+    /// A runtime or action error (e.g. a rejected command).
+    RuntimeAction = 1,
+    /// A CLI usage or config validation error.
+    UsageOrConfig = 2,
+    /// The named session was not found.
+    SessionNotFound = 3,
+    /// The runtime IPC endpoint was unavailable.
+    IpcUnavailable = 4,
+}
+
+impl CliExitCode {
+    /// The numeric exit code this variant reports to the OS.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// Placeholder mapping from a [`CommandResult`] to an exit code: applied
+    /// commands succeed, rejected ones report a runtime/action error. Richer
+    /// reasons (session-not-found, IPC-unavailable) are surfaced by the CLI
+    /// layer, not derivable from the result alone.
+    #[must_use]
+    pub const fn for_result(result: &CommandResult) -> Self {
+        match result {
+            CommandResult::Ok { .. } => CliExitCode::Success,
+            CommandResult::Rejected { .. } => CliExitCode::RuntimeAction,
+        }
     }
 }
 
