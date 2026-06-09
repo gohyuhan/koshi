@@ -511,6 +511,22 @@ pub enum RejectReason {
     MinSize,
 }
 
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::TargetGone => f.write_str("target no longer exists"),
+            RejectReason::TargetAmbiguous => {
+                f.write_str("target matched more than one; specify an explicit id")
+            }
+            RejectReason::TargetNotFound => f.write_str("no target matched"),
+            RejectReason::SourceClientStale => f.write_str("source client has detached"),
+            RejectReason::Unauthorized => f.write_str("command not permitted"),
+            RejectReason::InvalidState => f.write_str("invalid in the current state"),
+            RejectReason::MinSize => f.write_str("below minimum size"),
+        }
+    }
+}
+
 /// Payload for [`Event::CommandRejected`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRejected {

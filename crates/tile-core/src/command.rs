@@ -13,8 +13,9 @@
 //! No raw OS handles, no `&mut` references, and command identity is never a
 //! free-form `String`.
 
+use crate::event::RejectReason;
 use crate::geometry::Direction;
-use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
+use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -591,6 +592,73 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
             command: wire.command,
         }
         .validate()
+    }
+}
+
+// === Command results and rejection ===
+//
+// A command never silently no-ops: dispatching one always yields a
+// [`CommandResult`], either applied (with the events it emitted) or rejected
+// with an observable [`RejectReason`]. [`CliExitCode`] is the placeholder
+// core-side mapping the external CLI turns a result into a process exit status
+// with (full wiring lives in the CLI layer).
+
+/// The outcome of dispatching one command, keyed back to its originating
+/// [`CommandEnvelope`] by `command_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandResult {
+    /// The command was applied, emitting the listed events.
+    Ok {
+        /// Id of the command that was applied.
+        command_id: CommandId,
+        /// Events the command produced, in emission order.
+        emitted_events: Vec<EventId>,
+    },
+    /// The command was rejected and applied nothing.
+    Rejected {
+        /// Id of the command that was rejected.
+        command_id: CommandId,
+        /// Why the command was rejected.
+        reason: RejectReason,
+        /// Optional human-facing hint for resolving the rejection.
+        help: Option<String>,
+    },
+}
+
+/// Process exit status the external CLI reports. This is the placeholder
+/// core-side enumeration; the full result-to-exit-code wiring lives in the CLI
+/// layer. Discriminants are the actual exit numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliExitCode {
+    /// The command succeeded.
+    Success = 0,
+    /// A runtime or action error (e.g. a rejected command).
+    RuntimeAction = 1,
+    /// A CLI usage or config validation error.
+    UsageOrConfig = 2,
+    /// The named session was not found.
+    SessionNotFound = 3,
+    /// The runtime IPC endpoint was unavailable.
+    IpcUnavailable = 4,
+}
+
+impl CliExitCode {
+    /// The numeric exit code this variant reports to the OS.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// Placeholder mapping from a [`CommandResult`] to an exit code: applied
+    /// commands succeed, rejected ones report a runtime/action error. Richer
+    /// reasons (session-not-found, IPC-unavailable) are surfaced by the CLI
+    /// layer, not derivable from the result alone.
+    #[must_use]
+    pub const fn for_result(result: &CommandResult) -> Self {
+        match result {
+            CommandResult::Ok { .. } => CliExitCode::Success,
+            CommandResult::Rejected { .. } => CliExitCode::RuntimeAction,
+        }
     }
 }
 

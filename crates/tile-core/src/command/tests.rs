@@ -1,7 +1,8 @@
 //! Tests for the canonical command vocabulary.
 
 use super::*;
-use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId};
+use crate::event::RejectReason;
+use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
@@ -402,4 +403,86 @@ fn validate_accepts_consistent_envelope() {
         Command::ToggleLockMode,
     );
     assert!(env.validate().is_ok());
+}
+
+#[test]
+fn reject_reason_roundtrips() {
+    roundtrip(&RejectReason::TargetGone);
+    roundtrip(&RejectReason::TargetAmbiguous);
+    roundtrip(&RejectReason::TargetNotFound);
+    roundtrip(&RejectReason::SourceClientStale);
+    roundtrip(&RejectReason::Unauthorized);
+    roundtrip(&RejectReason::InvalidState);
+    roundtrip(&RejectReason::MinSize);
+}
+
+#[test]
+fn command_result_roundtrips() {
+    roundtrip(&CommandResult::Ok {
+        command_id: CommandId::new(),
+        emitted_events: vec![EventId::new(), EventId::new()],
+    });
+    roundtrip(&CommandResult::Rejected {
+        command_id: CommandId::new(),
+        reason: RejectReason::TargetNotFound,
+        help: Some("pass an explicit --pane id".to_string()),
+    });
+    roundtrip(&CommandResult::Rejected {
+        command_id: CommandId::new(),
+        reason: RejectReason::MinSize,
+        help: None,
+    });
+}
+
+/// Every reason produces a human string. Pins the diagnostic helper to the
+/// real variant set; any added/renamed reason breaks this.
+#[test]
+fn reject_reason_diagnostics_are_human() {
+    let cases: Vec<(RejectReason, &str)> = vec![
+        (RejectReason::TargetGone, "target no longer exists"),
+        (
+            RejectReason::TargetAmbiguous,
+            "target matched more than one; specify an explicit id",
+        ),
+        (RejectReason::TargetNotFound, "no target matched"),
+        (
+            RejectReason::SourceClientStale,
+            "source client has detached",
+        ),
+        (RejectReason::Unauthorized, "command not permitted"),
+        (RejectReason::InvalidState, "invalid in the current state"),
+        (RejectReason::MinSize, "below minimum size"),
+    ];
+    assert_eq!(cases.len(), 7);
+    for (reason, expected) in &cases {
+        assert_eq!(&reason.to_string(), expected);
+    }
+}
+
+#[test]
+fn cli_exit_codes_match_spec() {
+    assert_eq!(CliExitCode::Success.code(), 0);
+    assert_eq!(CliExitCode::RuntimeAction.code(), 1);
+    assert_eq!(CliExitCode::UsageOrConfig.code(), 2);
+    assert_eq!(CliExitCode::SessionNotFound.code(), 3);
+    assert_eq!(CliExitCode::IpcUnavailable.code(), 4);
+}
+
+#[test]
+fn cli_exit_code_maps_command_result() {
+    let applied = CommandResult::Ok {
+        command_id: CommandId::new(),
+        emitted_events: vec![],
+    };
+    assert_eq!(CliExitCode::for_result(&applied), CliExitCode::Success);
+
+    let rejected = CommandResult::Rejected {
+        command_id: CommandId::new(),
+        reason: RejectReason::Unauthorized,
+        help: None,
+    };
+    assert_eq!(
+        CliExitCode::for_result(&rejected),
+        CliExitCode::RuntimeAction
+    );
 }
