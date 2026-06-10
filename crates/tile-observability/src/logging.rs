@@ -1,4 +1,4 @@
-//! `tracing` domain — structured logging bootstrap.
+//! `logging` domain — structured logging bootstrap.
 //!
 //! [`init_tracing`] installs a process-wide subscriber that emits structured
 //! logs, formatted as JSON or human-readable text per [`TracingOptions`]. Logs

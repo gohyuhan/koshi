@@ -5,4 +5,4 @@ pub mod error;
 
 pub mod diagnostics;
 
-pub mod tracing;
+pub mod logging;
