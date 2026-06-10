@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+directories = "6.0.0"
 miette = "7.6.0"
 thiserror = "2.0.18"
 tile-cli = { version = "0.1.0", path = "../tile-cli" }
@@ -15,3 +16,6 @@ tile-plugin-host = { version = "0.1.0", path = "../tile-plugin-host" }
 tile-pty = { version = "0.1.0", path = "../tile-pty" }
 tile-storage = { version = "0.1.0", path = "../tile-storage" }
 tile-terminal = { version = "0.1.0", path = "../tile-terminal" }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
