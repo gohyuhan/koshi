@@ -62,24 +62,49 @@ fn log_format_parses_value() {
 }
 
 #[test]
-fn init_tracing_installs_once() {
-    // First install succeeds; a second install fails because the process has a
-    // single global subscriber. This is the only test that completes a global
-    // install, so its two calls are deterministic regardless of parallelism: no
-    // other test races the global slot. `init_tracing_rejects_bad_filter` returns
-    // before `try_init`, and the `with_test_writer` tests use a thread-local
-    // subscriber.
-    let first = init_tracing(TracingOptions {
+fn init_tracing_writes_to_file_and_installs_once() {
+    // This is the only test that completes a global install, so its calls are
+    // deterministic regardless of parallelism: no other test races the global
+    // slot. `init_tracing_rejects_bad_filter` returns before `try_init`, and the
+    // `with_test_writer` tests use a thread-local subscriber.
+    let dir = std::env::temp_dir().join(format!("tile-log-test-{}", std::process::id()));
+    let path = dir.join("tile.log");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let guard = init_tracing(TracingOptions {
         format: LogFormat::Json,
         filter: "info".to_string(),
-    });
-    assert!(first.is_ok());
+        destination: LogDestination::File(path.clone()),
+        max_log_files: 7,
+    })
+    .expect("first install succeeds");
 
+    tracing::info!(session_id = "sess-file", "file sink event");
+
+    // A second install fails: a process has a single global subscriber.
     let second = init_tracing(TracingOptions {
         format: LogFormat::Json,
         filter: "info".to_string(),
+        destination: LogDestination::Stderr,
+        max_log_files: 7,
     });
     assert!(matches!(second, Err(TracingError::AlreadyInitialized)));
+
+    // Dropping the guard flushes the non-blocking writer to disk.
+    drop(guard);
+
+    // Daily rotation appends a date suffix to the prefix, so read whichever
+    // `tile.log*` file the appender created.
+    let contents = std::fs::read_dir(&dir)
+        .expect("log dir exists")
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("tile.log"))
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("log file readable"))
+        .expect("a rotated log file was written");
+    assert!(contents.contains("session_id"), "missing canonical field");
+    assert!(contents.contains("file sink event"), "missing log message");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -87,6 +112,33 @@ fn init_tracing_rejects_bad_filter() {
     let err = init_tracing(TracingOptions {
         format: LogFormat::Json,
         filter: "this is not a valid==filter".to_string(),
+        destination: LogDestination::Stderr,
+        max_log_files: 7,
     });
     assert!(matches!(err, Err(TracingError::Filter(_))));
+}
+
+#[test]
+fn init_tracing_disabled_is_noop() {
+    // Disabled installs no global subscriber, so it never conflicts with the one
+    // global install and is safely idempotent — both calls succeed regardless of
+    // test order.
+    let opts = || TracingOptions {
+        format: LogFormat::Json,
+        filter: "info".to_string(),
+        destination: LogDestination::Disabled,
+        max_log_files: 7,
+    };
+    assert!(init_tracing(opts()).is_ok());
+    assert!(init_tracing(opts()).is_ok());
+}
+
+#[test]
+fn default_log_path_is_under_state_dir() {
+    let path = default_log_path();
+    assert!(
+        path.ends_with("tile/tile.log"),
+        "unexpected default path: {}",
+        path.display()
+    );
 }
