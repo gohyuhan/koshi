@@ -83,6 +83,13 @@ pub struct PanicHookGuard {
 
 impl Drop for PanicHookGuard {
     fn drop(&mut self) {
+        // `set_hook` itself panics if called from a panicking thread, which would
+        // turn the in-flight panic into a destructor abort — the exact opposite
+        // of this module's goal. When we are unwinding, the chained hook has
+        // already run; leave it installed rather than abort to restore it.
+        if std::thread::panicking() {
+            return;
+        }
         if let Some(previous) = self.previous.take() {
             panic::set_hook(Box::new(move |info| previous(info)));
         }
