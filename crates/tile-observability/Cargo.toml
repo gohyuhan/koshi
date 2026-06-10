@@ -15,3 +15,5 @@ tile-plugin-host = { version = "0.1.0", path = "../tile-plugin-host" }
 tile-pty = { version = "0.1.0", path = "../tile-pty" }
 tile-storage = { version = "0.1.0", path = "../tile-storage" }
 tile-terminal = { version = "0.1.0", path = "../tile-terminal" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
