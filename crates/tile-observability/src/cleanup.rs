@@ -12,7 +12,7 @@
 //! runtime when it actually enters those modes, so this crate takes no terminal
 //! dependency. Hooks are plain [`FnOnce`] closures here.
 
-use std::panic;
+use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::{Arc, Mutex};
 
 /// A one-shot terminal-cleanup action. Boxed and `Send` so it can be held in the
@@ -21,6 +21,10 @@ pub type CleanupHook = Box<dyn FnOnce() + Send>;
 
 /// The hook registry, shared between the guard and any installed panic hook.
 type Registry = Arc<Mutex<Vec<CleanupHook>>>;
+
+/// A shareable panic hook, so the installed chained hook and the
+/// [`PanicHookGuard`] that restores it can both hold the prior hook.
+type SharedPanicHook = Arc<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 /// Runs its registered [cleanup hooks](CleanupHook) exactly once — on drop, or on
 /// panic if [`install_panic_hook`] was called with this guard. Hooks run in the
@@ -62,25 +66,52 @@ impl Drop for TerminalCleanupGuard {
     }
 }
 
+/// Restores the panic hook that was installed before [`install_panic_hook`], on
+/// drop. Holding it for the terminal session's lifetime keeps the chained hook
+/// active; dropping it unchains cleanup so a later session does not stack inert
+/// wrappers on the process-global hook.
+#[must_use = "dropping the returned guard immediately restores the previous panic hook"]
+pub struct PanicHookGuard {
+    previous: Option<SharedPanicHook>,
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            panic::set_hook(Box::new(move |info| previous(info)));
+        }
+    }
+}
+
 /// Chain a panic hook that runs `guard`'s cleanup hooks before the previously
 /// installed hook. Terminal restoration happens first so the panic message and
 /// any crash report land on a sane screen rather than the alternate buffer.
 ///
 /// The panic hook shares the guard's registry, so a panic and a later drop draw
 /// from the same set: whichever runs first drains it, and the other is a no-op.
-pub fn install_panic_hook(guard: &TerminalCleanupGuard) {
+///
+/// Returns a [`PanicHookGuard`] that restores the previous hook when dropped.
+pub fn install_panic_hook(guard: &TerminalCleanupGuard) -> PanicHookGuard {
     let hooks = Arc::clone(&guard.hooks);
-    let previous = panic::take_hook();
+    let previous: SharedPanicHook = Arc::from(panic::take_hook());
+    let chained = Arc::clone(&previous);
     panic::set_hook(Box::new(move |info| {
         run_hooks(&hooks);
-        previous(info);
+        chained(info);
     }));
+    PanicHookGuard {
+        previous: Some(previous),
+    }
 }
 
 /// Drain the registry and run every hook in registration order. The lock is
 /// released before any hook runs, both so a hook may itself register (without
-/// deadlocking) and so a slow or panicking hook never holds the registry. A
-/// poisoned lock is recovered: cleanup must still run when another thread died.
+/// deadlocking) and so a slow hook never holds the registry. A poisoned lock is
+/// recovered: cleanup must still run when another thread died.
+///
+/// Each hook runs inside [`catch_unwind`](panic::catch_unwind): a hook that
+/// panics must not abort the process (a panic inside the panic hook would) nor
+/// skip the remaining hooks — partial cleanup beats none.
 fn run_hooks(hooks: &Registry) {
     let drained: Vec<CleanupHook> = {
         let mut guard = hooks
@@ -89,7 +120,7 @@ fn run_hooks(hooks: &Registry) {
         std::mem::take(&mut *guard)
     };
     for hook in drained {
-        hook();
+        let _ = panic::catch_unwind(AssertUnwindSafe(hook));
     }
 }
 

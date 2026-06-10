@@ -34,7 +34,9 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
         guard.register_cleanup(Box::new(move || {
             hook_counter.fetch_add(1, Ordering::SeqCst);
         }));
-        install_panic_hook(&guard);
+        // Hold the guard for the duration: dropping it would restore the silent
+        // hook and unchain the cleanup before the panic fires.
+        let _panic_guard = install_panic_hook(&guard);
 
         let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
         assert!(result.is_err());
@@ -50,6 +52,32 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
         counter.load(Ordering::SeqCst),
         1,
         "drop must not re-run hooks the panic hook already ran"
+    );
+
+    panic::set_hook(saved);
+}
+
+// A hook that panics must not stop the hooks that follow it: each runs in its
+// own `catch_unwind`. The deliberate panic is silenced under a no-op hook.
+#[test]
+fn a_panicking_hook_does_not_stop_later_hooks() {
+    let ran = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        guard.register_cleanup(Box::new(|| panic!("first hook fails")));
+        let later = Arc::clone(&ran);
+        guard.register_cleanup(Box::new(move || {
+            later.fetch_add(1, Ordering::SeqCst);
+        }));
+    } // drop runs both hooks; the first panics but is caught
+
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the hook after a panicking one must still run"
     );
 
     panic::set_hook(saved);
