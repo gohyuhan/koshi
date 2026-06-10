@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+miette = "7.6.0"
 thiserror = "2.0.18"
 tile-cli = { version = "0.1.0", path = "../tile-cli" }
 tile-config = { version = "0.1.0", path = "../tile-config" }
