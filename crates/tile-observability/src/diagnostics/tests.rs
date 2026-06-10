@@ -41,7 +41,7 @@ fn resize_min_size_diagnostic_reports_direction_and_sizes() {
     let d = resize_min_size_diagnostic(Direction::Left, 3, 2);
     assert_eq!(
         d.to_string(),
-        "cannot resize pane left: neighbor is at minimum size 2 (current 3)"
+        "cannot resize pane left: would drop a pane below minimum size 2 (current 3)"
     );
     assert_eq!(code_of(&d), "tile::resize");
     assert_eq!(

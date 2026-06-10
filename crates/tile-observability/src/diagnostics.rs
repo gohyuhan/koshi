@@ -38,9 +38,11 @@ pub struct CommandRejectDiagnostic {
     help: String,
 }
 
-/// A resize refused because a neighbor is already at its minimum size.
+/// A resize refused because it would drop a pane below its minimum size.
 #[derive(Debug, Error, Diagnostic)]
-#[error("cannot resize pane {direction}: neighbor is at minimum size {min} (current {current})")]
+#[error(
+    "cannot resize pane {direction}: would drop a pane below minimum size {min} (current {current})"
+)]
 #[diagnostic(
     code(tile::resize),
     help("free space by resizing or closing a neighboring pane")
@@ -80,6 +82,7 @@ pub fn command_reject_diagnostic(
 }
 
 /// Build a diagnostic for a resize that would breach a minimum-size constraint.
+/// `current` is the pane's size now; `min` is the floor the resize would breach.
 pub fn resize_min_size_diagnostic(
     direction: Direction,
     current: u16,
