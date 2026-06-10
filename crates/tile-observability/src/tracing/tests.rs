@@ -64,7 +64,11 @@ fn log_format_parses_value() {
 #[test]
 fn init_tracing_installs_once() {
     // First install succeeds; a second install fails because the process has a
-    // single global subscriber.
+    // single global subscriber. This is the only test that completes a global
+    // install, so its two calls are deterministic regardless of parallelism: no
+    // other test races the global slot. `init_tracing_rejects_bad_filter` returns
+    // before `try_init`, and the `with_test_writer` tests use a thread-local
+    // subscriber.
     let first = init_tracing(TracingOptions {
         format: LogFormat::Json,
         filter: "info".to_string(),

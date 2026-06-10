@@ -105,9 +105,11 @@ pub enum TracingError {
 }
 
 /// Holds resources tied to the active subscriber. Keep it alive for as long as
-/// logging is needed. It is a placeholder today — the global subscriber outlives
-/// it — but owns the lifecycle so a future non-blocking writer can flush on drop
-/// without changing this signature.
+/// logging is needed.
+///
+/// Dropping it is a no-op today: the global subscriber outlives it. The type
+/// exists so a future non-blocking writer can flush on drop without changing
+/// [`init_tracing`]'s signature.
 #[derive(Debug)]
 pub struct TracingGuard {
     _private: (),
