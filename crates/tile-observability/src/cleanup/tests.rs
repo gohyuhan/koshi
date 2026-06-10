@@ -98,3 +98,38 @@ fn a_panicking_hook_does_not_stop_later_hooks() {
 
     panic::set_hook(saved);
 }
+
+// The hardest case: a cleanup hook panics while cleanup runs *from the panic
+// hook*. Run inline that aborts the process (a panic during panic handling), so
+// reaching the assertions at all proves the hooks ran off the panic path. The
+// hook after the panicking one must still run.
+#[test]
+fn a_panicking_hook_during_panic_handling_does_not_abort() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ran = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        guard.register_cleanup(Box::new(|| panic!("cleanup hook fails")));
+        let later = Arc::clone(&ran);
+        guard.register_cleanup(Box::new(move || {
+            later.fetch_add(1, Ordering::SeqCst);
+        }));
+        let _panic_guard = install_panic_hook(&guard);
+
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+        assert!(result.is_err());
+    }
+
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "a panicking hook in the panic path must not abort or skip later hooks"
+    );
+
+    panic::set_hook(saved);
+}

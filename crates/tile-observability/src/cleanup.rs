@@ -127,9 +127,17 @@ pub fn install_panic_hook(guard: &TerminalCleanupGuard) -> PanicHookGuard {
 /// deadlocking) and so a slow hook never holds the registry. A poisoned lock is
 /// recovered: cleanup must still run when another thread died.
 ///
-/// Each hook runs inside [`catch_unwind`](panic::catch_unwind): a hook that
-/// panics must not abort the process (a panic inside the panic hook would) nor
-/// skip the remaining hooks — partial cleanup beats none.
+/// A hook that panics must neither abort the process nor skip the hooks after it.
+/// How that is achieved depends on where we are running:
+///
+/// - Off the panic path (a normal drop), each hook runs inside
+///   [`catch_unwind`](panic::catch_unwind), which isolates its panic.
+/// - From the installed panic hook, `catch_unwind` is not enough: a panic raised
+///   while Rust is executing a panic hook aborts the process immediately, before
+///   any `catch_unwind` landing pad. So the hooks run on a fresh thread instead,
+///   where each hook's panic is an ordinary first-level panic that `catch_unwind`
+///   contains. (A panicking hook there re-enters this function via the chained
+///   hook, but finds the registry already drained, so it cannot recurse.)
 fn run_hooks(hooks: &Registry) {
     let drained: Vec<CleanupHook> = {
         let mut guard = hooks
@@ -137,7 +145,25 @@ fn run_hooks(hooks: &Registry) {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *guard)
     };
-    for hook in drained {
+    if drained.is_empty() {
+        return;
+    }
+
+    if std::thread::panicking() {
+        // Spawning may fail under resource exhaustion mid-panic; then the hooks
+        // are dropped unrun (the terminal may be left dirty) rather than risk the
+        // abort that running them inline here would invite.
+        if let Ok(handle) = std::thread::Builder::new().spawn(move || run_each(drained)) {
+            let _ = handle.join();
+        }
+    } else {
+        run_each(drained);
+    }
+}
+
+/// Run each hook in order, isolating a panicking hook so the rest still run.
+fn run_each(hooks: Vec<CleanupHook>) {
+    for hook in hooks {
         let _ = panic::catch_unwind(AssertUnwindSafe(hook));
     }
 }
