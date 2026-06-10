@@ -48,8 +48,15 @@ impl LogFormat {
     /// Read the format from `TILE_LOG_FORMAT` (`json` or `pretty`). Anything else,
     /// including an unset variable, falls back to [`LogFormat::Pretty`].
     pub fn from_env() -> Self {
-        match std::env::var("TILE_LOG_FORMAT").as_deref() {
-            Ok("json") => LogFormat::Json,
+        LogFormat::parse(std::env::var("TILE_LOG_FORMAT").ok().as_deref())
+    }
+
+    /// The pure mapping behind [`from_env`]: `Some("json")` is JSON, anything else
+    /// (including `None`) is pretty. Kept separate so it can be tested without
+    /// touching the process-global environment.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("json") => LogFormat::Json,
             _ => LogFormat::Pretty,
         }
     }

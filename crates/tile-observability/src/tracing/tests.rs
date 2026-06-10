@@ -51,25 +51,14 @@ fn redacted_env_field_hides_sensitive_keys_only() {
 }
 
 #[test]
-fn log_format_reads_env() {
-    // Drive `from_env` off a controlled variable rather than the ambient one, so
-    // a developer or CI job that sets `TILE_LOG_FORMAT` cannot flip the result.
-    // Restore the prior value afterward to keep the process env untouched.
-    let prior = std::env::var("TILE_LOG_FORMAT").ok();
-
-    std::env::set_var("TILE_LOG_FORMAT", "json");
-    assert_eq!(LogFormat::from_env(), LogFormat::Json);
-
-    std::env::set_var("TILE_LOG_FORMAT", "anything-else");
-    assert_eq!(LogFormat::from_env(), LogFormat::Pretty);
-
-    std::env::remove_var("TILE_LOG_FORMAT");
-    assert_eq!(LogFormat::from_env(), LogFormat::Pretty);
-
-    match prior {
-        Some(value) => std::env::set_var("TILE_LOG_FORMAT", value),
-        None => std::env::remove_var("TILE_LOG_FORMAT"),
-    }
+fn log_format_parses_value() {
+    // Test the pure mapping directly so the suite never reads or writes the
+    // process-global `TILE_LOG_FORMAT`, which would be race-prone under parallel
+    // tests.
+    assert_eq!(LogFormat::parse(Some("json")), LogFormat::Json);
+    assert_eq!(LogFormat::parse(Some("pretty")), LogFormat::Pretty);
+    assert_eq!(LogFormat::parse(Some("anything-else")), LogFormat::Pretty);
+    assert_eq!(LogFormat::parse(None), LogFormat::Pretty);
 }
 
 #[test]
