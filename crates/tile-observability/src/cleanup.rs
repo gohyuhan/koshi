@@ -87,6 +87,11 @@ impl Drop for PanicHookGuard {
         // turn the in-flight panic into a destructor abort — the exact opposite
         // of this module's goal. When we are unwinding, the chained hook has
         // already run; leave it installed rather than abort to restore it.
+        //
+        // If that unwind is later caught and the process continues, the chained
+        // hook stays installed as an inert wrapper (its registry is already
+        // drained). This intentionally prefers preserving the original panic over
+        // restoring the previous hook here, since `set_hook` is illegal mid-panic.
         if std::thread::panicking() {
             return;
         }
