@@ -1,6 +1,16 @@
 use super::*;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+
+// Both panic-hook tests mutate the process-global panic hook, so they must not
+// run concurrently — Rust runs tests in parallel by default. Serialize them on a
+// shared lock so one test's `set_hook` cannot land between another's install and
+// its `catch_unwind`.
+fn panic_hook_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn drop_runs_hooks_in_registration_order() {
@@ -21,6 +31,9 @@ fn drop_runs_hooks_in_registration_order() {
 // prior hook before returning so it does not perturb other tests.
 #[test]
 fn panic_runs_cleanup_once_then_drop_is_noop() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let counter = Arc::new(AtomicUsize::new(0));
 
     // Silence the default hook so the deliberate panic below stays quiet, and
@@ -61,6 +74,9 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
 // own `catch_unwind`. The deliberate panic is silenced under a no-op hook.
 #[test]
 fn a_panicking_hook_does_not_stop_later_hooks() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let ran = Arc::new(AtomicUsize::new(0));
     let saved = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));

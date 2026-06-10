@@ -70,6 +70,12 @@ impl Drop for TerminalCleanupGuard {
 /// drop. Holding it for the terminal session's lifetime keeps the chained hook
 /// active; dropping it unchains cleanup so a later session does not stack inert
 /// wrappers on the process-global hook.
+///
+/// The process panic hook is a single global slot, so only one of these guards
+/// should be active at a time and they must be dropped in reverse install order
+/// (LIFO) — the natural lifetime of a nested scope. `Drop` restores the captured
+/// hook unconditionally, so dropping out of order would overwrite a hook some
+/// other component installed afterward.
 #[must_use = "dropping the returned guard immediately restores the previous panic hook"]
 pub struct PanicHookGuard {
     previous: Option<SharedPanicHook>,
