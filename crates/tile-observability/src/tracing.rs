@@ -10,6 +10,11 @@
 //! such as `TILE_CONTEXT_TOKEN` can never reach the output even if it is handed
 //! to the logger by mistake. The scrubbing itself lives in [`tile_core::redact`];
 //! this module only routes env maps through it on the way to a log line.
+//!
+//! Environment variables read by [`TracingOptions::from_env`]:
+//! - `TILE_LOG_FORMAT` — `json` or `pretty` (default: `pretty`).
+//! - `TILE_LOG` — tracing filter directive, e.g. `info` or `tile=debug`
+//!   (default: `info`).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -133,9 +138,16 @@ pub struct CapturedLogs {
 }
 
 impl CapturedLogs {
-    /// All captured output as a single string.
+    /// All captured output as a single string. Recovers a poisoned lock rather
+    /// than panicking: if a writer thread panicked mid-log, the bytes it already
+    /// wrote are still readable, so reading them must not cascade into a second
+    /// panic.
     pub fn contents(&self) -> String {
-        String::from_utf8_lossy(&self.buffer.lock().expect("log buffer not poisoned")).into_owned()
+        let bytes = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     /// The captured output split into lines (one JSON record per line).
@@ -153,7 +165,7 @@ impl io::Write for CapturedWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.buffer
             .lock()
-            .expect("log buffer not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .extend_from_slice(data);
         Ok(data.len())
     }
