@@ -4,3 +4,4 @@
 pub mod event_queue;
 pub mod fake_pty;
 pub mod fixtures;
+pub mod layout_assert;
