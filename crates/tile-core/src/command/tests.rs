@@ -256,6 +256,118 @@ fn copy_mode_variant_names_are_canonical() {
     }
 }
 
+/// `Command::kind` must report the matching discriminant for every variant.
+/// Reusing the canonical command instances keeps `CommandKind` pinned to the
+/// same 18-variant set as `Command`; a new command variant added without a
+/// `kind` arm fails to compile, and a mismatched arm fails this assert.
+#[test]
+fn command_kind_mirrors_command() {
+    let cases: Vec<(Command, CommandKind)> = vec![
+        (
+            Command::NewPane(NewPaneArgs::default()),
+            CommandKind::NewPane,
+        ),
+        (
+            Command::ClosePane(ClosePaneArgs::default()),
+            CommandKind::ClosePane,
+        ),
+        (
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Up,
+                amount: 1,
+            }),
+            CommandKind::ResizePane,
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                pane: PaneId::new(),
+            }),
+            CommandKind::FocusPane,
+        ),
+        (Command::NewTab(NewTabArgs::default()), CommandKind::NewTab),
+        (
+            Command::CloseTab(CloseTabArgs::default()),
+            CommandKind::CloseTab,
+        ),
+        (
+            Command::RenameTab(RenameTabArgs {
+                tab: None,
+                name: "t".to_string(),
+            }),
+            CommandKind::RenameTab,
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                target: TabTarget::Next,
+            }),
+            CommandKind::FocusTab,
+        ),
+        (
+            Command::WriteToPane(WriteToPaneArgs::default()),
+            CommandKind::WriteToPane,
+        ),
+        (Command::ToggleLockMode, CommandKind::ToggleLockMode),
+        (
+            Command::SetLockMode(LockModeArgs { locked: true }),
+            CommandKind::SetLockMode,
+        ),
+        (
+            Command::RunCommandPane(RunCommandPaneArgs {
+                command: SpawnSpec {
+                    program: std::path::PathBuf::from("ls"),
+                    args: vec![],
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    shell_kind: crate::process::ShellKind::Other("x".to_string()),
+                },
+                name: None,
+                cwd: None,
+            }),
+            CommandKind::RunCommandPane,
+        ),
+        (
+            Command::CopyMode(CopyModeCommand::Enter),
+            CommandKind::CopyMode,
+        ),
+        (
+            Command::Plugin(PluginCommand::Reload(ReloadPluginArgs {
+                plugin: PluginId::new(),
+            })),
+            CommandKind::Plugin,
+        ),
+        (
+            Command::TogglePaneFullscreen,
+            CommandKind::TogglePaneFullscreen,
+        ),
+        (
+            Command::RenamePane(RenamePaneArgs {
+                pane: None,
+                name: "p".to_string(),
+            }),
+            CommandKind::RenamePane,
+        ),
+        (
+            Command::MoveTab(MoveTabArgs {
+                tab: None,
+                index: 0,
+            }),
+            CommandKind::MoveTab,
+        ),
+        (
+            Command::RenameSession(RenameSessionArgs {
+                name: "s".to_string(),
+            }),
+            CommandKind::RenameSession,
+        ),
+    ];
+    assert_eq!(cases.len(), 18);
+    for (command, kind) in &cases {
+        assert_eq!(command.kind(), *kind);
+        roundtrip(kind);
+    }
+}
+
 /// A fixed timestamp so envelope roundtrips stay deterministic.
 fn fixed_time() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_700_000_000)
