@@ -2,6 +2,7 @@
 //! lifecycle states, protocol DTOs, input-privacy DTOs, error categories, and
 //! redaction helpers.
 
+pub mod action;
 pub mod command;
 pub mod error;
 pub mod event;

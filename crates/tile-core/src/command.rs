@@ -64,6 +64,83 @@ pub enum Command {
     RenameSession(RenameSessionArgs),
 }
 
+/// The payload-free discriminant of a [`Command`] — one unit variant per
+/// `Command` variant, in the same order.
+///
+/// The action registry ([`crate::action`]) routes a user-facing action to a
+/// core command by naming its `CommandKind`; the dispatcher later rebuilds the
+/// full typed `Command` from that kind plus resolved targets and args. Keeping
+/// the discriminant separate from the data-carrying enum lets action metadata
+/// stay `Copy` and free of placeholder args. [`Command::kind`] maps the other
+/// way, and a test pins the two enums to the same variant set so they cannot
+/// drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CommandKind {
+    /// Discriminant of [`Command::NewPane`].
+    NewPane,
+    /// Discriminant of [`Command::ClosePane`].
+    ClosePane,
+    /// Discriminant of [`Command::ResizePane`].
+    ResizePane,
+    /// Discriminant of [`Command::FocusPane`].
+    FocusPane,
+    /// Discriminant of [`Command::NewTab`].
+    NewTab,
+    /// Discriminant of [`Command::CloseTab`].
+    CloseTab,
+    /// Discriminant of [`Command::RenameTab`].
+    RenameTab,
+    /// Discriminant of [`Command::FocusTab`].
+    FocusTab,
+    /// Discriminant of [`Command::WriteToPane`].
+    WriteToPane,
+    /// Discriminant of [`Command::ToggleLockMode`].
+    ToggleLockMode,
+    /// Discriminant of [`Command::SetLockMode`].
+    SetLockMode,
+    /// Discriminant of [`Command::RunCommandPane`].
+    RunCommandPane,
+    /// Discriminant of [`Command::CopyMode`].
+    CopyMode,
+    /// Discriminant of [`Command::Plugin`].
+    Plugin,
+    /// Discriminant of [`Command::TogglePaneFullscreen`].
+    TogglePaneFullscreen,
+    /// Discriminant of [`Command::RenamePane`].
+    RenamePane,
+    /// Discriminant of [`Command::MoveTab`].
+    MoveTab,
+    /// Discriminant of [`Command::RenameSession`].
+    RenameSession,
+}
+
+impl Command {
+    /// The payload-free [`CommandKind`] discriminant of this command.
+    #[must_use]
+    pub const fn kind(&self) -> CommandKind {
+        match self {
+            Command::NewPane(_) => CommandKind::NewPane,
+            Command::ClosePane(_) => CommandKind::ClosePane,
+            Command::ResizePane(_) => CommandKind::ResizePane,
+            Command::FocusPane(_) => CommandKind::FocusPane,
+            Command::NewTab(_) => CommandKind::NewTab,
+            Command::CloseTab(_) => CommandKind::CloseTab,
+            Command::RenameTab(_) => CommandKind::RenameTab,
+            Command::FocusTab(_) => CommandKind::FocusTab,
+            Command::WriteToPane(_) => CommandKind::WriteToPane,
+            Command::ToggleLockMode => CommandKind::ToggleLockMode,
+            Command::SetLockMode(_) => CommandKind::SetLockMode,
+            Command::RunCommandPane(_) => CommandKind::RunCommandPane,
+            Command::CopyMode(_) => CommandKind::CopyMode,
+            Command::Plugin(_) => CommandKind::Plugin,
+            Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
+            Command::RenamePane(_) => CommandKind::RenamePane,
+            Command::MoveTab(_) => CommandKind::MoveTab,
+            Command::RenameSession(_) => CommandKind::RenameSession,
+        }
+    }
+}
+
 /// Arguments for [`Command::NewPane`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewPaneArgs {
