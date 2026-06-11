@@ -4,3 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+tile-core = { version = "0.1.0", path = "../tile-core" }
