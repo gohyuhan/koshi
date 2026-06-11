@@ -26,6 +26,8 @@ use crate::ids::PluginId;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
+use std::str::FromStr;
+use uuid::Uuid;
 
 /// The maximum length of an [`ActionName`], from the grammar
 /// `^[a-z][a-z0-9-]{0,30}$` (1 leading letter + up to 30 trailing chars).
@@ -159,9 +161,14 @@ pub enum ActionNamespace {
 
 /// A fully-qualified reference to an action: its namespace plus local name.
 ///
-/// `Display` renders the canonical wire form used in config and CLI output:
-/// `core:new-pane`, `plugin:<uuid>:open-status`, `user:my-macro`.
+/// `Display` renders the canonical wire form used everywhere an action is named
+/// by string — config files, CLI output, and plugin messages: `core:new-pane`,
+/// `plugin:<uuid>:open-status`, `user:my-macro`. Serde round-trips through that
+/// same string (not a `{namespace, name}` struct) via [`FromStr`], so a keymap
+/// like `"<C-p>n" action="core:new-pane"` decodes to exactly this type and the
+/// stable user-facing token is the wire format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ActionRef {
     /// The namespace that owns the action.
     pub namespace: ActionNamespace,
@@ -211,6 +218,93 @@ impl fmt::Display for ActionRef {
             ActionNamespace::Plugin(id) => write!(f, "plugin:{}:{}", id.as_uuid(), self.name),
             ActionNamespace::User => write!(f, "user:{}", self.name),
         }
+    }
+}
+
+/// Why a string is not a valid [`ActionRef`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionRefParseError {
+    /// No `namespace:` prefix was present.
+    MissingNamespace,
+    /// The namespace prefix was not one of `core`, `plugin`, or `user`.
+    UnknownNamespace {
+        /// The unrecognized prefix.
+        found: String,
+    },
+    /// A `plugin:` reference was missing the `:<name>` after its id.
+    MissingPluginName,
+    /// A `plugin:` reference's id was not a valid UUID.
+    InvalidPluginId,
+    /// The local name failed the action-name grammar.
+    Name(ActionNameError),
+}
+
+impl fmt::Display for ActionRefParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActionRefParseError::MissingNamespace => {
+                f.write_str("action ref is missing a 'namespace:' prefix")
+            }
+            ActionRefParseError::UnknownNamespace { found } => write!(
+                f,
+                "unknown action namespace {found:?}; expected core, plugin, or user"
+            ),
+            ActionRefParseError::MissingPluginName => {
+                f.write_str("plugin action ref must be 'plugin:<uuid>:<name>'")
+            }
+            ActionRefParseError::InvalidPluginId => {
+                f.write_str("plugin action ref has an invalid UUID")
+            }
+            ActionRefParseError::Name(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ActionRefParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ActionRefParseError::Name(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for ActionRef {
+    type Err = ActionRefParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (namespace, rest) = s
+            .split_once(':')
+            .ok_or(ActionRefParseError::MissingNamespace)?;
+        match namespace {
+            "core" => ActionRef::core(rest).map_err(ActionRefParseError::Name),
+            "user" => ActionRef::user(rest).map_err(ActionRefParseError::Name),
+            "plugin" => {
+                let (id, name) = rest
+                    .split_once(':')
+                    .ok_or(ActionRefParseError::MissingPluginName)?;
+                let uuid = Uuid::parse_str(id).map_err(|_| ActionRefParseError::InvalidPluginId)?;
+                ActionRef::plugin(PluginId::from_uuid(uuid), name)
+                    .map_err(ActionRefParseError::Name)
+            }
+            found => Err(ActionRefParseError::UnknownNamespace {
+                found: found.to_string(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<String> for ActionRef {
+    type Error = ActionRefParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<ActionRef> for String {
+    fn from(action: ActionRef) -> Self {
+        action.to_string()
     }
 }
 

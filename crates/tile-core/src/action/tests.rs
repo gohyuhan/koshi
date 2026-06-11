@@ -88,9 +88,63 @@ fn action_ref_roundtrips_each_namespace() {
 }
 
 #[test]
-fn action_ref_rejects_invalid_name_on_decode() {
-    let forged = r#"{"namespace":"Core","name":"Bad Name"}"#;
-    let decoded: Result<ActionRef, _> = serde_json::from_str(forged);
+fn action_ref_serializes_as_canonical_string() {
+    // The wire form is the documented `core:new-pane` token, not a struct, so a
+    // keymap referencing actions by name decodes straight into an `ActionRef`.
+    let core = ActionRef::core("new-pane").expect("valid");
+    assert_eq!(
+        serde_json::to_string(&core).expect("serialize"),
+        "\"core:new-pane\""
+    );
+
+    let decoded: ActionRef = serde_json::from_str("\"core:new-pane\"").expect("deserialize");
+    assert_eq!(decoded, core);
+}
+
+#[test]
+fn action_ref_parses_canonical_string() {
+    assert_eq!(
+        "core:new-pane".parse::<ActionRef>().expect("valid"),
+        ActionRef::core("new-pane").expect("valid")
+    );
+    assert_eq!(
+        "user:my-macro".parse::<ActionRef>().expect("valid"),
+        ActionRef::user("my-macro").expect("valid")
+    );
+
+    let plugin_id = PluginId::new();
+    let text = format!("plugin:{}:open-status", plugin_id.as_uuid());
+    assert_eq!(
+        text.parse::<ActionRef>().expect("valid"),
+        ActionRef::plugin(plugin_id, "open-status").expect("valid")
+    );
+}
+
+#[test]
+fn action_ref_rejects_malformed_strings() {
+    assert_eq!(
+        "new-pane".parse::<ActionRef>(),
+        Err(ActionRefParseError::MissingNamespace)
+    );
+    assert!(matches!(
+        "shell:new-pane".parse::<ActionRef>(),
+        Err(ActionRefParseError::UnknownNamespace { .. })
+    ));
+    assert_eq!(
+        "plugin:not-a-uuid:x".parse::<ActionRef>(),
+        Err(ActionRefParseError::InvalidPluginId)
+    );
+    assert_eq!(
+        format!("plugin:{}", PluginId::new().as_uuid()).parse::<ActionRef>(),
+        Err(ActionRefParseError::MissingPluginName)
+    );
+    assert!(matches!(
+        "core:Bad Name".parse::<ActionRef>(),
+        Err(ActionRefParseError::Name(_))
+    ));
+
+    // The same rejection holds when decoding from the wire.
+    let decoded: Result<ActionRef, _> = serde_json::from_str("\"core:Bad Name\"");
     assert!(decoded.is_err(), "invalid action name must not deserialize");
 }
 
