@@ -24,14 +24,17 @@
 //! area, cannot overlap or fall outside, and is exempt from the minimum-size
 //! floor (its frozen PTY size lives elsewhere).
 //!
-//! ## Not yet covered: live-pane reference checking
+//! ## Live-pane reference checking
 //!
 //! `TILE_05` normalization also requires that every layout-tree leaf references a
-//! live pane. Asserting that needs the `LayoutNode` tree and a pane registry,
-//! neither of which exists yet — they arrive with the layout node model in the
-//! next phase. Adding speculative tree/registry types here would couple this
-//! helper to a shape that has not been designed, so that assertion is
-//! intentionally deferred until those types land.
+//! live pane. [`assert_live_pane_refs`] checks this, but stays decoupled from the
+//! not-yet-designed `LayoutNode` tree and pane registry: it takes the
+//! already-extracted leaf pane ids and the set of live pane ids, rather than the
+//! concrete tree/registry types. When the layout node model lands, a test can
+//! pass `layout.leaf_panes()` and the registry's live set without changing this
+//! invariant or the crate's dependency direction.
+
+use std::collections::HashSet;
 
 use tile_core::geometry::{Rect, Size};
 use tile_core::ids::PaneId;
@@ -44,7 +47,7 @@ pub type PlacedPane = (PaneId, Rect);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutAssertionError {
     /// The live panes do not account for exactly the tab area.
-    SpaceNotFullyOccupied { tab_area: u32, occupied_area: u32 },
+    SpaceNotFullyOccupied { tab_area: u64, occupied_area: u64 },
     /// Two live panes share at least one cell.
     Overlap {
         a: PaneId,
@@ -57,6 +60,8 @@ pub enum LayoutAssertionError {
     OutsideTab { pane: PaneId, rect: Rect, tab: Rect },
     /// A live pane is smaller than the minimum cell size.
     MinSizeViolated { pane: PaneId, size: Size, min: Size },
+    /// A layout leaf references a pane that is not live in the pane registry.
+    DeadPaneReference { pane: PaneId },
 }
 
 impl std::fmt::Display for LayoutAssertionError {
@@ -86,15 +91,18 @@ impl std::fmt::Display for LayoutAssertionError {
             Self::MinSizeViolated { pane, size, min } => {
                 write!(f, "pane {pane} size {size:?} is below the minimum {min:?}")
             }
+            Self::DeadPaneReference { pane } => {
+                write!(f, "layout references non-live pane {pane}")
+            }
         }
     }
 }
 
 impl std::error::Error for LayoutAssertionError {}
 
-/// Total cells a rect covers, widened so a full `u16`×`u16` grid cannot overflow.
-fn area(rect: Rect) -> u32 {
-    u32::from(rect.size.cols) * u32::from(rect.size.rows)
+/// Total cells a rect covers, widened so sums across many panes cannot overflow.
+fn area(rect: Rect) -> u64 {
+    u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
 /// Assert the live panes occupy exactly the tab area, by cell count.
@@ -111,7 +119,7 @@ pub fn assert_all_space_occupied(
     panes: &[PlacedPane],
     tab_rect: Rect,
 ) -> Result<(), LayoutAssertionError> {
-    let occupied_area: u32 = panes.iter().map(|&(_, rect)| area(rect)).sum();
+    let occupied_area: u64 = panes.iter().map(|&(_, rect)| area(rect)).sum();
     let tab_area = area(tab_rect);
     if occupied_area == tab_area {
         Ok(())
@@ -206,6 +214,29 @@ pub fn assert_min_size_respected(
     Ok(())
 }
 
+/// Assert every layout leaf references a live pane.
+///
+/// This helper intentionally accepts the already-extracted leaf pane ids rather
+/// than a concrete `LayoutNode`, because Phase B owns the final tree shape. When
+/// that type lands, tests can pass `layout.leaf_panes()` here without changing
+/// the invariant or this crate's dependency direction.
+///
+/// # Errors
+///
+/// [`LayoutAssertionError::DeadPaneReference`] for the first pane id not present
+/// in `live_panes`.
+pub fn assert_live_pane_refs(
+    layout_leaf_panes: &[PaneId],
+    live_panes: &HashSet<PaneId>,
+) -> Result<(), LayoutAssertionError> {
+    for &pane in layout_leaf_panes {
+        if !live_panes.contains(&pane) {
+            return Err(LayoutAssertionError::DeadPaneReference { pane });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +298,20 @@ mod tests {
     }
 
     #[test]
+    fn oversized_occupancy_sum_does_not_overflow() {
+        let huge = rect(0, 0, u16::MAX, u16::MAX);
+        let panes = vec![(PaneId::new(), huge), (PaneId::new(), huge)];
+        let err = assert_all_space_occupied(&panes, huge).unwrap_err();
+        assert_eq!(
+            err,
+            LayoutAssertionError::SpaceNotFullyOccupied {
+                tab_area: 65_535_u64 * 65_535,
+                occupied_area: 65_535_u64 * 65_535 * 2,
+            }
+        );
+    }
+
+    #[test]
     fn overlap_is_detected_and_names_both_panes() {
         let a = PaneId::new();
         let b = PaneId::new();
@@ -311,6 +356,26 @@ mod tests {
                 size: Size { cols: 1, rows: 24 },
                 min,
             }
+        );
+    }
+
+    #[test]
+    fn live_pane_refs_pass_when_all_leaf_panes_are_live() {
+        let a = PaneId::new();
+        let b = PaneId::new();
+        let live = HashSet::from([a, b]);
+        assert_live_pane_refs(&[a, b], &live).unwrap();
+    }
+
+    #[test]
+    fn dead_pane_ref_is_detected() {
+        let live_pane = PaneId::new();
+        let dead_pane = PaneId::new();
+        let live = HashSet::from([live_pane]);
+        let err = assert_live_pane_refs(&[live_pane, dead_pane], &live).unwrap_err();
+        assert_eq!(
+            err,
+            LayoutAssertionError::DeadPaneReference { pane: dead_pane }
         );
     }
 

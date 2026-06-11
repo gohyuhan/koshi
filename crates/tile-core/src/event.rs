@@ -20,7 +20,7 @@
 //! sensitive text cannot ride along.
 
 use crate::command::{CopyTarget, GridPos, SelectionKind};
-use crate::geometry::Point;
+use crate::geometry::{Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,28 @@ pub enum Event {
     TabClosed(TabClosed),
     /// Focus moved to a tab.
     TabFocused(TabFocused),
+    /// A pane's display name changed.
+    PaneRenamed(PaneRenamed),
+    /// A tab moved to a new index.
+    TabMoved(TabMoved),
+    /// A tab's display name changed.
+    TabRenamed(TabRenamed),
+    /// The session display name changed.
+    SessionRenamed(SessionRenamed),
+    /// A session rename was rejected after validation.
+    SessionRenameFailed(SessionRenameFailed),
+    /// A pane became invisible because the terminal is too small.
+    PaneSuppressed(PaneSuppressed),
+    /// A suppressed pane became visible again after a resize.
+    PaneResumed(PaneResumed),
+    /// All panes are suppressed; runtime should show the too-small overlay.
+    TerminalTooSmallEntered(TerminalTooSmallEntered),
+    /// At least one pane became visible; runtime can leave the too-small overlay.
+    TerminalTooSmallExited(TerminalTooSmallExited),
+    /// Configuration reload succeeded and was atomically swapped in.
+    ConfigReloaded(ConfigReloaded),
+    /// Configuration reload failed; the previous config remains active.
+    ConfigReloadFailed(ConfigReloadFailed),
 
     // Input modes and keybindings.
     /// The active input mode changed (e.g. normal, locked, copy).
@@ -188,6 +210,107 @@ pub struct TabClosed {
 pub struct TabFocused {
     /// The newly focused tab.
     pub tab_id: TabId,
+}
+
+/// Payload for [`Event::PaneRenamed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneRenamed {
+    /// The renamed pane.
+    pub pane_id: PaneId,
+    /// The pane's new display name.
+    pub name: String,
+}
+
+/// Payload for [`Event::TabMoved`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabMoved {
+    /// The moved tab.
+    pub tab_id: TabId,
+    /// The tab's previous zero-based index.
+    pub old_index: usize,
+    /// The tab's new zero-based index.
+    pub new_index: usize,
+}
+
+/// Payload for [`Event::TabRenamed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabRenamed {
+    /// The renamed tab.
+    pub tab_id: TabId,
+    /// The tab's new display name.
+    pub name: String,
+}
+
+/// Payload for [`Event::SessionRenamed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRenamed {
+    /// The renamed session.
+    pub session_id: SessionId,
+    /// The session's previous display name.
+    pub old_name: String,
+    /// The session's new display name.
+    pub new_name: String,
+}
+
+/// Payload for [`Event::SessionRenameFailed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRenameFailed {
+    /// The session whose rename failed.
+    pub session_id: SessionId,
+    /// Human-facing rejection reason.
+    pub reason: String,
+}
+
+/// Payload for [`Event::PaneSuppressed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSuppressed {
+    /// The pane that became invisible.
+    pub pane_id: PaneId,
+    /// The tab containing the pane.
+    pub tab_id: TabId,
+}
+
+/// Payload for [`Event::PaneResumed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneResumed {
+    /// The pane that became visible again.
+    pub pane_id: PaneId,
+    /// The tab containing the pane.
+    pub tab_id: TabId,
+}
+
+/// Payload for [`Event::TerminalTooSmallEntered`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalTooSmallEntered {
+    /// The affected client viewport.
+    pub client_id: ClientId,
+    /// The viewport size that could not fit any pane.
+    pub size: Size,
+}
+
+/// Payload for [`Event::TerminalTooSmallExited`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalTooSmallExited {
+    /// The affected client viewport.
+    pub client_id: ClientId,
+    /// The viewport size after recovery.
+    pub size: Size,
+}
+
+/// Payload for [`Event::ConfigReloaded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReloaded {
+    /// The session whose config was reloaded.
+    pub session_id: SessionId,
+}
+
+/// Payload for [`Event::ConfigReloadFailed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReloadFailed {
+    /// The session whose config reload failed.
+    pub session_id: SessionId,
+    /// Human-facing diagnostic.
+    pub reason: String,
 }
 
 // ============================================================================
@@ -470,6 +593,8 @@ pub struct PaneScrollbackTruncated {
     pub pane_id: PaneId,
     /// How many lines were dropped from the bounded buffer.
     pub dropped_lines: u64,
+    /// How many bytes were dropped from the bounded buffer.
+    pub dropped_bytes: u64,
 }
 
 /// The delivery class of an event, used when reporting drops.

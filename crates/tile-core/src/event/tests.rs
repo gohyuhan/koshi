@@ -1,7 +1,7 @@
 //! Tests for the canonical event vocabulary.
 
 use super::*;
-use crate::geometry::Point;
+use crate::geometry::{Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
 use std::time::{Duration, UNIX_EPOCH};
@@ -42,6 +42,55 @@ fn lifecycle_events_roundtrip() {
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         pane_id: PaneId::new(),
         mode: InputMode::CopyMode,
+    }));
+}
+
+#[test]
+fn rename_move_suppression_and_reload_events_roundtrip() {
+    roundtrip(&Event::PaneRenamed(PaneRenamed {
+        pane_id: PaneId::new(),
+        name: "logs".to_string(),
+    }));
+    roundtrip(&Event::TabMoved(TabMoved {
+        tab_id: TabId::new(),
+        old_index: 0,
+        new_index: 2,
+    }));
+    roundtrip(&Event::TabRenamed(TabRenamed {
+        tab_id: TabId::new(),
+        name: "work".to_string(),
+    }));
+    roundtrip(&Event::SessionRenamed(SessionRenamed {
+        session_id: SessionId::new(),
+        old_name: "default".to_string(),
+        new_name: "main".to_string(),
+    }));
+    roundtrip(&Event::SessionRenameFailed(SessionRenameFailed {
+        session_id: SessionId::new(),
+        reason: "empty name".to_string(),
+    }));
+    roundtrip(&Event::PaneSuppressed(PaneSuppressed {
+        pane_id: PaneId::new(),
+        tab_id: TabId::new(),
+    }));
+    roundtrip(&Event::PaneResumed(PaneResumed {
+        pane_id: PaneId::new(),
+        tab_id: TabId::new(),
+    }));
+    roundtrip(&Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+        client_id: ClientId::new(),
+        size: Size { cols: 1, rows: 1 },
+    }));
+    roundtrip(&Event::TerminalTooSmallExited(TerminalTooSmallExited {
+        client_id: ClientId::new(),
+        size: Size { cols: 80, rows: 24 },
+    }));
+    roundtrip(&Event::ConfigReloaded(ConfigReloaded {
+        session_id: SessionId::new(),
+    }));
+    roundtrip(&Event::ConfigReloadFailed(ConfigReloadFailed {
+        session_id: SessionId::new(),
+        reason: "parse error".to_string(),
     }));
 }
 
@@ -94,6 +143,7 @@ fn delivery_and_rejection_events_roundtrip() {
     roundtrip(&Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
         pane_id: PaneId::new(),
         dropped_lines: 500,
+        dropped_bytes: 8192,
     }));
     roundtrip(&Event::CommandRejected(CommandRejected {
         id: CommandId::new(),
@@ -281,6 +331,84 @@ fn event_variant_names_are_canonical() {
             "TabFocused",
         ),
         (
+            Event::PaneRenamed(PaneRenamed {
+                pane_id: PaneId::new(),
+                name: "logs".to_string(),
+            }),
+            "PaneRenamed",
+        ),
+        (
+            Event::TabMoved(TabMoved {
+                tab_id: TabId::new(),
+                old_index: 0,
+                new_index: 1,
+            }),
+            "TabMoved",
+        ),
+        (
+            Event::TabRenamed(TabRenamed {
+                tab_id: TabId::new(),
+                name: "work".to_string(),
+            }),
+            "TabRenamed",
+        ),
+        (
+            Event::SessionRenamed(SessionRenamed {
+                session_id: SessionId::new(),
+                old_name: "default".to_string(),
+                new_name: "main".to_string(),
+            }),
+            "SessionRenamed",
+        ),
+        (
+            Event::SessionRenameFailed(SessionRenameFailed {
+                session_id: SessionId::new(),
+                reason: "empty name".to_string(),
+            }),
+            "SessionRenameFailed",
+        ),
+        (
+            Event::PaneSuppressed(PaneSuppressed {
+                pane_id: PaneId::new(),
+                tab_id: TabId::new(),
+            }),
+            "PaneSuppressed",
+        ),
+        (
+            Event::PaneResumed(PaneResumed {
+                pane_id: PaneId::new(),
+                tab_id: TabId::new(),
+            }),
+            "PaneResumed",
+        ),
+        (
+            Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                client_id: ClientId::new(),
+                size: Size { cols: 1, rows: 1 },
+            }),
+            "TerminalTooSmallEntered",
+        ),
+        (
+            Event::TerminalTooSmallExited(TerminalTooSmallExited {
+                client_id: ClientId::new(),
+                size: Size { cols: 80, rows: 24 },
+            }),
+            "TerminalTooSmallExited",
+        ),
+        (
+            Event::ConfigReloaded(ConfigReloaded {
+                session_id: SessionId::new(),
+            }),
+            "ConfigReloaded",
+        ),
+        (
+            Event::ConfigReloadFailed(ConfigReloadFailed {
+                session_id: SessionId::new(),
+                reason: "parse error".to_string(),
+            }),
+            "ConfigReloadFailed",
+        ),
+        (
             Event::InputModeChanged(InputModeChanged {
                 pane_id: PaneId::new(),
                 mode: InputMode::Normal,
@@ -368,6 +496,7 @@ fn event_variant_names_are_canonical() {
             Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
                 pane_id: PaneId::new(),
                 dropped_lines: 0,
+                dropped_bytes: 0,
             }),
             "PaneScrollbackTruncated",
         ),
@@ -428,7 +557,7 @@ fn event_variant_names_are_canonical() {
             "Plugin",
         ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 40);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
