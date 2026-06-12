@@ -267,6 +267,100 @@ fn removing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
 }
 
 #[test]
+fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
+    let (a, b, n) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let stacked = add_to_stack(&tree, b, n).unwrap();
+    assert_eq!(stacked.leaf_panes(), [a, b, n]);
+    let LayoutNode::Split(outer) = &stacked else {
+        panic!("root must stay a split");
+    };
+    let LayoutNode::Split(stack) = &outer.children[1].node else {
+        panic!("b's slot must become a stack");
+    };
+    assert_eq!(stack.direction, SplitDirection::Stacked);
+    assert_eq!(stack.active, 1);
+    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(collapsed, [true, false]);
+}
+
+#[test]
+fn stacking_onto_a_stack_member_appends_to_that_stack() {
+    let (a, b, n) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
+
+    let stacked = add_to_stack(&tree, a, n).unwrap();
+    let LayoutNode::Split(stack) = &stacked else {
+        panic!("stack must survive");
+    };
+    assert_eq!(stack.children.len(), 3);
+    assert_eq!(stack.weights.len(), 3);
+    assert_eq!(stack.active, 2);
+    assert_eq!(stacked.leaf_panes(), [a, b, n]);
+    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(collapsed, [true, true, false]);
+}
+
+#[test]
+fn stacked_layout_still_tiles_after_the_edit() {
+    let (a, b, n) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let stacked = add_to_stack(&tree, b, n).unwrap();
+    assert_tiles(&stacked, tab());
+}
+
+#[test]
+fn a_directional_split_treats_the_whole_stack_as_one_operand() {
+    let (x, a, b, n) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 1));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(x), LayoutChild::new(stack.clone())],
+    ));
+
+    // Splitting downward from a stack member puts the new pane under the
+    // stack, with the stack itself intact above it.
+    let split = split_leaf(&tree, b, n, Direction::Down).unwrap();
+    let LayoutNode::Split(outer) = &split else {
+        panic!("root must stay a split");
+    };
+    let LayoutNode::Split(column) = &outer.children[1].node else {
+        panic!("the stack's slot must become a vertical split");
+    };
+    assert_eq!(column.direction, SplitDirection::Vertical);
+    assert_eq!(column.children[0].node, stack);
+    assert_eq!(column.children[1].node, LayoutNode::Pane(n));
+    assert_eq!(split.leaf_panes(), [x, a, b, n]);
+}
+
+#[test]
+fn a_directional_split_before_a_stack_places_the_new_pane_first() {
+    let (a, b, n) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
+
+    let split = split_leaf(&stack, a, n, Direction::Left).unwrap();
+    let LayoutNode::Split(row) = &split else {
+        panic!("root must become a split");
+    };
+    assert_eq!(row.direction, SplitDirection::Horizontal);
+    assert_eq!(row.children[0].node, LayoutNode::Pane(n));
+    assert_eq!(row.children[1].node, stack);
+}
+
+#[test]
+fn stacking_onto_a_missing_anchor_is_rejected() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let snapshot = tree.clone();
+
+    let missing = PaneId::new();
+    let err = add_to_stack(&tree, missing, PaneId::new()).unwrap_err();
+    assert_eq!(err, SplitError::PaneNotFound { target: missing });
+    assert_eq!(tree, snapshot);
+}
+
+#[test]
 fn missing_target_is_an_error_and_the_input_is_unchanged() {
     let (a, b, new) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);

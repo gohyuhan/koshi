@@ -11,6 +11,7 @@ use tile_core::error::{DomainCategory, DomainError, Severity};
 use tile_core::geometry::{Direction, Rect, SplitDirection};
 use tile_core::ids::PaneId;
 
+use crate::size::SizeWeight;
 use crate::solver::solve;
 use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
@@ -32,11 +33,15 @@ impl DomainError for SplitError {
     }
 }
 
-/// Split the leaf holding `target`, placing `new_pane` beside it.
+/// Split next to `target`, placing `new_pane` beside it.
 ///
-/// The leaf is replaced by a directional split of the two panes with equal
-/// weights. `direction` is where the new pane lands relative to the target:
-/// `Right` and `Down` put it after, `Left` and `Up` before.
+/// The operand is replaced by a directional split of operand and new pane
+/// with equal weights. `direction` is where the new pane lands: `Right` and
+/// `Down` put it after, `Left` and `Up` before.
+///
+/// When `target` sits inside a stack, the operand is the whole stack — a
+/// directional split never breaks a stack open, it places the new pane
+/// beside it. Otherwise the operand is the target's leaf.
 ///
 /// # Errors
 ///
@@ -48,22 +53,75 @@ pub fn split_leaf(
     new_pane: PaneId,
     direction: Direction,
 ) -> Result<LayoutNode, SplitError> {
-    let mut result = tree.clone();
-    let Some(slot) = find_leaf_mut(&mut result, target) else {
+    let Some(path) = tree.path_to(target) else {
         return Err(SplitError::PaneNotFound { target });
     };
+    // The outermost stack on the path owns the split; without one, the
+    // leaf itself does.
+    let operand_depth = (0..path.len())
+        .find(|&depth| {
+            matches!(
+                tree.node_at(&path[..depth]),
+                LayoutNode::Split(split) if split.direction == SplitDirection::Stacked
+            )
+        })
+        .unwrap_or(path.len());
+
+    let mut result = tree.clone();
+    let slot = result.node_at_mut(&path[..operand_depth]);
+    let operand = std::mem::replace(slot, LayoutNode::Pane(new_pane));
 
     let split_direction = match direction {
         Direction::Left | Direction::Right => SplitDirection::Horizontal,
         Direction::Up | Direction::Down => SplitDirection::Vertical,
     };
-    let old = LayoutChild::new(LayoutNode::Pane(target));
+    let old = LayoutChild::new(operand);
     let new = LayoutChild::new(LayoutNode::Pane(new_pane));
     let children = match direction {
         Direction::Right | Direction::Down => vec![old, new],
         Direction::Left | Direction::Up => vec![new, old],
     };
     *slot = LayoutNode::Split(SplitNode::with_equal_weights(split_direction, children));
+    Ok(result)
+}
+
+/// Stack `new_pane` onto `anchor`'s position.
+///
+/// If `anchor` already sits inside a stack, the new pane joins that stack;
+/// otherwise the anchor's leaf becomes a two-member stack. Either way the
+/// new pane is the active (expanded) member afterwards, matching how a
+/// directional split focuses the new pane.
+///
+/// # Errors
+///
+/// [`SplitError::PaneNotFound`] when `anchor` has no leaf in `tree`; the
+/// caller's tree is unchanged.
+pub fn add_to_stack(
+    tree: &LayoutNode,
+    anchor: PaneId,
+    new_pane: PaneId,
+) -> Result<LayoutNode, SplitError> {
+    if !tree.contains_pane(anchor) {
+        return Err(SplitError::PaneNotFound { target: anchor });
+    }
+
+    let mut result = tree.clone();
+    if let Some(stack) = result.stack_containing_mut(anchor) {
+        stack.children.push(LayoutChild {
+            node: LayoutNode::Pane(new_pane),
+            collapsed: false,
+        });
+        stack.weights.push(SizeWeight::default());
+        stack.active = stack.children.len() - 1;
+        let active = stack.active;
+        for (index, child) in stack.children.iter_mut().enumerate() {
+            child.collapsed = index != active;
+        }
+    } else {
+        let path = result.path_to(anchor).expect("presence checked above");
+        let slot = result.node_at_mut(&path);
+        *slot = LayoutNode::Split(SplitNode::stack(vec![anchor, new_pane], 1));
+    }
     Ok(result)
 }
 
@@ -210,21 +268,6 @@ fn reseat_active(split: &mut SplitNode, removed_index: usize) {
             child.collapsed = index != split.active;
         }
     }
-}
-
-/// The mutable slot of the leaf holding `target`, if it exists.
-fn find_leaf_mut(node: &mut LayoutNode, target: PaneId) -> Option<&mut LayoutNode> {
-    if matches!(node, LayoutNode::Pane(id) if *id == target) {
-        return Some(node);
-    }
-    if let LayoutNode::Split(split) = node {
-        for child in &mut split.children {
-            if let Some(found) = find_leaf_mut(&mut child.node, target) {
-                return Some(found);
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

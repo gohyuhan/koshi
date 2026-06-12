@@ -115,6 +115,18 @@ impl LayoutNode {
         node
     }
 
+    /// Mutable variant of [`LayoutNode::node_at`].
+    pub(crate) fn node_at_mut(&mut self, path: &[usize]) -> &mut LayoutNode {
+        let mut node = self;
+        for &index in path {
+            let LayoutNode::Split(split) = node else {
+                unreachable!("path was built over this tree");
+            };
+            node = &mut split.children[index].node;
+        }
+        node
+    }
+
     /// Like [`LayoutNode::node_at`], for paths known to end at a split.
     pub(crate) fn split_at(&self, path: &[usize]) -> &SplitNode {
         match self.node_at(path) {
@@ -125,14 +137,7 @@ impl LayoutNode {
 
     /// Mutable variant of [`LayoutNode::split_at`].
     pub(crate) fn split_at_mut(&mut self, path: &[usize]) -> &mut SplitNode {
-        let mut node = self;
-        for &index in path {
-            let LayoutNode::Split(split) = node else {
-                unreachable!("path was built over this tree");
-            };
-            node = &mut split.children[index].node;
-        }
-        match node {
+        match self.node_at_mut(path) {
             LayoutNode::Split(split) => split,
             LayoutNode::Pane(_) => unreachable!("path was built over this tree"),
         }
