@@ -11,5 +11,6 @@ pub mod mode;
 pub mod normalize;
 pub mod resize;
 pub mod size;
+pub mod snapshot;
 pub mod solver;
 pub mod tree;
