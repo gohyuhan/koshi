@@ -6,6 +6,7 @@ pub mod edit;
 pub mod error;
 
 pub mod layout;
+pub mod resize;
 pub mod size;
 pub mod solver;
 pub mod tree;

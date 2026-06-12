@@ -143,6 +143,23 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
     }
 }
 
+/// The floor of one child slot along the split axis, for callers that only
+/// know the slot index (resize uses this to bound what a donor can give).
+pub(crate) fn slot_floor(split: &SplitNode, index: usize, horizontal: bool) -> u16 {
+    let child_min = split
+        .children
+        .get(index)
+        .map_or(Size { cols: 0, rows: 0 }, |child| {
+            min_size(&child.node, MIN_PANE_SIZE)
+        });
+    let axis_min = if horizontal {
+        child_min.cols
+    } else {
+        child_min.rows
+    };
+    child_floor(split, index, axis_min)
+}
+
 /// The floor for one child slot along the split axis: the larger of the
 /// subtree's own minimum and any floor its weight declares.
 fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
@@ -216,6 +233,23 @@ fn solve_directional(
     out: &mut Vec<(PaneId, Rect)>,
     suppressed: &mut Vec<PaneId>,
 ) {
+    let rects = directional_child_rects(split, rect);
+    for (child, child_rect) in split.children.iter().zip(rects) {
+        if child_rect.is_empty() {
+            suppress_subtree(&child.node, out, suppressed);
+        } else {
+            solve_node(&child.node, child_rect, out, suppressed);
+        }
+    }
+}
+
+/// The rectangle each child of a directional split receives inside `rect`,
+/// in child order. Suppressed children get a zero rect at their position.
+///
+/// This is the one place a directional split's geometry is decided; both
+/// solving and resize preflighting read it. A kept child's rect always meets
+/// the child's floor, so an empty rect here always means "suppressed".
+pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect) -> Vec<Rect> {
     let horizontal = split.direction == SplitDirection::Horizontal;
     let (available, available_cross) = if horizontal {
         (rect.size.cols, rect.size.rows)
@@ -254,11 +288,12 @@ fn solve_directional(
     let kept_floors: Vec<u16> = filter_kept(&floors, &kept);
     let sizes = distribute(&kept_weights, &kept_floors, available);
 
+    let mut rects = Vec::with_capacity(split.children.len());
     let mut offset: u16 = 0;
     let mut kept_index = 0;
-    for (index, child) in split.children.iter().enumerate() {
-        if !kept[index] {
-            suppress_subtree(&child.node, out, suppressed);
+    for &keep in &kept {
+        if !keep {
+            rects.push(Rect::zero());
             continue;
         }
         let cells = sizes[kept_index];
@@ -286,9 +321,10 @@ fn solve_directional(
                 },
             )
         };
-        solve_node(&child.node, child_rect, out, suppressed);
+        rects.push(child_rect);
         offset = offset.saturating_add(cells);
     }
+    rects
 }
 
 /// Keep only the elements whose flag is set, preserving order.
