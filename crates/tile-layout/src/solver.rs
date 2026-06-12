@@ -28,7 +28,7 @@ use tile_core::ids::PaneId;
 use crate::mode::LayoutMode;
 use crate::size::SizeConstraint;
 use crate::size::SizeWeight;
-use crate::tree::{LayoutNode, SplitNode};
+use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
 /// The smallest useful terminal pane: two columns by one row. A pane PTY is
 /// never sized below this floor.
@@ -38,7 +38,8 @@ pub const MIN_PANE_SIZE: Size = Size { cols: 2, rows: 1 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolveResult {
     /// Every leaf pane exactly once, in layout order, with its solved
-    /// rectangle. A zero-area rect means the pane is not visible.
+    /// rectangle. A collapsed stack member's rect is its one-row header
+    /// strip; a zero-area rect means the pane is not visible at all.
     pub panes: Vec<(PaneId, Rect)>,
     /// Panes clipped to zero area because the layout no longer fits. Stable
     /// trailing order: the same panes suppress and restore as space changes.
@@ -46,20 +47,47 @@ pub struct SolveResult {
     /// `true` when suppression left nothing visible at all; the caller shows
     /// a terminal-too-small overlay instead of a pane grid.
     pub all_suppressed: bool,
+    /// One entry per collapsed stack member, in layout order. The renderer
+    /// draws these strips and mouse routing hit-tests them; both are
+    /// Tile-owned regions, never forwarded to a PTY.
+    pub stack_headers: Vec<StackHeader>,
 }
 
-impl SolveResult {
-    fn from_parts(panes: Vec<(PaneId, Rect)>, suppressed: Vec<PaneId>) -> Self {
+/// The one-row strip standing in for a collapsed stack member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackHeader {
+    /// The collapsed pane this header represents; clicking the strip
+    /// activates it.
+    pub pane: PaneId,
+    /// The strip itself: one row spanning the stack's width.
+    pub rect: Rect,
+    /// Zero-based position of this member within its stack.
+    pub position: usize,
+    /// Total members in the stack, for indicators like `[2/5]`.
+    pub total: usize,
+}
+
+/// Accumulators threaded through the solve recursion.
+#[derive(Default)]
+struct SolveState {
+    panes: Vec<(PaneId, Rect)>,
+    suppressed: Vec<PaneId>,
+    headers: Vec<StackHeader>,
+}
+
+impl SolveState {
+    fn into_result(self) -> SolveResult {
         // The overlay condition: space ran out (something was suppressed)
         // and no pane kept a visible rect. Panes that are zero-area for
         // other reasons (collapsed stack members, fullscreen hiding) do not
         // count as suppressed, but they cannot keep the overlay away either.
         let all_suppressed =
-            !suppressed.is_empty() && panes.iter().all(|&(_, rect)| rect.is_empty());
-        Self {
-            panes,
-            suppressed,
+            !self.suppressed.is_empty() && self.panes.iter().all(|&(_, rect)| rect.is_empty());
+        SolveResult {
+            panes: self.panes,
+            suppressed: self.suppressed,
             all_suppressed,
+            stack_headers: self.headers,
         }
     }
 }
@@ -72,19 +100,19 @@ impl SolveResult {
 /// panes drop out and return as the rect shrinks and regrows.
 #[must_use]
 pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
-    let mut panes = Vec::new();
-    let mut suppressed = Vec::new();
-    solve_node(tree, tab_rect, &mut panes, &mut suppressed);
-    SolveResult::from_parts(panes, suppressed)
+    let mut state = SolveState::default();
+    solve_node(tree, tab_rect, &mut state);
+    state.into_result()
 }
 
 /// Solve `tree` over `tab_rect` under a layout mode.
 ///
 /// `Tiled` is [`solve`]. `Fullscreen` gives the focused pane the whole tab
 /// and zero area to everyone else — without touching the tree, so leaving
-/// fullscreen restores the prior layout exactly. A fullscreen mode pointing
-/// at a pane that is no longer in the tree falls back to the tiled solve:
-/// stale mode state must never blank a session.
+/// fullscreen restores the prior layout exactly. No stack headers are drawn
+/// over a fullscreen pane. A fullscreen mode pointing at a pane that is no
+/// longer in the tree falls back to the tiled solve: stale mode state must
+/// never blank a session.
 #[must_use]
 pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
     let LayoutMode::Fullscreen { focused } = mode else {
@@ -94,20 +122,19 @@ pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> S
         return solve(tree, tab_rect);
     }
 
-    let mut panes = Vec::new();
-    let mut suppressed = Vec::new();
+    let mut state = SolveState::default();
     for pane in tree.leaf_panes() {
         if pane != focused {
-            panes.push((pane, Rect::zero()));
+            state.panes.push((pane, Rect::zero()));
         } else if tab_rect.size.cols < MIN_PANE_SIZE.cols || tab_rect.size.rows < MIN_PANE_SIZE.rows
         {
-            panes.push((pane, Rect::zero()));
-            suppressed.push(pane);
+            state.panes.push((pane, Rect::zero()));
+            state.suppressed.push(pane);
         } else {
-            panes.push((pane, tab_rect));
+            state.panes.push((pane, tab_rect));
         }
     }
-    SolveResult::from_parts(panes, suppressed)
+    state.into_result()
 }
 
 /// `true` when every pane in `tree` can be placed inside `rect` at minimum
@@ -168,22 +195,26 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
                 }
                 Size { cols, rows }
             }
-            SplitDirection::Stacked => {
-                let mut cols: u16 = 0;
-                for child in &split.children {
-                    cols = cols.max(min_size(&child.node, default_min).cols);
-                }
-                let header_rows = split.children.len().saturating_sub(1) as u16;
-                let active_rows = split
-                    .children
-                    .get(split.active)
-                    .map_or(0, |child| min_size(&child.node, default_min).rows);
-                Size {
-                    cols,
-                    rows: header_rows.saturating_add(active_rows),
-                }
-            }
+            SplitDirection::Stacked => stack_min_size(split, default_min),
         },
+    }
+}
+
+/// The smallest rectangle a stack can be solved into: its widest member by
+/// one header row per collapsed member plus the active member's rows.
+fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
+    let mut cols: u16 = 0;
+    for child in &split.children {
+        cols = cols.max(min_size(&child.node, default_min).cols);
+    }
+    let header_rows = split.children.len().saturating_sub(1) as u16;
+    let active_rows = split
+        .children
+        .get(split.active)
+        .map_or(0, |child| min_size(&child.node, default_min).rows);
+    Size {
+        cols,
+        rows: header_rows.saturating_add(active_rows),
     }
 }
 
@@ -217,50 +248,32 @@ fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
     subtree_axis_min.max(weight_floor)
 }
 
-fn solve_node(
-    node: &LayoutNode,
-    rect: Rect,
-    out: &mut Vec<(PaneId, Rect)>,
-    suppressed: &mut Vec<PaneId>,
-) {
+fn solve_node(node: &LayoutNode, rect: Rect, state: &mut SolveState) {
     match node {
         LayoutNode::Pane(id) => {
             // Backstop: a leaf that cannot show a usable pane is suppressed,
             // never rendered as a sliver.
             if rect.size.cols < MIN_PANE_SIZE.cols || rect.size.rows < MIN_PANE_SIZE.rows {
-                out.push((*id, Rect::zero()));
-                suppressed.push(*id);
+                state.panes.push((*id, Rect::zero()));
+                state.suppressed.push(*id);
             } else {
-                out.push((*id, rect));
+                state.panes.push((*id, rect));
             }
         }
         LayoutNode::Split(split) => match split.direction {
             SplitDirection::Horizontal | SplitDirection::Vertical => {
-                solve_directional(split, rect, out, suppressed);
+                solve_directional(split, rect, state);
             }
-            SplitDirection::Stacked => solve_stacked(split, rect, out, suppressed),
+            SplitDirection::Stacked => solve_stacked(split, rect, state),
         },
     }
 }
 
 /// Zero out a whole subtree and record every leaf as suppressed.
-fn suppress_subtree(
-    node: &LayoutNode,
-    out: &mut Vec<(PaneId, Rect)>,
-    suppressed: &mut Vec<PaneId>,
-) {
+fn suppress_subtree(node: &LayoutNode, state: &mut SolveState) {
     for pane in node.leaf_panes() {
-        out.push((pane, Rect::zero()));
-        suppressed.push(pane);
-    }
-}
-
-/// Zero out a whole subtree without marking it suppressed — used for
-/// collapsed stack children, which are hidden by the stack, not by lack of
-/// space, and stay focus-addressable.
-fn zero_subtree(node: &LayoutNode, out: &mut Vec<(PaneId, Rect)>) {
-    for pane in node.leaf_panes() {
-        out.push((pane, Rect::zero()));
+        state.panes.push((pane, Rect::zero()));
+        state.suppressed.push(pane);
     }
 }
 
@@ -271,18 +284,13 @@ fn zero_subtree(node: &LayoutNode, out: &mut Vec<(PaneId, Rect)>) {
 /// once the running sum of axis floors overflows the rect, that child and
 /// everything after it drop too (trailing suppression). The children that
 /// remain always fit at floor, so the recursion below never overlaps.
-fn solve_directional(
-    split: &SplitNode,
-    rect: Rect,
-    out: &mut Vec<(PaneId, Rect)>,
-    suppressed: &mut Vec<PaneId>,
-) {
+fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
     let rects = directional_child_rects(split, rect);
     for (child, child_rect) in split.children.iter().zip(rects) {
         if child_rect.is_empty() {
-            suppress_subtree(&child.node, out, suppressed);
+            suppress_subtree(&child.node, state);
         } else {
-            solve_node(&child.node, child_rect, out, suppressed);
+            solve_node(&child.node, child_rect, state);
         }
     }
 }
@@ -380,22 +388,93 @@ fn filter_kept<T: Copy>(items: &[T], kept: &[bool]) -> Vec<T> {
         .collect()
 }
 
-/// Stacked children share the rect. The active child takes all of it for
-/// now; collapsed children solve to zero area without counting as
-/// suppressed — they are hidden by the stack, not by lack of space. (Header
-/// rows are layered in with the rest of the stacked behavior.)
-fn solve_stacked(
-    split: &SplitNode,
-    rect: Rect,
-    out: &mut Vec<(PaneId, Rect)>,
-    suppressed: &mut Vec<PaneId>,
-) {
-    for (index, child) in split.children.iter().enumerate() {
-        if index == split.active {
-            solve_node(&child.node, rect, out, suppressed);
-        } else {
-            zero_subtree(&child.node, out);
+/// Stacked children share the rect: the active child expands into whatever
+/// remains after every collapsed member takes a one-row header strip.
+///
+/// Headers stay in layout order — members above the active child sit on
+/// top, members below sit underneath — so the visual stack matches the
+/// tree. A collapsed member's pane rect *is* its header strip; the matching
+/// [`StackHeader`] entry carries the indicator metadata.
+///
+/// If the rect cannot hold every header plus the active child at minimum
+/// size (or is narrower than the widest member needs), the whole stack
+/// suppresses as one unit: no headers, every member zero-area. A stack
+/// never shows a partial subset of itself.
+fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
+    if split.children.is_empty() {
+        return;
+    }
+    let active = split.active.min(split.children.len() - 1);
+    let total = split.children.len();
+    let header_count = (total - 1) as u16;
+
+    let needed = stack_min_size(split, MIN_PANE_SIZE);
+    if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
+        for child in &split.children {
+            suppress_subtree(&child.node, state);
         }
+        return;
+    }
+
+    let active_rows = rect.size.rows - header_count;
+    let mut y = rect.origin.y;
+    for (index, child) in split.children.iter().enumerate() {
+        if index == active {
+            let active_rect = Rect::new(
+                Point {
+                    x: rect.origin.x,
+                    y,
+                },
+                Size {
+                    cols: rect.size.cols,
+                    rows: active_rows,
+                },
+            );
+            solve_node(&child.node, active_rect, state);
+            y = y.saturating_add(active_rows);
+            continue;
+        }
+        let header_rect = Rect::new(
+            Point {
+                x: rect.origin.x,
+                y,
+            },
+            Size {
+                cols: rect.size.cols,
+                rows: 1,
+            },
+        );
+        emit_header(child, header_rect, index, total, state);
+        y = y.saturating_add(1);
+    }
+}
+
+/// Place one collapsed stack member on its header strip.
+///
+/// Members are panes by construction (the stack edits only ever add
+/// leaves). If a subtree somehow ends up collapsed in a stack, its first
+/// leaf stands in on the strip and the rest solve to zero — deterministic
+/// and unreachable through the public edits.
+fn emit_header(
+    child: &LayoutChild,
+    header_rect: Rect,
+    index: usize,
+    total: usize,
+    state: &mut SolveState,
+) {
+    let leaves = child.node.leaf_panes();
+    let Some((&first, rest)) = leaves.split_first() else {
+        return;
+    };
+    state.panes.push((first, header_rect));
+    state.headers.push(StackHeader {
+        pane: first,
+        rect: header_rect,
+        position: index,
+        total,
+    });
+    for &pane in rest {
+        state.panes.push((pane, Rect::zero()));
     }
 }
 

@@ -395,15 +395,155 @@ fn suppression_never_overlaps_or_spills() {
 }
 
 #[test]
-fn collapsed_stack_children_are_zero_area_but_not_suppressed() {
+fn stack_gives_the_active_child_everything_above_the_headers() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
     let tab = rect(0, 0, 80, 24);
 
     let result = solve(&tree, tab);
-    assert_eq!(result.panes, [(a, tab), (b, Rect::zero())]);
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 80, 23)), (b, rect(0, 23, 80, 1))]
+    );
+    // Collapsed members occupy a header strip, not suppression.
     assert!(result.suppressed.is_empty());
     assert!(!result.all_suppressed);
+    assert_eq!(
+        result.stack_headers,
+        [StackHeader {
+            pane: b,
+            rect: rect(0, 23, 80, 1),
+            position: 1,
+            total: 2,
+        }]
+    );
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn five_member_stack_keeps_headers_in_layout_order_around_the_active_child() {
+    let panes: Vec<PaneId> = (0..5).map(|_| PaneId::new()).collect();
+    let tree = LayoutNode::Split(SplitNode::stack(panes.clone(), 2));
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    // Members 0 and 1 sit above as single rows, the active member gets
+    // rows 2..22, members 3 and 4 sit below.
+    assert_eq!(
+        result.panes,
+        [
+            (panes[0], rect(0, 0, 80, 1)),
+            (panes[1], rect(0, 1, 80, 1)),
+            (panes[2], rect(0, 2, 80, 20)),
+            (panes[3], rect(0, 22, 80, 1)),
+            (panes[4], rect(0, 23, 80, 1)),
+        ]
+    );
+    let positions: Vec<usize> = result.stack_headers.iter().map(|h| h.position).collect();
+    assert_eq!(positions, [0, 1, 3, 4]);
+    assert!(result.stack_headers.iter().all(|h| h.total == 5));
+    assert_tiles_exactly(&result, tab);
+    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+}
+
+#[test]
+fn stack_header_metadata_is_stable_across_solves() {
+    let panes: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
+    let tree = LayoutNode::Split(SplitNode::stack(panes, 1));
+    let tab = rect(0, 0, 80, 24);
+
+    let first = solve(&tree, tab);
+    for _ in 0..10 {
+        assert_eq!(solve(&tree, tab), first);
+    }
+}
+
+#[test]
+fn stack_beside_a_pane_solves_inside_its_own_slot() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(stack)],
+    ));
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 40, 24)),
+            (b, rect(40, 0, 40, 23)),
+            (c, rect(40, 23, 40, 1)),
+        ]
+    );
+    assert_eq!(result.stack_headers.len(), 1);
+    assert_eq!(result.stack_headers[0].rect, rect(40, 23, 40, 1));
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn a_stack_too_small_for_its_active_child_suppresses_as_one_unit() {
+    let panes: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
+    let tree = LayoutNode::Split(SplitNode::stack(panes.clone(), 0));
+    // Three members need two header rows plus one active row; two rows are
+    // not enough, and a partial stack must never render.
+    let tab = rect(0, 0, 80, 2);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.suppressed, panes);
+    assert!(result.all_suppressed);
+    assert!(result.stack_headers.is_empty());
+    assert!(result.panes.iter().all(|(_, r)| r.is_empty()));
+}
+
+#[test]
+fn a_stack_narrower_than_its_members_suppresses_as_one_unit() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
+
+    let result = solve(&tree, rect(0, 0, 1, 24));
+    assert_eq!(result.suppressed, [a, b]);
+    assert!(result.all_suppressed);
+    assert!(result.stack_headers.is_empty());
+}
+
+#[test]
+fn an_active_subtree_splits_the_active_region() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    // Hand-built: a stack whose active member is itself a vertical pair.
+    // The edits never create this shape, but the solver must stay sound.
+    let pair = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(b), leaf(c)],
+    ));
+    let stack = SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutChild {
+                node: LayoutNode::Pane(a),
+                collapsed: true,
+            },
+            LayoutChild {
+                node: pair,
+                collapsed: false,
+            },
+        ],
+        weights: vec![SizeWeight::default(), SizeWeight::default()],
+        active: 1,
+    };
+    let tab = rect(0, 0, 80, 25);
+
+    let result = solve(&LayoutNode::Split(stack), tab);
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 80, 1)),
+            (b, rect(0, 1, 80, 12)),
+            (c, rect(0, 13, 80, 12)),
+        ]
+    );
+    assert_tiles_exactly(&result, tab);
 }
 
 #[test]
