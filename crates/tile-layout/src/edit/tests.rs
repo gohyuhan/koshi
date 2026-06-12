@@ -247,6 +247,88 @@ fn removing_before_the_active_stack_child_keeps_it_active() {
 }
 
 #[test]
+fn removing_after_the_active_stack_child_keeps_it_active() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
+
+    let (removed, _) = remove_pane(&tree, tab(), c).unwrap();
+    let LayoutNode::Split(stack) = &removed else {
+        panic!("stack must survive");
+    };
+    assert_eq!(stack.active, 1);
+    assert!(!stack.children[1].collapsed);
+    assert_eq!(removed.leaf_panes(), [a, b]);
+}
+
+#[test]
+fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
+    use std::collections::HashSet;
+
+    use crate::normalize::normalize;
+
+    let (a, b, x) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(x), LayoutChild::new(stack)],
+    ));
+
+    let (removed, _) = remove_pane(&tree, tab(), a).unwrap();
+    let live: HashSet<PaneId> = [x, b].into_iter().collect();
+    let normalized = normalize(&removed, &live).unwrap();
+
+    let LayoutNode::Split(outer) = &normalized else {
+        panic!("root must stay a split");
+    };
+    // The one-member stack collapsed into b's plain leaf.
+    assert_eq!(outer.children[1].node, LayoutNode::Pane(b));
+    assert_tiles(&normalized, tab());
+    // No header strip remains for a pane that is no longer stacked.
+    assert!(solve(&normalized, tab()).stack_headers.is_empty());
+}
+
+#[test]
+fn a_held_dead_pane_keeps_its_header_and_stays_selectable() {
+    use std::collections::HashSet;
+
+    use crate::focus::stack_activate;
+    use crate::normalize::normalize;
+
+    let (alive, held) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![alive, held], 0));
+
+    // Hold-on-exit: the exited pane is never removed, so it is still a live
+    // member of the layout. Normalization keeps it.
+    let live: HashSet<PaneId> = [alive, held].into_iter().collect();
+    let mut normalized = normalize(&tree, &live).unwrap();
+    assert_eq!(normalized.leaf_panes(), [alive, held]);
+
+    // Its header is still drawn, and it can still be activated.
+    let result = solve(&normalized, tab());
+    assert_eq!(result.stack_headers.len(), 1);
+    assert_eq!(result.stack_headers[0].pane, held);
+
+    let stack = normalized.stack_containing_mut(held).unwrap();
+    let change = stack_activate(stack, held).unwrap();
+    assert_eq!(change.newly_active, held);
+}
+
+#[test]
+fn removing_the_last_stack_member_prunes_the_stack() {
+    let (x, a) = (PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![a], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(x), LayoutChild::new(stack)],
+    ));
+
+    let (removed, info) = remove_pane(&tree, tab(), a).unwrap();
+    assert_eq!(removed.leaf_panes(), [x]);
+    assert_eq!(info.absorbed_by, [x]);
+    assert_tiles(&removed, tab());
+}
+
+#[test]
 fn removing_the_only_pane_is_rejected() {
     let a = PaneId::new();
     let tree = LayoutNode::Pane(a);

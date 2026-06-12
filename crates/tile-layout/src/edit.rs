@@ -164,7 +164,14 @@ pub struct RemovalInfo {
 /// Splits emptied by the removal are pruned so no region of the tab goes
 /// dead, but a split left with a single child is kept — normalization is a
 /// separate, explicit step. Inside a stack, removal keeps exactly one child
-/// expanded: removing the active child activates the next one.
+/// expanded: removing the active member activates the one that slides into
+/// its place, removing any other member leaves the active one alone.
+///
+/// This is also the close-inside-a-stack path. A stack left with one member
+/// becomes a plain leaf at the caller's next normalize; a stack left with
+/// none is pruned here like any emptied split. A pane held open after its
+/// process exits is *not* removed at all — it stays a live (dead-state)
+/// member with a selectable header until something closes it explicitly.
 ///
 /// `tab_rect` is the rect the tree currently solves into; it anchors the
 /// returned [`RemovalInfo`] geometry.
