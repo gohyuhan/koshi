@@ -127,6 +127,34 @@ fn pane_inside_a_stack_resizes_the_stack_as_a_unit() {
 }
 
 #[test]
+fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
+    // Hand-built: a stack whose active member is a vertical pair — the
+    // edits never create this, but the solver supports it, so the resize
+    // preflight must measure the donor inside the header-carved active
+    // rect, not the whole stack rect.
+    let (a, upper, lower) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, upper], 1);
+    stack.children[1].node = pair(SplitDirection::Vertical, upper, lower);
+    let tree = LayoutNode::Split(stack);
+
+    // One header row leaves 23 rows for the pair: upper 11, lower 12. The
+    // donor above can spare ten rows, not the eleven the uncarved 24-row
+    // rect would suggest.
+    let err = resize(&tree, tab(), lower, Direction::Up, 11).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 11,
+            spare: 10,
+        }
+    );
+
+    let allowed = resize(&tree, tab(), lower, Direction::Up, 10).unwrap();
+    assert_eq!(solved_size(&allowed, tab(), upper).rows, 1);
+    assert_eq!(solved_size(&allowed, tab(), lower).rows, 22);
+}
+
+#[test]
 fn resize_blocked_by_the_neighbors_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);

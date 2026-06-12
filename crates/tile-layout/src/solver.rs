@@ -228,9 +228,12 @@ fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
         cols = cols.max(min_size(&child.node, default_min).cols);
     }
     let header_rows = split.children.len().saturating_sub(1) as u16;
+    // Clamp like `solve_stacked` does, so both agree on which member is
+    // active when a deserialized stack carries an out-of-range index.
+    let active = split.active.min(split.children.len().saturating_sub(1));
     let active_rows = split
         .children
-        .get(split.active)
+        .get(active)
         .map_or(0, |child| min_size(&child.node, default_min).rows);
     Size {
         cols,
@@ -535,14 +538,15 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
             SizeConstraint::Fixed(_) | SizeConstraint::Percent(_) => None,
         })
         .collect();
-    // Validated flex weights are at least 1, so a non-empty list always has a
-    // positive total and the division below cannot hit zero.
+    // Validated flex weights are at least 1, but `Flex(0)` is still
+    // representable (public variant, serde), so the division is checked: a
+    // zero total yields zero shares and the leftover pass hands out the pool.
     let total_weight: u64 = flex.iter().map(|&(_, w)| w).sum();
     if !flex.is_empty() {
         let pool = u64::from(remaining);
         let mut assigned: u64 = 0;
         for &(index, w) in &flex {
-            let share = (pool * w / total_weight) as u16;
+            let share = (pool * w).checked_div(total_weight).unwrap_or(0) as u16;
             sizes[index] = share;
             assigned += u64::from(share);
         }

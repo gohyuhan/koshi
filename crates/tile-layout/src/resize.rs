@@ -16,7 +16,7 @@
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};
-use tile_core::geometry::{Direction, Rect, SplitDirection};
+use tile_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use tile_core::ids::PaneId;
 
 use crate::solver::{directional_child_rects, slot_floor};
@@ -151,8 +151,9 @@ fn find_border(
 /// The rect the node at `path` solves into, starting from `tab_rect`.
 ///
 /// Descends the same geometry the solver derives: directional levels slice
-/// with the shared child-rect computation; a stacked level passes its whole
-/// rect to the active child and zero to collapsed ones.
+/// with the shared child-rect computation; a stacked level carves one
+/// header row per collapsed member out of the active child's rect, shifted
+/// below the headers above it, and passes zero to collapsed ones.
 fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize]) -> Rect {
     let mut node = tree;
     let mut rect = tab_rect;
@@ -165,8 +166,22 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize]) -> Rect {
                 directional_child_rects(split, rect)[index]
             }
             SplitDirection::Stacked => {
-                if index == split.active {
-                    rect
+                // Mirror `solve_stacked`: same clamp on the active index,
+                // one header row per other member carved out of the active
+                // rect, headers above the active member shifting it down.
+                let active = split.active.min(split.children.len().saturating_sub(1));
+                if index == active {
+                    let header_rows = split.children.len().saturating_sub(1) as u16;
+                    Rect::new(
+                        Point {
+                            x: rect.origin.x,
+                            y: rect.origin.y.saturating_add(index as u16),
+                        },
+                        Size {
+                            cols: rect.size.cols,
+                            rows: rect.size.rows.saturating_sub(header_rows),
+                        },
+                    )
                 } else {
                     Rect::zero()
                 }

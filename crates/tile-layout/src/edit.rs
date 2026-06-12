@@ -197,9 +197,12 @@ pub struct RemovalInfo {
     /// The rect the removed pane occupied before removal.
     pub old_rect: Rect,
     /// Panes whose new rects cover part of `old_rect`, largest absorbed
-    /// area first (ties keep layout order). The first entry is the natural
+    /// area first (ties keep layout order), followed in layout order by
+    /// panes that cover none of it but still changed size — removing a
+    /// stack member regrows the active member in place, without its rect
+    /// ever touching the freed strip. The first entry is the natural
     /// focus-repair candidate — it visually took over the closed pane's
-    /// space — and every listed pane changed size, so its PTY needs a
+    /// space — and together the entries cover every pane whose PTY needs a
     /// resize. Collapsed stack members are never listed: their one-row
     /// header strip is Tile-owned chrome, not pane content, so crossing the
     /// old rect with it neither absorbs space nor makes a focus target.
@@ -253,8 +256,15 @@ pub fn remove_pane(
         .iter()
         .filter(|&&(id, _)| !after.stack_headers.iter().any(|header| header.pane == id))
         .filter_map(|&(id, rect)| {
-            rect.intersection(old_rect)
-                .map(|overlap| (id, cell_area(overlap)))
+            if rect.is_empty() {
+                return None;
+            }
+            let overlap = rect.intersection(old_rect).map_or(0, cell_area);
+            let resized = before
+                .panes
+                .iter()
+                .any(|&(before_id, before_rect)| before_id == id && before_rect.size != rect.size);
+            (overlap > 0 || resized).then_some((id, overlap))
         })
         .collect();
     absorbers.sort_by_key(|&(_, area)| std::cmp::Reverse(area));

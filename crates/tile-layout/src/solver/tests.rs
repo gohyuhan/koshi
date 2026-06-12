@@ -152,6 +152,25 @@ fn flex_weights_share_proportionally() {
 }
 
 #[test]
+fn all_zero_flex_weights_solve_without_panicking() {
+    // The validated constructors reject `Flex(0)`, but the variant stays
+    // representable through serde and direct construction. The solver must
+    // degrade to the leftover distribution instead of dividing by zero.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Flex(0))),
+            (b, SizeWeight::new(SizeConstraint::Flex(0))),
+        ],
+    );
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
 fn resize_deltas_shift_cells_between_siblings() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let grow = SizeWeight {
@@ -596,6 +615,24 @@ fn a_stack_too_small_for_its_active_child_suppresses_as_one_unit() {
     assert!(result.all_suppressed);
     assert!(result.stack_headers.is_empty());
     assert!(result.panes.iter().all(|(_, r)| r.is_empty()));
+}
+
+#[test]
+fn an_out_of_bounds_active_index_still_suppresses_as_one_unit() {
+    let panes: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
+    // Hand-built: the constructors and edits clamp `active`, but a
+    // deserialized stack may carry an out-of-range index. The min-size
+    // check must count the clamped active member, not skip it, or a
+    // too-short rect renders headers over a zero-area active child.
+    let mut stack = SplitNode::stack(panes.clone(), 0);
+    stack.active = panes.len() + 4;
+    let tree = LayoutNode::Split(stack);
+    let tab = rect(0, 0, 80, 2);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.suppressed, panes);
+    assert!(result.all_suppressed);
+    assert!(result.stack_headers.is_empty());
 }
 
 #[test]

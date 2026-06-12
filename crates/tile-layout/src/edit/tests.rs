@@ -227,6 +227,40 @@ fn absorbed_by_skips_collapsed_stack_members() {
 }
 
 #[test]
+fn absorbed_by_lists_the_regrown_active_member_of_a_shrunk_stack() {
+    // Removing the bottom collapsed member frees only its header row, which
+    // the surviving header slides down onto — the active member regrows
+    // above it without ever crossing the freed strip. It still changed
+    // size, so it must be reported for the PTY resize.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 0));
+
+    let (removed, info) = remove_pane(&tree, tab(), c).unwrap();
+    let solved = solve(&removed, tab());
+    let a_rect = solved.panes.iter().find(|&&(id, _)| id == a).unwrap().1;
+    assert!(a_rect.intersection(info.old_rect).is_none());
+    assert_eq!(info.absorbed_by, [a]);
+}
+
+#[test]
+fn absorbed_by_includes_resized_panes_beyond_the_freed_rect() {
+    // Four equal columns; removing the third resizes every survivor, but
+    // the leftmost one's new rect never reaches the freed span. It is
+    // still listed — last, after the panes that absorbed actual cells.
+    let (a, b, x, c) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b), leaf(x), leaf(c)],
+    ));
+
+    let (removed, info) = remove_pane(&tree, tab(), x).unwrap();
+    let solved = solve(&removed, tab());
+    let a_rect = solved.panes.iter().find(|&&(id, _)| id == a).unwrap().1;
+    assert!(a_rect.intersection(info.old_rect).is_none());
+    assert_eq!(info.absorbed_by, [b, c, a]);
+}
+
+#[test]
 fn removing_the_active_stack_child_activates_the_next_one() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
