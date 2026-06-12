@@ -138,6 +138,22 @@ fn stack_reduced_to_one_live_child_becomes_a_plain_leaf() {
 }
 
 #[test]
+fn dead_members_before_the_active_one_shift_its_index_down() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 2));
+
+    // a dies; c is still the expanded member but now sits at index 1.
+    let normalized = normalize(&tree, &live(&[b, c])).unwrap();
+    let LayoutNode::Split(stack) = &normalized else {
+        panic!("stack must survive");
+    };
+    assert_eq!(stack.active, 1);
+    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(collapsed, [true, false]);
+    assert_eq!(normalized.leaf_panes(), [b, c]);
+}
+
+#[test]
 fn dead_active_stack_child_hands_off_to_the_next_member() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));

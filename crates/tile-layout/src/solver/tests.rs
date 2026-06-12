@@ -265,6 +265,107 @@ fn preferred_target_stops_at_the_donors_floor() {
 }
 
 #[test]
+fn preferred_target_without_flexible_donors_stays_unmet() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Preferred(80))),
+            (b, SizeWeight::new(SizeConstraint::Fixed(20))),
+            (c, SizeWeight::new(SizeConstraint::Fixed(60))),
+        ],
+    );
+    let tab = rect(0, 0, 100, 24);
+
+    // A preference is only a hint: with nothing but exact-sized siblings,
+    // there is no slack and the target is quietly unmet.
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [20, 20, 60]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn floors_outrank_fixed_sizes_when_no_flexible_donor_remains() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::default().with_min(20).unwrap()),
+            (b, SizeWeight::new(SizeConstraint::Fixed(30))),
+        ],
+    );
+    let tab = rect(0, 0, 40, 24);
+
+    // The fixed sibling claims 30 of 40 first, leaving the flexible child
+    // at 10 — below its floor of 20. The clamp may tap fixed children, so
+    // the floor wins and the fixed pane gives the difference back.
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [20, 20]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn resize_deltas_clamp_at_zero_and_at_the_full_axis() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tab = rect(0, 0, 80, 24);
+
+    // A runaway positive delta saturates at the axis, then the floor clamp
+    // claws back the sibling's minimum.
+    let grow = SizeWeight {
+        resize_delta: 1000,
+        ..SizeWeight::default()
+    };
+    let grown = solve(
+        &split_with(
+            SplitDirection::Horizontal,
+            vec![(a, grow), (b, SizeWeight::default())],
+        ),
+        tab,
+    );
+    let widths: Vec<u16> = grown.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [78, 2]);
+    assert_tiles_exactly(&grown, tab);
+
+    // A runaway negative delta clamps to zero, and the floor clamp brings
+    // the child back up to its minimum.
+    let shrink = SizeWeight {
+        resize_delta: -1000,
+        ..SizeWeight::default()
+    };
+    let shrunk = solve(
+        &split_with(
+            SplitDirection::Horizontal,
+            vec![(a, shrink), (b, SizeWeight::default())],
+        ),
+        tab,
+    );
+    let widths: Vec<u16> = shrunk.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [2, 78]);
+    assert_tiles_exactly(&shrunk, tab);
+}
+
+#[test]
+fn underfilled_percents_leave_the_remainder_to_flex() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Percent(30))),
+            (b, SizeWeight::new(SizeConstraint::Percent(30))),
+            (c, SizeWeight::new(SizeConstraint::Flex(1))),
+        ],
+    );
+    let tab = rect(0, 0, 100, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [30, 30, 40]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
 fn fits_accepts_a_layout_with_room_for_every_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b]);
