@@ -190,6 +190,137 @@ fn all_fixed_underfill_gives_slack_to_the_last_child() {
 }
 
 #[test]
+fn min_floor_is_honored_when_the_layout_fits() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let wide = SizeWeight::default().with_min(20).unwrap();
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, wide),
+            (b, SizeWeight::default()),
+            (c, SizeWeight::default()),
+        ],
+    );
+    let tab = rect(0, 0, 30, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [20, 8, 2]);
+    assert_tiles_exactly(&result, tab);
+    assert_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
+}
+
+#[test]
+fn min_primary_acts_as_a_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Min(15))),
+            (b, SizeWeight::new(SizeConstraint::Flex(1))),
+        ],
+    );
+    let tab = rect(0, 0, 20, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [15, 5]);
+}
+
+#[test]
+fn preferred_target_is_honored_when_slack_allows() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Preferred(30))),
+            (b, SizeWeight::new(SizeConstraint::Flex(1))),
+        ],
+    );
+    let tab = rect(0, 0, 100, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [30, 70]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn preferred_target_stops_at_the_donors_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Preferred(90))),
+            (b, SizeWeight::default().with_min(20).unwrap()),
+        ],
+    );
+    let tab = rect(0, 0, 100, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    // The donor gives down to its floor of 20; the target settles at 80.
+    assert_eq!(widths, [80, 20]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn fits_accepts_a_layout_with_room_for_every_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+    assert!(fits(&tree, rect(0, 0, 4, 1), MIN_PANE_SIZE));
+    assert!(fits(&tree, rect(0, 0, 80, 24), MIN_PANE_SIZE));
+}
+
+#[test]
+fn fits_rejects_a_layout_whose_floors_exceed_the_rect() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+    // Two panes at two columns each need four; three is one short.
+    assert!(!fits(&tree, rect(0, 0, 3, 24), MIN_PANE_SIZE));
+}
+
+#[test]
+fn fits_accounts_for_nested_axis_minimums() {
+    let (a, b, c, d) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let column = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(b), leaf(c), leaf(d)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(column)],
+    ));
+
+    // The column needs three rows; the leaf beside it needs two columns.
+    assert!(fits(&tree, rect(0, 0, 4, 3), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 4, 2), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 3, 3), MIN_PANE_SIZE));
+}
+
+#[test]
+fn fits_uses_declared_floors_not_just_defaults() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let wide = SizeWeight::default().with_min(30).unwrap();
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![(a, wide), (b, SizeWeight::default())],
+    );
+    assert!(fits(&tree, rect(0, 0, 32, 24), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 31, 24), MIN_PANE_SIZE));
+}
+
+#[test]
+fn border_inclusive_min_adds_one_cell_per_side() {
+    let content = Size { cols: 2, rows: 1 };
+    assert_eq!(
+        border_inclusive_min(content, true),
+        Size { cols: 4, rows: 3 }
+    );
+    assert_eq!(border_inclusive_min(content, false), content);
+}
+
+#[test]
 fn zero_area_tab_solves_every_pane_to_zero_without_panicking() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let result = solve(&split(SplitDirection::Horizontal, &[a, b]), Rect::zero());

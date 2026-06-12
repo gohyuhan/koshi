@@ -12,8 +12,10 @@
 //! Along a split axis, children claim cells in constraint order: `Fixed`
 //! sizes first, then `Percent` of the axis, then the remainder is shared by
 //! the flexible children (`Flex`, and `Min`/`Preferred`, which flex around
-//! their floor/target) in proportion to their weights. User resizes are
-//! applied last as exact cell deltas.
+//! their floor/target) in proportion to their weights. User resizes apply
+//! next as exact cell deltas; then preferred targets are honored within
+//! whatever slack flexible siblings can give, and finally every child is
+//! clamped up to its floor whenever the floors fit at all.
 //!
 //! Cells that integer division leaves over go to the *trailing* children, one
 //! each: a 101-column 50/50 split solves to 50 and 51. When no flexible child
@@ -26,6 +28,10 @@ use tile_core::ids::PaneId;
 use crate::size::SizeConstraint;
 use crate::size::SizeWeight;
 use crate::tree::{LayoutNode, SplitNode};
+
+/// The smallest useful terminal pane: two columns by one row. A pane PTY is
+/// never sized below this floor.
+pub const MIN_PANE_SIZE: Size = Size { cols: 2, rows: 1 };
 
 /// The solved placement for one tree over one tab rectangle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +59,96 @@ pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
     }
 }
 
+/// `true` when every pane in `tree` can be placed inside `rect` at minimum
+/// size. Command handlers call this before mutating a layout: a split that
+/// cannot fit is rejected up front instead of producing a broken solve.
+///
+/// `default_min` is the floor for panes without an explicit one; terminal
+/// panes use [`MIN_PANE_SIZE`].
+#[must_use]
+pub fn fits(tree: &LayoutNode, rect: Rect, default_min: Size) -> bool {
+    let needed = min_size(tree, default_min);
+    needed.cols <= rect.size.cols && needed.rows <= rect.size.rows
+}
+
+/// The minimum a pane needs once borders are drawn around its content:
+/// bordered panes spend one cell per side on each axis.
+#[must_use]
+pub fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
+    if has_borders {
+        Size {
+            cols: content_min.cols.saturating_add(2),
+            rows: content_min.rows.saturating_add(2),
+        }
+    } else {
+        content_min
+    }
+}
+
+/// The smallest rectangle this subtree can be solved into.
+///
+/// Directional splits sum their children's floors along the split axis and
+/// take the largest across it. A stack needs its widest child, one header row
+/// per collapsed child, plus the active child's rows.
+#[must_use]
+pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
+    match node {
+        LayoutNode::Pane(_) => default_min,
+        LayoutNode::Split(split) => match split.direction {
+            SplitDirection::Horizontal => {
+                let mut cols: u16 = 0;
+                let mut rows: u16 = 0;
+                for (index, child) in split.children.iter().enumerate() {
+                    let child_min = min_size(&child.node, default_min);
+                    let floor = child_floor(split, index, child_min.cols);
+                    cols = cols.saturating_add(floor);
+                    rows = rows.max(child_min.rows);
+                }
+                Size { cols, rows }
+            }
+            SplitDirection::Vertical => {
+                let mut cols: u16 = 0;
+                let mut rows: u16 = 0;
+                for (index, child) in split.children.iter().enumerate() {
+                    let child_min = min_size(&child.node, default_min);
+                    let floor = child_floor(split, index, child_min.rows);
+                    rows = rows.saturating_add(floor);
+                    cols = cols.max(child_min.cols);
+                }
+                Size { cols, rows }
+            }
+            SplitDirection::Stacked => {
+                let mut cols: u16 = 0;
+                for child in &split.children {
+                    cols = cols.max(min_size(&child.node, default_min).cols);
+                }
+                let header_rows = split.children.len().saturating_sub(1) as u16;
+                let active_rows = split
+                    .children
+                    .get(split.active)
+                    .map_or(0, |child| min_size(&child.node, default_min).rows);
+                Size {
+                    cols,
+                    rows: header_rows.saturating_add(active_rows),
+                }
+            }
+        },
+    }
+}
+
+/// The floor for one child slot along the split axis: the larger of the
+/// subtree's own minimum and any floor its weight declares.
+fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
+    let weight_floor = split.weights.get(index).map_or(0, |weight| {
+        let primary_floor = match weight.primary {
+            SizeConstraint::Min(cells) => cells,
+            _ => 0,
+        };
+        primary_floor.max(weight.min.unwrap_or(0))
+    });
+    subtree_axis_min.max(weight_floor)
+}
+
 fn solve_node(node: &LayoutNode, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
     match node {
         LayoutNode::Pane(id) => out.push((*id, rect)),
@@ -72,7 +168,21 @@ fn solve_directional(split: &SplitNode, rect: Rect, out: &mut Vec<(PaneId, Rect)
     } else {
         rect.size.rows
     };
-    let sizes = distribute(&split.weights, available);
+    let floors: Vec<u16> = split
+        .children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let child_min = min_size(&child.node, MIN_PANE_SIZE);
+            let axis_min = if horizontal {
+                child_min.cols
+            } else {
+                child_min.rows
+            };
+            child_floor(split, index, axis_min)
+        })
+        .collect();
+    let sizes = distribute(&split.weights, &floors, available);
 
     let mut offset: u16 = 0;
     for (child, &cells) in split.children.iter().zip(&sizes) {
@@ -121,8 +231,9 @@ fn solve_stacked(split: &SplitNode, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
 /// Split `available` cells among children according to their weights.
 ///
 /// The returned sizes always sum to exactly `available`: a split never
-/// leaves cells unassigned and never assigns more than it has.
-fn distribute(weights: &[SizeWeight], available: u16) -> Vec<u16> {
+/// leaves cells unassigned and never assigns more than it has. When the
+/// floors fit, every child also ends at or above its floor.
+fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; weights.len()];
     let mut remaining = available;
 
@@ -178,7 +289,103 @@ fn distribute(weights: &[SizeWeight], available: u16) -> Vec<u16> {
     }
 
     repair_sum(&mut sizes, available);
+    honor_preferred(&mut sizes, weights, floors);
+    clamp_to_floors(&mut sizes, weights, floors, available);
     sizes
+}
+
+/// `true` when this weight may give up or take cells during adjustment.
+/// `Fixed` and `Percent` children hold their computed size unless a floor
+/// elsewhere forces the issue.
+fn is_flexible(weight: &SizeWeight) -> bool {
+    matches!(
+        weight.primary,
+        SizeConstraint::Flex(_) | SizeConstraint::Min(_) | SizeConstraint::Preferred(_)
+    )
+}
+
+/// The target a child aims for when space allows, if it declared one.
+/// The overlay wins over a `Preferred` primary, since overlays sit on top.
+fn preferred_target(weight: &SizeWeight) -> Option<u16> {
+    weight.preferred.or(match weight.primary {
+        SizeConstraint::Preferred(cells) => Some(cells),
+        _ => None,
+    })
+}
+
+/// Pull each preferred child toward its target using only slack: donors give
+/// cells down to their floor, receivers are the trailing flexible siblings.
+/// Children are visited in order, so an earlier target wins contested slack.
+fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
+    for index in 0..weights.len() {
+        let Some(target) = preferred_target(&weights[index]) else {
+            continue;
+        };
+        let current = sizes[index];
+        if current > target {
+            // Surplus above the target flows to the trailing-most flexible
+            // sibling; without one there is no slack to rebalance into.
+            let floor = floors.get(index).copied().unwrap_or(0);
+            let surplus = current.saturating_sub(target.max(floor));
+            let receiver = (0..weights.len())
+                .rev()
+                .find(|&i| i != index && is_flexible(&weights[i]));
+            if let Some(receiver) = receiver {
+                sizes[index] -= surplus;
+                sizes[receiver] = sizes[receiver].saturating_add(surplus);
+            }
+        } else if current < target {
+            let taken = take_cells(sizes, weights, floors, target - current, index);
+            sizes[index] = sizes[index].saturating_add(taken);
+        }
+    }
+}
+
+/// Raise every child to its floor, funding the deficit from siblings above
+/// theirs. Skipped entirely when the floors cannot fit — that is the
+/// suppression path, not a clamping problem.
+fn clamp_to_floors(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16], available: u16) {
+    let total_floor: u64 = floors.iter().map(|&cells| u64::from(cells)).sum();
+    if total_floor > u64::from(available) {
+        return;
+    }
+    for index in 0..sizes.len() {
+        let floor = floors.get(index).copied().unwrap_or(0);
+        if sizes[index] < floor {
+            let need = floor - sizes[index];
+            let taken = take_cells(sizes, weights, floors, need, index);
+            sizes[index] += taken;
+        }
+    }
+}
+
+/// Take up to `need` cells from siblings, trailing-first, leaving every donor
+/// at or above its floor. Flexible donors give first; `Fixed`/`Percent`
+/// children are only tapped when the flexible ones are exhausted.
+fn take_cells(
+    sizes: &mut [u16],
+    weights: &[SizeWeight],
+    floors: &[u16],
+    need: u16,
+    skip: usize,
+) -> u16 {
+    let mut taken: u16 = 0;
+    for flexible_pass in [true, false] {
+        for index in (0..sizes.len()).rev() {
+            if taken == need {
+                return taken;
+            }
+            if index == skip || is_flexible(&weights[index]) != flexible_pass {
+                continue;
+            }
+            let floor = floors.get(index).copied().unwrap_or(0);
+            let spare = sizes[index].saturating_sub(floor);
+            let give = spare.min(need - taken);
+            sizes[index] -= give;
+            taken += give;
+        }
+    }
+    taken
 }
 
 /// Force `sizes` to sum to exactly `available`, adjusting from the end.
