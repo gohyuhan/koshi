@@ -5,7 +5,7 @@ use tile_test_support::layout_assert::{
 
 use super::*;
 use crate::solver::solve;
-use crate::tree::LayoutChild;
+use crate::tree::{LayoutChild, SplitNode};
 
 fn tab() -> Rect {
     Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })

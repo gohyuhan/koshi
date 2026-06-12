@@ -63,6 +63,80 @@ impl LayoutNode {
                 .any(|child| child.node.contains_pane(pane)),
         }
     }
+
+    /// The deepest stack whose subtree holds `pane`, for stack-local
+    /// operations: activating a collapsed member, cycling stack focus.
+    pub fn stack_containing_mut(&mut self, pane: PaneId) -> Option<&mut SplitNode> {
+        let path = self.path_to(pane)?;
+        let mut deepest = None;
+        for depth in 0..path.len() {
+            if let LayoutNode::Split(split) = self.node_at(&path[..depth]) {
+                if split.direction == SplitDirection::Stacked {
+                    deepest = Some(depth);
+                }
+            }
+        }
+        Some(self.split_at_mut(&path[..deepest?]))
+    }
+
+    /// The child indices taken at each split from this node down to the
+    /// leaf holding `pane`, or `None` when the pane is not in this subtree.
+    pub(crate) fn path_to(&self, pane: PaneId) -> Option<Vec<usize>> {
+        fn descend(node: &LayoutNode, pane: PaneId, path: &mut Vec<usize>) -> bool {
+            match node {
+                LayoutNode::Pane(id) => *id == pane,
+                LayoutNode::Split(split) => {
+                    for (index, child) in split.children.iter().enumerate() {
+                        path.push(index);
+                        if descend(&child.node, pane, path) {
+                            return true;
+                        }
+                        path.pop();
+                    }
+                    false
+                }
+            }
+        }
+
+        let mut path = Vec::new();
+        descend(self, pane, &mut path).then_some(path)
+    }
+
+    /// The node reached by walking `path` child indices from this node.
+    /// `path` must come from [`LayoutNode::path_to`] on this same tree.
+    pub(crate) fn node_at(&self, path: &[usize]) -> &LayoutNode {
+        let mut node = self;
+        for &index in path {
+            let LayoutNode::Split(split) = node else {
+                unreachable!("path was built over this tree");
+            };
+            node = &split.children[index].node;
+        }
+        node
+    }
+
+    /// Like [`LayoutNode::node_at`], for paths known to end at a split.
+    pub(crate) fn split_at(&self, path: &[usize]) -> &SplitNode {
+        match self.node_at(path) {
+            LayoutNode::Split(split) => split,
+            LayoutNode::Pane(_) => unreachable!("path was built over this tree"),
+        }
+    }
+
+    /// Mutable variant of [`LayoutNode::split_at`].
+    pub(crate) fn split_at_mut(&mut self, path: &[usize]) -> &mut SplitNode {
+        let mut node = self;
+        for &index in path {
+            let LayoutNode::Split(split) = node else {
+                unreachable!("path was built over this tree");
+            };
+            node = &mut split.children[index].node;
+        }
+        match node {
+            LayoutNode::Split(split) => split,
+            LayoutNode::Pane(_) => unreachable!("path was built over this tree"),
+        }
+    }
 }
 
 /// An interior node: children share this node's rectangle.

@@ -95,3 +95,108 @@ fn no_survivors_yields_empty_candidates() {
     assert_eq!(candidates.absorbed_space, None);
     assert!(candidates.layout_order.is_empty());
 }
+
+fn collapsed_flags(stack: &SplitNode) -> Vec<bool> {
+    stack.children.iter().map(|child| child.collapsed).collect()
+}
+
+#[test]
+fn focus_next_cycles_forward_and_wraps() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b, c], 0);
+
+    let change = stack_focus_next(&mut stack).unwrap();
+    assert_eq!(change.newly_active, b);
+    assert_eq!(change.deactivated, Some(a));
+    assert_eq!(stack.active, 1);
+    assert_eq!(collapsed_flags(&stack), [true, false, true]);
+
+    stack_focus_next(&mut stack).unwrap();
+    let wrapped = stack_focus_next(&mut stack).unwrap();
+    assert_eq!(wrapped.newly_active, a);
+    assert_eq!(stack.active, 0);
+}
+
+#[test]
+fn focus_prev_cycles_backward_and_wraps() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b, c], 0);
+
+    let change = stack_focus_prev(&mut stack).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, Some(a));
+    assert_eq!(stack.active, 2);
+    assert_eq!(collapsed_flags(&stack), [true, true, false]);
+}
+
+#[test]
+fn activate_by_id_expands_the_target_and_collapses_the_prior() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b, c], 0);
+
+    let change = stack_activate(&mut stack, c).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, Some(a));
+    assert_eq!(stack.active, 2);
+    assert_eq!(collapsed_flags(&stack), [true, true, false]);
+}
+
+#[test]
+fn activating_the_active_member_or_a_stranger_changes_nothing() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, b], 0);
+    let snapshot = stack.clone();
+
+    assert_eq!(stack_activate(&mut stack, a), None);
+    assert_eq!(stack_activate(&mut stack, PaneId::new()), None);
+    assert_eq!(stack, snapshot);
+}
+
+#[test]
+fn a_single_member_stack_cannot_cycle() {
+    let a = PaneId::new();
+    let mut stack = SplitNode::stack(vec![a], 0);
+    assert_eq!(stack_focus_next(&mut stack), None);
+    assert_eq!(stack_focus_prev(&mut stack), None);
+}
+
+#[test]
+fn directional_splits_refuse_stack_focus_ops() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut split = SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            crate::tree::LayoutChild::new(crate::tree::LayoutNode::Pane(a)),
+            crate::tree::LayoutChild::new(crate::tree::LayoutNode::Pane(b)),
+        ],
+    );
+    assert_eq!(stack_focus_next(&mut split), None);
+    assert_eq!(stack_activate(&mut split, b), None);
+}
+
+#[test]
+fn entering_a_stack_targets_its_active_member() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = SplitNode::stack(vec![a, b, c], 1);
+    assert_eq!(stack_entry_target(&stack), Some(b));
+}
+
+#[test]
+fn the_deepest_stack_holding_a_pane_is_found_for_activation() {
+    use crate::tree::{LayoutChild, LayoutNode};
+
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let mut tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(a)),
+            LayoutChild::new(stack),
+        ],
+    ));
+
+    let found = tree.stack_containing_mut(c).expect("c lives in a stack");
+    let change = stack_activate(found, c).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert!(tree.stack_containing_mut(a).is_none());
+}

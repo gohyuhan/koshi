@@ -20,7 +20,7 @@ use tile_core::geometry::{Direction, Rect, SplitDirection};
 use tile_core::ids::PaneId;
 
 use crate::solver::{directional_child_rects, slot_floor};
-use crate::tree::{LayoutNode, SplitNode};
+use crate::tree::LayoutNode;
 
 /// A rejected resize. The caller's tree is unchanged in every case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -69,10 +69,9 @@ pub fn resize(
     direction: Direction,
     amount: u16,
 ) -> Result<LayoutNode, ResizeError> {
-    let mut path = Vec::new();
-    if !path_to(tree, pane, &mut path) {
+    let Some(path) = tree.path_to(pane) else {
         return Err(ResizeError::PaneNotFound { pane });
-    }
+    };
 
     let horizontal = matches!(direction, Direction::Left | Direction::Right);
     let wanted = if horizontal {
@@ -88,7 +87,7 @@ pub fn resize(
     };
 
     // The donor can give only what its solved size holds above its floor.
-    let split = split_at(tree, &path[..depth]);
+    let split = tree.split_at(&path[..depth]);
     let split_rect = rect_at(tree, tab_rect, &path[..depth]);
     let donor_rect = directional_child_rects(split, split_rect)[donor];
     let donor_cells = if horizontal {
@@ -105,7 +104,7 @@ pub fn resize(
     }
 
     let mut result = tree.clone();
-    let split = split_at_mut(&mut result, &path[..depth]);
+    let split = result.split_at_mut(&path[..depth]);
     split.weights[receiver].resize_delta = split.weights[receiver]
         .resize_delta
         .saturating_add(i32::from(amount));
@@ -113,24 +112,6 @@ pub fn resize(
         .resize_delta
         .saturating_sub(i32::from(amount));
     Ok(result)
-}
-
-/// Record the child index taken at each split from the root down to the
-/// leaf holding `pane`. Returns `false` when the pane is not in `node`.
-fn path_to(node: &LayoutNode, pane: PaneId, path: &mut Vec<usize>) -> bool {
-    match node {
-        LayoutNode::Pane(id) => *id == pane,
-        LayoutNode::Split(split) => {
-            for (index, child) in split.children.iter().enumerate() {
-                path.push(index);
-                if path_to(&child.node, pane, path) {
-                    return true;
-                }
-                path.pop();
-            }
-            false
-        }
-    }
 }
 
 /// Find the deepest ancestor split with `wanted` direction where the path's
@@ -143,7 +124,7 @@ fn find_border(
     direction: Direction,
 ) -> Option<(usize, usize, usize)> {
     for depth in (0..path.len()).rev() {
-        let LayoutNode::Split(split) = node_at(tree, &path[..depth]) else {
+        let LayoutNode::Split(split) = tree.node_at(&path[..depth]) else {
             continue;
         };
         if split.direction != wanted {
@@ -161,41 +142,6 @@ fn find_border(
         }
     }
     None
-}
-
-/// The node reached by walking `path` child indices from `tree`.
-fn node_at<'tree>(tree: &'tree LayoutNode, path: &[usize]) -> &'tree LayoutNode {
-    let mut node = tree;
-    for &index in path {
-        let LayoutNode::Split(split) = node else {
-            unreachable!("path was built over this tree");
-        };
-        node = &split.children[index].node;
-    }
-    node
-}
-
-/// Like [`node_at`], for paths known to end at a split.
-fn split_at<'tree>(tree: &'tree LayoutNode, path: &[usize]) -> &'tree SplitNode {
-    match node_at(tree, path) {
-        LayoutNode::Split(split) => split,
-        LayoutNode::Pane(_) => unreachable!("path was built over this tree"),
-    }
-}
-
-/// Mutable variant of [`split_at`].
-fn split_at_mut<'tree>(tree: &'tree mut LayoutNode, path: &[usize]) -> &'tree mut SplitNode {
-    let mut node = tree;
-    for &index in path {
-        let LayoutNode::Split(split) = node else {
-            unreachable!("path was built over this tree");
-        };
-        node = &mut split.children[index].node;
-    }
-    match node {
-        LayoutNode::Split(split) => split,
-        LayoutNode::Pane(_) => unreachable!("path was built over this tree"),
-    }
 }
 
 /// The rect the node at `path` solves into, starting from `tab_rect`.

@@ -11,8 +11,10 @@
 //! header — must not silently receive focus. Reaching one of those goes
 //! through an explicit activation, not through focus repair.
 
-use tile_core::geometry::Rect;
+use tile_core::geometry::{Rect, SplitDirection};
 use tile_core::ids::PaneId;
+
+use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
 /// focus history.
@@ -88,6 +90,103 @@ fn doubled_center(rect: Rect) -> (u32, u32) {
 
 fn cell_area(rect: Rect) -> u64 {
     u64::from(rect.size.cols) * u64::from(rect.size.rows)
+}
+
+/// A completed stack-local focus move: which member expanded and which
+/// collapsed. The caller forwards these to its focus and render state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackFocusChange {
+    /// The member that just expanded.
+    pub newly_active: PaneId,
+    /// The member that collapsed to a header, when the previously active
+    /// slot held one.
+    pub deactivated: Option<PaneId>,
+}
+
+/// Expand the next stack member, wrapping at the end.
+///
+/// Returns `None` when nothing can change: the node is not a stack, or no
+/// other member can take focus. The stack is unchanged in that case.
+pub fn stack_focus_next(stack: &mut SplitNode) -> Option<StackFocusChange> {
+    stack_focus_step(stack, 1)
+}
+
+/// Expand the previous stack member, wrapping at the start.
+///
+/// Returns `None` when nothing can change, leaving the stack unchanged.
+pub fn stack_focus_prev(stack: &mut SplitNode) -> Option<StackFocusChange> {
+    stack_focus_step(stack, -1)
+}
+
+/// Expand the stack member holding `pane` (a collapsed member is a valid
+/// target — that is exactly what header clicks and remote focus do).
+///
+/// Returns `None` when `pane` is not in this stack or is already the
+/// active member; the stack is unchanged in that case.
+pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusChange> {
+    if stack.direction != SplitDirection::Stacked {
+        return None;
+    }
+    let target = stack
+        .children
+        .iter()
+        .position(|child| child.node.contains_pane(pane))?;
+    if target == current_active(stack) {
+        return None;
+    }
+    Some(set_active(stack, target))
+}
+
+/// The pane focus lands on when a client enters this stack from outside:
+/// its active member.
+#[must_use]
+pub fn stack_entry_target(stack: &SplitNode) -> Option<PaneId> {
+    let child = stack.children.get(current_active(stack))?;
+    child.node.leaf_panes().first().copied()
+}
+
+/// Walk `step` through the members (wrapping) to the first one that holds a
+/// pane, and expand it.
+fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange> {
+    if stack.direction != SplitDirection::Stacked || stack.children.len() < 2 {
+        return None;
+    }
+    let count = stack.children.len() as i64;
+    let active = current_active(stack) as i64;
+    for offset in 1..count {
+        let candidate = (active + step * offset).rem_euclid(count) as usize;
+        if !stack.children[candidate].node.leaf_panes().is_empty() {
+            return Some(set_active(stack, candidate));
+        }
+    }
+    None
+}
+
+/// The in-bounds active index (constructors clamp it, but a deserialized
+/// stack might not have).
+fn current_active(stack: &SplitNode) -> usize {
+    stack.active.min(stack.children.len().saturating_sub(1))
+}
+
+/// Point the stack at `target`: expand it, collapse everyone else.
+fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
+    let deactivated = stack
+        .children
+        .get(current_active(stack))
+        .and_then(|child| child.node.leaf_panes().first().copied());
+    stack.active = target;
+    for (index, child) in stack.children.iter_mut().enumerate() {
+        child.collapsed = index != target;
+    }
+    StackFocusChange {
+        newly_active: stack.children[target]
+            .node
+            .leaf_panes()
+            .first()
+            .copied()
+            .expect("callers only activate members that hold a pane"),
+        deactivated,
+    }
 }
 
 #[cfg(test)]
