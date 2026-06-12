@@ -19,6 +19,7 @@ use tile_core::error::{DomainCategory, DomainError, Severity};
 use tile_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use tile_core::ids::PaneId;
 
+use crate::size::SizeWeight;
 use crate::solver::{directional_child_rects, slot_floor};
 use crate::tree::LayoutNode;
 
@@ -109,6 +110,13 @@ pub fn resize(
 
     let mut result = tree.clone();
     let split = result.split_at_mut(&path[..depth]);
+    // A deserialized split may carry fewer weights than children; pad with
+    // the default share (normalization's repair) before indexing into them.
+    if split.weights.len() < split.children.len() {
+        split
+            .weights
+            .resize(split.children.len(), SizeWeight::default());
+    }
     split.weights[receiver].resize_delta = split.weights[receiver]
         .resize_delta
         .saturating_add(i32::from(amount));
@@ -127,7 +135,26 @@ fn find_border(
     wanted: SplitDirection,
     direction: Direction,
 ) -> Option<(usize, usize, usize)> {
-    for depth in (0..path.len()).rev() {
+    // Splits inside a collapsed stack member are invisible — its panes
+    // resize the stack as a unit, so only borders above the first collapsed
+    // crossing are candidates and the search bubbles to the outer levels.
+    let mut visible = path.len();
+    let mut node = tree;
+    for (depth, &index) in path.iter().enumerate() {
+        let LayoutNode::Split(split) = node else {
+            break;
+        };
+        if split.direction == SplitDirection::Stacked {
+            let active = split.active.min(split.children.len().saturating_sub(1));
+            if index != active {
+                visible = depth;
+                break;
+            }
+        }
+        node = &split.children[index].node;
+    }
+
+    for depth in (0..visible).rev() {
         let LayoutNode::Split(split) = tree.node_at(&path[..depth]) else {
             continue;
         };

@@ -358,8 +358,15 @@ pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect) -> Vec<Rect
     }
 
     // Distribute over the kept children only, then lay rects in child order;
-    // suppressed children sit at their position with zero area.
-    let kept_weights: Vec<SizeWeight> = filter_kept(&split.weights, &kept);
+    // suppressed children sit at their position with zero area. A child
+    // whose weight is missing (a deserialized split may carry fewer weights
+    // than children) takes the default share, as normalization repairs it.
+    let kept_weights: Vec<SizeWeight> = kept
+        .iter()
+        .enumerate()
+        .filter(|&(_, &keep)| keep)
+        .map(|(index, _)| split.weights.get(index).copied().unwrap_or_default())
+        .collect();
     let kept_floors: Vec<u16> = filter_kept(&floors, &kept);
     let sizes = distribute(&kept_weights, &kept_floors, available);
 
@@ -518,10 +525,12 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
         }
     }
 
-    // Percentages are shares of the whole axis, floored to cells.
+    // Percentages are shares of the whole axis, floored to cells. Clamped
+    // to 100: validation rejects more, but a raw tree can carry it, and an
+    // unclamped product can truncate through the cast.
     for (index, weight) in weights.iter().enumerate() {
         if let SizeConstraint::Percent(percent) = weight.primary {
-            let want = (u32::from(available) * u32::from(percent) / 100) as u16;
+            let want = (u32::from(available) * u32::from(percent.min(100)) / 100) as u16;
             sizes[index] = want.min(remaining);
             remaining -= sizes[index];
         }

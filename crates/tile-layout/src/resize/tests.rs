@@ -155,6 +155,43 @@ fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
 }
 
 #[test]
+fn resize_inside_a_collapsed_member_moves_the_stack_border() {
+    // Hand-built: a collapsed member that is itself a split. Its inner
+    // borders are invisible, so resizing one of its panes must bubble to
+    // the stack's outer border — the stack resizes as a unit — instead of
+    // measuring a zero-area donor and refusing.
+    let (a, x, u, v) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![x, u], 0);
+    stack.children[1].node = pair(SplitDirection::Horizontal, u, v);
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(LayoutNode::Split(stack))],
+    ));
+
+    let resized = resize(&tree, tab(), v, Direction::Left, 5).unwrap();
+    assert_eq!(solved_size(&resized, tab(), a).cols, 35);
+    assert_eq!(solved_size(&resized, tab(), x).cols, 45);
+}
+
+#[test]
+fn missing_weights_are_repaired_before_a_resize() {
+    // Hand-built: a deserialized split can carry fewer weights than
+    // children. The transaction pads the missing ones with the default
+    // share instead of panicking when it indexes them.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: vec![leaf(a), leaf(b)],
+        weights: Vec::new(),
+        active: 0,
+    });
+
+    let resized = resize(&tree, tab(), a, Direction::Right, 1).unwrap();
+    assert_eq!(solved_size(&resized, tab(), a).cols, 41);
+    assert_eq!(solved_size(&resized, tab(), b).cols, 39);
+}
+
+#[test]
 fn resize_blocked_by_the_neighbors_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);

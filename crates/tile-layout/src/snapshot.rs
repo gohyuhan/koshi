@@ -29,22 +29,30 @@ pub struct StackSnapshot {
 impl StackSnapshot {
     /// Capture a stack's persisted shape. `None` when `node` is not a
     /// stack. A member that is itself a subtree is represented by its
-    /// first pane — a shape the edits never produce.
+    /// first pane — a shape the edits never produce. A member without any
+    /// pane is dropped, and the active index follows its member through
+    /// that filtering; when the active member itself is dropped, the last
+    /// member stands in.
     #[must_use]
     pub fn capture(stack: &SplitNode) -> Option<Self> {
         if stack.direction != SplitDirection::Stacked {
             return None;
         }
+        let source_active = stack.active.min(stack.children.len().saturating_sub(1));
         let mut members = Vec::with_capacity(stack.children.len());
         let mut collapsed_states = Vec::with_capacity(stack.children.len());
-        for child in &stack.children {
+        let mut active = None;
+        for (index, child) in stack.children.iter().enumerate() {
             let Some(&pane) = child.node.leaf_panes().first() else {
                 continue;
             };
+            if index == source_active {
+                active = Some(members.len());
+            }
             members.push(pane);
             collapsed_states.push(child.collapsed);
         }
-        let active = stack.active.min(members.len().saturating_sub(1));
+        let active = active.unwrap_or(members.len().saturating_sub(1));
         Some(Self {
             members,
             active,

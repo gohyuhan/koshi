@@ -152,6 +152,48 @@ fn flex_weights_share_proportionally() {
 }
 
 #[test]
+fn missing_weights_fall_back_to_the_default_share() {
+    // Hand-built: a deserialized split can carry fewer weights than
+    // children. The unweighted child takes the default share instead of
+    // panicking the distribution.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: vec![leaf(a), leaf(b)],
+        weights: vec![SizeWeight::new(SizeConstraint::Flex(1))],
+        active: 0,
+    });
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [40, 40]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn an_out_of_range_percent_caps_at_the_whole_axis() {
+    // Hand-built: validation rejects Percent above 100, but a raw tree can
+    // carry one. It must behave as 100 — on a wide axis the oversized
+    // product would otherwise truncate through the cast into a garbage
+    // share.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Percent(255))),
+            (b, SizeWeight::new(SizeConstraint::Flex(1))),
+        ],
+    );
+    let tab = rect(0, 0, 40_000, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [39_998, 2]);
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
 fn all_zero_flex_weights_solve_without_panicking() {
     // The validated constructors reject `Flex(0)`, but the variant stays
     // representable through serde and direct construction. The solver must

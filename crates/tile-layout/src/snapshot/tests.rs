@@ -31,6 +31,32 @@ fn snapshot_survives_serde() {
 }
 
 #[test]
+fn capture_keeps_the_active_member_when_an_empty_member_is_dropped() {
+    // Hand-built: a member with no pane at all is dropped from the
+    // snapshot. The active index must follow its member through that
+    // filtering, not keep pointing at the old position.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        tile_core::geometry::SplitDirection::Vertical,
+        Vec::new(),
+    ));
+    let mut stack = SplitNode::stack(vec![a, b, c], 1);
+    stack.children.insert(
+        0,
+        LayoutChild {
+            node: empty,
+            collapsed: true,
+        },
+    );
+    stack.active = 2; // still member b, now shifted one slot right
+
+    let snapshot = StackSnapshot::capture(&stack).unwrap();
+    assert_eq!(snapshot.members, [a, b, c]);
+    assert_eq!(snapshot.active, 1);
+    assert_eq!(snapshot.restore().active, 1);
+}
+
+#[test]
 fn capturing_a_directional_split_yields_nothing() {
     let split = SplitNode::with_equal_weights(
         tile_core::geometry::SplitDirection::Horizontal,

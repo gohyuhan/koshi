@@ -275,10 +275,12 @@ fn file_writer(
             TracingError::Sink(format!("log path has no file name: {}", path.display()))
         })?;
     std::fs::create_dir_all(directory).map_err(|err| TracingError::Sink(err.to_string()))?;
+    // Clamped to one: retention of zero would prune every file, including
+    // the one being written — logs would silently vanish.
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
-        .max_log_files(max_log_files)
+        .max_log_files(max_log_files.max(1))
         .build(directory)
         .map_err(|err| TracingError::Sink(err.to_string()))?;
     Ok(tracing_appender::non_blocking(appender))
