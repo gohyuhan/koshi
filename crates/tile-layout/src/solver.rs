@@ -46,8 +46,13 @@ pub struct SolveResult {
     /// rectangle. A collapsed stack member's rect is its one-row header
     /// strip; a zero-area rect means the pane is not visible at all.
     pub panes: Vec<(PaneId, Rect)>,
-    /// Panes clipped to zero area because the layout no longer fits. Stable
-    /// trailing order: the same panes suppress and restore as space changes.
+    /// Panes clipped to zero area *because the layout no longer fits* —
+    /// space-driven suppression only. Panes that are zero-area for other
+    /// reasons (hidden behind a fullscreen pane, or a collapsed stack
+    /// member's non-header leaves) are not listed here; those states are
+    /// reversible by a mode toggle or stack activation, not by space.
+    /// Stable trailing order: the same panes suppress and restore as space
+    /// changes.
     pub suppressed: Vec<PaneId>,
     /// `true` when suppression left nothing visible at all; the caller shows
     /// a terminal-too-small overlay instead of a pane grid.
@@ -103,6 +108,10 @@ impl SolveState {
 }
 
 /// Solve `tree` over `tab_rect`.
+///
+/// Rects follow the cell-geometry convention throughout: half-open, with
+/// `origin` inclusive and the right/bottom edges exclusive, so adjacent
+/// panes share borders without sharing cells.
 ///
 /// When the tree's floors no longer fit, trailing panes are suppressed —
 /// solved to zero area and listed in [`SolveResult::suppressed`] — rather

@@ -1,6 +1,6 @@
 //! `xtask` — repository automation runner. Not shipped; invoked via
 //! `cargo xtask <command>`. Currently hosts the dependency-direction guard
-//! (FND-002) that enforces the architecture's allowed crate-dependency edges.
+//! that enforces the architecture's allowed crate-dependency edges.
 
 use std::process::ExitCode;
 

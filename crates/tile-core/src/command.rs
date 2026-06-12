@@ -30,7 +30,9 @@ pub enum Command {
     NewPane(NewPaneArgs),
     /// Close a pane (defaults to the focused one).
     ClosePane(ClosePaneArgs),
-    /// Grow or shrink a pane along one edge.
+    /// Move one of a pane's borders outward, growing it by whole cells.
+    /// Shrinking is expressed as the neighbor's grow on the shared border,
+    /// so amounts are always positive.
     ResizePane(ResizePaneArgs),
     /// Move focus to a pane.
     FocusPane(FocusPaneArgs),
@@ -142,6 +144,13 @@ impl Command {
 }
 
 /// Arguments for [`Command::NewPane`].
+///
+/// One command, three structural outcomes — the dispatcher routes on the
+/// flags: `in_place` swaps the source leaf's content with unchanged
+/// geometry, `stacked` adds the new pane to the source's stack (creating
+/// one if needed), and otherwise the source leaf splits directionally.
+/// The flags are mutually exclusive in intent; `in_place` wins if both are
+/// set, since it is the most conservative (no geometry change).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
@@ -172,9 +181,11 @@ pub struct ClosePaneArgs {
 pub struct ResizePaneArgs {
     /// Pane to resize; `None` resizes the focused pane.
     pub pane: Option<PaneId>,
-    /// Edge to move.
+    /// Which of the pane's borders moves, outward: the pane grows toward
+    /// this direction and the neighbor on that side donates the cells.
     pub direction: Direction,
-    /// Number of cells to move the edge by.
+    /// Number of cells the border moves. Always positive — a shrink is the
+    /// neighboring pane's grow on the same border.
     pub amount: u16,
 }
 

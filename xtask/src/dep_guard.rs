@@ -1,9 +1,8 @@
-//! Dependency-direction guard (FND-002).
+//! Dependency-direction guard.
 //!
 //! Loads the workspace dependency graph via `cargo metadata` and enforces the
-//! architecture's load-bearing invariants (`TILE_01`, `TILE_10`, `TILE_16A`).
-//! These four hold regardless of how the crates evolve, so the guard needs no
-//! per-crate allow-list to maintain:
+//! architecture's load-bearing invariants. These four hold regardless of how
+//! the crates evolve, so the guard needs no per-crate allow-list to maintain:
 //!
 //! - `tile-core` has zero internal `tile-*` dependencies (it is the foundation).
 //! - `tile-plugin-manager` does not depend on `tile-runtime`, `tile-ipc`, or
@@ -16,11 +15,15 @@
 //! `tile-runtime` -> `tile-plugin-host` -> `wasmtime`), and the real failure
 //! mode this guards against is a stray `cargo add` in the wrong crate.
 //!
-//! The full per-crate dependency matrix in `TILE_01` is intentionally *not*
+//! The architecture's full per-crate dependency matrix is intentionally *not*
 //! encoded here: it would require editing this file on every PR that adds a
 //! legitimate internal dependency, and several of its edges are interpretation.
 //! Cargo already rejects dependency cycles; this guard covers the two things it
 //! does not — foundation isolation and heavy-dependency containment.
+//!
+//! Both regular and dev-dependencies are checked, so test-only coupling cannot
+//! quietly cross an isolation line either. A dev-dependency on a test-support
+//! crate is fine wherever the direction rules above allow it.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;

@@ -1,20 +1,21 @@
 //! In-memory fake PTY backend.
 //!
 //! Layout, session, and runtime tests need to exercise pane spawning, writing,
-//! resizing, and child-exit handling without launching real shells (`TILE_13`):
-//! real processes make tests slow, platform-dependent, and non-deterministic.
-//! [`FakePtyBackend`] satisfies the full `TILE_07` PTY surface entirely in
+//! resizing, and child-exit handling without launching real shells: real
+//! processes make tests slow, platform-dependent, and non-deterministic.
+//! [`FakePtyBackend`] satisfies the full PTY backend surface entirely in
 //! memory, capturing every call so a test can assert on it and driving output
 //! and child-exit on demand.
 //!
-//! ## Temporary trait
+//! ## Locally declared trait
 //!
-//! `TILE_07` defines the canonical `PtyBackend` trait, but it is owned by
-//! `tile-pty` and lands in a later task. Depending on `tile-pty` from here would
-//! invert the layering (test-support sits below the PTY crate), so this module
-//! re-declares the trait against the same `tile-core` types. When the real
-//! trait lands, delete [`PtyBackend`] here and implement that one instead — the
-//! capture/drive surface of [`FakePtyBackend`] does not change.
+//! The canonical `PtyBackend` trait is owned by `tile-pty`, which lands in a
+//! later task. Depending on `tile-pty` from here would invert the layering
+//! (test-support sits below the PTY crate), so this module declares the trait
+//! locally against the same `tile-core` types. When `tile-pty` lands, the local
+//! declaration gives way to implementing the canonical trait — but
+//! [`FakePtyBackend`] itself stays: it is the permanent test double, and its
+//! capture/drive surface does not change.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,7 +58,8 @@ impl std::error::Error for PtyError {}
 /// Result alias for backend operations.
 pub type Result<T> = std::result::Result<T, PtyError>;
 
-/// The `TILE_07` PTY backend surface, re-declared locally (see module docs).
+/// The PTY backend surface, declared locally until `tile-pty` owns the
+/// canonical trait (see module docs).
 pub trait PtyBackend {
     /// Spawn a child in a new PTY of the given size, returning a handle that
     /// streams its output and exit status.

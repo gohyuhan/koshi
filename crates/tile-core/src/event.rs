@@ -70,7 +70,9 @@ pub enum Event {
     PaneResumed(PaneResumed),
     /// All panes are suppressed; runtime should show the too-small overlay.
     TerminalTooSmallEntered(TerminalTooSmallEntered),
-    /// At least one pane became visible; runtime can leave the too-small overlay.
+    /// At least one pane regained visible area because the terminal grew
+    /// back; runtime can leave the too-small overlay. Visibility changes
+    /// from mode toggles (e.g. leaving fullscreen) do not emit this.
     TerminalTooSmallExited(TerminalTooSmallExited),
     /// Configuration reload succeeded and was atomically swapped in.
     ConfigReloaded(ConfigReloaded),
