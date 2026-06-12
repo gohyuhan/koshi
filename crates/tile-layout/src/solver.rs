@@ -535,8 +535,10 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
             SizeConstraint::Fixed(_) | SizeConstraint::Percent(_) => None,
         })
         .collect();
+    // Validated flex weights are at least 1, so a non-empty list always has a
+    // positive total and the division below cannot hit zero.
     let total_weight: u64 = flex.iter().map(|&(_, w)| w).sum();
-    if total_weight > 0 {
+    if !flex.is_empty() {
         let pool = u64::from(remaining);
         let mut assigned: u64 = 0;
         for &(index, w) in &flex {
