@@ -168,7 +168,6 @@ fn action_metadata_roundtrips() {
         target_compat: vec![TargetKind::Pane],
         args_schema: Some(ActionArgsSchema::default()),
         handler: ActionHandlerRef::CoreCommand(CommandKind::NewPane),
-        source_doc_ref: Some(Cow::Borrowed("TILE_04")),
     };
     roundtrip(&metadata);
 }
@@ -181,7 +180,6 @@ fn core_seeds_are_well_formed() {
     for (action, metadata) in &seeds {
         assert_eq!(action.namespace, ActionNamespace::Core);
         assert_eq!(metadata.namespace, ActionNamespace::Core);
-        assert!(metadata.source_doc_ref.is_some());
     }
 
     // No duplicate action refs.
