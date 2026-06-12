@@ -24,7 +24,6 @@
 use crate::command::CommandKind;
 use crate::ids::PluginId;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -378,10 +377,6 @@ pub struct ActionMetadata {
     pub args_schema: Option<ActionArgsSchema>,
     /// How the action is dispatched.
     pub handler: ActionHandlerRef,
-    /// Pointer to the architecture doc that specifies the action, for
-    /// inspection. `Cow` so static seeds stay allocation-free while the field
-    /// still deserializes (to an owned string) on the wire.
-    pub source_doc_ref: Option<Cow<'static, str>>,
 }
 
 /// Build one `core:` seed entry. Names here are compile-time constants known to
@@ -394,7 +389,6 @@ fn core_seed(
     scope_class: ActionScope,
     target_compat: Vec<TargetKind>,
     handler: ActionHandlerRef,
-    source_doc_ref: &'static str,
 ) -> (ActionRef, ActionMetadata) {
     let action =
         ActionRef::core(name).expect("core seed action name must satisfy the action-name grammar");
@@ -406,7 +400,6 @@ fn core_seed(
         target_compat,
         args_schema: None,
         handler,
-        source_doc_ref: Some(Cow::Borrowed(source_doc_ref)),
     };
     (action, metadata)
 }
@@ -434,7 +427,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            "TILE_04",
         ),
         core_seed(
             "close-pane",
@@ -443,7 +435,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ClosePane),
-            "TILE_04",
         ),
         core_seed(
             "resize-pane",
@@ -452,7 +443,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            "TILE_05",
         ),
         core_seed(
             "focus-pane",
@@ -461,7 +451,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::FocusPane),
-            "TILE_04",
         ),
         core_seed(
             "toggle-pane-fullscreen",
@@ -470,7 +459,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::TogglePaneFullscreen),
-            "TILE_04",
         ),
         core_seed(
             "rename-pane",
@@ -479,7 +467,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RenamePane),
-            "TILE_04",
         ),
         // --- Tabs ---
         core_seed(
@@ -489,7 +476,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::NewTab),
-            "TILE_06",
         ),
         core_seed(
             "close-tab",
@@ -498,7 +484,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::CloseTab),
-            "TILE_06",
         ),
         core_seed(
             "focus-tab",
@@ -507,7 +492,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::FocusTab),
-            "TILE_06",
         ),
         core_seed(
             "next-tab",
@@ -516,7 +500,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::FocusTab),
-            "TILE_06",
         ),
         core_seed(
             "previous-tab",
@@ -525,7 +508,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::FocusTab),
-            "TILE_06",
         ),
         core_seed(
             "rename-tab",
@@ -534,7 +516,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::RenameTab),
-            "TILE_06",
         ),
         core_seed(
             "move-tab",
@@ -543,7 +524,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::MoveTab),
-            "TILE_06",
         ),
         // --- Session ---
         core_seed(
@@ -553,7 +533,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![Session],
             CoreCommand(CommandKind::RenameSession),
-            "TILE_06",
         ),
         // --- Lock mode ---
         core_seed(
@@ -563,7 +542,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ToggleLockMode),
-            "TILE_04",
         ),
         core_seed(
             "lock",
@@ -572,7 +550,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::SetLockMode),
-            "TILE_04",
         ),
         core_seed(
             "unlock",
@@ -581,7 +558,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::SetLockMode),
-            "TILE_04",
         ),
         // --- Run ---
         core_seed(
@@ -591,7 +567,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RunCommandPane),
-            "TILE_04",
         ),
         // --- Copy mode ---
         core_seed(
@@ -601,7 +576,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-exit",
@@ -610,7 +584,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-move-cursor",
@@ -619,7 +592,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-set-selection",
@@ -628,7 +600,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-clear-selection",
@@ -637,7 +608,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-copy",
@@ -646,7 +616,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-search",
@@ -655,7 +624,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-search-next",
@@ -664,7 +632,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         core_seed(
             "copy-mode-search-prev",
@@ -673,7 +640,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
-            "TILE_24",
         ),
         // --- Plugin lifecycle ---
         core_seed(
@@ -683,7 +649,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
         core_seed(
             "plugin-uninstall",
@@ -692,7 +657,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
         core_seed(
             "plugin-enable",
@@ -701,7 +665,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
         core_seed(
             "plugin-disable",
@@ -710,7 +673,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
         core_seed(
             "plugin-update",
@@ -719,7 +681,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
         core_seed(
             "plugin-reload",
@@ -728,7 +689,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
-            "TILE_16",
         ),
     ]
 }

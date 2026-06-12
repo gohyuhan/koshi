@@ -1,12 +1,12 @@
 //! Layout invariant assertions for pure-layout tests.
 //!
 //! The layout engine maps a layout tree over a tab rect to placed pane
-//! rectangles. Its correctness rests on a handful of geometric invariants
-//! (`TILE_05`, `TILE_13`): the live panes tile the whole tab area, no two panes
-//! overlap, nothing spills outside the tab, and every live pane respects the
-//! minimum cell size. These helpers let a test state each invariant directly
-//! against a slice of placed panes and get a structured, pane-identifying error
-//! when one breaks.
+//! rectangles. Its correctness rests on a handful of geometric invariants:
+//! the live panes tile the whole tab area, no two panes overlap, nothing
+//! spills outside the tab, and every live pane respects the minimum cell
+//! size. These helpers let a test state each invariant directly against a
+//! slice of placed panes and get a structured, pane-identifying error when
+//! one breaks.
 //!
 //! Each assertion is single-purpose so a test can check exactly one invariant.
 //! "Exact tiling" is the conjunction of three of them:
@@ -18,21 +18,22 @@
 //! ## Suppressed panes
 //!
 //! When the terminal shrinks below the fittable threshold the solver clips
-//! trailing panes to a zero-area rect and marks them `Suppressed` (`TILE_05`).
-//! A suppressed pane occupies no cells, so these helpers treat any empty rect as
-//! suppressed and exclude it from every invariant: it adds nothing to occupied
-//! area, cannot overlap or fall outside, and is exempt from the minimum-size
-//! floor (its frozen PTY size lives elsewhere).
+//! trailing panes to a zero-area rect and marks them suppressed. A suppressed
+//! pane occupies no cells, so these helpers treat any empty rect as suppressed.
+//! For the occupancy check that needs no special handling — an empty rect
+//! contributes zero area and cannot overlap anything; for the outside and
+//! minimum-size checks, empty rects are explicitly skipped, because a pane
+//! with no cells is neither placed wrongly nor undersized (its frozen PTY
+//! size lives elsewhere).
 //!
 //! ## Live-pane reference checking
 //!
-//! `TILE_05` normalization also requires that every layout-tree leaf references a
-//! live pane. [`assert_live_pane_refs`] checks this, but stays decoupled from the
-//! not-yet-designed `LayoutNode` tree and pane registry: it takes the
-//! already-extracted leaf pane ids and the set of live pane ids, rather than the
-//! concrete tree/registry types. When the layout node model lands, a test can
-//! pass `layout.leaf_panes()` and the registry's live set without changing this
-//! invariant or the crate's dependency direction.
+//! Layout normalization also requires that every layout-tree leaf references a
+//! live pane. [`assert_live_pane_refs`] checks this while staying decoupled
+//! from the concrete tree and pane-registry types: it takes already-extracted
+//! leaf pane ids and the set of live pane ids. The layout crate's tests pass
+//! `tree.leaf_panes()` and their live set straight in, and this crate keeps
+//! its dependency direction (it never depends on the layout crate).
 
 use std::collections::HashSet;
 
@@ -190,7 +191,7 @@ pub fn assert_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), Lay
 /// Assert every live pane is at least `min` cells in each dimension.
 ///
 /// Empty (suppressed) panes are exempt: their geometry is frozen at the last
-/// valid size and is not subject to the live floor (`TILE_05`).
+/// valid size and is not subject to the live floor.
 ///
 /// # Errors
 ///
@@ -216,10 +217,9 @@ pub fn assert_min_size_respected(
 
 /// Assert every layout leaf references a live pane.
 ///
-/// This helper intentionally accepts the already-extracted leaf pane ids rather
-/// than a concrete `LayoutNode`, because Phase B owns the final tree shape. When
-/// that type lands, tests can pass `layout.leaf_panes()` here without changing
-/// the invariant or this crate's dependency direction.
+/// This helper intentionally accepts the already-extracted leaf pane ids
+/// rather than a concrete tree type, keeping this crate independent of the
+/// layout crate. Callers pass `tree.leaf_panes()` and their live set in.
 ///
 /// # Errors
 ///
