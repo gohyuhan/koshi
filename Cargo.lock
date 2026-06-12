@@ -572,6 +572,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tile-core",
+ "tile-test-support",
 ]
 
 [[package]]

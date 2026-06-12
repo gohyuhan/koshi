@@ -6,4 +6,5 @@ pub mod error;
 
 pub mod layout;
 pub mod size;
+pub mod solver;
 pub mod tree;

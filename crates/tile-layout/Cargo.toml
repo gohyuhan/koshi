@@ -10,3 +10,4 @@ tile-core = { version = "0.1.0", path = "../tile-core" }
 
 [dev-dependencies]
 serde_json = "1.0.150"
+tile-test-support = { version = "0.1.0", path = "../tile-test-support" }
