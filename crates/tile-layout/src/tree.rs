@@ -64,8 +64,10 @@ impl LayoutNode {
         }
     }
 
-    /// The deepest stack whose subtree holds `pane`, for stack-local
-    /// operations: activating a collapsed member, cycling stack focus.
+    /// The innermost (deepest-nested) stack whose subtree holds `pane`, or
+    /// `None` when the pane is not inside any stack. Use it to reach the
+    /// stack a pane belongs to for stack-local operations: activating a
+    /// collapsed member, cycling stack focus, appending a new member.
     pub fn stack_containing_mut(&mut self, pane: PaneId) -> Option<&mut SplitNode> {
         let path = self.path_to(pane)?;
         let mut deepest = None;
@@ -81,6 +83,10 @@ impl LayoutNode {
 
     /// The child indices taken at each split from this node down to the
     /// leaf holding `pane`, or `None` when the pane is not in this subtree.
+    ///
+    /// Paths are positional and ephemeral: they are only meaningful against
+    /// the exact tree they were computed from, so recompute after any edit
+    /// rather than carrying a path across mutations.
     pub(crate) fn path_to(&self, pane: PaneId) -> Option<Vec<usize>> {
         fn descend(node: &LayoutNode, pane: PaneId, path: &mut Vec<usize>) -> bool {
             match node {
@@ -156,8 +162,9 @@ pub struct SplitNode {
     pub children: Vec<LayoutChild>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
-    /// Index of the active child. For `Stacked` splits this is the expanded
-    /// child (all others are collapsed); directional splits ignore it.
+    /// Index of the active child. Only meaningful for `Stacked` splits,
+    /// where it names the one expanded member (all others are collapsed).
+    /// Directional splits carry it as zero and never read it.
     pub active: usize,
 }
 

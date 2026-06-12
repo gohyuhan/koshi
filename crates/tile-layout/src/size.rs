@@ -146,9 +146,13 @@ impl SizeConstraint {
 pub struct SizeWeight {
     /// The distribution strategy for this child.
     pub primary: SizeConstraint,
-    /// Floor in cells along the split axis, combinable with any primary.
+    /// Floor in cells along the split axis: a guaranteed minimum applied
+    /// after the primary distribution, whatever the primary is. Combinable
+    /// with `preferred` — both overlays may be set at once.
     pub min: Option<u16>,
-    /// Target in cells along the split axis, honored only within slack.
+    /// Target in cells along the split axis, honored only with slack that
+    /// flexible siblings can give after the primary distribution and
+    /// without pushing anyone below a floor. Combinable with `min`.
     pub preferred: Option<u16>,
     /// Accumulated user-resize offset in cells, applied after `primary`.
     pub resize_delta: i32,

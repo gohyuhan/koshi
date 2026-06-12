@@ -1,6 +1,11 @@
 //! Geometry solver: a layout tree plus a tab rectangle in, exact pane
 //! rectangles out.
 //!
+//! The tree is pure intent — structure and relative sizes — and this module
+//! is the only place geometry is computed from it. That split of roles is
+//! what makes terminal resizes cheap and safe: the tree never changes, the
+//! solver just runs again over the new rectangle.
+//!
 //! Solving is pure and deterministic: the same tree over the same rect always
 //! yields the same placement, so nothing flickers across renders. Every leaf
 //! appears in the result exactly once, in layout order, and the placed rects
@@ -54,6 +59,11 @@ pub struct SolveResult {
 }
 
 /// The one-row strip standing in for a collapsed stack member.
+///
+/// Only collapsed members get headers — the active member shows its content
+/// instead. The strip is a Tile-owned region: the renderer draws it and
+/// mouse routing hit-tests it like a border, so a click on it activates the
+/// member and is never forwarded to a PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackHeader {
     /// The collapsed pane this header represents; clicking the strip
@@ -111,8 +121,9 @@ pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
 /// and zero area to everyone else — without touching the tree, so leaving
 /// fullscreen restores the prior layout exactly. No stack headers are drawn
 /// over a fullscreen pane. A fullscreen mode pointing at a pane that is no
-/// longer in the tree falls back to the tiled solve: stale mode state must
-/// never blank a session.
+/// longer in the tree is treated as stale and falls back to the tiled
+/// solve: the session stays visible with its normal grid instead of an
+/// empty screen, and the user can simply toggle fullscreen again.
 #[must_use]
 pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
     let LayoutMode::Fullscreen { focused } = mode else {

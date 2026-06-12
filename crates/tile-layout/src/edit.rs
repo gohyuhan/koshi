@@ -197,7 +197,10 @@ pub struct RemovalInfo {
     /// The rect the removed pane occupied before removal.
     pub old_rect: Rect,
     /// Panes whose new rects cover part of `old_rect`, largest absorbed
-    /// area first (ties keep layout order).
+    /// area first (ties keep layout order). The first entry is the natural
+    /// focus-repair candidate — it visually took over the closed pane's
+    /// space — and every listed pane changed size, so its PTY needs a
+    /// resize.
     pub absorbed_by: Vec<PaneId>,
 }
 

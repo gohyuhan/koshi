@@ -27,10 +27,16 @@ use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
 /// Normalize `tree` against the set of panes that are still alive.
 ///
+/// `live_panes` is the source of truth: any leaf not in it is dropped no
+/// matter where it sits in the tree. A pane held open after its process
+/// exits is still a live pane (it has a visible placeholder), so it
+/// survives here; dropping it is the caller's explicit removal, not
+/// normalization's.
+///
 /// Returns `None` when no live pane remains — there is no layout left and
-/// the caller closes the tab. A pane held open after its process exits is
-/// still a live pane (it has a visible placeholder), so it survives here;
-/// dropping it is the caller's explicit removal, not normalization's.
+/// the caller closes the tab. The pass is idempotent, so callers run it
+/// after removals and on restored snapshots without tracking whether the
+/// tree was already canonical.
 #[must_use]
 pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<LayoutNode> {
     normalize_node(tree, live_panes)
