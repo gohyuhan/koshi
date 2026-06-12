@@ -25,6 +25,7 @@
 use tile_core::geometry::{Point, Rect, Size, SplitDirection};
 use tile_core::ids::PaneId;
 
+use crate::mode::LayoutMode;
 use crate::size::SizeConstraint;
 use crate::size::SizeWeight;
 use crate::tree::{LayoutNode, SplitNode};
@@ -42,9 +43,25 @@ pub struct SolveResult {
     /// Panes clipped to zero area because the layout no longer fits. Stable
     /// trailing order: the same panes suppress and restore as space changes.
     pub suppressed: Vec<PaneId>,
-    /// `true` when every pane is suppressed; the caller shows a
-    /// terminal-too-small overlay instead of a pane grid.
+    /// `true` when suppression left nothing visible at all; the caller shows
+    /// a terminal-too-small overlay instead of a pane grid.
     pub all_suppressed: bool,
+}
+
+impl SolveResult {
+    fn from_parts(panes: Vec<(PaneId, Rect)>, suppressed: Vec<PaneId>) -> Self {
+        // The overlay condition: space ran out (something was suppressed)
+        // and no pane kept a visible rect. Panes that are zero-area for
+        // other reasons (collapsed stack members, fullscreen hiding) do not
+        // count as suppressed, but they cannot keep the overlay away either.
+        let all_suppressed =
+            !suppressed.is_empty() && panes.iter().all(|&(_, rect)| rect.is_empty());
+        Self {
+            panes,
+            suppressed,
+            all_suppressed,
+        }
+    }
 }
 
 /// Solve `tree` over `tab_rect`.
@@ -58,12 +75,39 @@ pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
     let mut panes = Vec::new();
     let mut suppressed = Vec::new();
     solve_node(tree, tab_rect, &mut panes, &mut suppressed);
-    let all_suppressed = !panes.is_empty() && suppressed.len() == panes.len();
-    SolveResult {
-        panes,
-        suppressed,
-        all_suppressed,
+    SolveResult::from_parts(panes, suppressed)
+}
+
+/// Solve `tree` over `tab_rect` under a layout mode.
+///
+/// `Tiled` is [`solve`]. `Fullscreen` gives the focused pane the whole tab
+/// and zero area to everyone else — without touching the tree, so leaving
+/// fullscreen restores the prior layout exactly. A fullscreen mode pointing
+/// at a pane that is no longer in the tree falls back to the tiled solve:
+/// stale mode state must never blank a session.
+#[must_use]
+pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
+    let LayoutMode::Fullscreen { focused } = mode else {
+        return solve(tree, tab_rect);
+    };
+    if !tree.contains_pane(focused) {
+        return solve(tree, tab_rect);
     }
+
+    let mut panes = Vec::new();
+    let mut suppressed = Vec::new();
+    for pane in tree.leaf_panes() {
+        if pane != focused {
+            panes.push((pane, Rect::zero()));
+        } else if tab_rect.size.cols < MIN_PANE_SIZE.cols || tab_rect.size.rows < MIN_PANE_SIZE.rows
+        {
+            panes.push((pane, Rect::zero()));
+            suppressed.push(pane);
+        } else {
+            panes.push((pane, tab_rect));
+        }
+    }
+    SolveResult::from_parts(panes, suppressed)
 }
 
 /// `true` when every pane in `tree` can be placed inside `rect` at minimum
