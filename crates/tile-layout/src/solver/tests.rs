@@ -311,6 +311,102 @@ fn fits_uses_declared_floors_not_just_defaults() {
 }
 
 #[test]
+fn shrink_suppresses_trailing_panes_deterministically() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b, c]);
+    // Three panes need six columns; five fit only the first two.
+    let tab = rect(0, 0, 5, 24);
+
+    let first = solve(&tree, tab);
+    assert_eq!(first.suppressed, [c]);
+    assert!(!first.all_suppressed);
+    assert_eq!(
+        first.panes,
+        [
+            (a, rect(0, 0, 2, 24)),
+            (b, rect(2, 0, 3, 24)),
+            (c, Rect::zero()),
+        ]
+    );
+    assert_tiles_exactly(&first, tab);
+    for _ in 0..10 {
+        assert_eq!(solve(&tree, tab), first);
+    }
+}
+
+#[test]
+fn regrow_restores_suppressed_panes() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b, c]);
+
+    let shrunk = solve(&tree, rect(0, 0, 5, 24));
+    assert_eq!(shrunk.suppressed, [c]);
+
+    let regrown = solve(&tree, rect(0, 0, 80, 24));
+    assert!(regrown.suppressed.is_empty());
+    assert!(regrown.panes.iter().all(|(_, r)| !r.is_empty()));
+    assert_tiles_exactly(&regrown, rect(0, 0, 80, 24));
+}
+
+#[test]
+fn all_panes_suppressed_is_flagged_for_the_overlay() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+
+    let result = solve(&tree, rect(0, 0, 1, 1));
+    assert_eq!(result.suppressed, [a, b]);
+    assert!(result.all_suppressed);
+    assert!(result.panes.iter().all(|(_, r)| r.is_empty()));
+}
+
+#[test]
+fn cross_axis_too_small_suppresses_only_the_unfittable_subtree() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    // A pane beside a two-row column, in a tab only one row tall: the column
+    // cannot fit, the lone pane still can.
+    let column = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(column)],
+    ));
+    let tab = rect(0, 0, 80, 1);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.suppressed, [b, c]);
+    assert!(!result.all_suppressed);
+    assert_eq!(result.panes[0], (a, tab));
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn suppression_never_overlaps_or_spills() {
+    let panes: Vec<PaneId> = (0..6).map(|_| PaneId::new()).collect();
+    let tree = split(SplitDirection::Horizontal, &panes);
+    for cols in 1..14 {
+        let tab = rect(0, 0, cols, 4);
+        let result = solve(&tree, tab);
+        assert_no_overlap(&result.panes).unwrap();
+        assert_no_outside(&result.panes, tab).unwrap();
+        assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    }
+}
+
+#[test]
+fn collapsed_stack_children_are_zero_area_but_not_suppressed() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 0));
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.panes, [(a, tab), (b, Rect::zero())]);
+    assert!(result.suppressed.is_empty());
+    assert!(!result.all_suppressed);
+}
+
+#[test]
 fn border_inclusive_min_adds_one_cell_per_side() {
     let content = Size { cols: 2, rows: 1 };
     assert_eq!(

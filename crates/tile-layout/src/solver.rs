@@ -48,14 +48,21 @@ pub struct SolveResult {
 }
 
 /// Solve `tree` over `tab_rect`.
+///
+/// When the tree's floors no longer fit, trailing panes are suppressed —
+/// solved to zero area and listed in [`SolveResult::suppressed`] — rather
+/// than overlapped or shrunk below minimum. Suppression is stable: the same
+/// panes drop out and return as the rect shrinks and regrows.
 #[must_use]
 pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
     let mut panes = Vec::new();
-    solve_node(tree, tab_rect, &mut panes);
+    let mut suppressed = Vec::new();
+    solve_node(tree, tab_rect, &mut panes, &mut suppressed);
+    let all_suppressed = !panes.is_empty() && suppressed.len() == panes.len();
     SolveResult {
         panes,
-        suppressed: Vec::new(),
-        all_suppressed: false,
+        suppressed,
+        all_suppressed,
     }
 }
 
@@ -149,43 +156,113 @@ fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
     subtree_axis_min.max(weight_floor)
 }
 
-fn solve_node(node: &LayoutNode, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
+fn solve_node(
+    node: &LayoutNode,
+    rect: Rect,
+    out: &mut Vec<(PaneId, Rect)>,
+    suppressed: &mut Vec<PaneId>,
+) {
     match node {
-        LayoutNode::Pane(id) => out.push((*id, rect)),
+        LayoutNode::Pane(id) => {
+            // Backstop: a leaf that cannot show a usable pane is suppressed,
+            // never rendered as a sliver.
+            if rect.size.cols < MIN_PANE_SIZE.cols || rect.size.rows < MIN_PANE_SIZE.rows {
+                out.push((*id, Rect::zero()));
+                suppressed.push(*id);
+            } else {
+                out.push((*id, rect));
+            }
+        }
         LayoutNode::Split(split) => match split.direction {
-            SplitDirection::Horizontal => solve_directional(split, rect, out),
-            SplitDirection::Vertical => solve_directional(split, rect, out),
-            SplitDirection::Stacked => solve_stacked(split, rect, out),
+            SplitDirection::Horizontal | SplitDirection::Vertical => {
+                solve_directional(split, rect, out, suppressed);
+            }
+            SplitDirection::Stacked => solve_stacked(split, rect, out, suppressed),
         },
     }
 }
 
+/// Zero out a whole subtree and record every leaf as suppressed.
+fn suppress_subtree(
+    node: &LayoutNode,
+    out: &mut Vec<(PaneId, Rect)>,
+    suppressed: &mut Vec<PaneId>,
+) {
+    for pane in node.leaf_panes() {
+        out.push((pane, Rect::zero()));
+        suppressed.push(pane);
+    }
+}
+
+/// Zero out a whole subtree without marking it suppressed — used for
+/// collapsed stack children, which are hidden by the stack, not by lack of
+/// space, and stay focus-addressable.
+fn zero_subtree(node: &LayoutNode, out: &mut Vec<(PaneId, Rect)>) {
+    for pane in node.leaf_panes() {
+        out.push((pane, Rect::zero()));
+    }
+}
+
 /// Divide `rect` among the split's children along its axis and recurse.
-fn solve_directional(split: &SplitNode, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
+///
+/// Children that cannot fit are suppressed before distribution: a child
+/// whose cross-axis minimum exceeds the rect is dropped individually, and
+/// once the running sum of axis floors overflows the rect, that child and
+/// everything after it drop too (trailing suppression). The children that
+/// remain always fit at floor, so the recursion below never overlaps.
+fn solve_directional(
+    split: &SplitNode,
+    rect: Rect,
+    out: &mut Vec<(PaneId, Rect)>,
+    suppressed: &mut Vec<PaneId>,
+) {
     let horizontal = split.direction == SplitDirection::Horizontal;
-    let available = if horizontal {
-        rect.size.cols
+    let (available, available_cross) = if horizontal {
+        (rect.size.cols, rect.size.rows)
     } else {
-        rect.size.rows
+        (rect.size.rows, rect.size.cols)
     };
-    let floors: Vec<u16> = split
-        .children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            let child_min = min_size(&child.node, MIN_PANE_SIZE);
-            let axis_min = if horizontal {
-                child_min.cols
-            } else {
-                child_min.rows
-            };
-            child_floor(split, index, axis_min)
-        })
-        .collect();
-    let sizes = distribute(&split.weights, &floors, available);
+
+    // Decide who fits: per-child cross-axis check, then trailing suppression
+    // along the split axis.
+    let mut kept = vec![false; split.children.len()];
+    let mut floors_fit = true;
+    let mut claimed: u32 = 0;
+    let mut floors = vec![0u16; split.children.len()];
+    for (index, child) in split.children.iter().enumerate() {
+        let child_min = min_size(&child.node, MIN_PANE_SIZE);
+        let (axis_min, cross_min) = if horizontal {
+            (child_min.cols, child_min.rows)
+        } else {
+            (child_min.rows, child_min.cols)
+        };
+        floors[index] = child_floor(split, index, axis_min);
+        if cross_min > available_cross {
+            continue;
+        }
+        if floors_fit && claimed + u32::from(floors[index]) <= u32::from(available) {
+            kept[index] = true;
+            claimed += u32::from(floors[index]);
+        } else {
+            floors_fit = false;
+        }
+    }
+
+    // Distribute over the kept children only, then lay rects in child order;
+    // suppressed children sit at their position with zero area.
+    let kept_weights: Vec<SizeWeight> = filter_kept(&split.weights, &kept);
+    let kept_floors: Vec<u16> = filter_kept(&floors, &kept);
+    let sizes = distribute(&kept_weights, &kept_floors, available);
 
     let mut offset: u16 = 0;
-    for (child, &cells) in split.children.iter().zip(&sizes) {
+    let mut kept_index = 0;
+    for (index, child) in split.children.iter().enumerate() {
+        if !kept[index] {
+            suppress_subtree(&child.node, out, suppressed);
+            continue;
+        }
+        let cells = sizes[kept_index];
+        kept_index += 1;
         let child_rect = if horizontal {
             Rect::new(
                 Point {
@@ -209,22 +286,36 @@ fn solve_directional(split: &SplitNode, rect: Rect, out: &mut Vec<(PaneId, Rect)
                 },
             )
         };
-        solve_node(&child.node, child_rect, out);
+        solve_node(&child.node, child_rect, out, suppressed);
         offset = offset.saturating_add(cells);
     }
 }
 
+/// Keep only the elements whose flag is set, preserving order.
+fn filter_kept<T: Copy>(items: &[T], kept: &[bool]) -> Vec<T> {
+    items
+        .iter()
+        .zip(kept)
+        .filter_map(|(&item, &keep)| keep.then_some(item))
+        .collect()
+}
+
 /// Stacked children share the rect. The active child takes all of it for
-/// now; collapsed children solve to zero area. (Header rows are layered in
-/// with the rest of the stacked behavior.)
-fn solve_stacked(split: &SplitNode, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
+/// now; collapsed children solve to zero area without counting as
+/// suppressed — they are hidden by the stack, not by lack of space. (Header
+/// rows are layered in with the rest of the stacked behavior.)
+fn solve_stacked(
+    split: &SplitNode,
+    rect: Rect,
+    out: &mut Vec<(PaneId, Rect)>,
+    suppressed: &mut Vec<PaneId>,
+) {
     for (index, child) in split.children.iter().enumerate() {
-        let child_rect = if index == split.active {
-            rect
+        if index == split.active {
+            solve_node(&child.node, rect, out, suppressed);
         } else {
-            Rect::zero()
-        };
-        solve_node(&child.node, child_rect, out);
+            zero_subtree(&child.node, out);
+        }
     }
 }
 
