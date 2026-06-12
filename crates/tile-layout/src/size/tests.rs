@@ -43,3 +43,58 @@ fn combined_flex_with_overlays_roundtrips() {
         resize_delta: -3,
     });
 }
+
+#[test]
+fn constructors_accept_valid_values() {
+    assert_eq!(SizeConstraint::flex(1), Ok(SizeConstraint::Flex(1)));
+    assert_eq!(SizeConstraint::percent(1), Ok(SizeConstraint::Percent(1)));
+    assert_eq!(
+        SizeConstraint::percent(100),
+        Ok(SizeConstraint::Percent(100))
+    );
+    assert_eq!(SizeConstraint::fixed(80), Ok(SizeConstraint::Fixed(80)));
+    assert_eq!(SizeConstraint::min(2), Ok(SizeConstraint::Min(2)));
+    assert_eq!(
+        SizeConstraint::preferred(120),
+        Ok(SizeConstraint::Preferred(120))
+    );
+}
+
+#[test]
+fn constructors_reject_invalid_values() {
+    assert_eq!(
+        SizeConstraint::flex(0),
+        Err(ConstraintError::ZeroFlexWeight)
+    );
+    assert_eq!(
+        SizeConstraint::percent(0),
+        Err(ConstraintError::PercentOutOfRange { got: 0 })
+    );
+    assert_eq!(
+        SizeConstraint::percent(101),
+        Err(ConstraintError::PercentOutOfRange { got: 101 })
+    );
+    assert_eq!(SizeConstraint::fixed(0), Err(ConstraintError::ZeroFixed));
+    assert_eq!(SizeConstraint::min(0), Err(ConstraintError::ZeroMin));
+    assert_eq!(
+        SizeConstraint::preferred(0),
+        Err(ConstraintError::ZeroPreferred)
+    );
+}
+
+#[test]
+fn weight_overlays_validate_and_compose() {
+    let weight = SizeWeight::new(SizeConstraint::Flex(2))
+        .with_min(20)
+        .unwrap()
+        .with_preferred(50)
+        .unwrap();
+    assert_eq!(weight.primary, SizeConstraint::Flex(2));
+    assert_eq!(weight.min, Some(20));
+    assert_eq!(weight.preferred, Some(50));
+    assert_eq!(weight.resize_delta, 0);
+
+    let base = SizeWeight::new(SizeConstraint::Flex(1));
+    assert_eq!(base.with_min(0), Err(ConstraintError::ZeroMin));
+    assert_eq!(base.with_preferred(0), Err(ConstraintError::ZeroPreferred));
+}

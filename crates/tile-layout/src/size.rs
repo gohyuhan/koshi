@@ -10,6 +10,8 @@
 //! All sizing is discrete cell math; nothing is stored as a bare percentage.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tile_core::error::{DomainCategory, DomainError, Severity};
 
 /// A relative share of leftover space, used by [`SizeConstraint::Flex`].
 ///
@@ -34,6 +36,105 @@ pub enum SizeConstraint {
     Preferred(u16),
 }
 
+/// A rejected constraint value. Construction is the validation boundary:
+/// values from config or commands go through the constructors below, so a
+/// constraint that exists is always meaningful to the solver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ConstraintError {
+    /// A flex weight of zero would claim no share at all.
+    #[error("flex weight must be at least 1")]
+    ZeroFlexWeight,
+    /// Percentages outside 1–100 cannot describe a share of the axis.
+    #[error("percent must be between 1 and 100, got {got}")]
+    PercentOutOfRange { got: u8 },
+    /// A fixed size of zero cells is not a visible pane.
+    #[error("fixed size must be at least one cell")]
+    ZeroFixed,
+    /// A minimum of zero cells is no floor at all.
+    #[error("minimum size must be at least one cell")]
+    ZeroMin,
+    /// A preferred size of zero cells is not a usable target.
+    #[error("preferred size must be at least one cell")]
+    ZeroPreferred,
+}
+
+impl DomainError for ConstraintError {
+    fn category(&self) -> DomainCategory {
+        DomainCategory::Layout
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Recoverable
+    }
+}
+
+impl SizeConstraint {
+    /// A validated weighted share. Weights start at 1.
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroFlexWeight`] when `weight` is zero.
+    pub fn flex(weight: Weight) -> Result<Self, ConstraintError> {
+        if weight == 0 {
+            Err(ConstraintError::ZeroFlexWeight)
+        } else {
+            Ok(Self::Flex(weight))
+        }
+    }
+
+    /// A validated percentage of the parent axis (1–100).
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::PercentOutOfRange`] when outside 1–100.
+    pub fn percent(percent: u8) -> Result<Self, ConstraintError> {
+        if (1..=100).contains(&percent) {
+            Ok(Self::Percent(percent))
+        } else {
+            Err(ConstraintError::PercentOutOfRange { got: percent })
+        }
+    }
+
+    /// A validated exact size in cells (at least one).
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroFixed`] when `cells` is zero.
+    pub fn fixed(cells: u16) -> Result<Self, ConstraintError> {
+        if cells == 0 {
+            Err(ConstraintError::ZeroFixed)
+        } else {
+            Ok(Self::Fixed(cells))
+        }
+    }
+
+    /// A validated floor in cells (at least one).
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroMin`] when `cells` is zero.
+    pub fn min(cells: u16) -> Result<Self, ConstraintError> {
+        if cells == 0 {
+            Err(ConstraintError::ZeroMin)
+        } else {
+            Ok(Self::Min(cells))
+        }
+    }
+
+    /// A validated target in cells (at least one).
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroPreferred`] when `cells` is zero.
+    pub fn preferred(cells: u16) -> Result<Self, ConstraintError> {
+        if cells == 0 {
+            Err(ConstraintError::ZeroPreferred)
+        } else {
+            Ok(Self::Preferred(cells))
+        }
+    }
+}
+
 /// The complete sizing instruction for one split child.
 ///
 /// `primary` picks the distribution strategy; `min` and `preferred` overlay a
@@ -51,6 +152,46 @@ pub struct SizeWeight {
     pub preferred: Option<u16>,
     /// Accumulated user-resize offset in cells, applied after `primary`.
     pub resize_delta: i32,
+}
+
+impl SizeWeight {
+    /// A weight using `primary` with no overlays and no resize offset.
+    /// `primary` carries its own validation, so this cannot fail.
+    #[must_use]
+    pub fn new(primary: SizeConstraint) -> Self {
+        Self {
+            primary,
+            min: None,
+            preferred: None,
+            resize_delta: 0,
+        }
+    }
+
+    /// Overlay a validated floor in cells on top of the primary constraint.
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroMin`] when `cells` is zero.
+    pub fn with_min(mut self, cells: u16) -> Result<Self, ConstraintError> {
+        if cells == 0 {
+            return Err(ConstraintError::ZeroMin);
+        }
+        self.min = Some(cells);
+        Ok(self)
+    }
+
+    /// Overlay a validated target in cells on top of the primary constraint.
+    ///
+    /// # Errors
+    ///
+    /// [`ConstraintError::ZeroPreferred`] when `cells` is zero.
+    pub fn with_preferred(mut self, cells: u16) -> Result<Self, ConstraintError> {
+        if cells == 0 {
+            return Err(ConstraintError::ZeroPreferred);
+        }
+        self.preferred = Some(cells);
+        Ok(self)
+    }
 }
 
 impl Default for SizeWeight {
