@@ -200,7 +200,9 @@ pub struct RemovalInfo {
     /// area first (ties keep layout order). The first entry is the natural
     /// focus-repair candidate — it visually took over the closed pane's
     /// space — and every listed pane changed size, so its PTY needs a
-    /// resize.
+    /// resize. Collapsed stack members are never listed: their one-row
+    /// header strip is Tile-owned chrome, not pane content, so crossing the
+    /// old rect with it neither absorbs space nor makes a focus target.
     pub absorbed_by: Vec<PaneId>,
 }
 
@@ -249,6 +251,7 @@ pub fn remove_pane(
     let mut absorbers: Vec<(PaneId, u64)> = after
         .panes
         .iter()
+        .filter(|&&(id, _)| !after.stack_headers.iter().any(|header| header.pane == id))
         .filter_map(|&(id, rect)| {
             rect.intersection(old_rect)
                 .map(|overlap| (id, cell_area(overlap)))

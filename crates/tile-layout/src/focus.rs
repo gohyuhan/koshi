@@ -6,14 +6,17 @@
 //! survivors now sit, which panes are sensible focus targets? This module
 //! returns those candidates, ranked three ways, and chooses nothing.
 //!
-//! Zero-area panes are never candidates: a pane without visible cells —
-//! suppressed, hidden by a fullscreen overlay, or collapsed into a stack
-//! header — must not silently receive focus. Reaching one of those goes
-//! through an explicit activation, not through focus repair.
+//! Two kinds of panes are never candidates. Zero-area panes — suppressed
+//! or hidden by a fullscreen overlay — have no visible cells to focus.
+//! Collapsed stack members do have a visible rect (their one-row header
+//! strip), but that strip is Tile-owned chrome: such a member must not
+//! silently receive focus either. Reaching one of those goes through an
+//! explicit activation, not through focus repair.
 
 use tile_core::geometry::{Rect, SplitDirection};
 use tile_core::ids::PaneId;
 
+use crate::solver::StackHeader;
 use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
@@ -34,13 +37,22 @@ pub struct FocusCandidates {
 /// `removed_rect`.
 ///
 /// `surviving_panes` is the solved placement of the layout after the
-/// removal, in layout order (exactly what the solver returns).
+/// removal, in layout order, and `stack_headers` the collapsed members of
+/// that same solve (exactly what the solver returns). Panes listed in
+/// `stack_headers` are excluded: their non-empty rect is the header strip,
+/// not focusable content.
 #[must_use]
-pub fn focus_candidates(removed_rect: Rect, surviving_panes: &[(PaneId, Rect)]) -> FocusCandidates {
+pub fn focus_candidates(
+    removed_rect: Rect,
+    surviving_panes: &[(PaneId, Rect)],
+    stack_headers: &[StackHeader],
+) -> FocusCandidates {
     let visible: Vec<(PaneId, Rect)> = surviving_panes
         .iter()
         .copied()
-        .filter(|&(_, rect)| !rect.is_empty())
+        .filter(|&(id, rect)| {
+            !rect.is_empty() && !stack_headers.iter().any(|header| header.pane == id)
+        })
         .collect();
 
     let spatial_neighbor = visible

@@ -204,6 +204,29 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
 }
 
 #[test]
+fn absorbed_by_skips_collapsed_stack_members() {
+    // x beside a stack: removing x widens the stack, so the collapsed
+    // member's header strip crosses x's old rect. Only the active member
+    // absorbed real content space; the header must not be listed.
+    let (x, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(x), LayoutChild::new(stack)],
+    ));
+
+    let (removed, info) = remove_pane(&tree, tab(), x).unwrap();
+    let solved = solve(&removed, tab());
+    assert_eq!(solved.stack_headers.len(), 1);
+    assert_eq!(solved.stack_headers[0].pane, c);
+    assert!(solved.stack_headers[0]
+        .rect
+        .intersection(info.old_rect)
+        .is_some());
+    assert_eq!(info.absorbed_by, [b]);
+}
+
+#[test]
 fn removing_the_active_stack_child_activates_the_next_one() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));

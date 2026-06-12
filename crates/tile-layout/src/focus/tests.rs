@@ -14,7 +14,7 @@ fn nearest_pane_by_center_is_the_spatial_neighbor() {
     let removed = rect(26, 0, 27, 24);
     let survivors = [(a, rect(0, 0, 40, 24)), (c, rect(40, 0, 40, 24))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
     assert_eq!(candidates.spatial_neighbor, Some(a));
 }
 
@@ -25,7 +25,7 @@ fn vertical_neighbors_rank_by_distance_too() {
     let removed = rect(0, 20, 80, 4);
     let survivors = [(top, rect(0, 0, 80, 12)), (bottom, rect(0, 12, 80, 8))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
     assert_eq!(candidates.spatial_neighbor, Some(bottom));
 }
 
@@ -36,7 +36,7 @@ fn biggest_absorber_wins_absorbed_space() {
     let removed = rect(26, 0, 27, 24);
     let survivors = [(a, rect(0, 0, 40, 24)), (c, rect(40, 0, 40, 24))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
     assert_eq!(candidates.absorbed_space, Some(a));
 }
 
@@ -46,7 +46,7 @@ fn no_overlap_means_no_absorber() {
     let removed = rect(40, 0, 40, 24);
     let survivors = [(a, rect(0, 0, 40, 24))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
     assert_eq!(candidates.absorbed_space, None);
     assert_eq!(candidates.spatial_neighbor, Some(a));
 }
@@ -58,7 +58,7 @@ fn equal_absorption_keeps_the_earlier_pane() {
     let removed = rect(20, 0, 40, 24);
     let survivors = [(a, rect(0, 0, 40, 24)), (b, rect(40, 0, 40, 24))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
     assert_eq!(candidates.absorbed_space, Some(a));
     assert_eq!(candidates.spatial_neighbor, Some(a));
 }
@@ -69,7 +69,33 @@ fn zero_area_panes_are_never_candidates() {
     let removed = rect(0, 0, 40, 24);
     let survivors = [(hidden, Rect::zero()), (visible, rect(0, 0, 80, 24))];
 
-    let candidates = focus_candidates(removed, &survivors);
+    let candidates = focus_candidates(removed, &survivors, &[]);
+    assert_eq!(candidates.spatial_neighbor, Some(visible));
+    assert_eq!(candidates.absorbed_space, Some(visible));
+    assert_eq!(candidates.layout_order, [visible]);
+}
+
+#[test]
+fn collapsed_stack_members_are_never_candidates() {
+    use crate::solver::StackHeader;
+
+    let (visible, collapsed) = (PaneId::new(), PaneId::new());
+    // The collapsed member's one-row header strip sits right on the removed
+    // rect: nearest center, biggest per-cell overlap share. It must still
+    // lose everywhere.
+    let removed = rect(0, 12, 80, 2);
+    let survivors = [
+        (collapsed, rect(0, 12, 80, 1)),
+        (visible, rect(0, 13, 80, 11)),
+    ];
+    let headers = [StackHeader {
+        pane: collapsed,
+        rect: rect(0, 12, 80, 1),
+        position: 0,
+        total: 2,
+    }];
+
+    let candidates = focus_candidates(removed, &survivors, &headers);
     assert_eq!(candidates.spatial_neighbor, Some(visible));
     assert_eq!(candidates.absorbed_space, Some(visible));
     assert_eq!(candidates.layout_order, [visible]);
@@ -84,13 +110,13 @@ fn layout_order_lists_visible_panes_in_input_order() {
         (c, rect(50, 0, 30, 24)),
     ];
 
-    let candidates = focus_candidates(rect(0, 0, 10, 10), &survivors);
+    let candidates = focus_candidates(rect(0, 0, 10, 10), &survivors, &[]);
     assert_eq!(candidates.layout_order, [a, b, c]);
 }
 
 #[test]
 fn no_survivors_yields_empty_candidates() {
-    let candidates = focus_candidates(rect(0, 0, 10, 10), &[]);
+    let candidates = focus_candidates(rect(0, 0, 10, 10), &[], &[]);
     assert_eq!(candidates.spatial_neighbor, None);
     assert_eq!(candidates.absorbed_space, None);
     assert!(candidates.layout_order.is_empty());
