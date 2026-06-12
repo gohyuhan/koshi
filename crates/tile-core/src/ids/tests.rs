@@ -73,6 +73,16 @@ fn from_uuid_preserves_value() {
 }
 
 #[test]
+fn ids_are_orderable() {
+    // The nil UUID is all-zero, so it sorts below any v7 id (which carries a
+    // non-zero timestamp). Proves the `Ord` derive directly, not just via a
+    // `BTreeMap` key elsewhere.
+    let low = PaneId::from_uuid(Uuid::nil());
+    let high = PaneId::new();
+    assert!(low < high);
+}
+
+#[test]
 fn generated_ids_are_unique() {
     const N: usize = 10_000;
     let ids: HashSet<PaneId> = (0..N).map(|_| PaneId::new()).collect();
