@@ -129,7 +129,15 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     if factors.iter().all(|&factor| factor == 1) {
         return entries;
     }
-    let product: u128 = factors.iter().product();
+    // The rescaling factor product can overflow only on absurdly deep
+    // hostile trees, but a nested split is valid — so refuse the merge
+    // rather than wrap.
+    let product = factors
+        .iter()
+        .try_fold(1u128, |acc, &factor| acc.checked_mul(factor));
+    let Some(product) = product else {
+        return entries;
+    };
 
     // Plan every rescaled weight before touching the tree, so an overflow
     // anywhere aborts the merge with the entries untouched.

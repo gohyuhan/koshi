@@ -563,8 +563,9 @@ fn preferred_target(weight: &SizeWeight) -> Option<u16> {
     })
 }
 
-/// Pull each preferred child toward its target using only slack: donors give
-/// cells down to their floor, receivers are the trailing flexible siblings.
+/// Pull each preferred child toward its target using only slack: donors are
+/// flexible siblings with cells above their floor, never `Fixed`/`Percent`
+/// children — a preference is a hint and must not override an exact size.
 /// Children are visited in order, so an earlier target wins contested slack.
 fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
     for index in 0..weights.len() {
@@ -585,7 +586,8 @@ fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
                 sizes[receiver] = sizes[receiver].saturating_add(surplus);
             }
         } else if current < target {
-            let taken = take_cells(sizes, weights, floors, target - current, index);
+            let need = target - current;
+            let taken = take_cells(sizes, weights, floors, need, index, DonorPool::FlexibleOnly);
             sizes[index] = sizes[index].saturating_add(taken);
         }
     }
@@ -603,24 +605,38 @@ fn clamp_to_floors(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16], av
         let floor = floors.get(index).copied().unwrap_or(0);
         if sizes[index] < floor {
             let need = floor - sizes[index];
-            let taken = take_cells(sizes, weights, floors, need, index);
+            let taken = take_cells(sizes, weights, floors, need, index, DonorPool::Anyone);
             sizes[index] += taken;
         }
     }
 }
 
+/// Who may give up cells in [`take_cells`]. A minimum-size clamp may tap
+/// anyone — floors outrank exact sizes — but a preferred target is only a
+/// hint and must stay within flexible slack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DonorPool {
+    FlexibleOnly,
+    Anyone,
+}
+
 /// Take up to `need` cells from siblings, trailing-first, leaving every donor
 /// at or above its floor. Flexible donors give first; `Fixed`/`Percent`
-/// children are only tapped when the flexible ones are exhausted.
+/// children are tapped only when the pool allows it and the flexible donors
+/// are exhausted.
 fn take_cells(
     sizes: &mut [u16],
     weights: &[SizeWeight],
     floors: &[u16],
     need: u16,
     skip: usize,
+    pool: DonorPool,
 ) -> u16 {
     let mut taken: u16 = 0;
     for flexible_pass in [true, false] {
+        if !flexible_pass && pool == DonorPool::FlexibleOnly {
+            break;
+        }
         for index in (0..sizes.len()).rev() {
             if taken == need {
                 return taken;

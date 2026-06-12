@@ -113,9 +113,8 @@ pub fn add_to_stack(
         });
         stack.weights.push(SizeWeight::default());
         stack.active = stack.children.len() - 1;
-        let active = stack.active;
         for (index, child) in stack.children.iter_mut().enumerate() {
-            child.collapsed = index != active;
+            child.collapsed = index != stack.active;
         }
     } else {
         let path = result.path_to(anchor).expect("presence checked above");
@@ -313,7 +312,7 @@ fn reseat_active(split: &mut SplitNode, removed_index: usize) {
     if removed_index < split.active {
         split.active -= 1;
     }
-    split.active = split.active.min(split.children.len() - 1);
+    split.active = split.active.min(split.children.len().saturating_sub(1));
     if split.direction == SplitDirection::Stacked {
         for (index, child) in split.children.iter_mut().enumerate() {
             child.collapsed = index != split.active;
