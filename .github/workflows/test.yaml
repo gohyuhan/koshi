@@ -25,14 +25,16 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # --locked: CI must build exactly what Cargo.lock pins, never a
+      # silently-updated transitive dependency.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Check
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
 
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
 
       - name: Dependency-direction guard
         run: cargo xtask dep-guard
