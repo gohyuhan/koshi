@@ -75,6 +75,54 @@ fn stale_fullscreen_focus_falls_back_to_tiled() {
 }
 
 #[test]
+fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(stack)],
+    ));
+    let snapshot = tree.clone();
+
+    // c is collapsed; fullscreen still promotes it to the whole tab while
+    // the stack and every sibling hide.
+    let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: c }, tab());
+    assert_eq!(
+        result.panes,
+        [(a, Rect::zero()), (b, Rect::zero()), (c, tab())]
+    );
+    assert!(result.stack_headers.is_empty());
+    assert!(result.suppressed.is_empty());
+
+    // The stack was never rewritten: same membership, same active member,
+    // same collapsed flags — so restoring shows b expanded again.
+    assert_eq!(tree, snapshot);
+    let restored = solve_with_mode(&tree, LayoutMode::Tiled, tab());
+    let LayoutNode::Split(outer) = &tree else {
+        panic!("root must stay a split");
+    };
+    let LayoutNode::Split(stack) = &outer.children[1].node else {
+        panic!("stack must survive");
+    };
+    assert_eq!(stack.active, 0);
+    assert_eq!(restored, solve(&tree, tab()));
+    assert_eq!(restored.stack_headers.len(), 1);
+    assert_eq!(restored.stack_headers[0].pane, c);
+}
+
+#[test]
+fn fullscreen_of_the_active_stack_member_round_trips_identically() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 1));
+    let before = solve(&tree, tab());
+
+    let zoomed = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: b }, tab());
+    assert_eq!(zoomed.panes, [(a, Rect::zero()), (b, tab())]);
+
+    assert_eq!(solve_with_mode(&tree, LayoutMode::Tiled, tab()), before);
+}
+
+#[test]
 fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
