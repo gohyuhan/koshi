@@ -786,6 +786,12 @@ dependencies = [
 [[package]]
 name = "tile-pane"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tile-core",
+]
 
 [[package]]
 name = "tile-plugin-api"
@@ -822,6 +828,15 @@ version = "0.1.0"
 [[package]]
 name = "tile-session"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tile-core",
+ "tile-layout",
+ "tile-pane",
+ "tile-test-support",
+]
 
 [[package]]
 name = "tile-storage"

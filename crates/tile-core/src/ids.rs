@@ -2,8 +2,9 @@
 //!
 //! Newtype wrappers around UUIDv7, giving each domain entity a distinct,
 //! non-interchangeable identifier type. UUIDv7 is time-ordered, so freshly
-//! minted IDs sort by creation order. Every ID is `Copy`, hashable, and
-//! `serde`-serializable; `Display` renders a human-readable prefixed form
+//! minted IDs sort by creation order. Every ID is `Copy`, hashable, ordered
+//! (usable as a `BTreeMap` key), and `serde`-serializable; `Display` renders
+//! a human-readable prefixed form
 //! (e.g. `pane-0192f0c1-…`). No `From<&str>` parsing is provided — IDs are
 //! either generated (`new`) or wrapped from an existing UUID (`from_uuid`).
 //!
@@ -16,7 +17,7 @@ use std::fmt;
 use uuid::Uuid;
 
 /// Identifies a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
 impl SessionId {
@@ -52,7 +53,7 @@ impl fmt::Display for SessionId {
 }
 
 /// Identifies a connected client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ClientId(Uuid);
 
 impl ClientId {
@@ -88,7 +89,7 @@ impl fmt::Display for ClientId {
 }
 
 /// Identifies a tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TabId(Uuid);
 
 impl TabId {
@@ -124,7 +125,7 @@ impl fmt::Display for TabId {
 }
 
 /// Identifies a pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PaneId(Uuid);
 
 impl PaneId {
@@ -160,7 +161,7 @@ impl fmt::Display for PaneId {
 }
 
 /// Identifies a plugin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PluginId(Uuid);
 
 impl PluginId {
@@ -196,7 +197,7 @@ impl fmt::Display for PluginId {
 }
 
 /// Identifies a dispatched command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CommandId(Uuid);
 
 impl CommandId {
@@ -232,7 +233,7 @@ impl fmt::Display for CommandId {
 }
 
 /// Identifies an emitted event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EventId(Uuid);
 
 impl EventId {
@@ -268,7 +269,7 @@ impl fmt::Display for EventId {
 }
 
 /// Identifies an event subscriber.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SubscriberId(Uuid);
 
 impl SubscriberId {
