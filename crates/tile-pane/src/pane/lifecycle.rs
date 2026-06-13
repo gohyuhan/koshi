@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::InvalidTransition;
+use crate::{error::InvalidTransition, pane::state::PaneKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycle {
@@ -38,7 +38,11 @@ pub enum PaneLifecycle {
 }
 
 impl PaneLifecycle {
-    pub fn transition(self, event: PaneLifecycleEvent) -> Result<Self, InvalidTransition> {
+    pub fn transition(
+        self,
+        event: PaneLifecycleEvent,
+        kind: PaneKind,
+    ) -> Result<Self, InvalidTransition> {
         match (self, event) {
             (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
                 Ok(PaneLifecycle::Running)
@@ -62,7 +66,11 @@ impl PaneLifecycle {
                 Ok(PaneLifecycle::Spawning)
             }
 
-            _ => Err(InvalidTransition { from: self, event }),
+            _ => Err(InvalidTransition {
+                from: self,
+                event,
+                kind,
+            }),
         }
     }
 }

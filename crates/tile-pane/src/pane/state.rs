@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, path::PathBuf, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tile_core::{
+    error::DomainCategory,
     ids::{PaneId, PluginId},
     process::SpawnSpec,
 };
@@ -26,6 +27,19 @@ use crate::pane::{
 pub enum PaneKind {
     Terminal,
     Plugin { plugin_id: PluginId },
+}
+
+impl PaneKind {
+    /// The diagnostics domain a failure on this pane classifies into: a terminal
+    /// pane is a `Terminal` failure, a plugin pane a `Plugin` failure — so a
+    /// pane-domain error is never mislabelled as a terminal-emulator failure.
+    #[must_use]
+    pub fn domain_category(&self) -> DomainCategory {
+        match self {
+            PaneKind::Terminal => DomainCategory::Terminal,
+            PaneKind::Plugin { .. } => DomainCategory::Plugin,
+        }
+    }
 }
 
 /// Runtime metadata for a single pane, keyed by `id` in the registry. The

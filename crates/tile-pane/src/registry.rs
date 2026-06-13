@@ -26,7 +26,10 @@ impl PaneRegistry {
 
     pub fn insert(&mut self, pane_record: PaneRecord) -> Result<(), PaneRegistryError> {
         if self.records.contains_key(&pane_record.id) {
-            return Err(PaneRegistryError::DuplicateId(pane_record.id));
+            return Err(PaneRegistryError::DuplicateId {
+                id: pane_record.id,
+                kind: pane_record.kind,
+            });
         }
         self.records.insert(pane_record.id, pane_record);
         Ok(())

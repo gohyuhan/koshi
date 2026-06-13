@@ -6,19 +6,24 @@ use tile_core::{
     ids::PaneId,
 };
 
-use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
+use crate::pane::{
+    lifecycle::{PaneLifecycle, PaneLifecycleEvent},
+    state::PaneKind,
+};
 
 /// Why a pane-registry operation was rejected.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PaneRegistryError {
     /// A record was inserted under an id the registry already holds.
-    #[error("pane {0} is already registered")]
-    DuplicateId(PaneId),
+    #[error("pane {id} is already registered")]
+    DuplicateId { id: PaneId, kind: PaneKind },
 }
 
 impl DomainError for PaneRegistryError {
     fn category(&self) -> DomainCategory {
-        DomainCategory::Terminal
+        match self {
+            PaneRegistryError::DuplicateId { kind, .. } => kind.domain_category(),
+        }
     }
 
     fn severity(&self) -> Severity {
@@ -34,11 +39,13 @@ pub struct InvalidTransition {
     pub from: PaneLifecycle,
     /// The event that was rejected.
     pub event: PaneLifecycleEvent,
+    /// The kind of pane, terminal or plugin
+    pub kind: PaneKind,
 }
 
 impl DomainError for InvalidTransition {
     fn category(&self) -> DomainCategory {
-        DomainCategory::Terminal
+        self.kind.domain_category()
     }
 
     fn severity(&self) -> Severity {
