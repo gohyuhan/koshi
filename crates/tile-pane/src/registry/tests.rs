@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use tile_core::error::{DomainCategory, DomainError, Severity};
 use tile_core::ids::{PaneId, PluginId};
 use tile_core::process::{ShellKind, SpawnSpec};
 
@@ -65,10 +66,37 @@ fn inserting_a_duplicate_id_is_rejected_and_keeps_the_original() {
     registry.insert(original).expect("first insert");
     let rejected = registry.insert(clash);
 
-    assert_eq!(rejected, Err(PaneRegistryError::DuplicateId(id)));
+    assert_eq!(
+        rejected,
+        Err(PaneRegistryError::DuplicateId {
+            id,
+            kind: PaneKind::Terminal
+        })
+    );
     // The first record is untouched — a rejected insert never overwrites.
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.get(id).unwrap().title.as_deref(), Some("original"));
+}
+
+#[test]
+fn a_duplicate_id_error_is_recoverable_and_classified_by_pane_kind() {
+    // The error's domain follows the clashing pane's kind, so a plugin pane is
+    // never mislabelled as a terminal-emulator failure.
+    let terminal = PaneRegistryError::DuplicateId {
+        id: PaneId::new(),
+        kind: PaneKind::Terminal,
+    };
+    assert_eq!(terminal.category(), DomainCategory::Terminal);
+    assert_eq!(terminal.severity(), Severity::Recoverable);
+
+    let plugin = PaneRegistryError::DuplicateId {
+        id: PaneId::new(),
+        kind: PaneKind::Plugin {
+            plugin_id: PluginId::new(),
+        },
+    };
+    assert_eq!(plugin.category(), DomainCategory::Plugin);
+    assert_eq!(plugin.severity(), Severity::Recoverable);
 }
 
 #[test]
