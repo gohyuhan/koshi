@@ -103,15 +103,16 @@ pub struct Session {
 }
 
 impl Session {
-    /// An empty session: no tabs, no panes, no clients, no plugin runtime.
+    /// A session with no tabs, no panes, and no plugin runtime yet, holding the
+    /// supplied client registry.
     #[must_use]
-    pub fn new(id: SessionId, name: String) -> Self {
+    pub fn new(id: SessionId, name: String, client_registry: ClientRegistry) -> Self {
         Self {
             id,
             name,
             tabs: BTreeMap::new(),
             panes: PaneRegistry::new(),
-            clients: ClientRegistry,
+            clients: client_registry,
             config_snapshot: SessionConfig,
             plugin_runtime_ref: None,
         }
