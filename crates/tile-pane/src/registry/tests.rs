@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use tile_core::error::{DomainCategory, DomainError, Severity};
 use tile_core::ids::{PaneId, PluginId};
 use tile_core::process::{ShellKind, SpawnSpec};
 
@@ -69,6 +70,14 @@ fn inserting_a_duplicate_id_is_rejected_and_keeps_the_original() {
     // The first record is untouched — a rejected insert never overwrites.
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.get(id).unwrap().title.as_deref(), Some("original"));
+}
+
+#[test]
+fn a_duplicate_id_error_is_a_recoverable_terminal_error() {
+    let err = PaneRegistryError::DuplicateId(PaneId::new());
+
+    assert_eq!(err.category(), DomainCategory::Terminal);
+    assert_eq!(err.severity(), Severity::Recoverable);
 }
 
 #[test]
