@@ -4,24 +4,56 @@
 //! [`PaneClosePolicy`] governs a requested close — graceful with a grace
 //! period, forced, or confirm-if-busy. [`PaneExitPolicy`] governs the pane's
 //! fate when its child exits on its own — close it, hold the dead pane visible,
-//! or respawn a shell. The enums are the vocabulary; their defaults and the
-//! mapping onto the process-kill policy land with the operations that apply
-//! them.
+//! or respawn a shell. Each carries its production default, and
+//! [`PaneClosePolicy::kill_policy`] maps a requested close onto the process
+//! [`KillPolicy`]. The tab-level empty-tab policy lives with the session model.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tile_core::{constant::GRACEFUL_TIMEOUT_DURATION, process::KillPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
-    Graceful { timeout: Duration },
+    Graceful {
+        #[serde(with = "tile_core::process::duration_secs")]
+        timeout: Duration,
+    },
     Force,
     ConfirmIfBusy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for PaneClosePolicy {
+    fn default() -> Self {
+        PaneClosePolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION,
+        }
+    }
+}
+
+impl PaneClosePolicy {
+    /// Map this close policy onto the process [`KillPolicy`] the PTY layer
+    /// applies. `ConfirmIfBusy` resolves to a graceful close — the prompt is a
+    /// UI step; once confirmed, the close proceeds gracefully.
+    #[must_use]
+    pub fn kill_policy(&self) -> KillPolicy {
+        match self {
+            PaneClosePolicy::Graceful { timeout } => KillPolicy::Graceful { timeout: *timeout },
+            PaneClosePolicy::Force => KillPolicy::Force,
+            PaneClosePolicy::ConfirmIfBusy => KillPolicy::Graceful {
+                timeout: GRACEFUL_TIMEOUT_DURATION,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PaneExitPolicy {
+    #[default]
     CloseOnExit,
     HoldOnExit,
     RespawnShell,
 }
+
+#[cfg(test)]
+mod tests;

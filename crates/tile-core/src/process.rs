@@ -95,7 +95,7 @@ pub struct PtySize {
 ///
 /// `KillPolicy` timeouts are coarse, so the sub-second part is intentionally
 /// dropped on the wire; this keeps the serialized form a plain integer.
-mod duration_secs {
+pub mod duration_secs {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
