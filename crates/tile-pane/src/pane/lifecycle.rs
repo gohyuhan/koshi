@@ -2,11 +2,12 @@
 //! teardown.
 //!
 //! A pane is born `Spawning`, becomes `Running` once its process is live, then
-//! ends one of two ways — its child `Exited` (carrying the exit code, or none
-//! on signal-kill, and when), or a requested `Closing` (carrying since-when) —
-//! before it is finally `Removed` from the registry. A dead `Exited` pane may
-//! instead respawn (the `RespawnShell` policy), looping back to `Spawning` in
-//! place; only `Removed` is terminal. Modelling the stages as a type keeps an
+//! ends — its child `Exited` (carrying the exit code, or none on signal-kill,
+//! and when), or a requested `Closing` (carrying since-when, and askable from
+//! any live stage, even before the child runs) — before it is finally
+//! `Removed` from the registry. A dead `Exited` pane may instead respawn (the
+//! `RespawnShell` policy), looping back to `Spawning` in place; only `Removed`
+//! is terminal. Modelling the stages as a type keeps an
 //! illegal move — reviving a removed pane, running one mid-teardown — a
 //! transition-time error instead of a silent bug.
 //!
@@ -42,6 +43,9 @@ impl PaneLifecycle {
             (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
                 Ok(PaneLifecycle::Running)
             }
+            (PaneLifecycle::Spawning, PaneLifecycleEvent::CloseRequested { since }) => {
+                Ok(PaneLifecycle::Closing { since })
+            }
             (PaneLifecycle::Running, PaneLifecycleEvent::ProcessExited { code, at }) => {
                 Ok(PaneLifecycle::Exited { code, at })
             }
@@ -57,6 +61,7 @@ impl PaneLifecycle {
             (PaneLifecycle::Exited { .. }, PaneLifecycleEvent::Respawn) => {
                 Ok(PaneLifecycle::Spawning)
             }
+
             _ => Err(InvalidTransition { from: self, event }),
         }
     }

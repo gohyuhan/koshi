@@ -45,6 +45,10 @@ fn is_allowed(from: PaneLifecycle, event: PaneLifecycleEvent) -> bool {
         (from, event),
         (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted)
             | (
+                PaneLifecycle::Spawning,
+                PaneLifecycleEvent::CloseRequested { .. }
+            )
+            | (
                 PaneLifecycle::Running,
                 PaneLifecycleEvent::ProcessExited { .. }
             )
@@ -66,6 +70,17 @@ fn spawning_advances_to_running_when_the_process_starts() {
     let next = PaneLifecycle::Spawning.transition(PaneLifecycleEvent::ProcessStarted);
 
     assert_eq!(next, Ok(PaneLifecycle::Running));
+}
+
+#[test]
+fn a_spawning_pane_can_be_closed_before_it_runs() {
+    let since = SystemTime::UNIX_EPOCH;
+
+    let next = PaneLifecycle::Spawning.transition(PaneLifecycleEvent::CloseRequested { since });
+
+    // A close can arrive before the child reports started; honour it rather
+    // than forcing the pane to run first.
+    assert_eq!(next, Ok(PaneLifecycle::Closing { since }));
 }
 
 #[test]
@@ -219,14 +234,14 @@ fn only_the_specified_transitions_are_accepted() {
 }
 
 #[test]
-fn exactly_six_transitions_are_legal() {
+fn exactly_seven_transitions_are_legal() {
     let accepted = all_states()
         .into_iter()
         .flat_map(|from| all_events().into_iter().map(move |event| (from, event)))
         .filter(|&(from, event)| from.transition(event).is_ok())
         .count();
 
-    assert_eq!(accepted, 6);
+    assert_eq!(accepted, 7);
 }
 
 #[test]
