@@ -11,7 +11,7 @@ use crate::client::ClientRegistry;
 #[test]
 fn a_new_session_starts_empty() {
     let id = SessionId::new();
-    let session = Session::new(id, "main".to_owned());
+    let session = Session::new(id, "main".to_owned(), ClientRegistry::new());
 
     assert_eq!(session.id, id);
     assert_eq!(session.name, "main");
