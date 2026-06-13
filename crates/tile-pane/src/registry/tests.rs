@@ -138,7 +138,7 @@ fn a_pane_record_survives_a_serde_round_trip() {
         exit_policy: PaneExitPolicy::HoldOnExit,
         env,
         lifecycle: PaneLifecycle::Exited {
-            code: 0,
+            code: Some(0),
             at: SystemTime::UNIX_EPOCH,
         },
         created_at: SystemTime::UNIX_EPOCH,

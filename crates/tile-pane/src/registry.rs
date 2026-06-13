@@ -41,6 +41,15 @@ impl PaneRegistry {
         self.records.remove(&pane_id)
     }
 
+    /// Mutable access to a record for in-place field edits (title, lifecycle,
+    /// exit status, …).
+    ///
+    /// The record exposes its `id`, but **mutating `id` through this handle does
+    /// not move the map entry** — the record would stay keyed under its old id,
+    /// desyncing key from `record.id`. Re-keying is deliberately not handled
+    /// here: an id change belongs to the update flow, which removes the record
+    /// under the old id and re-inserts it under the new one, while an unchanged
+    /// id just updates in place.
     pub fn get_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.records.get_mut(&pane_id)
     }
