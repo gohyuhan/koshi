@@ -3,15 +3,64 @@
 
 use std::collections::BTreeMap;
 
-use tile_core::ids::{SessionId, TabId};
+use serde::{Deserialize, Serialize};
+use tile_core::{
+    constant::MAX_TAB_FOCUS_MRU,
+    ids::{PaneId, SessionId, TabId},
+};
+use tile_layout::{mode::LayoutMode, tree::LayoutNode};
 use tile_pane::registry::PaneRegistry;
 
-use crate::client::ClientRegistry;
+use crate::{client::ClientRegistry, session::lifecycle::TabLifecycle};
 
-/// One tab: name, layout tree, lifecycle, and tab-local focus history.
-/// Placeholder shell: the tab model fills it in.
-#[derive(Debug)]
-pub struct Tab;
+/// One tab: its name, bar position, layout tree and mode, lifecycle, and the
+/// panes it focused, most-recent first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tab {
+    pub id: TabId,
+    pub name: String,
+    pub index: u32,
+    pub layout: LayoutNode,
+    pub layout_mode: LayoutMode,
+    pub lifecycle: TabLifecycle,
+    /// Panes this tab has focused, most-recent first, with at most one entry
+    /// per pane — re-focusing moves a pane to the front instead of adding a
+    /// duplicate. Capped at [`MAX_TAB_FOCUS_MRU`]; focus recovery walks
+    /// it newest-first to pick the inheriting pane when the focused one
+    /// disappears.
+    focus_mru: Vec<PaneId>,
+}
+
+impl Tab {
+    /// A freshly created tab showing a single pane. Starts in `Creating`
+    /// with no focus recorded yet; `root_pane` is its only layout leaf.
+    #[must_use]
+    pub fn new(id: TabId, name: String, tab_index: u32, root_pane: PaneId) -> Self {
+        Self {
+            id,
+            name,
+            index: tab_index,
+            layout: LayoutNode::Pane(root_pane),
+            layout_mode: LayoutMode::Tiled,
+            lifecycle: TabLifecycle::Creating,
+            focus_mru: Vec::new(),
+        }
+    }
+
+    /// Records `pane` as the most-recently focused: moves it to the front,
+    /// keeping one entry per pane, and drops the oldest once the cap is hit.
+    pub fn record_focus_mru(&mut self, pane: PaneId) {
+        self.focus_mru.retain(|&p| p != pane);
+        self.focus_mru.insert(0, pane);
+        if self.focus_mru.len() as u16 > MAX_TAB_FOCUS_MRU {
+            self.focus_mru.pop();
+        }
+    }
+
+    pub fn focus_mru(&self) -> &[PaneId] {
+        &self.focus_mru
+    }
+}
 
 /// The configuration a session captured when it started. A snapshot, not a
 /// live reference: a config reload builds a new snapshot for new sessions

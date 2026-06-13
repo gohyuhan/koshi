@@ -2,6 +2,7 @@
 
 pub mod command;
 pub mod event;
+pub mod lifecycle;
 pub mod state;
 
 #[cfg(test)]
