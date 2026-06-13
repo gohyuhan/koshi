@@ -110,7 +110,7 @@ impl Session {
             id,
             name,
             tabs: BTreeMap::new(),
-            panes: PaneRegistry,
+            panes: PaneRegistry::new(),
             clients: ClientRegistry,
             config_snapshot: SessionConfig,
             plugin_runtime_ref: None,
