@@ -57,18 +57,6 @@ pub enum TabTarget {
 pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> Vec<Event> {
     let mut events = vec![];
 
-    // A wound-down session does not accept new tabs. The first tab drives
-    // `Starting -> Running`; if that move is rejected the session is `Stopping`
-    // or `Stopped`, so refuse *before* mutating any state — otherwise a late
-    // `new_tab` would leave a live tab and pane under a shutting-down session.
-    if session.tabs.is_empty()
-        && session
-            .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
-            .is_err()
-    {
-        return events;
-    }
-
     let new_pane_id = PaneId::new();
     let new_tab_id = TabId::new();
 
@@ -79,6 +67,13 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
 
     // new tab
     let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
+    // The first tab drives `Starting -> Running`; a later tab is a domain no-op.
+    // This is a pure state op: admission — refusing tabs once the session is
+    // winding down — is the runtime/command layer's job (it pre-checks
+    // `session.lifecycle()` before routing the command here), not this layer's.
+    if session.tabs.is_empty() {
+        let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
+    }
     // record the tab into the session available tab
     session.tabs.insert(new_tab_id, new_tab);
 

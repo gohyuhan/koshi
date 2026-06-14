@@ -241,23 +241,3 @@ fn closing_the_last_tab_requests_a_stop() {
     assert!(teardown.iter().any(|event| matches!(event, Event::Quit)));
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }
-
-#[test]
-fn a_new_tab_is_refused_after_the_session_has_wound_down() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
-    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
-    let tab = created_tab_id(&events);
-
-    // Closing the last tab winds the session down to `Stopping`.
-    let _ = close_tab(&mut session, tab);
-    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
-
-    // A late tab request must not revive a shutting-down session: the rejected
-    // `FirstTabCreated` aborts the operation before any state is touched, so no
-    // tab or pane is inserted and no events are emitted.
-    let late = new_tab(&mut session, "late".to_owned(), SystemTime::UNIX_EPOCH);
-    assert!(late.is_empty());
-    assert!(session.tabs.is_empty());
-    assert!(session.panes.is_empty());
-    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
-}
