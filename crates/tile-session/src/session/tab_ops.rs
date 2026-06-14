@@ -57,6 +57,18 @@ pub enum TabTarget {
 pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> Vec<Event> {
     let mut events = vec![];
 
+    // A wound-down session does not accept new tabs. The first tab drives
+    // `Starting -> Running`; if that move is rejected the session is `Stopping`
+    // or `Stopped`, so refuse *before* mutating any state — otherwise a late
+    // `new_tab` would leave a live tab and pane under a shutting-down session.
+    if session.tabs.is_empty()
+        && session
+            .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
+            .is_err()
+    {
+        return events;
+    }
+
     let new_pane_id = PaneId::new();
     let new_tab_id = TabId::new();
 
@@ -67,9 +79,6 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
 
     // new tab
     let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
-    if session.tabs.is_empty() {
-        session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
-    }
     // record the tab into the session available tab
     session.tabs.insert(new_tab_id, new_tab);
 
@@ -286,7 +295,9 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
     reindex_tab_index(session);
 
     if session.tabs.is_empty() {
-        session.update_lifecycle(SessionLifecycleEvent::StopRequested);
+        // Idempotent if the session is already winding down; the quit signal
+        // stands regardless.
+        let _ = session.update_lifecycle(SessionLifecycleEvent::StopRequested);
         events.push(Event::Quit);
     }
 

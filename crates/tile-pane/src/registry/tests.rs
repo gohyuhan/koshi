@@ -155,11 +155,15 @@ fn a_pane_record_survives_a_serde_round_trip() {
     record.exited_at = Some(SystemTime::UNIX_EPOCH);
     record.exit_code = Some(0);
     // Drive to `Exited { code: Some(0), .. }` through legal events.
-    record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-    record.update_lifecycle(PaneLifecycleEvent::ProcessExited {
-        code: Some(0),
-        at: SystemTime::UNIX_EPOCH,
-    });
+    record
+        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+        .expect("ProcessStarted is legal from Spawning");
+    record
+        .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+            code: Some(0),
+            at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("ProcessExited is legal from Running");
 
     let json = serde_json::to_string(&record).expect("serialize");
     let restored: PaneRecord = serde_json::from_str(&json).expect("deserialize");

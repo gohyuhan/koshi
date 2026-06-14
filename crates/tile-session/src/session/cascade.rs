@@ -198,11 +198,13 @@ pub fn on_child_exit(
         // two events in sequence settles on the right state either way.
         PaneExitPolicy::RespawnShell => {
             if let Some(pane) = session.panes.get_mut(pane_id) {
-                pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
+                // A rejected step is the intended no-op described above, so the
+                // two events settle on the right state either way; ignore both.
+                let _ = pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
                     code: exit_code,
                     at: exited_at,
                 });
-                pane.update_lifecycle(PaneLifecycleEvent::Respawn);
+                let _ = pane.update_lifecycle(PaneLifecycleEvent::Respawn);
             }
         }
         // A self-exiting shell removes its pane through the shared cascade.

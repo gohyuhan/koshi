@@ -37,22 +37,38 @@ fn walk_lifecycle(record: &mut PaneRecord, target: PaneLifecycle) {
     match target {
         PaneLifecycle::Spawning => {}
         PaneLifecycle::Running => {
-            record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Exited { code, at } => {
-            record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-            record.update_lifecycle(PaneLifecycleEvent::ProcessExited { code, at });
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessExited { code, at })
+                .expect("walk_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Closing { since } => {
-            record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-            record.update_lifecycle(PaneLifecycleEvent::CloseRequested { since });
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested { since })
+                .expect("walk_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Removed => {
-            record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-            record.update_lifecycle(PaneLifecycleEvent::CloseRequested {
-                since: SystemTime::UNIX_EPOCH,
-            });
-            record.update_lifecycle(PaneLifecycleEvent::Cleaned);
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+                    since: SystemTime::UNIX_EPOCH,
+                })
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::Cleaned)
+                .expect("walk_lifecycle drives only legal transitions");
         }
     }
 }

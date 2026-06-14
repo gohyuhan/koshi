@@ -13,6 +13,7 @@ use tile_pane::registry::PaneRegistry;
 
 use crate::{
     client::{Client, ClientRegistry},
+    error::InvalidTransition,
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle},
 };
 
@@ -137,16 +138,21 @@ impl Session {
         &self.lifecycle
     }
 
-    /// Apply a lifecycle `event`, advancing the session's state; an illegal
-    /// transition from the current state is ignored. Crate-internal — callers
-    /// drive the lifecycle through the typed wrappers ([`Session::attach_client`],
-    /// [`Session::detach_client`], [`Session::request_stop`],
-    /// [`Session::complete_stop`]) or the tab operations, so the firing
-    /// conditions stay in one place.
-    pub(crate) fn update_lifecycle(&mut self, event: SessionLifecycleEvent) {
-        if let Ok(next_lifecycle) = self.lifecycle.transition(event) {
-            self.lifecycle = next_lifecycle;
-        }
+    /// Apply a lifecycle `event`, advancing the session's state, or return
+    /// [`InvalidTransition`] if the move is illegal from the current state.
+    /// Crate-internal — callers drive the lifecycle through the typed wrappers
+    /// ([`Session::attach_client`], [`Session::detach_client`],
+    /// [`Session::request_stop`], [`Session::complete_stop`]) or the tab
+    /// operations, so the firing conditions stay in one place. Each caller
+    /// decides whether a rejected event is an expected no-op to ignore (a
+    /// re-attach to an already-`Running` session) or a fault to abort on (a tab
+    /// created under a wound-down session).
+    pub(crate) fn update_lifecycle(
+        &mut self,
+        event: SessionLifecycleEvent,
+    ) -> Result<(), InvalidTransition> {
+        self.lifecycle = self.lifecycle.transition(event)?;
+        Ok(())
     }
 
     /// Attach `client` and mark the session live. `ClientAttached` only revives
@@ -154,7 +160,9 @@ impl Session {
     /// leaves the lifecycle unchanged.
     pub fn attach_client(&mut self, client: Client) {
         self.clients.attach(client);
-        self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
+        // `ClientAttached` only revives a `Detaching` session; from `Running`
+        // it is an expected no-op, so a rejected transition is not a fault here.
+        let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
     }
 
     /// Detach the client `client_id`. When it was the *last* attached client the
@@ -163,7 +171,9 @@ impl Session {
     pub fn detach_client(&mut self, client_id: ClientId) {
         self.clients.detach(client_id);
         if self.clients.is_empty() {
-            self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
+            // Already stopping/stopped sessions reject the park; that is fine —
+            // a session winding down stays wound down when its last client goes.
+            let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
     }
 
@@ -171,12 +181,15 @@ impl Session {
     /// State is retained — stopping destroys no tabs or panes — so a stopped
     /// session can be persisted and restored later.
     pub fn request_stop(&mut self) {
-        self.update_lifecycle(SessionLifecycleEvent::StopRequested);
+        // Idempotent: requesting a stop on an already-`Stopping`/`Stopped`
+        // session is rejected and changes nothing.
+        let _ = self.update_lifecycle(SessionLifecycleEvent::StopRequested);
     }
 
     /// Finish shutdown once teardown is done, moving `Stopping` to the terminal
     /// `Stopped`.
     pub fn complete_stop(&mut self) {
-        self.update_lifecycle(SessionLifecycleEvent::StopCompleted);
+        // Only a `Stopping` session completes; any other state rejects it.
+        let _ = self.update_lifecycle(SessionLifecycleEvent::StopCompleted);
     }
 }
