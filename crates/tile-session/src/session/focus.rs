@@ -25,7 +25,7 @@ use crate::session::{policy::EmptyTabPolicy, state::Tab};
 pub enum FocusRepairResult {
     /// Focus this pane — the first eligible one found walking the recovery
     /// order (focus history, then spatial neighbor, absorbed space, and finally
-    /// any visible pane).
+    /// the first eligible pane in layout order).
     Focused(PaneId),
     /// The tab still holds panes but every one is suppressed (zero-area, too
     /// little room to draw). No pane can take focus: the caller shows the
@@ -44,7 +44,7 @@ pub enum FocusRepairResult {
 /// 1. the tab's focus history, newest first ([`Tab::focus_mru`]);
 /// 2. the spatial neighbor of the removed pane's old rect;
 /// 3. the pane that absorbed the most of the removed pane's space;
-/// 4. the first visible pane in layout order, as a last resort.
+/// 4. the first eligible pane in layout order, as a last resort.
 ///
 /// `candidate` is the layout's ranked survivors after the removal (from
 /// `tile_layout::focus::focus_candidates`); its `layout_order` is exactly the
@@ -90,10 +90,12 @@ pub fn repair_focus(
         }
     }
 
-    if let Some(&pane_id) = candidate.layout_order.first() {
-        if is_eligible(pane_id) {
-            return FocusRepairResult::Focused(pane_id);
-        }
+    if let Some(&pane_id) = candidate
+        .layout_order
+        .iter()
+        .find(|&&pane_id| is_eligible(pane_id))
+    {
+        return FocusRepairResult::Focused(pane_id);
     }
 
     if tab.layout.leaf_panes().is_empty() {

@@ -164,6 +164,28 @@ fn the_first_visible_pane_is_the_last_resort() {
 }
 
 #[test]
+fn the_last_resort_walks_past_ineligible_panes_to_the_first_live_one() {
+    // The visible layout order leads with a Removed pane; the last-resort step
+    // must skip it and focus the first live pane, not fall through to a no-pane
+    // verdict while an eligible pane is still present.
+    let (removed, live) = (PaneId::new(), PaneId::new());
+    let tab = tab_with_root(live); // no focus history recorded
+    let registry = registry_with(vec![
+        record(removed, PaneLifecycle::Removed),
+        record(live, PaneLifecycle::Running),
+    ]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(None, None, vec![removed, live]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::Focused(live));
+}
+
+#[test]
 fn a_suppressed_pane_is_never_focused() {
     // `suppressed` is alive and sits in history, but it is absent from the
     // visible layout order, so it is not a focus target.
