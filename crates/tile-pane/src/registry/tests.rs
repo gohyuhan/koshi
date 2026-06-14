@@ -8,27 +8,16 @@ use tile_core::process::{ShellKind, SpawnSpec};
 
 use super::PaneRegistry;
 use crate::error::PaneRegistryError;
-use crate::pane::lifecycle::PaneLifecycle;
+use crate::pane::lifecycle::PaneLifecycleEvent;
 use crate::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 use crate::pane::state::{PaneKind, PaneRecord};
 
 /// A minimal terminal-pane record. Timestamps use `UNIX_EPOCH` so tests stay
 /// deterministic; per-test fields are tweaked by the caller.
 fn terminal_record(id: PaneId) -> PaneRecord {
-    PaneRecord {
-        id,
-        kind: PaneKind::Terminal,
-        title: None,
-        command: None,
-        cwd: None,
-        close_policy: PaneClosePolicy::Force,
-        exit_policy: PaneExitPolicy::CloseOnExit,
-        env: BTreeMap::new(),
-        lifecycle: PaneLifecycle::Spawning,
-        created_at: SystemTime::UNIX_EPOCH,
-        exited_at: None,
-        exit_code: None,
-    }
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record.close_policy = PaneClosePolicy::Force;
+    record
 }
 
 #[test]
@@ -148,31 +137,29 @@ fn a_pane_record_survives_a_serde_round_trip() {
     let mut env = BTreeMap::new();
     env.insert("EDITOR".to_owned(), "nvim".to_owned());
 
-    let record = PaneRecord {
-        id: PaneId::new(),
-        kind: PaneKind::Terminal,
-        title: Some("editor".to_owned()),
-        command: Some(SpawnSpec {
-            program: PathBuf::from("/bin/bash"),
-            args: vec!["-l".to_owned()],
-            cwd: Some(PathBuf::from("/home/u")),
-            env: env.clone(),
-            shell_kind: ShellKind::Bash,
-        }),
+    let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
+    record.title = Some("editor".to_owned());
+    record.command = Some(SpawnSpec {
+        program: PathBuf::from("/bin/bash"),
+        args: vec!["-l".to_owned()],
         cwd: Some(PathBuf::from("/home/u")),
-        close_policy: PaneClosePolicy::Graceful {
-            timeout: Duration::from_secs(3),
-        },
-        exit_policy: PaneExitPolicy::RespawnShell,
-        env,
-        lifecycle: PaneLifecycle::Exited {
-            code: Some(0),
-            at: SystemTime::UNIX_EPOCH,
-        },
-        created_at: SystemTime::UNIX_EPOCH,
-        exited_at: Some(SystemTime::UNIX_EPOCH),
-        exit_code: Some(0),
+        env: env.clone(),
+        shell_kind: ShellKind::Bash,
+    });
+    record.cwd = Some(PathBuf::from("/home/u"));
+    record.close_policy = PaneClosePolicy::Graceful {
+        timeout: Duration::from_secs(3),
     };
+    record.exit_policy = PaneExitPolicy::RespawnShell;
+    record.env = env;
+    record.exited_at = Some(SystemTime::UNIX_EPOCH);
+    record.exit_code = Some(0);
+    // Drive to `Exited { code: Some(0), .. }` through legal events.
+    record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+    record.update_lifecycle(PaneLifecycleEvent::ProcessExited {
+        code: Some(0),
+        at: SystemTime::UNIX_EPOCH,
+    });
 
     let json = serde_json::to_string(&record).expect("serialize");
     let restored: PaneRecord = serde_json::from_str(&json).expect("deserialize");
@@ -182,11 +169,9 @@ fn a_pane_record_survives_a_serde_round_trip() {
 
 #[test]
 fn a_plugin_pane_kind_survives_a_serde_round_trip() {
-    let record = PaneRecord {
-        kind: PaneKind::Plugin {
-            plugin_id: PluginId::new(),
-        },
-        ..terminal_record(PaneId::new())
+    let mut record = terminal_record(PaneId::new());
+    record.kind = PaneKind::Plugin {
+        plugin_id: PluginId::new(),
     };
 
     let json = serde_json::to_string(&record).expect("serialize");

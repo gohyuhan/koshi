@@ -6,12 +6,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tile_core::{
     constant::MAX_TAB_FOCUS_MRU,
-    ids::{PaneId, SessionId, TabId},
+    ids::{ClientId, PaneId, SessionId, TabId},
 };
 use tile_layout::{mode::LayoutMode, tree::LayoutNode};
 use tile_pane::registry::PaneRegistry;
 
-use crate::{client::ClientRegistry, session::lifecycle::TabLifecycle};
+use crate::{
+    client::{Client, ClientRegistry},
+    session::lifecycle::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle},
+};
 
 /// One tab: its name, bar position, layout tree and mode, lifecycle, and the
 /// panes it focused, most-recent first.
@@ -22,7 +25,7 @@ pub struct Tab {
     pub index: usize,
     pub layout: LayoutNode,
     pub layout_mode: LayoutMode,
-    pub lifecycle: TabLifecycle,
+    lifecycle: TabLifecycle,
     /// Panes this tab has focused, most-recent first, with at most one entry
     /// per pane — re-focusing moves a pane to the front instead of adding a
     /// duplicate. Capped at [`MAX_TAB_FOCUS_MRU`]; focus recovery walks
@@ -64,6 +67,10 @@ impl Tab {
     pub fn remove_focus_mru(&mut self, pane_id: PaneId) {
         self.focus_mru.retain(|&p| p != pane_id);
     }
+
+    pub fn lifecycle(&self) -> &TabLifecycle {
+        &self.lifecycle
+    }
 }
 
 /// The configuration a session captured when it started. A snapshot, not a
@@ -104,6 +111,8 @@ pub struct Session {
     pub config_snapshot: SessionConfig,
     /// The session's plugin runtime, once one is running.
     pub plugin_runtime_ref: Option<PluginRuntimeHandle>,
+
+    lifecycle: SessionLifecycle,
 }
 
 impl Session {
@@ -119,6 +128,55 @@ impl Session {
             clients: client_registry,
             config_snapshot: SessionConfig,
             plugin_runtime_ref: None,
+            lifecycle: SessionLifecycle::Starting,
         }
+    }
+
+    /// The session's current lifecycle state.
+    pub fn lifecycle(&self) -> &SessionLifecycle {
+        &self.lifecycle
+    }
+
+    /// Apply a lifecycle `event`, advancing the session's state; an illegal
+    /// transition from the current state is ignored. Crate-internal — callers
+    /// drive the lifecycle through the typed wrappers ([`Session::attach_client`],
+    /// [`Session::detach_client`], [`Session::request_stop`],
+    /// [`Session::complete_stop`]) or the tab operations, so the firing
+    /// conditions stay in one place.
+    pub(crate) fn update_lifecycle(&mut self, event: SessionLifecycleEvent) {
+        if let Ok(next_lifecycle) = self.lifecycle.transition(event) {
+            self.lifecycle = next_lifecycle;
+        }
+    }
+
+    /// Attach `client` and mark the session live. `ClientAttached` only revives
+    /// a `Detaching` (no-client) session; attaching to an already-`Running` one
+    /// leaves the lifecycle unchanged.
+    pub fn attach_client(&mut self, client: Client) {
+        self.clients.attach(client);
+        self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
+    }
+
+    /// Detach the client `client_id`. When it was the *last* attached client the
+    /// session drops to `Detaching` — its tabs and panes stay alive; detaching
+    /// one of several clients leaves the session `Running`.
+    pub fn detach_client(&mut self, client_id: ClientId) {
+        self.clients.detach(client_id);
+        if self.clients.is_empty() {
+            self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
+        }
+    }
+
+    /// Request shutdown: move a `Running` or `Detaching` session to `Stopping`.
+    /// State is retained — stopping destroys no tabs or panes — so a stopped
+    /// session can be persisted and restored later.
+    pub fn request_stop(&mut self) {
+        self.update_lifecycle(SessionLifecycleEvent::StopRequested);
+    }
+
+    /// Finish shutdown once teardown is done, moving `Stopping` to the terminal
+    /// `Stopped`.
+    pub fn complete_stop(&mut self) {
+        self.update_lifecycle(SessionLifecycleEvent::StopCompleted);
     }
 }

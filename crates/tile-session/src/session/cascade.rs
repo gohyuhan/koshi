@@ -185,32 +185,24 @@ pub fn on_child_exit(
         exit_code,
     })];
 
-    // Read the policy and kind, then drop the borrow before any `&mut` use.
+    // Read the policy, then drop the borrow before any `&mut` use.
     let Some(pane) = session.panes.get(pane_id) else {
         return events;
     };
     let policy = pane.exit_policy;
-    let kind = pane.kind.clone();
 
     match policy {
         // Respawn in place: Running -> Exited -> Spawning. The actual process
-        // spawn is the runtime's job; here we only advance the lifecycle.
+        // spawn is the runtime's job; here we only advance the lifecycle. An
+        // illegal step is a no-op (the pane was not Running), so applying the
+        // two events in sequence settles on the right state either way.
         PaneExitPolicy::RespawnShell => {
             if let Some(pane) = session.panes.get_mut(pane_id) {
-                if let Ok(exited) = pane.lifecycle.transition(
-                    PaneLifecycleEvent::ProcessExited {
-                        code: exit_code,
-                        at: exited_at,
-                    },
-                    kind.clone(),
-                ) {
-                    pane.lifecycle = exited;
-                    if let Ok(spawning) =
-                        pane.lifecycle.transition(PaneLifecycleEvent::Respawn, kind)
-                    {
-                        pane.lifecycle = spawning;
-                    }
-                }
+                pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
+                    code: exit_code,
+                    at: exited_at,
+                });
+                pane.update_lifecycle(PaneLifecycleEvent::Respawn);
             }
         }
         // A self-exiting shell removes its pane through the shared cascade.

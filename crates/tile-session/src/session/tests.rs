@@ -1,12 +1,40 @@
+use std::time::SystemTime;
+
 use tile_core::constant::MAX_TAB_FOCUS_MRU;
-use tile_core::ids::{PaneId, SessionId, TabId};
+use tile_core::event::Event;
+use tile_core::geometry::Size;
+use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_layout::mode::LayoutMode;
 use tile_layout::tree::LayoutNode;
 use tile_pane::registry::PaneRegistry;
 
-use super::lifecycle::TabLifecycle;
+use super::lifecycle::{SessionLifecycle, TabLifecycle};
 use super::state::{Session, Tab};
-use crate::client::ClientRegistry;
+use super::tab_ops::{close_tab, new_tab};
+use crate::client::{Client, ClientRegistry};
+
+/// A client viewing `active_tab`, with a fixed viewport and `UNIX_EPOCH` attach
+/// time so tests stay deterministic.
+fn client_viewing(active_tab: TabId) -> Client {
+    Client::new(
+        ClientId::new(),
+        SessionId::new(),
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        active_tab,
+    )
+}
+
+/// The id of the tab a `new_tab` call just created, read off its `TabCreated`.
+fn created_tab_id(events: &[Event]) -> TabId {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::TabCreated(created) => Some(created.tab_id),
+            _ => None,
+        })
+        .expect("new_tab emits a TabCreated event")
+}
 
 #[test]
 fn a_new_session_starts_empty() {
@@ -34,7 +62,7 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
     // A fresh tab shows exactly its root pane, tiled, mid-creation, no focus yet.
     assert_eq!(tab.layout, LayoutNode::Pane(root));
     assert_eq!(tab.layout_mode, LayoutMode::Tiled);
-    assert_eq!(tab.lifecycle, TabLifecycle::Creating);
+    assert_eq!(*tab.lifecycle(), TabLifecycle::Creating);
     assert!(tab.focus_mru().is_empty());
 }
 
@@ -113,4 +141,103 @@ fn a_tab_survives_a_serde_round_trip() {
     let restored: Tab = serde_json::from_str(&json).expect("deserialize");
 
     assert_eq!(tab, restored);
+}
+
+#[test]
+fn a_fresh_session_is_starting() {
+    let session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Starting);
+}
+
+#[test]
+fn the_first_tab_moves_the_session_to_running() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+
+    let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+
+    // A second tab does not re-fire the start transition.
+    let _ = new_tab(&mut session, "logs".to_owned(), SystemTime::UNIX_EPOCH);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+}
+
+#[test]
+fn detaching_the_last_client_parks_the_session_without_destroying_state() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let client = client_viewing(tab);
+    let client_id = client.id();
+    session.attach_client(client);
+    // Attaching to a running session leaves it running.
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+
+    session.detach_client(client_id);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+    // Parking is not destruction: the tabs and panes stay alive.
+    assert!(!session.tabs.is_empty());
+    assert!(!session.panes.is_empty());
+}
+
+#[test]
+fn re_attaching_resumes_a_detached_session() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let first = client_viewing(tab);
+    let first_id = first.id();
+    session.attach_client(first);
+    session.detach_client(first_id);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+
+    session.attach_client(client_viewing(tab));
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+}
+
+#[test]
+fn detaching_one_of_several_clients_keeps_the_session_running() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let a = client_viewing(tab);
+    let a_id = a.id();
+    let b = client_viewing(tab);
+    let b_id = b.id();
+    session.attach_client(a);
+    session.attach_client(b);
+
+    session.detach_client(a_id);
+    // One client remains, so the session is still running.
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+
+    session.detach_client(b_id);
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Detaching);
+}
+
+#[test]
+fn requesting_then_completing_a_stop_walks_to_stopped() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+
+    session.request_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+
+    session.complete_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopped);
+}
+
+#[test]
+fn closing_the_last_tab_requests_a_stop() {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let teardown = close_tab(&mut session, tab);
+
+    assert!(teardown.iter().any(|event| matches!(event, Event::Quit)));
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
 }

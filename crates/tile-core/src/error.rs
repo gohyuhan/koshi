@@ -15,6 +15,7 @@ pub enum DomainCategory {
     Terminal,
     Layout,
     Plugin,
+    Session,
     Storage,
 }
 
@@ -28,6 +29,7 @@ impl std::fmt::Display for DomainCategory {
             DomainCategory::Terminal => f.write_str("terminal"),
             DomainCategory::Layout => f.write_str("layout"),
             DomainCategory::Plugin => f.write_str("plugin"),
+            DomainCategory::Session => f.write_str("session"),
             DomainCategory::Storage => f.write_str("storage"),
         }
     }

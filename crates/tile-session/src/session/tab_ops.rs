@@ -26,6 +26,7 @@ use tile_core::ids::{ClientId, PaneId, TabId};
 use tile_pane::pane::state::PaneRecord;
 
 use crate::client::Client;
+use crate::session::lifecycle::SessionLifecycleEvent;
 use crate::session::state::{Session, Tab};
 
 /// Which tab a focus request names, resolved against the current display order
@@ -66,6 +67,9 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
 
     // new tab
     let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
+    if session.tabs.is_empty() {
+        session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
+    }
     // record the tab into the session available tab
     session.tabs.insert(new_tab_id, new_tab);
 
@@ -282,6 +286,7 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
     reindex_tab_index(session);
 
     if session.tabs.is_empty() {
+        session.update_lifecycle(SessionLifecycleEvent::StopRequested);
         events.push(Event::Quit);
     }
 

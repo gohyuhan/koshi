@@ -16,7 +16,7 @@ use tile_core::{
 };
 
 use crate::pane::{
-    lifecycle::PaneLifecycle,
+    lifecycle::{PaneLifecycle, PaneLifecycleEvent},
     policy::{PaneClosePolicy, PaneExitPolicy},
 };
 
@@ -63,7 +63,7 @@ pub struct PaneRecord {
     /// Environment overrides applied at spawn, sorted for deterministic output.
     pub env: BTreeMap<String, String>,
     /// Where the pane sits in its lifecycle.
-    pub lifecycle: PaneLifecycle,
+    lifecycle: PaneLifecycle,
     /// When the pane was created.
     pub created_at: SystemTime,
     /// When the pane's child exited, once it has.
@@ -87,6 +87,16 @@ impl PaneRecord {
             created_at,
             exited_at: None,
             exit_code: None,
+        }
+    }
+
+    pub fn lifecycle(&self) -> &PaneLifecycle {
+        &self.lifecycle
+    }
+
+    pub fn update_lifecycle(&mut self, event: PaneLifecycleEvent) {
+        if let Ok(next_lifecycle) = self.lifecycle.transition(event, self.kind.clone()) {
+            self.lifecycle = next_lifecycle;
         }
     }
 }

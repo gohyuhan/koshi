@@ -69,7 +69,7 @@ pub fn repair_focus(
         candidate.layout_order.contains(&pane_id)
             && pane_registry
                 .get(pane_id)
-                .is_some_and(|pane| pane.lifecycle != PaneLifecycle::Removed)
+                .is_some_and(|pane| *pane.lifecycle() != PaneLifecycle::Removed)
     };
 
     for &pane_id in tab.focus_mru() {
