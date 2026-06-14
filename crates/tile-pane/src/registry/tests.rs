@@ -163,7 +163,7 @@ fn a_pane_record_survives_a_serde_round_trip() {
         close_policy: PaneClosePolicy::Graceful {
             timeout: Duration::from_secs(3),
         },
-        exit_policy: PaneExitPolicy::HoldOnExit,
+        exit_policy: PaneExitPolicy::RespawnShell,
         env,
         lifecycle: PaneLifecycle::Exited {
             code: Some(0),

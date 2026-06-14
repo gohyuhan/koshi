@@ -33,8 +33,8 @@ pub enum FocusRepairResult {
     /// back enough to un-suppress a pane.
     TerminalTooSmall,
     /// The tab has no panes left at all. There is nothing to focus, so the
-    /// caller carries out the tab's empty-tab policy — close the tab, respawn a
-    /// shell, or keep a dead placeholder.
+    /// caller carries out the tab's empty-tab policy — close the tab or respawn
+    /// a shell.
     EmptyTab(EmptyTabPolicy),
 }
 

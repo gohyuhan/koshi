@@ -3,8 +3,8 @@
 //!
 //! [`PaneClosePolicy`] governs a requested close — graceful with a grace
 //! period, forced, or confirm-if-busy. [`PaneExitPolicy`] governs the pane's
-//! fate when its child exits on its own — close it, hold the dead pane visible,
-//! or respawn a shell. Each carries its production default, and
+//! fate when its child exits on its own — close it or respawn a shell. Each
+//! carries its production default, and
 //! [`PaneClosePolicy::kill_policy`] maps a requested close onto the process
 //! [`KillPolicy`]. The tab-level empty-tab policy lives with the session model.
 
@@ -51,7 +51,6 @@ impl PaneClosePolicy {
 pub enum PaneExitPolicy {
     #[default]
     CloseOnExit,
-    HoldOnExit,
     RespawnShell,
 }
 

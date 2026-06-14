@@ -345,29 +345,28 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
 }
 
 #[test]
-fn a_held_dead_pane_keeps_its_header_and_stays_selectable() {
+fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
     use std::collections::HashSet;
 
     use crate::focus::stack_activate;
     use crate::normalize::normalize;
 
-    let (alive, held) = (PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::stack(vec![alive, held], 0));
+    let (active, inactive) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![active, inactive], 0));
 
-    // Hold-on-exit: the exited pane is never removed, so it is still a live
-    // member of the layout. Normalization keeps it.
-    let live: HashSet<PaneId> = [alive, held].into_iter().collect();
+    // Both panes are in the live set, so normalization keeps the whole stack.
+    let live: HashSet<PaneId> = [active, inactive].into_iter().collect();
     let mut normalized = normalize(&tree, &live).unwrap();
-    assert_eq!(normalized.leaf_panes(), [alive, held]);
+    assert_eq!(normalized.leaf_panes(), [active, inactive]);
 
-    // Its header is still drawn, and it can still be activated.
+    // The non-active member's header is still drawn, and it can be activated.
     let result = solve(&normalized, tab());
     assert_eq!(result.stack_headers.len(), 1);
-    assert_eq!(result.stack_headers[0].pane, held);
+    assert_eq!(result.stack_headers[0].pane, inactive);
 
-    let stack = normalized.stack_containing_mut(held).unwrap();
-    let change = stack_activate(stack, held).unwrap();
-    assert_eq!(change.newly_active, held);
+    let stack = normalized.stack_containing_mut(inactive).unwrap();
+    let change = stack_activate(stack, inactive).unwrap();
+    assert_eq!(change.newly_active, inactive);
 }
 
 #[test]

@@ -71,11 +71,7 @@ fn a_graceful_timeout_serializes_as_whole_seconds_matching_kill_policy() {
 
 #[test]
 fn an_exit_policy_survives_a_serde_round_trip() {
-    for policy in [
-        PaneExitPolicy::CloseOnExit,
-        PaneExitPolicy::HoldOnExit,
-        PaneExitPolicy::RespawnShell,
-    ] {
+    for policy in [PaneExitPolicy::CloseOnExit, PaneExitPolicy::RespawnShell] {
         let json = serde_json::to_string(&policy).expect("serialize");
         let restored: PaneExitPolicy = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(policy, restored);

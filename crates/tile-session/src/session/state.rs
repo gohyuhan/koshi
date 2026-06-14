@@ -60,6 +60,10 @@ impl Tab {
     pub fn focus_mru(&self) -> &[PaneId] {
         &self.focus_mru
     }
+
+    pub fn remove_focus_mru(&mut self, pane_id: PaneId) {
+        self.focus_mru.retain(|&p| p != pane_id);
+    }
 }
 
 /// The configuration a session captured when it started. A snapshot, not a
