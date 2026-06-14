@@ -46,7 +46,7 @@ fn single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
 }
 
 /// A single-pane tab at display position `index`.
-fn tab_with_index(tab_id: TabId, pane: PaneId, index: u32) -> Tab {
+fn tab_with_index(tab_id: TabId, pane: PaneId, index: usize) -> Tab {
     let mut tab = single_pane_tab(tab_id, pane);
     tab.index = index;
     tab

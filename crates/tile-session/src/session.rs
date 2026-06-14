@@ -7,6 +7,7 @@ pub mod focus;
 pub mod lifecycle;
 pub mod policy;
 pub mod state;
+pub mod tab_ops;
 
 #[cfg(test)]
 mod tests;

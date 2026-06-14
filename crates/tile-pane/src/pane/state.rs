@@ -71,3 +71,22 @@ pub struct PaneRecord {
     /// The child's exit code, once it has exited.
     pub exit_code: Option<i32>,
 }
+
+impl PaneRecord {
+    pub fn new(id: PaneId, created_at: SystemTime) -> Self {
+        Self {
+            id,
+            kind: PaneKind::Terminal,
+            title: None,
+            command: None,
+            cwd: None,
+            close_policy: PaneClosePolicy::default(),
+            exit_policy: PaneExitPolicy::default(),
+            env: BTreeMap::new(),
+            lifecycle: PaneLifecycle::Spawning,
+            created_at,
+            exited_at: None,
+            exit_code: None,
+        }
+    }
+}
