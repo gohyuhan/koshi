@@ -556,8 +556,9 @@ fn event_variant_names_are_canonical() {
             })),
             "Plugin",
         ),
+        (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 40);
+    assert_eq!(cases.len(), 41);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }

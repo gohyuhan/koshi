@@ -45,6 +45,13 @@ fn single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
     Tab::new(tab_id, "code".to_owned(), 0, pane)
 }
 
+/// A single-pane tab at display position `index`.
+fn tab_with_index(tab_id: TabId, pane: PaneId, index: u32) -> Tab {
+    let mut tab = single_pane_tab(tab_id, pane);
+    tab.index = index;
+    tab
+}
+
 /// A tab split left/right between `left` and `right`.
 fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
@@ -174,6 +181,40 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
         session.clients.get(second_id).unwrap().focused_pane(tab_id),
         Some(b)
     );
+}
+
+#[test]
+fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let client = focused_client(tab_id, a);
+    let client_id = client.id();
+    let mut session = session_with(
+        vec![client],
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+
+    // A rect narrower than `MIN_PANE_SIZE` suppresses the survivor, so focus
+    // recovery finds no focusable pane though the tab still holds one.
+    let tiny = Rect::new(Point { x: 0, y: 0 }, Size { cols: 1, rows: 1 });
+    let events = remove_pane_cascade(&mut session, tab_id, a, tiny, EmptyTabPolicy::CloseTab);
+
+    // The overlay is reported and the client's stale focus on the gone pane is
+    // cleared rather than left dangling.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::TerminalTooSmallEntered(t) if t.client_id == client_id)));
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab_id),
+        None
+    );
+    // The survivor stays — the tab is not empty, just unfocusable for now.
+    assert!(session.panes.get(b).is_some());
+    assert_eq!(session.tabs[&tab_id].layout.leaf_panes(), vec![b]);
 }
 
 #[test]
@@ -352,4 +393,108 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
         .any(|e| matches!(e, Event::PaneProcessExited(p) if p.pane_id == pane)));
     assert!(events.iter().any(|e| matches!(e, Event::PaneRemoved(_))));
     assert!(events.iter().any(|e| matches!(e, Event::Quit)));
+}
+
+#[test]
+fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
+    let (left, middle, right) = (TabId::new(), TabId::new(), TabId::new());
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut client = focused_client(middle, b); // viewing the middle tab
+    let client_id = client.id();
+    client.update_focused_pane(left, a); // also has a focus recorded on the left tab
+    let mut session = session_with(
+        vec![client],
+        vec![
+            tab_with_index(left, a, 0),
+            tab_with_index(middle, b, 1),
+            tab_with_index(right, c, 2),
+        ],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(c, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+
+    let _ = remove_pane_cascade(&mut session, middle, b, rect(), EmptyTabPolicy::CloseTab);
+
+    let client = session.clients.get(client_id).unwrap();
+    // The previous tab (largest index below the closed one) inherits the client.
+    assert_eq!(client.active_tab(), left);
+    // Its focus entry for the gone tab is pruned.
+    assert_eq!(client.focused_pane(middle), None);
+    // Focus it still holds on the surviving left tab is untouched.
+    assert_eq!(client.focused_pane(left), Some(a));
+}
+
+#[test]
+fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
+    let (first, second) = (TabId::new(), TabId::new());
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let client = focused_client(first, a);
+    let client_id = client.id();
+    let mut session = session_with(
+        vec![client],
+        vec![tab_with_index(first, a, 0), tab_with_index(second, b, 1)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+
+    let _ = remove_pane_cascade(&mut session, first, a, rect(), EmptyTabPolicy::CloseTab);
+
+    // No previous tab, so the next one inherits the client.
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), second);
+}
+
+#[test]
+fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
+    let (other, viewing) = (TabId::new(), TabId::new());
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut client = focused_client(viewing, b); // active on `viewing`
+    let client_id = client.id();
+    client.update_focused_pane(other, a); // but holds a stale focus on `other`
+    let mut session = session_with(
+        vec![client],
+        vec![tab_with_index(other, a, 0), tab_with_index(viewing, b, 1)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+
+    let _ = remove_pane_cascade(&mut session, other, a, rect(), EmptyTabPolicy::CloseTab);
+
+    let client = session.clients.get(client_id).unwrap();
+    // The client was not viewing the closed tab, so its active tab is unchanged.
+    assert_eq!(client.active_tab(), viewing);
+    // The stale focus entry for the closed tab is still pruned.
+    assert_eq!(client.focused_pane(other), None);
+}
+
+#[test]
+fn closing_the_last_tab_prunes_client_focus_and_quits() {
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let client = focused_client(tab_id, pane);
+    let client_id = client.id();
+    let mut session = session_with(
+        vec![client],
+        vec![single_pane_tab(tab_id, pane)],
+        vec![record(
+            pane,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+
+    let events = remove_pane_cascade(&mut session, tab_id, pane, rect(), EmptyTabPolicy::CloseTab);
+
+    assert!(events.iter().any(|e| matches!(e, Event::Quit)));
+    // The focus entry for the closed tab is pruned even as the session quits.
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab_id),
+        None
+    );
 }
