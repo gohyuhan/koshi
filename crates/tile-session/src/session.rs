@@ -1,5 +1,6 @@
 //! `session` domain — skeleton per standard source layout.
 
+pub mod cascade;
 pub mod command;
 pub mod event;
 pub mod focus;

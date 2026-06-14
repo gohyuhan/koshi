@@ -235,7 +235,7 @@ fn an_exited_pane_is_never_silently_removed() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Acceptance signal: Exited is retained (HoldOnExit) — no event takes it
+    // Acceptance signal: Exited is a retained state — no event takes it
     // straight to Removed; only an explicit close, then cleanup, does.
     for event in all_events() {
         assert_ne!(

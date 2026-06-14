@@ -128,6 +128,11 @@ pub enum Event {
     // Plugin lifecycle.
     /// A plugin lifecycle fact.
     Plugin(PluginEvent),
+
+    // Session lifecycle.
+    /// The session is shutting down: its last tab closed, so the program
+    /// quits. A terminal event — nothing follows it.
+    Quit,
 }
 
 // ============================================================================
