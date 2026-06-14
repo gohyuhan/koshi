@@ -1,4 +1,4 @@
-name: test
+name: ci
 
 on:
   push:
@@ -8,8 +8,8 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  test:
-    name: fmt + clippy + test
+  formatting:
+    name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -30,11 +30,37 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  dep-guard:
+    name: dependency guard
+    runs-on: ubuntu-latest
+    needs: formatting
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Dependency-direction guard
+        run: cargo xtask dep-guard
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: dep-guard
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
       - name: Check
         run: cargo check --workspace --all-targets --locked
 
       - name: Test
         run: cargo test --workspace --all-features --locked
-
-      - name: Dependency-direction guard
-        run: cargo xtask dep-guard
