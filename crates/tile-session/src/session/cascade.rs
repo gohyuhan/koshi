@@ -17,8 +17,7 @@
 use std::time::SystemTime;
 
 use tile_core::event::{
-    Event, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, TabClosed,
-    TerminalTooSmallEntered,
+    Event, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, TerminalTooSmallEntered,
 };
 use tile_core::geometry::Rect;
 use tile_core::ids::{ClientId, PaneId, TabId};
@@ -31,6 +30,7 @@ use tile_pane::pane::policy::PaneExitPolicy;
 use crate::session::focus::{repair_focus, FocusRepairResult};
 use crate::session::policy::EmptyTabPolicy;
 use crate::session::state::Session;
+use crate::session::tab_ops::close_and_refocus_tab;
 
 /// Remove `pane_id` from `tab_id` and follow the consequences up the tree.
 ///
@@ -143,33 +143,7 @@ pub fn remove_pane_cascade(
         // The tab is empty: its policy decides its fate.
         None => match empty_tab_policy {
             EmptyTabPolicy::CloseTab => {
-                let closed_index = session.tabs.get(&tab_id).map(|tab| tab.index);
-                session.tabs.remove(&tab_id);
-                events.push(Event::TabClosed(TabClosed { tab_id }));
-
-                // Move every client off the closed tab: drop its focus entry for
-                // the gone tab, and if it was viewing that tab, send it to the
-                // nearest surviving tab.
-                let next_tab = closed_index.and_then(|index| nearest_surviving_tab(session, index));
-                let client_ids: Vec<ClientId> = session
-                    .clients
-                    .list_attached()
-                    .map(|client| client.id())
-                    .collect();
-                for client_id in client_ids {
-                    if let Some(client) = session.clients.get_mut(client_id) {
-                        client.remove_focused_pane(tab_id);
-                        if client.active_tab() == tab_id {
-                            if let Some(next) = next_tab {
-                                client.update_active_tab(next);
-                            }
-                        }
-                    }
-                }
-
-                if session.tabs.is_empty() {
-                    events.push(Event::Quit);
-                }
+                events.extend(close_and_refocus_tab(session, tab_id));
             }
             // Respawn a fresh shell into the now-empty tab instead of closing
             // it. Spawning a replacement pane is the runtime's job and needs a
@@ -180,23 +154,6 @@ pub fn remove_pane_cascade(
     }
 
     events
-}
-
-/// The surviving tab nearest `closed_index` in display order: the previous tab
-/// (largest index below it) if one exists, otherwise the next (smallest index
-/// above it). `None` when no tabs remain.
-fn nearest_surviving_tab(session: &Session, closed_index: u32) -> Option<TabId> {
-    let previous = session
-        .tabs
-        .values()
-        .filter(|tab| tab.index < closed_index)
-        .max_by_key(|tab| tab.index);
-    let next = session
-        .tabs
-        .values()
-        .filter(|tab| tab.index > closed_index)
-        .min_by_key(|tab| tab.index);
-    previous.or(next).map(|tab| tab.id)
 }
 
 /// Handle a pane's child process exiting, applying its [`PaneExitPolicy`].

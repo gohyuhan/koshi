@@ -19,7 +19,7 @@ use crate::{client::ClientRegistry, session::lifecycle::TabLifecycle};
 pub struct Tab {
     pub id: TabId,
     pub name: String,
-    pub index: u32,
+    pub index: usize,
     pub layout: LayoutNode,
     pub layout_mode: LayoutMode,
     pub lifecycle: TabLifecycle,
@@ -35,7 +35,7 @@ impl Tab {
     /// A freshly created tab showing a single pane. Starts in `Creating`
     /// with no focus recorded yet; `root_pane` is its only layout leaf.
     #[must_use]
-    pub fn new(id: TabId, name: String, tab_index: u32, root_pane: PaneId) -> Self {
+    pub fn new(id: TabId, name: String, tab_index: usize, root_pane: PaneId) -> Self {
         Self {
             id,
             name,
