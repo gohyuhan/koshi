@@ -110,7 +110,7 @@ fn new_tab_registers_a_spawning_pane_and_emits_created_then_pane_created() {
     assert_eq!(tab.id, tab_id);
     assert_eq!(tab.layout.leaf_panes(), vec![pane_id]);
     assert_eq!(
-        session.panes.get(pane_id).unwrap().lifecycle,
+        *session.panes.get(pane_id).unwrap().lifecycle(),
         PaneLifecycle::Spawning
     );
 }

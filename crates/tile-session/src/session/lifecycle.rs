@@ -1,16 +1,20 @@
-//! Lifecycle state machines for the session model: the typed states a tab —
-//! and later a session — moves through from creation to teardown.
+//! Lifecycle state machines for the session model: the typed states a tab and
+//! a session move through from creation to teardown.
 //!
-//! Each lifecycle is a small enum. A tab is born `Creating`, becomes the
-//! shown tab (`Active`) or a background one (`Inactive`), then winds down
-//! through `Closing` to `Closed`. Modelling the stages as a type turns an
-//! illegal move — reviving a closed tab, showing one mid-teardown — into a
-//! transition-time error instead of a silent bug.
+//! Each lifecycle is a small enum. A tab is born `Creating`, becomes `Active`
+//! once its root pane is live, and winds down through `Closing` to `Closed`. A
+//! session starts `Starting`, reaches `Running` on its first tab, drops to
+//! `Detaching` while no client is attached, and ends `Stopping` then `Stopped`.
+//! Modelling the stages as a type turns an illegal move — reviving a closed
+//! tab, stopping an already-stopped session — into a transition-time error
+//! instead of a silent bug.
 //!
-//! The enums live here; the transition functions that police the legal moves
-//! land with the operations that drive them.
+//! [`SessionLifecycle::transition`] polices the session's legal moves; the tab
+//! transitions land with the operations that drive them.
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::InvalidTransition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabLifecycle {
@@ -20,3 +24,57 @@ pub enum TabLifecycle {
     Closing,
     Closed,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionLifecycle {
+    Starting,
+    Running,
+    Detaching,
+    Stopping,
+    Stopped,
+}
+
+impl SessionLifecycle {
+    /// Apply `event`, returning the next state, or [`InvalidTransition`] if the
+    /// move is illegal from the current state. `Stopped` is terminal and
+    /// rejects every event. The returned `Result` must be used — the next state
+    /// is the transition's only effect, so the caller assigns it back.
+    pub fn transition(self, event: SessionLifecycleEvent) -> Result<Self, InvalidTransition> {
+        match (self, event) {
+            (SessionLifecycle::Starting, SessionLifecycleEvent::FirstTabCreated) => {
+                Ok(SessionLifecycle::Running)
+            }
+            (SessionLifecycle::Running, SessionLifecycleEvent::LastClientDetached) => {
+                Ok(SessionLifecycle::Detaching)
+            }
+            (SessionLifecycle::Detaching, SessionLifecycleEvent::ClientAttached) => {
+                Ok(SessionLifecycle::Running)
+            }
+            (SessionLifecycle::Running, SessionLifecycleEvent::StopRequested) => {
+                Ok(SessionLifecycle::Stopping)
+            }
+            (SessionLifecycle::Stopping, SessionLifecycleEvent::StopCompleted) => {
+                Ok(SessionLifecycle::Stopped)
+            }
+            (SessionLifecycle::Detaching, SessionLifecycleEvent::StopRequested) => {
+                Ok(SessionLifecycle::Stopping)
+            }
+            (SessionLifecycle::Starting, SessionLifecycleEvent::StopRequested) => {
+                Ok(SessionLifecycle::Stopping)
+            }
+            _ => Err(InvalidTransition { from: self, event }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionLifecycleEvent {
+    FirstTabCreated,
+    LastClientDetached,
+    ClientAttached,
+    StopRequested,
+    StopCompleted,
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,13 +1,12 @@
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use tile_core::geometry::SplitDirection;
 use tile_core::ids::{PaneId, TabId};
 use tile_layout::focus::FocusCandidates;
 use tile_layout::tree::{LayoutNode, SplitNode};
-use tile_pane::pane::lifecycle::PaneLifecycle;
-use tile_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
-use tile_pane::pane::state::{PaneKind, PaneRecord};
+use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
+use tile_pane::pane::policy::PaneClosePolicy;
+use tile_pane::pane::state::PaneRecord;
 use tile_pane::registry::PaneRegistry;
 
 use super::{repair_focus, FocusRepairResult};
@@ -20,21 +19,53 @@ fn tab_with_root(root: PaneId) -> Tab {
 }
 
 /// A terminal-pane record in `lifecycle`. Timestamps use `UNIX_EPOCH` so tests
-/// stay deterministic.
+/// stay deterministic. `lifecycle` is set only through events, so the fresh
+/// `Spawning` record is walked to the requested state along a legal path.
 fn record(id: PaneId, lifecycle: PaneLifecycle) -> PaneRecord {
-    PaneRecord {
-        id,
-        kind: PaneKind::Terminal,
-        title: None,
-        command: None,
-        cwd: None,
-        close_policy: PaneClosePolicy::Force,
-        exit_policy: PaneExitPolicy::CloseOnExit,
-        env: BTreeMap::new(),
-        lifecycle,
-        created_at: SystemTime::UNIX_EPOCH,
-        exited_at: None,
-        exit_code: None,
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record.close_policy = PaneClosePolicy::Force;
+    walk_lifecycle(&mut record, lifecycle);
+    record
+}
+
+/// Walk a fresh `Spawning` record to `target` through legal lifecycle events.
+fn walk_lifecycle(record: &mut PaneRecord, target: PaneLifecycle) {
+    match target {
+        PaneLifecycle::Spawning => {}
+        PaneLifecycle::Running => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Exited { code, at } => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessExited { code, at })
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Closing { since } => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested { since })
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Removed => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+                    since: SystemTime::UNIX_EPOCH,
+                })
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::Cleaned)
+                .expect("walk_lifecycle drives only legal transitions");
+        }
     }
 }
 

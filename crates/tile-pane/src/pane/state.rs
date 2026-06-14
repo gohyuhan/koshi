@@ -15,8 +15,9 @@ use tile_core::{
     process::SpawnSpec,
 };
 
+use crate::error::InvalidTransition;
 use crate::pane::{
-    lifecycle::PaneLifecycle,
+    lifecycle::{PaneLifecycle, PaneLifecycleEvent},
     policy::{PaneClosePolicy, PaneExitPolicy},
 };
 
@@ -63,7 +64,7 @@ pub struct PaneRecord {
     /// Environment overrides applied at spawn, sorted for deterministic output.
     pub env: BTreeMap<String, String>,
     /// Where the pane sits in its lifecycle.
-    pub lifecycle: PaneLifecycle,
+    lifecycle: PaneLifecycle,
     /// When the pane was created.
     pub created_at: SystemTime,
     /// When the pane's child exited, once it has.
@@ -88,5 +89,19 @@ impl PaneRecord {
             exited_at: None,
             exit_code: None,
         }
+    }
+
+    pub fn lifecycle(&self) -> &PaneLifecycle {
+        &self.lifecycle
+    }
+
+    /// Apply a lifecycle `event`, advancing the pane's state, or return
+    /// [`InvalidTransition`] if the move is illegal from the current state.
+    /// The pane is the sole owner of its lifecycle (the field is private), so
+    /// this is the only way to drive it; the caller decides whether a rejected
+    /// event is an expected no-op to ignore or a fault to report.
+    pub fn update_lifecycle(&mut self, event: PaneLifecycleEvent) -> Result<(), InvalidTransition> {
+        self.lifecycle = self.lifecycle.transition(event, self.kind.clone())?;
+        Ok(())
     }
 }

@@ -1,13 +1,12 @@
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use tile_core::event::Event;
 use tile_core::geometry::{Point, Rect, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_layout::tree::{LayoutChild, LayoutNode, SplitNode};
-use tile_pane::pane::lifecycle::PaneLifecycle;
+use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use tile_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
-use tile_pane::pane::state::{PaneKind, PaneRecord};
+use tile_pane::pane::state::PaneRecord;
 
 use super::{on_child_exit, remove_pane_cascade};
 use crate::client::{Client, ClientRegistry};
@@ -22,21 +21,55 @@ fn rect() -> Rect {
 }
 
 /// A terminal-pane record in `lifecycle` with the given exit policy.
-/// Timestamps use `UNIX_EPOCH` so tests stay deterministic.
+/// Timestamps use `UNIX_EPOCH` so tests stay deterministic. `lifecycle` is set
+/// only through events, so the fresh `Spawning` record is walked to the
+/// requested state along a legal transition path.
 fn record(id: PaneId, lifecycle: PaneLifecycle, exit_policy: PaneExitPolicy) -> PaneRecord {
-    PaneRecord {
-        id,
-        kind: PaneKind::Terminal,
-        title: None,
-        command: None,
-        cwd: None,
-        close_policy: PaneClosePolicy::Force,
-        exit_policy,
-        env: BTreeMap::new(),
-        lifecycle,
-        created_at: SystemTime::UNIX_EPOCH,
-        exited_at: None,
-        exit_code: None,
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record.close_policy = PaneClosePolicy::Force;
+    record.exit_policy = exit_policy;
+    walk_lifecycle(&mut record, lifecycle);
+    record
+}
+
+/// Walk a fresh `Spawning` record to `target` through legal lifecycle events.
+fn walk_lifecycle(record: &mut PaneRecord, target: PaneLifecycle) {
+    match target {
+        PaneLifecycle::Spawning => {}
+        PaneLifecycle::Running => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Exited { code, at } => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessExited { code, at })
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Closing { since } => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested { since })
+                .expect("walk_lifecycle drives only legal transitions");
+        }
+        PaneLifecycle::Removed => {
+            record
+                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+                    since: SystemTime::UNIX_EPOCH,
+                })
+                .expect("walk_lifecycle drives only legal transitions");
+            record
+                .update_lifecycle(PaneLifecycleEvent::Cleaned)
+                .expect("walk_lifecycle drives only legal transitions");
+        }
     }
 }
 
@@ -355,7 +388,7 @@ fn a_respawn_shell_pane_returns_to_spawning() {
     );
 
     let kept = session.panes.get(pane).expect("the pane is kept");
-    assert_eq!(kept.lifecycle, PaneLifecycle::Spawning);
+    assert_eq!(*kept.lifecycle(), PaneLifecycle::Spawning);
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::PaneProcessExited(p) if p.pane_id == pane)));
