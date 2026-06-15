@@ -596,7 +596,7 @@ impl std::error::Error for CommandEnvelopeError {}
 /// One command crossing a boundary, with its identity, origin, and timestamp.
 ///
 /// `client_id` is redundant with the client named by `source`; the two must
-/// agree. Deserialization is routed through [`CommandEnvelopeWire`] and rejects
+/// agree. Deserialization is routed through `CommandEnvelopeWire` and rejects
 /// any envelope where they disagree, so a value decoded from the IPC socket or
 /// a plugin can never carry a forged `client_id`. In-process construction
 /// should use [`CommandEnvelope::new`] (which derives the field) or pass a

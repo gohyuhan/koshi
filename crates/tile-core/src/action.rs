@@ -41,7 +41,7 @@ const MAX_ACTION_NAME_LEN: usize = 31;
 pub enum ActionNameError {
     /// The name was empty.
     Empty,
-    /// The name exceeded [`MAX_ACTION_NAME_LEN`] characters.
+    /// The name exceeded `MAX_ACTION_NAME_LEN` characters.
     TooLong {
         /// The offending length.
         len: usize,

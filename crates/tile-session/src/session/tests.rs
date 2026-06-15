@@ -6,12 +6,15 @@ use tile_core::geometry::Size;
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_layout::mode::LayoutMode;
 use tile_layout::tree::LayoutNode;
+use tile_pane::pane::lifecycle::PaneLifecycleEvent;
+use tile_pane::pane::state::PaneRecord;
 use tile_pane::registry::PaneRegistry;
 
 use super::lifecycle::{SessionLifecycle, TabLifecycle};
 use super::state::{Session, Tab};
 use super::tab_ops::{close_tab, new_tab};
 use crate::client::{Client, ClientRegistry};
+use crate::error::SessionConsistencyError;
 
 /// A client viewing `active_tab`, with a fixed viewport and `UNIX_EPOCH` attach
 /// time so tests stay deterministic.
@@ -240,4 +243,390 @@ fn closing_the_last_tab_requests_a_stop() {
 
     assert!(teardown.iter().any(|event| matches!(event, Event::Quit)));
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+}
+
+/// A fresh, empty session with a random id.
+fn empty_session() -> Session {
+    Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new())
+}
+
+/// A `Running` pane record registered in `session`, returned by id. Live and a
+/// valid layout leaf, so on its own it trips no pane-level consistency check.
+fn register_live_pane(session: &mut Session) -> PaneId {
+    let id = PaneId::new();
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record
+        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+        .expect("Spawning -> Running is a legal transition");
+    session
+        .panes
+        .insert(record)
+        .expect("a fresh pane id is unique");
+    id
+}
+
+/// A `Removed` pane record registered in `session`, returned by id.
+fn register_removed_pane(session: &mut Session) -> PaneId {
+    let id = PaneId::new();
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record
+        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+            since: SystemTime::UNIX_EPOCH,
+        })
+        .expect("Spawning -> Closing is a legal transition");
+    record
+        .update_lifecycle(PaneLifecycleEvent::Cleaned)
+        .expect("Closing -> Removed is a legal transition");
+    session
+        .panes
+        .insert(record)
+        .expect("a fresh pane id is unique");
+    id
+}
+
+/// The id of the pane a `new_tab` call just created, read off its `PaneCreated`.
+fn created_pane_id(events: &[Event]) -> PaneId {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::PaneCreated(created) => Some(created.pane_id),
+            _ => None,
+        })
+        .expect("new_tab emits a PaneCreated event")
+}
+
+/// Attach a client *of this session*, viewing `active_tab`, and return its id.
+fn attach_viewing(session: &mut Session, active_tab: TabId) -> ClientId {
+    let client = Client::new(
+        ClientId::new(),
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        active_tab,
+    );
+    let client_id = client.id();
+    session.attach_client(client);
+    client_id
+}
+
+/// A clone of `tab` with its (private) lifecycle forced via a serde round-trip.
+/// No tab-lifecycle driver exists yet, so this is the only way to construct a
+/// `Closed` tab to exercise the consistency guard for one.
+fn force_tab_lifecycle(tab: &Tab, lifecycle: &str) -> Tab {
+    let mut value = serde_json::to_value(tab).expect("a tab serializes");
+    value["lifecycle"] = serde_json::Value::String(lifecycle.to_owned());
+    serde_json::from_value(value).expect("a tab with a forced lifecycle deserializes")
+}
+
+#[test]
+fn a_freshly_built_session_is_consistent() {
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
+
+    let client_id = attach_viewing(&mut session, tab);
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(tab, pane);
+
+    session
+        .validate()
+        .expect("a session built through the normal operations is consistent");
+}
+
+#[test]
+fn a_layout_leaf_with_no_record_is_reported() {
+    let mut session = empty_session();
+    let ghost = PaneId::new();
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
+    session.tabs.insert(tab.id, tab);
+
+    let errors = session
+        .validate()
+        .expect_err("a leaf with no registry record is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::PaneNotInRegistry { pane, .. } if *pane == ghost
+    )));
+}
+
+#[test]
+fn a_removed_pane_left_in_the_layout_is_reported() {
+    let mut session = empty_session();
+    let pane = register_removed_pane(&mut session);
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
+    session.tabs.insert(tab.id, tab);
+
+    let errors = session
+        .validate()
+        .expect_err("a removed pane still in the layout is inconsistent");
+    // A removed pane kept as a leaf breaks two invariants at once: it is an
+    // illegal leaf *and* a record that should have been dropped.
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::RemovedPaneInLayout { pane: p, .. } if *p == pane
+    )));
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::LingeringRemovedRecord { pane: p } if *p == pane
+    )));
+}
+
+#[test]
+fn a_live_record_in_no_layout_is_reported() {
+    let mut session = empty_session();
+    let orphan = register_live_pane(&mut session);
+
+    let errors = session
+        .validate()
+        .expect_err("a live record that is not a leaf anywhere is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::OrphanedPaneRecord { pane, .. } if *pane == orphan
+    )));
+}
+
+#[test]
+fn a_removed_record_with_no_layout_is_reported() {
+    let mut session = empty_session();
+    let pane = register_removed_pane(&mut session);
+
+    let errors = session
+        .validate()
+        .expect_err("a removed record lingering in the registry is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::LingeringRemovedRecord { pane: p } if *p == pane
+    )));
+    // It is not a leaf, so the layout-side check does not also fire.
+    assert!(!errors
+        .iter()
+        .any(|error| matches!(error, SessionConsistencyError::RemovedPaneInLayout { .. })));
+}
+
+#[test]
+fn a_pane_placed_in_two_tabs_is_reported() {
+    let mut session = empty_session();
+    let shared = register_live_pane(&mut session);
+    let tab_a = Tab::new(TabId::new(), "a".to_owned(), 0, shared);
+    let tab_b = Tab::new(TabId::new(), "b".to_owned(), 1, shared);
+    session.tabs.insert(tab_a.id, tab_a);
+    session.tabs.insert(tab_b.id, tab_b);
+
+    let errors = session
+        .validate()
+        .expect_err("a pane that is a leaf in two tabs is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::PaneInMultipleLayouts { pane, tabs }
+            if *pane == shared && tabs.len() == 2
+    )));
+}
+
+#[test]
+fn a_tab_stored_under_the_wrong_key_is_reported() {
+    let mut session = empty_session();
+    let pane = register_live_pane(&mut session);
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
+    let tab_id = tab.id;
+    let wrong_key = TabId::new();
+    session.tabs.insert(wrong_key, tab);
+
+    let errors = session
+        .validate()
+        .expect_err("a tab keyed under a foreign id is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::TabKeyMismatch { key, tab_id: id }
+            if *key == wrong_key && *id == tab_id
+    )));
+}
+
+#[test]
+fn two_tabs_sharing_a_bar_index_are_reported() {
+    let mut session = empty_session();
+    let pane_a = register_live_pane(&mut session);
+    let pane_b = register_live_pane(&mut session);
+    let tab_a = Tab::new(TabId::new(), "a".to_owned(), 0, pane_a);
+    let tab_b = Tab::new(TabId::new(), "b".to_owned(), 0, pane_b);
+    session.tabs.insert(tab_a.id, tab_a);
+    session.tabs.insert(tab_b.id, tab_b);
+
+    let errors = session
+        .validate()
+        .expect_err("two tabs at the same bar position is inconsistent");
+    assert!(errors.contains(&SessionConsistencyError::DuplicateTabIndex { index: 0 }));
+}
+
+#[test]
+fn a_client_belonging_to_another_session_is_reported() {
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let foreign = SessionId::new();
+    let client = Client::new(
+        ClientId::new(),
+        foreign,
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        tab,
+    );
+    session.attach_client(client);
+
+    let errors = session
+        .validate()
+        .expect_err("a client of a different session is inconsistent");
+    // `found` must name the offending client's session, not this session's id.
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::ClientSessionMismatch { found, .. } if *found == foreign
+    )));
+}
+
+#[test]
+fn a_client_active_tab_that_does_not_exist_is_reported() {
+    let mut session = empty_session();
+    let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+
+    let phantom = TabId::new();
+    let client_id = attach_viewing(&mut session, phantom);
+
+    let errors = session
+        .validate()
+        .expect_err("a client viewing a tab that is gone is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::ActiveTabMissing { client, tab }
+            if *client == client_id && *tab == phantom
+    )));
+}
+
+#[test]
+fn a_client_focus_on_an_unknown_pane_is_reported() {
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let ghost = PaneId::new();
+    let client_id = attach_viewing(&mut session, tab);
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(tab, ghost);
+
+    let errors = session
+        .validate()
+        .expect_err("focus on a pane with no record is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::FocusPaneNotInRegistry { pane, .. } if *pane == ghost
+    )));
+}
+
+#[test]
+fn a_client_focus_in_a_missing_tab_is_reported() {
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
+
+    let phantom_tab = TabId::new();
+    let client_id = attach_viewing(&mut session, tab);
+    // Focus remembered under a tab that is not in the session, on a real pane.
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(phantom_tab, pane);
+
+    let errors = session
+        .validate()
+        .expect_err("focus remembered in a missing tab is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::FocusTabMissing { tab: t, .. } if *t == phantom_tab
+    )));
+    // The pane is real, so the registry-side focus check does not fire.
+    assert!(!errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::FocusPaneNotInRegistry { .. }
+    )));
+}
+
+#[test]
+fn a_client_focus_on_a_pane_outside_its_tab_is_reported() {
+    let mut session = empty_session();
+    let events_a = new_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
+    let pane_a = created_pane_id(&events_a);
+    let events_b = new_tab(&mut session, "b".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab_b = created_tab_id(&events_b);
+
+    let client_id = attach_viewing(&mut session, tab_b);
+    // Focus recorded for tab_b but pointing at tab_a's pane: a real pane that is
+    // not a leaf of the tab it is focused in.
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(tab_b, pane_a);
+
+    let errors = session
+        .validate()
+        .expect_err("focus on a pane outside its tab is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::FocusTargetMissing { tab, pane, .. }
+            if *tab == tab_b && *pane == pane_a
+    )));
+    // The pane exists in the registry, so this is a target mismatch, not a
+    // missing record.
+    assert!(!errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::FocusPaneNotInRegistry { .. }
+    )));
+}
+
+#[test]
+fn a_closed_tab_left_in_the_map_is_reported() {
+    let mut session = empty_session();
+    let pane = register_live_pane(&mut session);
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
+    let tab_id = tab.id;
+    let closed = force_tab_lifecycle(&tab, "Closed");
+    session.tabs.insert(tab_id, closed);
+
+    let errors = session
+        .validate()
+        .expect_err("a closed tab still in the map is inconsistent");
+    assert!(errors.contains(&SessionConsistencyError::LingeringClosedTab { tab: tab_id }));
+}
+
+#[test]
+fn every_violation_is_collected_in_one_pass() {
+    let mut session = empty_session();
+    // A layout leaf with no record.
+    let ghost = PaneId::new();
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
+    session.tabs.insert(tab.id, tab);
+    // A live record that is a leaf nowhere.
+    let orphan = register_live_pane(&mut session);
+
+    let errors = session
+        .validate()
+        .expect_err("a session with two faults is inconsistent");
+    // Both faults surface from a single call rather than only the first.
+    assert!(errors.len() >= 2);
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::PaneNotInRegistry { pane, .. } if *pane == ghost
+    )));
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::OrphanedPaneRecord { pane, .. } if *pane == orphan
+    )));
 }

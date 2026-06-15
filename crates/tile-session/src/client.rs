@@ -98,6 +98,11 @@ impl Client {
         self.focus_by_tab.get(&tab_id).copied()
     }
 
+    #[must_use]
+    pub fn focused_panes(&self) -> &HashMap<TabId, PaneId> {
+        &self.focus_by_tab
+    }
+
     /// This client's mouse interaction state.
     #[must_use]
     pub fn mouse_state(&self) -> &MouseState {
