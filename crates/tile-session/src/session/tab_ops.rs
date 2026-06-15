@@ -12,7 +12,7 @@
 //! *is* its position. Every operation that changes the tab set keeps it dense —
 //! [`new_tab`] appends, [`close_tab`] removes and renumbers, [`move_tab`]
 //! reorders — so consumers can treat index and display position as one. Closing
-//! a tab funnels through [`close_and_refocus_tab`], shared with the close/quit
+//! a tab funnels through `close_and_refocus_tab`, shared with the close/quit
 //! cascade, so a user-closed tab and a tab emptied by a self-exiting shell tear
 //! down identically.
 
@@ -91,7 +91,7 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
 ///
 /// Emits [`Event::PaneClosing`] + [`Event::PaneRemoved`] for every pane the tab
 /// holds — the runtime kills the real processes off these events; this layer
-/// only drops the records — then hands off to [`close_and_refocus_tab`] to
+/// only drops the records — then hands off to `close_and_refocus_tab` to
 /// remove the tab, move any client viewing it to the nearest surviving tab,
 /// renumber the remaining tabs densely, and quit the session if no tabs remain.
 /// An unknown `tab_id` is a no-op with no events.
