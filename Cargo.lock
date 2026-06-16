@@ -859,6 +859,7 @@ name = "tile-test-support"
 version = "0.1.0"
 dependencies = [
  "tile-core",
+ "tile-pty",
 ]
 
 [[package]]

@@ -148,15 +148,22 @@ fn pump_exit(
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
     match handle.try_exit_status() {
-        Some(status) => on_child_exit(
-            session,
-            tab_id,
-            handle.pane_id(),
-            Some(status.code),
-            EPOCH,
-            tab_rect,
-            empty_tab_policy,
-        ),
+        Some(status) => {
+            // A signal-killed child has no exit code, so it maps to `None`.
+            let exit_code = match status {
+                ExitStatus::ExitCode(code) => Some(code),
+                ExitStatus::Signaled(_) => None,
+            };
+            on_child_exit(
+                session,
+                tab_id,
+                handle.pane_id(),
+                exit_code,
+                EPOCH,
+                tab_rect,
+                empty_tab_policy,
+            )
+        }
         None => Vec::new(),
     }
 }
@@ -209,7 +216,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     )
     .is_empty());
 
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -259,7 +266,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
     let client_id = client.id();
     session.attach_client(client);
 
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -301,7 +308,7 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
     session.attach_client(first);
     session.attach_client(second);
 
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,
@@ -341,7 +348,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     session.attach_client(client);
 
     // Drive the exit against a viewport too small to fit the survivor.
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -374,7 +381,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
         vec![running_pane(only, PaneExitPolicy::CloseOnExit)],
     );
 
-    pty.trigger_child_exit(only, ExitStatus { code: 0 })
+    pty.trigger_child_exit(only, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -424,7 +431,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
         ],
     );
 
-    pty.trigger_child_exit(closing, ExitStatus { code: 0 })
+    pty.trigger_child_exit(closing, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -456,7 +463,7 @@ fn last_pane_respawn_policy_keeps_the_pane() {
         vec![running_pane(pane, PaneExitPolicy::RespawnShell)],
     );
 
-    pty.trigger_child_exit(pane, ExitStatus { code: 1 })
+    pty.trigger_child_exit(pane, ExitStatus::ExitCode(1))
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -488,7 +495,7 @@ fn last_pane_exit_under_respawn_tab_policy_keeps_the_tab() {
         vec![running_pane(pane, PaneExitPolicy::CloseOnExit)],
     );
 
-    pty.trigger_child_exit(pane, ExitStatus { code: 0 })
+    pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
@@ -587,7 +594,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
         ],
     );
 
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,
@@ -623,7 +630,7 @@ fn output_for_a_removed_pane_is_dropped() {
     assert_eq!(route_output(&session, &handle_a), Some(true));
 
     // Remove the pane through a child-exit.
-    pty.trigger_child_exit(a, ExitStatus { code: 0 })
+    pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,

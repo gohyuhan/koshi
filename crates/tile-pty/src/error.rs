@@ -1,11 +1,14 @@
 //! PTY domain error. Classifies into [`DomainCategory::Pty`].
 
 use thiserror::Error;
-use tile_core::error::{DomainCategory, DomainError, Severity};
+use tile_core::{
+    error::{DomainCategory, DomainError, Severity},
+    ids::PaneId,
+};
 
 /// A failure spawning or driving a child PTY. Pane-level failures are
 /// recoverable: a dead PTY closes its pane without crashing the session.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PtyError {
     /// The child process could not be spawned.
     #[error("failed to spawn pty: {detail}")]
@@ -13,7 +16,13 @@ pub enum PtyError {
     /// Reading from or writing to the PTY failed.
     #[error("pty io error: {detail}")]
     Io { detail: String },
+    /// An operation named a pane the backend never spawned (or already removed).
+    #[error("invalid pane: id - {pane}")]
+    UnknownPane { pane: PaneId },
 }
+
+/// Result of a [`PtyBackend`](crate::backend::state::PtyBackend) operation.
+pub type Result<T> = std::result::Result<T, PtyError>;
 
 impl DomainError for PtyError {
     fn category(&self) -> DomainCategory {
