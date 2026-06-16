@@ -115,5 +115,19 @@ pub mod duration_secs {
     }
 }
 
+/// How a spawned child ended.
+///
+/// `ExitCode` carries the process's own exit status; `Signaled` carries the
+/// signal number that killed it, for which no exit code exists. The PTY layer
+/// reports one of these per child; the runtime maps it onto the session's
+/// `Option<i32>` exit code, where a signal becomes `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExitStatus {
+    /// The child exited on its own with this code (`0` is success by convention).
+    ExitCode(i32),
+    /// The child was killed by this signal number; it carries no exit code.
+    Signaled(i32),
+}
+
 #[cfg(test)]
 mod tests;

@@ -3,110 +3,23 @@
 //! Layout, session, and runtime tests need to exercise pane spawning, writing,
 //! resizing, and child-exit handling without launching real shells: real
 //! processes make tests slow, platform-dependent, and non-deterministic.
-//! [`FakePtyBackend`] satisfies the full PTY backend surface entirely in
+//! [`FakePtyBackend`] satisfies the full [`PtyBackend`] surface entirely in
 //! memory, capturing every call so a test can assert on it and driving output
 //! and child-exit on demand.
 //!
-//! ## Locally declared trait
-//!
-//! The canonical `PtyBackend` trait is owned by `tile-pty`, which lands in a
-//! later task. Depending on `tile-pty` from here would invert the layering
-//! (test-support sits below the PTY crate), so this module declares the trait
-//! locally against the same `tile-core` types. When `tile-pty` lands, the local
-//! declaration gives way to implementing the canonical trait — but
-//! [`FakePtyBackend`] itself stays: it is the permanent test double, and its
-//! capture/drive surface does not change.
+//! It implements the canonical [`tile_pty`] trait, so a test can drive it
+//! through the same interface the real backend exposes. [`FakePtyBackend`] is
+//! the permanent test double: its capture/drive surface — `push_output`,
+//! `trigger_child_exit`, and the `*s` query methods — is what tests assert on.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 
 pub use tile_core::ids::PaneId;
-pub use tile_core::process::{KillPolicy, PtySize, SpawnSpec};
-
-/// Exit status reported for a spawned child.
-///
-/// Temporary stand-in until the PTY layer lands its canonical type; it carries
-/// the single fact tests assert on — the process exit code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExitStatus {
-    /// The child's exit code (`0` is success by convention).
-    pub code: i32,
-}
-
-/// Errors a [`PtyBackend`] operation can return.
-///
-/// Temporary stand-in for the PTY layer's error type. The fake only fails one
-/// way: addressing a pane that was never spawned.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PtyError {
-    /// No pane with this id is known to the backend.
-    UnknownPane(PaneId),
-}
-
-impl fmt::Display for PtyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PtyError::UnknownPane(pane) => write!(f, "unknown pane: {pane}"),
-        }
-    }
-}
-
-impl std::error::Error for PtyError {}
-
-/// Result alias for backend operations.
-pub type Result<T> = std::result::Result<T, PtyError>;
-
-/// The PTY backend surface, declared locally until `tile-pty` owns the
-/// canonical trait (see module docs).
-pub trait PtyBackend {
-    /// Spawn a child in a new PTY of the given size, returning a handle that
-    /// streams its output and exit status.
-    fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle>;
-    /// Resize an existing pane's PTY.
-    fn resize(&self, pane: PaneId, size: PtySize) -> Result<()>;
-    /// Write bytes to a pane's child stdin.
-    fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<()>;
-    /// Terminate a pane's child according to `policy`.
-    fn kill(&self, pane: PaneId, policy: KillPolicy) -> Result<()>;
-}
-
-/// The caller's view of one spawned pane: its id plus the streams the backend
-/// delivers child output and exit status on.
-///
-/// Output and exit are non-blocking reads so a single-threaded test can spawn,
-/// drive, and assert without scheduling. Dropping the handle does not forget the
-/// pane: the backend keeps its capture; the handle only owns the receiving ends
-/// of the two streams.
-pub struct PtyHandle {
-    pane_id: PaneId,
-    output: Receiver<Vec<u8>>,
-    exit: Receiver<ExitStatus>,
-}
-
-impl PtyHandle {
-    /// The pane this handle addresses.
-    #[must_use]
-    pub fn pane_id(&self) -> PaneId {
-        self.pane_id
-    }
-
-    /// The next chunk of child output, or `None` if none is pending.
-    ///
-    /// Each chunk corresponds to one [`FakePtyBackend::push_output`] call, in
-    /// order.
-    pub fn try_read_output(&self) -> Option<Vec<u8>> {
-        self.output.try_recv().ok()
-    }
-
-    /// The child's exit status, or `None` if it has not exited yet.
-    ///
-    /// Set by [`FakePtyBackend::trigger_child_exit`].
-    pub fn try_exit_status(&self) -> Option<ExitStatus> {
-        self.exit.try_recv().ok()
-    }
-}
+pub use tile_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+pub use tile_pty::backend::state::{PtyBackend, PtyHandle};
+pub use tile_pty::error::{PtyError, Result};
 
 /// Everything the backend records and drives for a single spawned pane.
 struct PaneRecord {
@@ -147,7 +60,10 @@ impl FakePtyBackend {
     /// real child writing to a closed reader.
     pub fn push_output(&self, pane: PaneId, bytes: impl Into<Vec<u8>>) -> Result<()> {
         let state = self.state.lock().unwrap();
-        let record = state.panes.get(&pane).ok_or(PtyError::UnknownPane(pane))?;
+        let record = state
+            .panes
+            .get(&pane)
+            .ok_or(PtyError::UnknownPane { pane })?;
         let _ = record.output_tx.send(bytes.into());
         Ok(())
     }
@@ -157,7 +73,10 @@ impl FakePtyBackend {
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn trigger_child_exit(&self, pane: PaneId, status: ExitStatus) -> Result<()> {
         let state = self.state.lock().unwrap();
-        let record = state.panes.get(&pane).ok_or(PtyError::UnknownPane(pane))?;
+        let record = state
+            .panes
+            .get(&pane)
+            .ok_or(PtyError::UnknownPane { pane })?;
         let _ = record.exit_tx.send(status);
         Ok(())
     }
@@ -175,7 +94,7 @@ impl FakePtyBackend {
             .panes
             .get(&pane)
             .map(|r| r.spec.clone())
-            .ok_or(PtyError::UnknownPane(pane))
+            .ok_or(PtyError::UnknownPane { pane })
     }
 
     /// Every write made to a pane, in order.
@@ -185,7 +104,7 @@ impl FakePtyBackend {
             .panes
             .get(&pane)
             .map(|r| r.writes.clone())
-            .ok_or(PtyError::UnknownPane(pane))
+            .ok_or(PtyError::UnknownPane { pane })
     }
 
     /// Every resize applied to a pane, in order.
@@ -195,7 +114,7 @@ impl FakePtyBackend {
             .panes
             .get(&pane)
             .map(|r| r.resizes.clone())
-            .ok_or(PtyError::UnknownPane(pane))
+            .ok_or(PtyError::UnknownPane { pane })
     }
 
     /// Every kill requested for a pane, in order.
@@ -205,15 +124,14 @@ impl FakePtyBackend {
             .panes
             .get(&pane)
             .map(|r| r.kills.clone())
-            .ok_or(PtyError::UnknownPane(pane))
+            .ok_or(PtyError::UnknownPane { pane })
     }
 }
 
 impl PtyBackend for FakePtyBackend {
     fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle> {
         let pane_id = PaneId::new();
-        let (output_tx, output) = mpsc::channel();
-        let (exit_tx, exit) = mpsc::channel();
+        let (handle, output_tx, exit_tx) = PtyHandle::new(pane_id);
 
         let mut state = self.state.lock().unwrap();
         state.panes.insert(
@@ -229,11 +147,7 @@ impl PtyBackend for FakePtyBackend {
         );
         state.spawn_order.push(pane_id);
 
-        Ok(PtyHandle {
-            pane_id,
-            output,
-            exit,
-        })
+        Ok(handle)
     }
 
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<()> {
@@ -241,7 +155,7 @@ impl PtyBackend for FakePtyBackend {
         let record = state
             .panes
             .get_mut(&pane)
-            .ok_or(PtyError::UnknownPane(pane))?;
+            .ok_or(PtyError::UnknownPane { pane })?;
         record.resizes.push(size);
         Ok(())
     }
@@ -251,18 +165,18 @@ impl PtyBackend for FakePtyBackend {
         let record = state
             .panes
             .get_mut(&pane)
-            .ok_or(PtyError::UnknownPane(pane))?;
+            .ok_or(PtyError::UnknownPane { pane })?;
         record.writes.push(bytes.to_vec());
         Ok(())
     }
 
-    fn kill(&self, pane: PaneId, policy: KillPolicy) -> Result<()> {
+    fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state
             .panes
             .get_mut(&pane)
-            .ok_or(PtyError::UnknownPane(pane))?;
-        record.kills.push(policy);
+            .ok_or(PtyError::UnknownPane { pane })?;
+        record.kills.push(kill_policy);
         Ok(())
     }
 }
@@ -378,10 +292,10 @@ mod tests {
         let pane = handle.pane_id();
 
         assert!(handle.try_exit_status().is_none());
-        pty.trigger_child_exit(pane, ExitStatus { code: 0 })
+        pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
             .unwrap();
 
-        assert_eq!(handle.try_exit_status(), Some(ExitStatus { code: 0 }));
+        assert_eq!(handle.try_exit_status(), Some(ExitStatus::ExitCode(0)));
         assert!(handle.try_exit_status().is_none());
     }
 
@@ -392,20 +306,23 @@ mod tests {
 
         assert_eq!(
             pty.resize(ghost, size(80, 24)),
-            Err(PtyError::UnknownPane(ghost))
+            Err(PtyError::UnknownPane { pane: ghost })
         );
-        assert_eq!(pty.write(ghost, b"x"), Err(PtyError::UnknownPane(ghost)));
+        assert_eq!(
+            pty.write(ghost, b"x"),
+            Err(PtyError::UnknownPane { pane: ghost })
+        );
         assert_eq!(
             pty.kill(ghost, KillPolicy::Force),
-            Err(PtyError::UnknownPane(ghost))
+            Err(PtyError::UnknownPane { pane: ghost })
         );
         assert_eq!(
             pty.push_output(ghost, b"x".to_vec()),
-            Err(PtyError::UnknownPane(ghost))
+            Err(PtyError::UnknownPane { pane: ghost })
         );
         assert_eq!(
-            pty.trigger_child_exit(ghost, ExitStatus { code: 0 }),
-            Err(PtyError::UnknownPane(ghost))
+            pty.trigger_child_exit(ghost, ExitStatus::ExitCode(0)),
+            Err(PtyError::UnknownPane { pane: ghost })
         );
     }
 
@@ -423,5 +340,33 @@ mod tests {
         assert!(a.try_read_output().is_none());
         assert_eq!(b.try_read_output(), Some(b"b".to_vec()));
         assert_eq!(pty.spawned_panes(), vec![a.pane_id(), b.pane_id()]);
+    }
+
+    #[test]
+    fn the_fake_is_usable_as_a_pty_backend_trait_object() {
+        // The fake stands in for any `PtyBackend`, so it must work behind a trait
+        // object the way the real backend will. Drive a full spawn/resize/write/
+        // kill/exit cycle through `&dyn PtyBackend` plus the inherent queries.
+        let pty = FakePtyBackend::new();
+        let backend: &dyn PtyBackend = &pty;
+
+        let handle = backend.spawn(spec(), size(80, 24)).unwrap();
+        let pane = handle.pane_id();
+        backend.resize(pane, size(100, 30)).unwrap();
+        backend.write(pane, b"ls\n").unwrap();
+        backend.kill(pane, KillPolicy::Force).unwrap();
+
+        // Calls made through the trait object are captured like inherent ones.
+        assert_eq!(
+            pty.resizes(pane).unwrap(),
+            vec![size(80, 24), size(100, 30)]
+        );
+        assert_eq!(pty.writes(pane).unwrap(), vec![b"ls\n".to_vec()]);
+        assert_eq!(pty.kills(pane).unwrap(), vec![KillPolicy::Force]);
+
+        // The handle the trait object returned streams exit status canonically.
+        pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
+            .unwrap();
+        assert_eq!(handle.try_exit_status(), Some(ExitStatus::ExitCode(0)));
     }
 }

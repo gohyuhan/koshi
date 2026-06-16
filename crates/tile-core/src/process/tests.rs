@@ -107,3 +107,16 @@ fn pty_size_roundtrips() {
     let back: PtySize = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(size, back);
 }
+
+#[test]
+fn exit_status_roundtrips() {
+    for status in [
+        ExitStatus::ExitCode(0),
+        ExitStatus::ExitCode(1),
+        ExitStatus::Signaled(9),
+    ] {
+        let json = serde_json::to_string(&status).expect("serialize");
+        let back: ExitStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(status, back);
+    }
+}
