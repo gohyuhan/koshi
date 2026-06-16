@@ -47,10 +47,12 @@ impl PaneKind {
 /// layout holds only the id; this record is the one owner of everything else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneRecord {
-    /// Stable id, matching the layout leaf that references this pane.
-    pub id: PaneId,
-    /// What backs the pane (terminal or plugin surface).
-    pub kind: PaneKind,
+    /// Stable id, matching the layout leaf that references this pane. Read-only:
+    /// the registry keys records by it, so it is fixed for the record's life.
+    id: PaneId,
+    /// What backs the pane (terminal or plugin surface). Fixed at creation so a
+    /// pane's diagnostics domain never changes underneath it.
+    kind: PaneKind,
     /// Display title, once one has been set or reported.
     pub title: Option<String>,
     /// The process this pane was spawned to run, if any.
@@ -74,10 +76,18 @@ pub struct PaneRecord {
 }
 
 impl PaneRecord {
+    /// A fresh `Spawning` record for a terminal-backed pane.
     pub fn new(id: PaneId, created_at: SystemTime) -> Self {
+        Self::new_with_kind(id, PaneKind::Terminal, created_at)
+    }
+
+    /// A fresh `Spawning` record for a pane backed by `kind`. `kind` is fixed
+    /// here and never changes afterward, so the pane's diagnostics domain stays
+    /// stable for its whole life.
+    pub fn new_with_kind(id: PaneId, kind: PaneKind, created_at: SystemTime) -> Self {
         Self {
             id,
-            kind: PaneKind::Terminal,
+            kind,
             title: None,
             command: None,
             cwd: None,
@@ -89,6 +99,18 @@ impl PaneRecord {
             exited_at: None,
             exit_code: None,
         }
+    }
+
+    /// This pane's stable id, matching its layout leaf and registry key.
+    #[must_use]
+    pub fn id(&self) -> PaneId {
+        self.id
+    }
+
+    /// What backs this pane. Fixed at creation.
+    #[must_use]
+    pub fn kind(&self) -> &PaneKind {
+        &self.kind
     }
 
     pub fn lifecycle(&self) -> &PaneLifecycle {

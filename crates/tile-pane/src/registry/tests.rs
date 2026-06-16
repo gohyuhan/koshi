@@ -124,7 +124,7 @@ fn list_yields_every_record() {
     }
 
     // `list` order is the map's, so compare as sorted sets.
-    let mut listed: Vec<PaneId> = registry.list().map(|record| record.id).collect();
+    let mut listed: Vec<PaneId> = registry.list().map(|record| record.id()).collect();
     listed.sort();
     ids.sort();
 
@@ -173,10 +173,13 @@ fn a_pane_record_survives_a_serde_round_trip() {
 
 #[test]
 fn a_plugin_pane_kind_survives_a_serde_round_trip() {
-    let mut record = terminal_record(PaneId::new());
-    record.kind = PaneKind::Plugin {
-        plugin_id: PluginId::new(),
-    };
+    let record = PaneRecord::new_with_kind(
+        PaneId::new(),
+        PaneKind::Plugin {
+            plugin_id: PluginId::new(),
+        },
+        SystemTime::UNIX_EPOCH,
+    );
 
     let json = serde_json::to_string(&record).expect("serialize");
     let restored: PaneRecord = serde_json::from_str(&json).expect("deserialize");

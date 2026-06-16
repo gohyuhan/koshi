@@ -347,10 +347,10 @@ fn all_panes_suppressed_reports_terminal_too_small() {
 fn an_empty_tab_reports_the_empty_tab_policy() {
     // A tab with no leaves at all falls to its empty-tab policy, carried out.
     let mut tab = tab_with_root(PaneId::new());
-    tab.layout = LayoutNode::Split(SplitNode::with_equal_weights(
+    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         Vec::new(),
-    ));
+    )));
     let registry = PaneRegistry::new();
 
     let result = repair_focus(

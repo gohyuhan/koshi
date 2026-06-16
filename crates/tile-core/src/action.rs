@@ -337,9 +337,9 @@ pub enum TargetKind {
 
 /// Typed schema for an action's arguments.
 ///
-/// Placeholder: the full typed-argument model is owned by the keybinding system
-/// task (KBD-001), which fills this in once config parsing exists. It is a named
-/// type now so [`ActionMetadata`] has a stable shape and seed entries can carry
+/// Placeholder: the full typed-argument model is owned by the keybinding
+/// system, which fills this in once config parsing exists. It is a named type
+/// now so [`ActionMetadata`] has a stable shape and seed entries can carry
 /// `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionArgsSchema {}

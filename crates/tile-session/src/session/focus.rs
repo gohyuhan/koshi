@@ -98,7 +98,7 @@ pub fn repair_focus(
         return FocusRepairResult::Focused(pane_id);
     }
 
-    if tab.layout.leaf_panes().is_empty() {
+    if tab.layout().leaf_panes().is_empty() {
         FocusRepairResult::EmptyTab(empty_tab_policy)
     } else {
         FocusRepairResult::TerminalTooSmall

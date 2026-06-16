@@ -59,12 +59,12 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
     let root = PaneId::new();
     let tab = Tab::new(tab_id, "code".to_owned(), 0, root);
 
-    assert_eq!(tab.id, tab_id);
-    assert_eq!(tab.name, "code");
-    assert_eq!(tab.index, 0);
+    assert_eq!(tab.id(), tab_id);
+    assert_eq!(tab.name(), "code");
+    assert_eq!(tab.index(), 0);
     // A fresh tab shows exactly its root pane, tiled, mid-creation, no focus yet.
-    assert_eq!(tab.layout, LayoutNode::Pane(root));
-    assert_eq!(tab.layout_mode, LayoutMode::Tiled);
+    assert_eq!(*tab.layout(), LayoutNode::Pane(root));
+    assert_eq!(tab.layout_mode(), LayoutMode::Tiled);
     assert_eq!(*tab.lifecycle(), TabLifecycle::Creating);
     assert!(tab.focus_mru().is_empty());
 }
@@ -74,21 +74,21 @@ fn renaming_a_tab_changes_only_its_name() {
     let root = PaneId::new();
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, root);
 
-    tab.name = "logs".to_owned();
+    tab.update_name("logs".to_owned());
 
-    assert_eq!(tab.name, "logs");
+    assert_eq!(tab.name(), "logs");
     // Position and layout are untouched by a rename.
-    assert_eq!(tab.index, 0);
-    assert_eq!(tab.layout, LayoutNode::Pane(root));
+    assert_eq!(tab.index(), 0);
+    assert_eq!(*tab.layout(), LayoutNode::Pane(root));
 }
 
 #[test]
 fn a_tab_index_can_be_reassigned() {
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
 
-    tab.index = 3;
+    tab.update_index(3);
 
-    assert_eq!(tab.index, 3);
+    assert_eq!(tab.index(), 3);
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn a_layout_leaf_with_no_record_is_reported() {
     let mut session = empty_session();
     let ghost = PaneId::new();
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
-    session.tabs.insert(tab.id, tab);
+    session.tabs.insert(tab.id(), tab);
 
     let errors = session
         .validate()
@@ -358,7 +358,7 @@ fn a_removed_pane_left_in_the_layout_is_reported() {
     let mut session = empty_session();
     let pane = register_removed_pane(&mut session);
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
-    session.tabs.insert(tab.id, tab);
+    session.tabs.insert(tab.id(), tab);
 
     let errors = session
         .validate()
@@ -413,8 +413,8 @@ fn a_pane_placed_in_two_tabs_is_reported() {
     let shared = register_live_pane(&mut session);
     let tab_a = Tab::new(TabId::new(), "a".to_owned(), 0, shared);
     let tab_b = Tab::new(TabId::new(), "b".to_owned(), 1, shared);
-    session.tabs.insert(tab_a.id, tab_a);
-    session.tabs.insert(tab_b.id, tab_b);
+    session.tabs.insert(tab_a.id(), tab_a);
+    session.tabs.insert(tab_b.id(), tab_b);
 
     let errors = session
         .validate()
@@ -431,7 +431,7 @@ fn a_tab_stored_under_the_wrong_key_is_reported() {
     let mut session = empty_session();
     let pane = register_live_pane(&mut session);
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
-    let tab_id = tab.id;
+    let tab_id = tab.id();
     let wrong_key = TabId::new();
     session.tabs.insert(wrong_key, tab);
 
@@ -452,8 +452,8 @@ fn two_tabs_sharing_a_bar_index_are_reported() {
     let pane_b = register_live_pane(&mut session);
     let tab_a = Tab::new(TabId::new(), "a".to_owned(), 0, pane_a);
     let tab_b = Tab::new(TabId::new(), "b".to_owned(), 0, pane_b);
-    session.tabs.insert(tab_a.id, tab_a);
-    session.tabs.insert(tab_b.id, tab_b);
+    session.tabs.insert(tab_a.id(), tab_a);
+    session.tabs.insert(tab_b.id(), tab_b);
 
     let errors = session
         .validate()
@@ -596,7 +596,7 @@ fn a_closed_tab_left_in_the_map_is_reported() {
     let mut session = empty_session();
     let pane = register_live_pane(&mut session);
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, pane);
-    let tab_id = tab.id;
+    let tab_id = tab.id();
     let closed = force_tab_lifecycle(&tab, "Closed");
     session.tabs.insert(tab_id, closed);
 
@@ -612,7 +612,7 @@ fn every_violation_is_collected_in_one_pass() {
     // A layout leaf with no record.
     let ghost = PaneId::new();
     let tab = Tab::new(TabId::new(), "code".to_owned(), 0, ghost);
-    session.tabs.insert(tab.id, tab);
+    session.tabs.insert(tab.id(), tab);
     // A live record that is a leaf nowhere.
     let orphan = register_live_pane(&mut session);
 
