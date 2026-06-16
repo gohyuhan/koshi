@@ -25,13 +25,13 @@ impl PaneRegistry {
     }
 
     pub fn insert(&mut self, pane_record: PaneRecord) -> Result<(), PaneRegistryError> {
-        if self.records.contains_key(&pane_record.id) {
+        if self.records.contains_key(&pane_record.id()) {
             return Err(PaneRegistryError::DuplicateId {
-                id: pane_record.id,
-                kind: pane_record.kind,
+                id: pane_record.id(),
+                kind: pane_record.kind().clone(),
             });
         }
-        self.records.insert(pane_record.id, pane_record);
+        self.records.insert(pane_record.id(), pane_record);
         Ok(())
     }
 
@@ -47,12 +47,10 @@ impl PaneRegistry {
     /// Mutable access to a record for in-place field edits (title, lifecycle,
     /// exit status, …).
     ///
-    /// The record exposes its `id`, but **mutating `id` through this handle does
-    /// not move the map entry** — the record would stay keyed under its old id,
-    /// desyncing key from `record.id`. Re-keying is deliberately not handled
-    /// here: an id change belongs to the update flow, which removes the record
-    /// under the old id and re-inserts it under the new one, while an unchanged
-    /// id just updates in place.
+    /// `id` is read-only — the record exposes it through [`PaneRecord::id`] but
+    /// not as a mutable field — so a record can never desync from its map key
+    /// through this handle. Changing a pane's id is therefore a remove under the
+    /// old id followed by an insert under the new one, never an in-place edit.
     pub fn get_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.records.get_mut(&pane_id)
     }

@@ -21,11 +21,11 @@ use crate::{
 /// panes it focused, most-recent first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
-    pub id: TabId,
-    pub name: String,
-    pub index: usize,
-    pub layout: LayoutNode,
-    pub layout_mode: LayoutMode,
+    id: TabId,
+    name: String,
+    index: usize,
+    layout: LayoutNode,
+    layout_mode: LayoutMode,
     lifecycle: TabLifecycle,
     /// Panes this tab has focused, most-recent first, with at most one entry
     /// per pane — re-focusing moves a pane to the front instead of adding a
@@ -49,6 +49,53 @@ impl Tab {
             lifecycle: TabLifecycle::Creating,
             focus_mru: Vec::new(),
         }
+    }
+
+    /// This tab's stable id, matching its key in [`Session::tabs`].
+    #[must_use]
+    pub fn id(&self) -> TabId {
+        self.id
+    }
+
+    /// The name shown for this tab in the tab bar.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// This tab's display position in the bar; kept a dense `0..n` across the
+    /// session's tabs by the tab operations.
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// This tab's layout tree.
+    #[must_use]
+    pub fn layout(&self) -> &LayoutNode {
+        &self.layout
+    }
+
+    /// How this tab's layout is arranged.
+    #[must_use]
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.layout_mode
+    }
+
+    /// Rename this tab.
+    pub fn update_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    /// Set this tab's display position. Callers keep positions a dense `0..n`
+    /// across the session's tabs.
+    pub fn update_index(&mut self, index: usize) {
+        self.index = index;
+    }
+
+    /// Replace this tab's layout tree.
+    pub fn update_layout(&mut self, layout: LayoutNode) {
+        self.layout = layout;
     }
 
     /// Records `pane` as the most-recently focused: moves it to the front,
@@ -272,10 +319,10 @@ impl Session {
         for pane in self.panes.list() {
             if *pane.lifecycle() == PaneLifecycle::Removed {
                 consistency_error
-                    .push(SessionConsistencyError::LingeringRemovedRecord { pane: pane.id });
-            } else if !panes_in_layout_nodes.contains_key(&pane.id) {
+                    .push(SessionConsistencyError::LingeringRemovedRecord { pane: pane.id() });
+            } else if !panes_in_layout_nodes.contains_key(&pane.id()) {
                 consistency_error.push(SessionConsistencyError::OrphanedPaneRecord {
-                    pane: pane.id,
+                    pane: pane.id(),
                     lifecycle: *pane.lifecycle(),
                 });
             }

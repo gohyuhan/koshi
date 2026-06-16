@@ -81,28 +81,29 @@ fn single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
 /// A single-pane tab at display position `index`.
 fn tab_with_index(tab_id: TabId, pane: PaneId, index: usize) -> Tab {
     let mut tab = single_pane_tab(tab_id, pane);
-    tab.index = index;
+    tab.update_index(index);
     tab
 }
 
 /// A tab split left/right between `left` and `right`.
 fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
-    tab.layout = LayoutNode::Split(SplitNode::with_equal_weights(
+    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
             LayoutChild::new(LayoutNode::Pane(left)),
             LayoutChild::new(LayoutNode::Pane(right)),
         ],
-    ));
+    )));
     tab
 }
 
-/// A client viewing `tab_id` with `pane` focused there.
-fn focused_client(tab_id: TabId, pane: PaneId) -> Client {
+/// A client viewing `tab_id` with `pane` focused there, carrying `session_id`
+/// so attaching it leaves the session a state [`Session::validate`] accepts.
+fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client {
     let mut client = Client::new(
         ClientId::new(),
-        SessionId::new(),
+        session_id,
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
         tab_id,
@@ -111,15 +112,13 @@ fn focused_client(tab_id: TabId, pane: PaneId) -> Client {
     client
 }
 
-/// A session holding the given clients, tabs, and pane records.
-fn session_with(clients: Vec<Client>, tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
-    let mut registry = ClientRegistry::new();
-    for client in clients {
-        registry.attach(client);
-    }
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), registry);
+/// A session holding the given tabs and pane records, with no clients attached
+/// yet. Attach clients afterward with [`Session::attach_client`] so each carries
+/// the session's own id — a fixture the session would actually accept.
+fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
     for tab in tabs {
-        session.tabs.insert(tab.id, tab);
+        session.tabs.insert(tab.id(), tab);
     }
     for pane in records {
         session.panes.insert(pane).expect("unique pane id");
@@ -128,19 +127,35 @@ fn session_with(clients: Vec<Client>, tabs: Vec<Tab>, records: Vec<PaneRecord>) 
 }
 
 #[test]
-fn removing_a_focused_pane_focuses_a_survivor() {
+fn fixtures_build_a_consistent_session() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
-    let client = focused_client(tab_id, a);
-    let client_id = client.id();
     let mut session = session_with(
-        vec![client],
         vec![two_pane_tab(tab_id, a, b)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    session.attach_client(focused_client(session.id, tab_id, a));
+
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn removing_a_focused_pane_focuses_a_survivor() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let client = focused_client(session.id, tab_id, a);
+    let client_id = client.id();
+    session.attach_client(client);
 
     let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
 
@@ -154,7 +169,7 @@ fn removing_a_focused_pane_focuses_a_survivor() {
         .any(|e| matches!(e, Event::PaneFocused(p) if p.pane_id == b && p.tab_id == tab_id)));
     // The removed pane is gone from the registry and the layout collapsed to B.
     assert!(session.panes.get(a).is_none());
-    assert_eq!(session.tabs[&tab_id].layout.leaf_panes(), vec![b]);
+    assert_eq!(session.tabs[&tab_id].layout().leaf_panes(), vec![b]);
     // Removal facts are reported.
     assert!(events
         .iter()
@@ -168,16 +183,16 @@ fn removing_a_focused_pane_focuses_a_survivor() {
 fn removing_a_nonfocused_pane_leaves_focus_untouched() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
-    let client = focused_client(tab_id, b); // focused on the survivor
-    let client_id = client.id();
     let mut session = session_with(
-        vec![client],
         vec![two_pane_tab(tab_id, a, b)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let client = focused_client(session.id, tab_id, b); // focused on the survivor
+    let client_id = client.id();
+    session.attach_client(client);
 
     let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
 
@@ -192,17 +207,18 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
 fn focus_repair_runs_for_every_client_on_the_removed_pane() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
-    let first = focused_client(tab_id, a);
-    let second = focused_client(tab_id, a);
-    let (first_id, second_id) = (first.id(), second.id());
     let mut session = session_with(
-        vec![first, second],
         vec![two_pane_tab(tab_id, a, b)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let first = focused_client(session.id, tab_id, a);
+    let second = focused_client(session.id, tab_id, a);
+    let (first_id, second_id) = (first.id(), second.id());
+    session.attach_client(first);
+    session.attach_client(second);
 
     let _ = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
 
@@ -220,16 +236,16 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
 fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
-    let client = focused_client(tab_id, a);
-    let client_id = client.id();
     let mut session = session_with(
-        vec![client],
         vec![two_pane_tab(tab_id, a, b)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let client = focused_client(session.id, tab_id, a);
+    let client_id = client.id();
+    session.attach_client(client);
 
     // A rect narrower than `MIN_PANE_SIZE` suppresses the survivor, so focus
     // recovery finds no focusable pane though the tab still holds one.
@@ -247,7 +263,7 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
     );
     // The survivor stays — the tab is not empty, just unfocusable for now.
     assert!(session.panes.get(b).is_some());
-    assert_eq!(session.tabs[&tab_id].layout.leaf_panes(), vec![b]);
+    assert_eq!(session.tabs[&tab_id].layout().leaf_panes(), vec![b]);
 }
 
 #[test]
@@ -258,7 +274,6 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
     tab.record_focus_mru(b);
     tab.record_focus_mru(a); // history: [a, b]
     let mut session = session_with(
-        vec![],
         vec![tab],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
@@ -278,7 +293,6 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
     let tab_id = TabId::new();
     let only = PaneId::new();
     let mut session = session_with(
-        vec![],
         vec![single_pane_tab(tab_id, only)],
         vec![record(
             only,
@@ -301,7 +315,6 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
     let (tab_one, tab_two) = (TabId::new(), TabId::new());
     let (pane_one, pane_two) = (PaneId::new(), PaneId::new());
     let mut session = session_with(
-        vec![],
         vec![
             single_pane_tab(tab_one, pane_one),
             single_pane_tab(tab_two, pane_two),
@@ -341,7 +354,6 @@ fn removing_an_unknown_pane_emits_nothing() {
     let tab_id = TabId::new();
     let only = PaneId::new();
     let mut session = session_with(
-        vec![],
         vec![single_pane_tab(tab_id, only)],
         vec![record(
             only,
@@ -368,7 +380,6 @@ fn a_respawn_shell_pane_returns_to_spawning() {
     let tab_id = TabId::new();
     let pane = PaneId::new();
     let mut session = session_with(
-        vec![],
         vec![single_pane_tab(tab_id, pane)],
         vec![record(
             pane,
@@ -400,7 +411,6 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
     let tab_id = TabId::new();
     let pane = PaneId::new();
     let mut session = session_with(
-        vec![],
         vec![single_pane_tab(tab_id, pane)],
         vec![record(
             pane,
@@ -432,11 +442,7 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
 fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
     let (left, middle, right) = (TabId::new(), TabId::new(), TabId::new());
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut client = focused_client(middle, b); // viewing the middle tab
-    let client_id = client.id();
-    client.update_focused_pane(left, a); // also has a focus recorded on the left tab
     let mut session = session_with(
-        vec![client],
         vec![
             tab_with_index(left, a, 0),
             tab_with_index(middle, b, 1),
@@ -448,6 +454,10 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
             record(c, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let mut client = focused_client(session.id, middle, b); // viewing the middle tab
+    let client_id = client.id();
+    client.update_focused_pane(left, a); // also has a focus recorded on the left tab
+    session.attach_client(client);
 
     let _ = remove_pane_cascade(&mut session, middle, b, rect(), EmptyTabPolicy::CloseTab);
 
@@ -464,16 +474,16 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
 fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
     let (first, second) = (TabId::new(), TabId::new());
     let (a, b) = (PaneId::new(), PaneId::new());
-    let client = focused_client(first, a);
-    let client_id = client.id();
     let mut session = session_with(
-        vec![client],
         vec![tab_with_index(first, a, 0), tab_with_index(second, b, 1)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let client = focused_client(session.id, first, a);
+    let client_id = client.id();
+    session.attach_client(client);
 
     let _ = remove_pane_cascade(&mut session, first, a, rect(), EmptyTabPolicy::CloseTab);
 
@@ -485,17 +495,17 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
 fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
     let (other, viewing) = (TabId::new(), TabId::new());
     let (a, b) = (PaneId::new(), PaneId::new());
-    let mut client = focused_client(viewing, b); // active on `viewing`
-    let client_id = client.id();
-    client.update_focused_pane(other, a); // but holds a stale focus on `other`
     let mut session = session_with(
-        vec![client],
         vec![tab_with_index(other, a, 0), tab_with_index(viewing, b, 1)],
         vec![
             record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
+    let mut client = focused_client(session.id, viewing, b); // active on `viewing`
+    let client_id = client.id();
+    client.update_focused_pane(other, a); // but holds a stale focus on `other`
+    session.attach_client(client);
 
     let _ = remove_pane_cascade(&mut session, other, a, rect(), EmptyTabPolicy::CloseTab);
 
@@ -510,10 +520,7 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
 fn closing_the_last_tab_prunes_client_focus_and_quits() {
     let tab_id = TabId::new();
     let pane = PaneId::new();
-    let client = focused_client(tab_id, pane);
-    let client_id = client.id();
     let mut session = session_with(
-        vec![client],
         vec![single_pane_tab(tab_id, pane)],
         vec![record(
             pane,
@@ -521,6 +528,9 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
             PaneExitPolicy::CloseOnExit,
         )],
     );
+    let client = focused_client(session.id, tab_id, pane);
+    let client_id = client.id();
+    session.attach_client(client);
 
     let events = remove_pane_cascade(&mut session, tab_id, pane, rect(), EmptyTabPolicy::CloseTab);
 

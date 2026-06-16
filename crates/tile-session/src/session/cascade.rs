@@ -75,9 +75,9 @@ pub fn remove_pane_cascade(
     // Collapse the layout *before* repairing focus, so the tree never
     // references the removed pane while candidates are computed. Removing the
     // only pane yields `LastPane` — the signal that the tab is now empty.
-    let removal = match remove_pane(&tab.layout, tab_rect, pane_id) {
+    let removal = match remove_pane(tab.layout(), tab_rect, pane_id) {
         Ok((new_tree, info)) => {
-            tab.layout = new_tree;
+            tab.update_layout(new_tree);
             Some(info)
         }
         Err(RemoveError::LastPane { .. }) => None,
@@ -93,7 +93,7 @@ pub fn remove_pane_cascade(
         Some(info) => {
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
-                let solved = solve_with_mode(&tab.layout, tab.layout_mode, tab_rect);
+                let solved = solve_with_mode(tab.layout(), tab.layout_mode(), tab_rect);
                 let candidates =
                     focus_candidates(info.old_rect, &solved.panes, &solved.stack_headers);
                 session

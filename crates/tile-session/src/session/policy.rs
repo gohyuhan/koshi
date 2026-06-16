@@ -3,9 +3,9 @@
 //!
 //! When the last pane in a tab is removed — whether closed on request or after
 //! its shell exited — [`EmptyTabPolicy`] decides the tab's fate. The default is
-//! [`EmptyTabPolicy::CloseTab`] (per `TILE_23`); when closing that tab leaves
-//! the session with no tabs, [`LastTabPolicy`] decides the program's fate, and
-//! its [`Quit`](LastTabPolicy::Quit) default ends the session.
+//! [`EmptyTabPolicy::CloseTab`], so an emptied tab does not linger; when closing
+//! that tab leaves the session with no tabs, [`LastTabPolicy`] decides the
+//! program's fate, and its [`Quit`](LastTabPolicy::Quit) default ends the session.
 
 use serde::{Deserialize, Serialize};
 

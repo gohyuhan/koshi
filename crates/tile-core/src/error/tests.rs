@@ -21,12 +21,13 @@ fn domain_category_roundtrips() {
         DomainCategory::Terminal,
         DomainCategory::Layout,
         DomainCategory::Plugin,
+        DomainCategory::Session,
         DomainCategory::Storage,
     ];
     for c in &cases {
         roundtrip(c);
     }
-    assert_eq!(cases.len(), 8);
+    assert_eq!(cases.len(), 9);
 }
 
 #[test]

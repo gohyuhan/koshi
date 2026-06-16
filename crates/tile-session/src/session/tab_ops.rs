@@ -103,7 +103,7 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
         return events;
     };
 
-    let tab_own_panes = tab.layout.leaf_panes();
+    let tab_own_panes = tab.layout().leaf_panes();
 
     for pane_id in tab_own_panes {
         let _ = session.panes.remove(pane_id);
@@ -126,10 +126,10 @@ pub fn rename_tab(session: &mut Session, tab_id: TabId, new_name: String) -> Vec
     let Some(tab) = session.tabs.get_mut(&tab_id) else {
         return Vec::new();
     };
-    if tab.name == new_name {
+    if tab.name() == new_name {
         return Vec::new(); // unchanged, nothing to emit
     }
-    tab.name = new_name.clone();
+    tab.update_name(new_name.clone());
     vec![Event::TabRenamed(TabRenamed {
         tab_id,
         name: new_name,
@@ -170,12 +170,12 @@ fn resolve_tab_target(session: &Session, active_tab: TabId, target: TabTarget) -
         TabTarget::Index(index) => tab_at_index(session, index),
         TabTarget::Next => {
             let len = session.tabs.len();
-            let current = session.tabs.get(&active_tab)?.index;
+            let current = session.tabs.get(&active_tab)?.index();
             tab_at_index(session, (current + 1) % len)
         }
         TabTarget::Prev => {
             let len = session.tabs.len();
-            let current = session.tabs.get(&active_tab)?.index;
+            let current = session.tabs.get(&active_tab)?.index();
             tab_at_index(session, (current + len - 1) % len)
         }
     }
@@ -186,8 +186,8 @@ fn tab_at_index(session: &Session, index: usize) -> Option<TabId> {
     session
         .tabs
         .values()
-        .find(|tab| tab.index == index)
-        .map(|tab| tab.id)
+        .find(|tab| tab.index() == index)
+        .map(|tab| tab.id())
 }
 
 /// Move `tab_id` to display position `new_index`, keeping the index dense.
@@ -199,7 +199,7 @@ fn tab_at_index(session: &Session, index: usize) -> Option<TabId> {
 /// emit events of their own.
 #[must_use]
 pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<Event> {
-    let Some(old_index) = session.tabs.get(&tab_id).map(|tab| tab.index) else {
+    let Some(old_index) = session.tabs.get(&tab_id).map(|tab| tab.index()) else {
         return Vec::new();
     };
 
@@ -216,28 +216,28 @@ pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<E
     let mut others: Vec<(usize, TabId)> = session
         .tabs
         .values()
-        .filter(|tab| tab.id != tab_id)
-        .map(|tab| (tab.index, tab.id))
+        .filter(|tab| tab.id() != tab_id)
+        .map(|tab| (tab.index(), tab.id()))
         .collect();
     others.sort_by_key(|&(index, _)| index);
 
     // 2. Renumber others densely 0..len-2 (closes the gap the target leaves).
     for (position, &(_, id)) in others.iter().enumerate() {
         if let Some(tab) = session.tabs.get_mut(&id) {
-            tab.index = position;
+            tab.update_index(position);
         }
     }
 
     // 3. Drop the target into its new slot.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
-        tab.index = new_index;
+        tab.update_index(new_index);
     }
 
     // 4. Shift everyone at/after the new slot up by one to make room.
     for &(_, id) in &others {
         if let Some(tab) = session.tabs.get_mut(&id) {
-            if tab.index >= new_index {
-                tab.index += 1;
+            if tab.index() >= new_index {
+                tab.update_index(tab.index() + 1);
             }
         }
     }
@@ -262,7 +262,7 @@ pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<E
 pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
     let mut events = vec![];
 
-    let closed_index = session.tabs.get(&tab_id).map(|tab| tab.index);
+    let closed_index = session.tabs.get(&tab_id).map(|tab| tab.index());
     session.tabs.remove(&tab_id);
     events.push(Event::TabClosed(TabClosed { tab_id }));
 
@@ -305,13 +305,13 @@ fn reindex_tab_index(session: &mut Session) {
     let mut existing_tabs: Vec<(usize, TabId)> = session
         .tabs
         .values()
-        .map(|tab| (tab.index, tab.id))
+        .map(|tab| (tab.index(), tab.id()))
         .collect();
     existing_tabs.sort_by_key(|&(index, _)| index);
 
     for (position, &(_, id)) in existing_tabs.iter().enumerate() {
         if let Some(tab) = session.tabs.get_mut(&id) {
-            tab.index = position;
+            tab.update_index(position);
         }
     }
 }
@@ -323,14 +323,14 @@ fn nearest_surviving_tab(session: &Session, closed_index: usize) -> Option<TabId
     let previous = session
         .tabs
         .values()
-        .filter(|tab| tab.index < closed_index)
-        .max_by_key(|tab| tab.index);
+        .filter(|tab| tab.index() < closed_index)
+        .max_by_key(|tab| tab.index());
     let next = session
         .tabs
         .values()
-        .filter(|tab| tab.index > closed_index)
-        .min_by_key(|tab| tab.index);
-    previous.or(next).map(|tab| tab.id)
+        .filter(|tab| tab.index() > closed_index)
+        .min_by_key(|tab| tab.index());
+    previous.or(next).map(|tab| tab.id())
 }
 
 #[cfg(test)]

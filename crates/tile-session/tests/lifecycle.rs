@@ -92,20 +92,20 @@ fn single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
 /// A single-pane tab at display position `index`.
 fn tab_with_index(tab_id: TabId, pane: PaneId, index: usize) -> Tab {
     let mut tab = single_pane_tab(tab_id, pane);
-    tab.index = index;
+    tab.update_index(index);
     tab
 }
 
 /// A tab split left/right between `left` and `right`, at display position 0.
 fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
-    tab.layout = LayoutNode::Split(SplitNode::with_equal_weights(
+    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
             LayoutChild::new(LayoutNode::Pane(left)),
             LayoutChild::new(LayoutNode::Pane(right)),
         ],
-    ));
+    )));
     tab
 }
 
@@ -128,7 +128,7 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
 fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
     let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
     for tab in tabs {
-        session.tabs.insert(tab.id, tab);
+        session.tabs.insert(tab.id(), tab);
     }
     for record in records {
         session.panes.insert(record).expect("unique pane id");
@@ -519,7 +519,7 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
     let (other, _other_handle) = spawn_child(&pty);
     let (multi_tab, other_tab) = (TabId::new(), TabId::new());
     let mut multi = two_pane_tab(multi_tab, a, b);
-    multi.index = 0;
+    multi.update_index(0);
     let mut session = session_with(
         vec![multi, tab_with_index(other_tab, other, 1)],
         vec![
