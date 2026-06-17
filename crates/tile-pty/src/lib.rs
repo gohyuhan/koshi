@@ -2,6 +2,7 @@
 //! PTY read/write/resize, and child process exit detection.
 
 pub mod error;
+pub mod kill;
 pub mod portable;
 pub mod types;
 

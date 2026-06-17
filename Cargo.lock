@@ -922,9 +922,11 @@ version = "0.1.0"
 name = "tile-pty"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "portable-pty",
  "thiserror 2.0.18",
  "tile-core",
+ "windows-sys",
 ]
 
 [[package]]
