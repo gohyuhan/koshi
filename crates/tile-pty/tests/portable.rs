@@ -46,7 +46,7 @@ fn spawn_pane(backend: &PortablePtyBackend, spec: SpawnSpec) -> PtyHandle {
 
 /// Poll the handle's output channel until `needle` appears or `timeout` elapses,
 /// returning everything accumulated (lossy UTF-8) for the assertion/diagnostics.
-fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
+fn read_until(handle: &mut PtyHandle, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut acc: Vec<u8> = Vec::new();
     while Instant::now() < deadline {
@@ -64,7 +64,7 @@ fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
 }
 
 /// Poll for the child's exit status until it arrives or `timeout` elapses.
-fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
+fn wait_exit(handle: &mut PtyHandle, timeout: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = handle.try_exit_status() {
@@ -91,8 +91,8 @@ fn process_alive(pid: &str) -> bool {
 #[test]
 fn spawn_streams_child_output() {
     let backend = PortablePtyBackend::new();
-    let handle = spawn_pane(&backend, spec("/bin/echo", &["hello"]));
-    let out = read_until(&handle, "hello", Duration::from_secs(5));
+    let mut handle = spawn_pane(&backend, spec("/bin/echo", &["hello"]));
+    let out = read_until(&mut handle, "hello", Duration::from_secs(5));
     assert!(
         out.contains("hello"),
         "expected child output to contain 'hello', got {out:?}"
@@ -102,8 +102,8 @@ fn spawn_streams_child_output() {
 #[test]
 fn spawn_reports_clean_exit() {
     let backend = PortablePtyBackend::new();
-    let handle = spawn_pane(&backend, spec("/bin/echo", &["bye"]));
-    let status = wait_exit(&handle, Duration::from_secs(5));
+    let mut handle = spawn_pane(&backend, spec("/bin/echo", &["bye"]));
+    let status = wait_exit(&mut handle, Duration::from_secs(5));
     assert_eq!(status, Some(ExitStatus::ExitCode(0)));
 }
 
@@ -119,11 +119,11 @@ fn spawn_mints_unique_pane_ids() {
 fn write_reaches_child_and_echoes_back() {
     let backend = PortablePtyBackend::new();
     // `cat` with no args reads stdin and writes it straight back out.
-    let handle = spawn_pane(&backend, spec("/bin/cat", &[]));
+    let mut handle = spawn_pane(&backend, spec("/bin/cat", &[]));
     backend
         .write(handle.pane_id(), b"ping\n")
         .expect("write to cat");
-    let out = read_until(&handle, "ping", Duration::from_secs(5));
+    let out = read_until(&mut handle, "ping", Duration::from_secs(5));
     assert!(
         out.contains("ping"),
         "expected cat to echo 'ping', got {out:?}"
@@ -184,14 +184,18 @@ fn kill_unknown_pane_errs() {
 #[test]
 fn kill_force_terminates_running_child() {
     let backend = PortablePtyBackend::new();
-    // `cat` blocks reading stdin forever; only a signal ends it.
-    let handle = spawn_pane(&backend, spec("/bin/cat", &[]));
+    // A child that loops without reading stdin, so only a signal ends it — never a
+    // stdin EOF from kill's pty teardown.
+    let mut handle = spawn_pane(
+        &backend,
+        spec("/bin/sh", &["-c", "while :; do sleep 1; done"]),
+    );
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
         .expect("force kill");
-    // kill() joins the watcher only after it publishes the exit, so the
-    // signal-based status is already waiting on the channel.
-    let status = wait_exit(&handle, Duration::from_secs(5));
+    // kill() fires the signal and returns without waiting; the watcher publishes
+    // the signal-based exit on the channel, which wait_exit polls for.
+    let status = wait_exit(&mut handle, Duration::from_secs(5));
     assert_eq!(
         status,
         Some(ExitStatus::Signaled(9)),
@@ -202,9 +206,9 @@ fn kill_force_terminates_running_child() {
 #[test]
 fn kill_graceful_lets_finished_child_exit_cleanly() {
     let backend = PortablePtyBackend::new();
-    let handle = spawn_pane(&backend, spec("/bin/echo", &["done"]));
+    let mut handle = spawn_pane(&backend, spec("/bin/echo", &["done"]));
     // Echo exits on its own; confirm that before issuing the graceful kill.
-    let status = wait_exit(&handle, Duration::from_secs(5));
+    let status = wait_exit(&mut handle, Duration::from_secs(5));
     assert_eq!(status, Some(ExitStatus::ExitCode(0)));
     // Graceful sees the already-set `exited` flag and skips SIGKILL entirely,
     // returning promptly without waiting out the timeout.
@@ -244,8 +248,8 @@ fn exit_status_reports_exact_signal_number() {
         ("USR2", usr2),
     ] {
         let script = format!("kill -{name} $$");
-        let handle = spawn_pane(&backend, spec("/bin/sh", &["-c", script.as_str()]));
-        let status = wait_exit(&handle, Duration::from_secs(5));
+        let mut handle = spawn_pane(&backend, spec("/bin/sh", &["-c", script.as_str()]));
+        let status = wait_exit(&mut handle, Duration::from_secs(5));
         assert_eq!(
             status,
             Some(ExitStatus::Signaled(num)),
@@ -257,20 +261,24 @@ fn exit_status_reports_exact_signal_number() {
 #[test]
 fn force_kills_a_sighup_ignoring_child() {
     let backend = PortablePtyBackend::new();
-    // Ignores SIGHUP and blocks in the `read` builtin (no child to orphan).
-    // portable-pty's old killer only sent SIGHUP — which this traps — so reaching
-    // `Signaled(9)` proves `force` escalates to a real, untrappable SIGKILL.
-    let handle = spawn_pane(
+    // Ignores SIGHUP and loops without reading stdin (no child to orphan, no stdin
+    // EOF to exit on). portable-pty's old killer only sent SIGHUP — which this traps
+    // — so reaching `Signaled(9)` proves `force` escalates to a real, untrappable
+    // SIGKILL.
+    let mut handle = spawn_pane(
         &backend,
-        spec("/bin/sh", &["-c", "trap '' HUP; echo READY; read x"]),
+        spec(
+            "/bin/sh",
+            &["-c", "trap '' HUP; echo READY; while :; do sleep 1; done"],
+        ),
     );
     // Wait until the trap is installed (printed after `trap`) before signalling.
-    read_until(&handle, "READY", Duration::from_secs(5));
+    read_until(&mut handle, "READY", Duration::from_secs(5));
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
         .expect("force kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::Signaled(9)),
         "Force must SIGKILL a SIGHUP-ignoring child"
     );
@@ -279,14 +287,20 @@ fn force_kills_a_sighup_ignoring_child() {
 #[test]
 fn graceful_escalates_to_sigkill_when_sigterm_is_ignored() {
     let backend = PortablePtyBackend::new();
-    // SIGTERM is trapped, so the grace window lapses and `kill` must escalate.
-    let handle = spawn_pane(
+    // Ignores SIGTERM and never reads stdin, so neither the trapped signal nor the
+    // stdin EOF that kill's teardown delivers can end it — only the escalated
+    // SIGKILL does. (A `read`-based child would exit cleanly on that EOF before the
+    // window lapses, never reaching the escalation this test exists to prove.)
+    let mut handle = spawn_pane(
         &backend,
-        spec("/bin/sh", &["-c", "trap '' TERM; echo READY; read x"]),
+        spec(
+            "/bin/sh",
+            &["-c", "trap '' TERM; echo READY; while :; do sleep 1; done"],
+        ),
     );
     // Without this the kill can race shell startup and land before the trap,
     // killing the child with the default SIGTERM disposition instead.
-    read_until(&handle, "READY", Duration::from_secs(5));
+    read_until(&mut handle, "READY", Duration::from_secs(5));
     backend
         .kill(
             handle.pane_id(),
@@ -296,7 +310,7 @@ fn graceful_escalates_to_sigkill_when_sigterm_is_ignored() {
         )
         .expect("graceful kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::Signaled(9)),
         "Graceful must escalate to SIGKILL past the window"
     );
@@ -305,10 +319,14 @@ fn graceful_escalates_to_sigkill_when_sigterm_is_ignored() {
 #[test]
 fn graceful_lets_a_cooperative_child_exit_on_sigterm() {
     let backend = PortablePtyBackend::new();
-    // No trap: the default SIGTERM disposition terminates it inside the window,
-    // so it dies of SIGTERM (15) and is never escalated to SIGKILL (9).
-    let handle = spawn_pane(&backend, spec("/bin/sh", &["-c", "echo READY; read x"]));
-    read_until(&handle, "READY", Duration::from_secs(5));
+    // No trap: the default SIGTERM disposition terminates it inside the window, so
+    // it dies of SIGTERM (15) and is never escalated to SIGKILL (9). It loops
+    // without reading stdin, so a teardown EOF can't pre-empt the signal.
+    let mut handle = spawn_pane(
+        &backend,
+        spec("/bin/sh", &["-c", "echo READY; while :; do sleep 1; done"]),
+    );
+    read_until(&mut handle, "READY", Duration::from_secs(5));
     backend
         .kill(
             handle.pane_id(),
@@ -318,7 +336,7 @@ fn graceful_lets_a_cooperative_child_exit_on_sigterm() {
         )
         .expect("graceful kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::Signaled(15)),
         "a cooperative child should exit on SIGTERM, not be SIGKILLed"
     );
@@ -330,12 +348,12 @@ fn tree_reaps_the_grandchild() {
     // The shell backgrounds a long sleep (its child, same process group), prints
     // that sleep's pid, then waits. `Tree` must killpg the whole group and take
     // the sleep with it; `Force` (leader only) would leave it orphaned and alive.
-    let handle = spawn_pane(
+    let mut handle = spawn_pane(
         &backend,
         spec("/bin/sh", &["-c", "sleep 300 & echo $!; wait"]),
     );
 
-    let out = read_until(&handle, "\n", Duration::from_secs(5));
+    let out = read_until(&mut handle, "\n", Duration::from_secs(5));
     let grandchild: String = out.chars().filter(char::is_ascii_digit).collect();
     assert!(
         !grandchild.is_empty(),
@@ -350,7 +368,7 @@ fn tree_reaps_the_grandchild() {
         .kill(handle.pane_id(), KillPolicy::Tree)
         .expect("tree kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::Signaled(9)),
         "the shell leader should be SIGKILLed by the group kill"
     );
@@ -377,14 +395,14 @@ fn tree_reaps_a_descendant_even_after_the_leader_has_exited() {
     // lives on as a member of the now-leaderless-but-non-empty group. `Tree` must
     // still `killpg` the group and reap it — gating `Tree` on the leader's
     // `exited` flag (which tracks only the leader) would leak the descendant.
-    let handle = spawn_pane(
+    let mut handle = spawn_pane(
         &backend,
         spec(
             "/bin/sh",
             &["-c", r#"trap "" HUP; sleep 300 & echo "$! READY""#],
         ),
     );
-    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let out = read_until(&mut handle, "READY", Duration::from_secs(5));
     let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
     assert!(
         !descendant.is_empty(),
@@ -392,7 +410,7 @@ fn tree_reaps_a_descendant_even_after_the_leader_has_exited() {
     );
 
     // The leader exits on its own → watcher reaps it → `exited` is set before kill.
-    let status = wait_exit(&handle, Duration::from_secs(5));
+    let status = wait_exit(&mut handle, Duration::from_secs(5));
     assert!(
         status.is_some(),
         "the leader should exit on its own, got {status:?}"
@@ -459,7 +477,7 @@ fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
     // the trap: parsing waits for `READY` (printed last), so the pid is already
     // buffered — no race between two separate echoes, and the trap is proven up
     // before the kill. (`$$` inside the backgrounded `sh -c` is that child's pid.)
-    let handle = spawn_pane(
+    let mut handle = spawn_pane(
         &backend,
         spec(
             "/bin/sh",
@@ -469,7 +487,7 @@ fn force_does_not_hang_when_a_descendant_keeps_the_pty_open() {
             ],
         ),
     );
-    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let out = read_until(&mut handle, "READY", Duration::from_secs(5));
     let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
     assert!(
         !descendant.is_empty(),
@@ -501,7 +519,7 @@ fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
     // the leader, so the same detach-the-reader rule must apply or kill() blocks.
     // The child prints its own pid then `READY` last, so parsing on `READY` finds
     // the pid already buffered (no two-echo race) and proves the trap is up first.
-    let handle = spawn_pane(
+    let mut handle = spawn_pane(
         &backend,
         spec(
             "/bin/sh",
@@ -511,7 +529,7 @@ fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
             ],
         ),
     );
-    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let out = read_until(&mut handle, "READY", Duration::from_secs(5));
     let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
     assert!(
         !descendant.is_empty(),

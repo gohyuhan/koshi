@@ -13,8 +13,9 @@
 //! `trigger_child_exit`, and the `*s` query methods — is what tests assert on.
 
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
 use std::sync::Mutex;
+
+use tokio::sync::mpsc::UnboundedSender;
 
 pub use tile_core::ids::PaneId;
 pub use tile_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
@@ -27,8 +28,8 @@ struct PaneRecord {
     resizes: Vec<PtySize>,
     writes: Vec<Vec<u8>>,
     kills: Vec<KillPolicy>,
-    output_tx: Sender<Vec<u8>>,
-    exit_tx: Sender<ExitStatus>,
+    output_tx: UnboundedSender<Vec<u8>>,
+    exit_tx: UnboundedSender<ExitStatus>,
 }
 
 /// Backend state behind the [`Mutex`]; the trait takes `&self`, so all mutation
@@ -217,7 +218,7 @@ mod tests {
     #[test]
     fn output_is_delivered_in_order() {
         let pty = FakePtyBackend::new();
-        let handle = pty.spawn(spec(), size(80, 24)).unwrap();
+        let mut handle = pty.spawn(spec(), size(80, 24)).unwrap();
         let pane = handle.pane_id();
 
         assert!(handle.try_read_output().is_none());
@@ -288,7 +289,7 @@ mod tests {
     #[test]
     fn child_exit_fires_once() {
         let pty = FakePtyBackend::new();
-        let handle = pty.spawn(spec(), size(80, 24)).unwrap();
+        let mut handle = pty.spawn(spec(), size(80, 24)).unwrap();
         let pane = handle.pane_id();
 
         assert!(handle.try_exit_status().is_none());
@@ -329,8 +330,8 @@ mod tests {
     #[test]
     fn multiple_panes_are_isolated() {
         let pty = FakePtyBackend::new();
-        let a = pty.spawn(spec(), size(80, 24)).unwrap();
-        let b = pty.spawn(spec(), size(80, 24)).unwrap();
+        let mut a = pty.spawn(spec(), size(80, 24)).unwrap();
+        let mut b = pty.spawn(spec(), size(80, 24)).unwrap();
 
         pty.write(a.pane_id(), b"a").unwrap();
         pty.push_output(b.pane_id(), b"b".to_vec()).unwrap();
@@ -350,7 +351,7 @@ mod tests {
         let pty = FakePtyBackend::new();
         let backend: &dyn PtyBackend = &pty;
 
-        let handle = backend.spawn(spec(), size(80, 24)).unwrap();
+        let mut handle = backend.spawn(spec(), size(80, 24)).unwrap();
         let pane = handle.pane_id();
         backend.resize(pane, size(100, 30)).unwrap();
         backend.write(pane, b"ls\n").unwrap();
@@ -368,5 +369,29 @@ mod tests {
         pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
             .unwrap();
         assert_eq!(handle.try_exit_status(), Some(ExitStatus::ExitCode(0)));
+    }
+
+    #[tokio::test]
+    async fn output_is_delivered_to_an_awaiting_reader() {
+        let pty = FakePtyBackend::new();
+        let mut handle = pty.spawn(spec(), size(80, 24)).unwrap();
+        let pane = handle.pane_id();
+
+        pty.push_output(pane, b"async".to_vec()).unwrap();
+
+        // The async channel wakes a task awaiting output, not just a poller.
+        assert_eq!(handle.recv_output().await, Some(b"async".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn child_exit_is_delivered_to_an_awaiting_reader() {
+        let pty = FakePtyBackend::new();
+        let mut handle = pty.spawn(spec(), size(80, 24)).unwrap();
+        let pane = handle.pane_id();
+
+        pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
+            .unwrap();
+
+        assert_eq!(handle.recv_exit().await, Some(ExitStatus::ExitCode(0)));
     }
 }

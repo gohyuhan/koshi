@@ -142,7 +142,7 @@ fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
 /// child has not exited (the cascade is edge-driven, not polled).
 fn pump_exit(
     session: &mut Session,
-    handle: &PtyHandle,
+    handle: &mut PtyHandle,
     tab_id: TabId,
     tab_rect: Rect,
     empty_tab_policy: EmptyTabPolicy,
@@ -177,7 +177,7 @@ fn pump_exit(
 /// Distinguishing "no chunk" from "dropped" matters: a post-removal assertion of
 /// `Some(false)` proves both that the chunk did arrive at the boundary *and*
 /// that the session had no pane to route it to.
-fn route_output(session: &Session, handle: &PtyHandle) -> Option<bool> {
+fn route_output(session: &Session, handle: &mut PtyHandle) -> Option<bool> {
     handle
         .try_read_output()
         .map(|_chunk| session.panes.get(handle.pane_id()).is_some())
@@ -191,7 +191,7 @@ fn position(events: &[Event], pred: impl Fn(&Event) -> bool) -> Option<usize> {
 #[test]
 fn child_exit_in_focused_pane_refocuses_a_survivor() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
     let (b, _handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
@@ -209,7 +209,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     // exit edge, never on an idle poll.
     assert!(pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab
@@ -220,7 +220,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -252,7 +252,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
 #[test]
 fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
     let (b, _handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
@@ -270,7 +270,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -292,7 +292,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
 #[test]
 fn child_exit_refocuses_every_client_that_watched_the_pane() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
     let (b, _handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
@@ -312,7 +312,7 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -333,7 +333,7 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
 #[test]
 fn child_exit_with_no_room_to_refocus_clears_focus() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
     let (b, _handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
@@ -352,7 +352,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
         .expect("pane a is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         tiny_rect(),
         EmptyTabPolicy::CloseTab,
@@ -374,7 +374,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
 #[test]
 fn last_pane_exit_closes_the_tab_and_quits() {
     let pty = FakePtyBackend::new();
-    let (only, handle) = spawn_child(&pty);
+    let (only, mut handle) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
         vec![single_pane_tab(tab_id, only)],
@@ -385,7 +385,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle,
+        &mut handle,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -417,7 +417,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
 #[test]
 fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
     let pty = FakePtyBackend::new();
-    let (closing, handle) = spawn_child(&pty);
+    let (closing, mut handle) = spawn_child(&pty);
     let (other, _other_handle) = spawn_child(&pty);
     let (closing_tab, other_tab) = (TabId::new(), TabId::new());
     let mut session = session_with(
@@ -435,7 +435,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle,
+        &mut handle,
         closing_tab,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -456,7 +456,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
 #[test]
 fn last_pane_respawn_policy_keeps_the_pane() {
     let pty = FakePtyBackend::new();
-    let (pane, handle) = spawn_child(&pty);
+    let (pane, mut handle) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
         vec![single_pane_tab(tab_id, pane)],
@@ -467,7 +467,7 @@ fn last_pane_respawn_policy_keeps_the_pane() {
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle,
+        &mut handle,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -488,7 +488,7 @@ fn last_pane_respawn_policy_keeps_the_pane() {
 #[test]
 fn last_pane_exit_under_respawn_tab_policy_keeps_the_tab() {
     let pty = FakePtyBackend::new();
-    let (pane, handle) = spawn_child(&pty);
+    let (pane, mut handle) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
         vec![single_pane_tab(tab_id, pane)],
@@ -499,7 +499,7 @@ fn last_pane_exit_under_respawn_tab_policy_keeps_the_tab() {
         .expect("the pane is known to the backend");
     let events = pump_exit(
         &mut session,
-        &handle,
+        &mut handle,
         tab_id,
         rect(),
         EmptyTabPolicy::RespawnShell,
@@ -580,7 +580,7 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
 #[test]
 fn child_exit_drops_the_pane_from_focus_history() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
     let (b, _handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut tab = two_pane_tab(tab_id, a, b);
@@ -598,7 +598,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -613,8 +613,8 @@ fn child_exit_drops_the_pane_from_focus_history() {
 #[test]
 fn output_for_a_removed_pane_is_dropped() {
     let pty = FakePtyBackend::new();
-    let (a, handle_a) = spawn_child(&pty);
-    let (b, handle_b) = spawn_child(&pty);
+    let (a, mut handle_a) = spawn_child(&pty);
+    let (b, mut handle_b) = spawn_child(&pty);
     let tab_id = TabId::new();
     let mut session = session_with(
         vec![two_pane_tab(tab_id, a, b)],
@@ -627,14 +627,14 @@ fn output_for_a_removed_pane_is_dropped() {
     // While the pane is live, its output routes to a real pane.
     pty.push_output(a, b"before".to_vec())
         .expect("pane a is known to the backend");
-    assert_eq!(route_output(&session, &handle_a), Some(true));
+    assert_eq!(route_output(&session, &mut handle_a), Some(true));
 
     // Remove the pane through a child-exit.
     pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
     let _ = pump_exit(
         &mut session,
-        &handle_a,
+        &mut handle_a,
         tab_id,
         rect(),
         EmptyTabPolicy::CloseTab,
@@ -647,13 +647,13 @@ fn output_for_a_removed_pane_is_dropped() {
     // (`false`).
     pty.push_output(a, b"after".to_vec())
         .expect("the backend still tracks the spawned child");
-    assert_eq!(route_output(&session, &handle_a), Some(false));
+    assert_eq!(route_output(&session, &mut handle_a), Some(false));
 
     // The surviving pane still receives its output — one pane's removal does not
     // poison routing for the rest.
     pty.push_output(b, b"live".to_vec())
         .expect("pane b is known to the backend");
-    assert_eq!(route_output(&session, &handle_b), Some(true));
+    assert_eq!(route_output(&session, &mut handle_b), Some(true));
 }
 
 #[test]

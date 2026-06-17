@@ -1,6 +1,6 @@
 //! The [`PtyBackend`] trait and the [`PtyHandle`] a spawned pane is driven through.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use tile_core::{
     ids::PaneId,
@@ -26,25 +26,31 @@ pub trait PtyBackend: Send + Sync {
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError>;
 }
 
-/// The read side of one spawned pane: its id and the channels the backend
+/// The read side of one spawned pane: its id and the async channels the backend
 /// delivers child output and exit status on.
 ///
-/// Reads are non-blocking (`try_*`) so a single thread can poll without
-/// scheduling. The backend keeps the sending ends (see [`PtyHandle::new`]);
-/// dropping the handle just closes the receivers.
+/// PTY I/O is blocking, so the backend drives it on dedicated OS threads (a
+/// reader pumping child output, a watcher awaiting child exit) that hand their
+/// results across these `tokio::sync::mpsc` channels. The runtime owns the handle
+/// and `await`s [`recv_output`](PtyHandle::recv_output) /
+/// [`recv_exit`](PtyHandle::recv_exit) on its event loop, so it never blocks a
+/// task on PTY I/O. [`try_read_output`](PtyHandle::try_read_output) /
+/// [`try_exit_status`](PtyHandle::try_exit_status) are non-blocking polls for
+/// callers not driving an async loop. Dropping the handle closes the receivers,
+/// which is how the backend threads learn the caller is gone.
 #[derive(Debug)]
 pub struct PtyHandle {
     pane_id: PaneId,
-    output: Receiver<Vec<u8>>,
-    exit: Receiver<ExitStatus>,
+    output: UnboundedReceiver<Vec<u8>>,
+    exit: UnboundedReceiver<ExitStatus>,
 }
 
 impl PtyHandle {
     /// Build a handle for `pane_id`, returning it with the output and exit
     /// senders the backend retains to push child output and the final exit.
-    pub fn new(pane_id: PaneId) -> (Self, Sender<Vec<u8>>, Sender<ExitStatus>) {
-        let (output_sender, output_receiver) = channel();
-        let (exit_sender, exit_receiver) = channel();
+    pub fn new(pane_id: PaneId) -> (Self, UnboundedSender<Vec<u8>>, UnboundedSender<ExitStatus>) {
+        let (output_sender, output_receiver) = unbounded_channel();
+        let (exit_sender, exit_receiver) = unbounded_channel();
         let new_pty_handle = PtyHandle {
             pane_id,
             output: output_receiver,
@@ -60,13 +66,25 @@ impl PtyHandle {
         self.pane_id
     }
 
+    /// Await the next chunk of child output, or `None` once the child is gone
+    /// and every sender has dropped.
+    pub async fn recv_output(&mut self) -> Option<Vec<u8>> {
+        self.output.recv().await
+    }
+
+    /// Await the child's exit status, or `None` if the watcher dropped without
+    /// reporting one.
+    pub async fn recv_exit(&mut self) -> Option<ExitStatus> {
+        self.exit.recv().await
+    }
+
     /// The next chunk of child output, or `None` if none is pending.
-    pub fn try_read_output(&self) -> Option<Vec<u8>> {
+    pub fn try_read_output(&mut self) -> Option<Vec<u8>> {
         self.output.try_recv().ok()
     }
 
     /// The child's exit status, or `None` if it has not exited yet.
-    pub fn try_exit_status(&self) -> Option<ExitStatus> {
+    pub fn try_exit_status(&mut self) -> Option<ExitStatus> {
         self.exit.try_recv().ok()
     }
 }

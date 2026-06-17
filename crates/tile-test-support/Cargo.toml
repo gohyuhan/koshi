@@ -6,3 +6,7 @@ edition.workspace = true
 [dependencies]
 tile-core = { version = "0.1.0", path = "../tile-core" }
 tile-pty = { version = "0.1.0", path = "../tile-pty" }
+tokio = { version = "1.52.3", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt"] }

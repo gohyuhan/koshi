@@ -84,7 +84,14 @@ pub struct PaneEntry {
     /// clean shutdown; `expect` flags the day that wiring lands.
     #[expect(dead_code)]
     reader: JoinHandle<()>,
-    /// Watcher thread: blocks on the child, records exit status, flips `exited`.
+    /// Watcher thread: blocks on the child, records exit status, flips `exited`,
+    /// and publishes the status on the exit channel.
+    ///
+    /// `kill` moves the whole entry onto a detached teardown thread and joins this
+    /// watcher there, so the pty stays open until the leader actually dies — the
+    /// child exits on the signal we send, not on a stdin EOF it would get from a
+    /// prematurely dropped master — while the caller never blocks. The *reader* is
+    /// never joined (a descendant can hold the slave open, so it may never EOF).
     watcher: JoinHandle<()>,
 }
 
@@ -276,53 +283,63 @@ impl PtyBackend for PortablePtyBackend {
             })
     }
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
-        let target_panes = self
+        let entry = self
             .panes
             .lock()
             .unwrap()
             .remove(&pane)
             .ok_or(PtyError::UnknownPane { pane })?;
 
-        // `Force`/`Graceful` signal the leader PID, so skip them once the watcher
-        // has reaped it — a recycled PID could belong to an unrelated process.
-        // `Tree` signals the whole group/job (`killpg` / `TerminateJobObject`),
-        // which stays valid while any member lives, so it fires unconditionally:
-        // the leader can exit while a same-group descendant keeps running, and
-        // `Tree` must still reap it (the `exited` flag tracks only the leader, not
-        // whether the group is empty).
-        match kill_policy {
-            KillPolicy::Force => {
-                if !target_panes.exited.load(Ordering::SeqCst) {
-                    let _ = target_panes.killer.force();
+        // `kill` must never block the caller: the runtime issues it from an async
+        // task on its event loop. So the whole teardown runs on a detached thread
+        // and `kill` returns at once; the child's death is observed on the exit
+        // channel. The thread keeps the pty open until the leader actually dies (it
+        // joins the watcher) — a graceful child then exits on the signal we send,
+        // not on the stdin EOF it would get from a dropped master mid-window. It
+        // never joins the *reader*: a descendant can hold the slave open, so the
+        // reader may never reach EOF.
+        thread::spawn(move || {
+            // `Force`/`Graceful` signal the leader PID, so skip them once the
+            // watcher has reaped it — a recycled PID could belong to an unrelated
+            // process. `Tree` signals the whole group/job (`killpg` /
+            // `TerminateJobObject`), which stays valid while any member lives, so it
+            // fires unconditionally: a same-group descendant can outlive the leader
+            // and `Tree` must still reap it (the `exited` flag tracks only the
+            // leader, not whether the group is empty).
+            match kill_policy {
+                KillPolicy::Force => {
+                    if !entry.exited.load(Ordering::SeqCst) {
+                        let _ = entry.killer.force();
+                    }
                 }
-            }
-            KillPolicy::Tree => {
-                let _ = target_panes.killer.tree();
-            }
-            KillPolicy::Graceful { timeout } => {
-                if !target_panes.exited.load(Ordering::SeqCst) {
-                    // Give the child the grace window to exit on its own, polling the
-                    // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
-
-                    // request a process termination first
-                    let _ = target_panes.killer.request_stop();
-                    let deadline = Instant::now() + timeout;
-                    while Instant::now() < deadline {
-                        if target_panes.exited.load(Ordering::SeqCst) {
-                            break;
+                KillPolicy::Tree => {
+                    let _ = entry.killer.tree();
+                }
+                KillPolicy::Graceful { timeout } => {
+                    if !entry.exited.load(Ordering::SeqCst) {
+                        // SIGTERM now, then the grace window; SIGKILL only if the
+                        // child is still alive when it lapses.
+                        let _ = entry.killer.request_stop();
+                        let deadline = Instant::now() + timeout;
+                        while Instant::now() < deadline {
+                            if entry.exited.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(25));
                         }
-                        thread::sleep(Duration::from_millis(25));
-                    }
-
-                    // after the define period, and it was not quited, force kill it
-                    if !target_panes.exited.load(Ordering::SeqCst) {
-                        let _ = target_panes.killer.force();
+                        if !entry.exited.load(Ordering::SeqCst) {
+                            let _ = entry.killer.force();
+                        }
                     }
                 }
             }
-        }
 
-        let _ = target_panes.watcher.join();
+            // Wait for the leader to die before the pty is released: `entry` (and
+            // with it the master/writer) drops at the end of this closure, so
+            // joining the watcher first keeps the child's exit driven by our signal
+            // rather than by a premature stdin EOF. The reader is left detached.
+            let _ = entry.watcher.join();
+        });
 
         Ok(())
     }

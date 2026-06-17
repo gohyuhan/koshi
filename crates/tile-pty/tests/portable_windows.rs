@@ -29,7 +29,7 @@ fn spec(program: &str, args: &[&str]) -> SpawnSpec {
     }
 }
 
-fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
+fn wait_exit(handle: &mut PtyHandle, timeout: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = handle.try_exit_status() {
@@ -46,14 +46,14 @@ fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
 fn force_terminates_a_running_child() {
     let backend = PortablePtyBackend::new();
     // `ping -n 100` blocks ~100s, so only the kill ends it.
-    let handle = backend
+    let mut handle = backend
         .spawn(spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]), SIZE)
         .expect("spawn cmd");
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
         .expect("force kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::ExitCode(137)),
     );
 }
@@ -61,14 +61,14 @@ fn force_terminates_a_running_child() {
 #[test]
 fn tree_terminates_the_job() {
     let backend = PortablePtyBackend::new();
-    let handle = backend
+    let mut handle = backend
         .spawn(spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]), SIZE)
         .expect("spawn cmd");
     backend
         .kill(handle.pane_id(), KillPolicy::Tree)
         .expect("tree kill");
     assert_eq!(
-        wait_exit(&handle, Duration::from_secs(5)),
+        wait_exit(&mut handle, Duration::from_secs(5)),
         Some(ExitStatus::ExitCode(137)),
     );
 }
