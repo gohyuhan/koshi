@@ -208,3 +208,41 @@ fn kill_graceful_lets_finished_child_exit_cleanly() {
         )
         .expect("graceful kill");
 }
+
+#[test]
+fn exit_status_reports_exact_signal_number() {
+    // The child signals *itself* with a known signal, so we can assert the
+    // exact number `map_status` recovers — not just "some signal". This is the
+    // real check on `sig_no`: portable-pty hands back `strsignal(3)` text that
+    // differs by platform ("Terminated" on Linux, "Terminated: 15" on macOS),
+    // and the previous `matches!(_, Signaled(_))` test passed even when the
+    // mapping produced 0.
+    // SIGUSR1/2 pin the greedy-parse regression: their strsignal text ends in a
+    // non-signal ordinal ("User defined signal 1"), and their numbers differ by
+    // OS (Linux 10/12, macOS/BSD 30/31), so a naive trailing-number parse would
+    // wrongly report 1/2 (SIGHUP/SIGINT).
+    let (usr1, usr2) = if cfg!(target_os = "linux") {
+        (10, 12)
+    } else {
+        (30, 31)
+    };
+    let backend = PortablePtyBackend::new();
+    for (name, num) in [
+        ("HUP", 1),
+        ("TERM", 15),
+        ("SEGV", 11),
+        ("USR1", usr1),
+        ("USR2", usr2),
+    ] {
+        let script = format!("kill -{name} $$");
+        let handle = backend
+            .spawn(spec("/bin/sh", &["-c", script.as_str()]), SIZE)
+            .expect("spawn sh");
+        let status = wait_exit(&handle, Duration::from_secs(5));
+        assert_eq!(
+            status,
+            Some(ExitStatus::Signaled(num)),
+            "signal {name} should map to {num}, got {status:?}"
+        );
+    }
+}

@@ -246,21 +246,59 @@ fn to_pp_size(s: PtySize) -> portable_pty::PtySize {
         pixel_height: 0,
     }
 }
+
 fn map_status(s: portable_pty::ExitStatus) -> ExitStatus {
     match s.signal() {
         Some(name) => ExitStatus::Signaled(sig_no(name)),
         None => ExitStatus::ExitCode(s.exit_code() as i32),
     }
 }
-fn sig_no(name: &str) -> i32 {
-    match name {
-        "SIGTERM" => 15,
-        "SIGKILL" => 9,
-        "SIGHUP" => 1,
-        "SIGINT" => 2,
-        "SIGQUIT" => 3,
-        "SIGSEGV" => 11,
-        "SIGABRT" => 6,
+
+/// Recover a Unix signal number from portable-pty's exit status string.
+///
+/// portable-pty discards the raw `WTERMSIG` and hands back `strsignal(3)` text,
+/// never the `SIG*` mnemonic. That text is platform-specific:
+/// - macOS/BSD: `"<description>: <n>"` — e.g. `"Terminated: 15"`
+/// - Linux/glibc: `"<description>"` — e.g. `"Terminated"` (no number)
+/// - portable-pty's fallback when `strsignal` returns null: `"Signal <n>"`
+///
+/// We parse the number ONLY when it follows a `": "` (macOS) or the `"Signal "`
+/// prefix (the fallback) — never a bare trailing word, because some glibc
+/// descriptions end in a non-signal ordinal (e.g. `"User defined signal 1"` is
+/// SIGUSR1 = 10, not signal 1). Otherwise we map the known glibc descriptions;
+/// an unrecognised one yields 0. Reachable only for Unix children — on Windows
+/// `signal()` is always `None`, so `map_status` takes the exit-code arm.
+fn sig_no(desc: &str) -> i32 {
+    // macOS appends ": <n>" — the real number is after the colon.
+    if let Some((_, n)) = desc.rsplit_once(": ") {
+        if let Ok(n) = n.parse::<i32>() {
+            return n;
+        }
+    }
+    // portable-pty's null-strsignal fallback is "Signal <n>".
+    if let Some(n) = desc
+        .strip_prefix("Signal ")
+        .and_then(|n| n.parse::<i32>().ok())
+    {
+        return n;
+    }
+    // Linux glibc: bare description, no trailing number.
+    match desc {
+        "Hangup" => 1,
+        "Interrupt" => 2,
+        "Quit" => 3,
+        "Illegal instruction" => 4,
+        "Trace/breakpoint trap" => 5,
+        "Aborted" => 6,
+        "Bus error" => 7,
+        "Floating point exception" => 8,
+        "Killed" => 9,
+        "User defined signal 1" => 10,
+        "Segmentation fault" => 11,
+        "User defined signal 2" => 12,
+        "Broken pipe" => 13,
+        "Alarm clock" => 14,
+        "Terminated" => 15,
         _ => 0,
     }
 }
