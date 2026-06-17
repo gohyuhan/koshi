@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty};
 use tile_core::{
     ids::PaneId,
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
@@ -18,6 +18,7 @@ use tile_core::{
 use crate::{
     backend::state::{PtyBackend, PtyHandle},
     error::PtyError,
+    kill::PtyChildKillControl,
 };
 
 /// Everything the backend retains for one live pane, keyed by [`PaneId`].
@@ -34,7 +35,7 @@ pub struct PaneEntry {
     /// Write half of the master — input bytes pushed here arrive at the child.
     writer: Box<dyn Write + Send>,
     /// Kill handle for the child process; `kill()` sends the terminating signal.
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    killer: PtyChildKillControl,
     /// Flipped to `true` by the watcher thread the moment the child exits; read
     /// by [`kill`](PortablePtyBackend::kill) to avoid signalling a dead process.
     exited: Arc<AtomicBool>,
@@ -108,6 +109,10 @@ impl PtyBackend for PortablePtyBackend {
             detail: e.to_string(),
         })?;
 
+        let pid = child.process_id().ok_or(PtyError::Spawn {
+            detail: "Fail to get PID".to_string(),
+        })?;
+
         // 4. Drop OUR copy of the slave. The child kept its own; once the child
         //    exits and the kernel closes its end, the master's read half reports
         //    EOF — that is how the reader thread (step 6) learns to stop.
@@ -117,7 +122,15 @@ impl PtyBackend for PortablePtyBackend {
         //    away. `killer` signals the child; `reader` is a cloned read half of
         //    the master (child output); `writer` is its write half (child input);
         //    `exited` is the flag the watcher flips and `kill` reads.
-        let killer = child.clone_killer();
+        #[cfg(unix)]
+        let killer = PtyChildKillControl::new(pid);
+        #[cfg(windows)]
+        let killer = PtyChildKillControl::new(
+            pid,
+            child.as_raw_handle().ok_or(PtyError::Spawn {
+                detail: "child has no process handle".to_string(),
+            })?,
+        )?;
         let reader = pair
             .master
             .try_clone_reader()
@@ -204,7 +217,7 @@ impl PtyBackend for PortablePtyBackend {
             })
     }
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
-        let mut target_panes = self
+        let target_panes = self
             .panes
             .lock()
             .unwrap()
@@ -212,21 +225,29 @@ impl PtyBackend for PortablePtyBackend {
             .ok_or(PtyError::UnknownPane { pane })?;
 
         match kill_policy {
-            KillPolicy::Force | KillPolicy::Tree => {
-                let _ = target_panes.killer.kill();
+            KillPolicy::Force => {
+                let _ = target_panes.killer.force();
+            }
+            KillPolicy::Tree => {
+                let _ = target_panes.killer.tree();
             }
             KillPolicy::Graceful { timeout } => {
                 // Give the child the grace window to exit on its own, polling the
                 // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
+
+                // request a process termination first
+                let _ = target_panes.killer.request_stop();
                 let deadline = Instant::now() + timeout;
                 while Instant::now() < deadline {
                     if target_panes.exited.load(Ordering::SeqCst) {
                         break;
                     }
-                    thread::sleep(Duration::from_millis(20));
+                    thread::sleep(Duration::from_millis(25));
                 }
+
+                // after the define period, and it was not quited, force kill it
                 if !target_panes.exited.load(Ordering::SeqCst) {
-                    let _ = target_panes.killer.kill();
+                    let _ = target_panes.killer.force();
                 }
             }
         }

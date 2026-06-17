@@ -19,6 +19,9 @@ pub enum PtyError {
     /// An operation named a pane the backend never spawned (or already removed).
     #[error("invalid pane: id - {pane}")]
     UnknownPane { pane: PaneId },
+
+    #[error("pty Signal error: {detail}")]
+    Signal { detail: String },
 }
 
 /// Result of a [`PtyBackend`](crate::backend::state::PtyBackend) operation.

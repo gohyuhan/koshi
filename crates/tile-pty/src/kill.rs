@@ -1,0 +1,177 @@
+//! OS-specific child termination, kept behind one cross-platform type.
+//!
+//! [`PtyChildKillControl`] exposes the same three operations on every platform —
+//! [`force`](PtyChildKillControl::force), [`tree`](PtyChildKillControl::tree),
+//! and [`request_stop`](PtyChildKillControl::request_stop) — so the backend's
+//! `kill` path stays platform-agnostic. The signal/Job-Object names that make
+//! them work are confined to this module.
+//!
+//! `force` targets only the child process (`kill(pid)` / `TerminateProcess`);
+//! `tree` targets the whole group (`killpg` / `TerminateJobObject`).
+
+#[cfg(unix)]
+use nix::{
+    sys::signal::{kill, killpg, Signal},
+    unistd::Pid,
+};
+#[cfg(windows)]
+use std::os::windows::io::RawHandle;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
+    System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
+    System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+};
+
+use crate::error::PtyError;
+
+/// Terminates a spawned child by PID and process group.
+///
+/// On Unix the child leads its own process group (`portable-pty` runs `setsid`),
+/// so `tree` group-kills via `killpg`; `force` signals only the leader PID.
+#[cfg(unix)]
+pub struct PtyChildKillControl {
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl PtyChildKillControl {
+    pub fn new(pid: u32) -> Self {
+        PtyChildKillControl { pid }
+    }
+
+    /// SIGKILL the child process (leader only).
+    pub fn force(&self) -> Result<(), PtyError> {
+        kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL).map_err(|e| PtyError::Signal {
+            detail: e.to_string(),
+        })
+    }
+
+    /// SIGKILL the child's whole process group, reaping any grandchildren.
+    pub fn tree(&self) -> Result<(), PtyError> {
+        killpg(Pid::from_raw(self.pid as i32), Signal::SIGKILL).map_err(|e| PtyError::Signal {
+            detail: e.to_string(),
+        })
+    }
+
+    /// SIGTERM the child, asking it to exit on its own.
+    pub fn request_stop(&self) -> Result<(), PtyError> {
+        kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM).map_err(|e| PtyError::Signal {
+            detail: e.to_string(),
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+/// Owns a Windows Job Object handle and closes it on drop.
+///
+/// The job groups the child and its descendants so [`tree`] can terminate them
+/// together. It is deliberately *not* created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`:
+/// closing the handle must not kill members, so that [`force`] (child only) and
+/// [`tree`] (whole group) stay distinct — matching the Unix `kill`/`killpg` split.
+///
+/// [`force`]: PtyChildKillControl::force
+/// [`tree`]: PtyChildKillControl::tree
+#[cfg(windows)]
+struct OwnedJob(HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedJob {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+// A raw `HANDLE` is `!Send`, but a job handle is safe to use from any thread and
+// the backend keeps `PaneEntry` behind a `Mutex` shared with the reader/watcher
+// threads, which requires `Send`.
+#[cfg(windows)]
+unsafe impl Send for OwnedJob {}
+
+/// Terminates a spawned child by PID and Job Object.
+///
+/// `force` terminates only the child process (`TerminateProcess`); `tree`
+/// terminates every process in the job (`TerminateJobObject`), reaping the
+/// child's descendants — the Windows analogue of `kill(pid)` vs `killpg(pgid)`.
+#[cfg(windows)]
+pub struct PtyChildKillControl {
+    pid: u32,
+    job: OwnedJob,
+}
+
+#[cfg(windows)]
+impl PtyChildKillControl {
+    /// Create a job and assign the child to it; descendants join automatically,
+    /// so [`tree`](Self::tree) can later reap the whole group.
+    pub fn new(pid: u32, child_handle: RawHandle) -> Result<Self, PtyError> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err(PtyError::Signal {
+                    detail: "CreateJobObjectW failed".to_string(),
+                });
+            }
+            // Own it now so an early return below still closes the handle.
+            let job = OwnedJob(job);
+
+            if AssignProcessToJobObject(job.0, child_handle as HANDLE) == 0 {
+                return Err(PtyError::Signal {
+                    detail: "AssignProcessToJobObject failed".to_string(),
+                });
+            }
+
+            Ok(PtyChildKillControl { pid, job })
+        }
+    }
+
+    /// Terminate only the child process; its descendants are left running.
+    pub fn force(&self) -> Result<(), PtyError> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid);
+            if handle.is_null() {
+                return Err(PtyError::Signal {
+                    detail: "OpenProcess failed".to_string(),
+                });
+            }
+            let terminated = TerminateProcess(handle, 137);
+            CloseHandle(handle);
+            if terminated == 0 {
+                return Err(PtyError::Signal {
+                    detail: "TerminateProcess failed".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Terminate every process in the job, reaping the child's descendants.
+    pub fn tree(&self) -> Result<(), PtyError> {
+        if unsafe { TerminateJobObject(self.job.0, 137) } == 0 {
+            return Err(PtyError::Signal {
+                detail: "TerminateJobObject failed".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Best-effort Ctrl-Break to the child; callers escalate to `force` if it
+    /// does not exit. (No POSIX signals on Windows.)
+    pub fn request_stop(&self) -> Result<(), PtyError> {
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid) } == 0 {
+            return Err(PtyError::Signal {
+                detail: "GenerateConsoleCtrlEvent failed".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
