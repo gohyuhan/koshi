@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty};
 use tile_core::{
     ids::PaneId,
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
@@ -20,6 +20,42 @@ use crate::{
     error::PtyError,
     kill::PtyChildKillControl,
 };
+
+/// Kills the wrapped child on drop unless [`disarm`](ChildGuard::disarm)ed.
+///
+/// Dropping a `portable-pty` child does not terminate the process, so this
+/// guards [`spawn`](PortablePtyBackend::spawn)'s fallible setup: if any step
+/// after launch returns early, the child is killed rather than leaked as an
+/// orphan with no owner. Once the watcher thread takes ownership of the child,
+/// the guard is disarmed.
+struct ChildGuard(Option<Box<dyn Child + Send + Sync>>);
+
+impl ChildGuard {
+    fn new(child: Box<dyn Child + Send + Sync>) -> Self {
+        ChildGuard(Some(child))
+    }
+
+    /// Take the child out, leaving the guard inert (no kill on drop).
+    fn disarm(mut self) -> Box<dyn Child + Send + Sync> {
+        self.0.take().expect("child present until disarmed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = dyn Child + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().expect("child present until disarmed")
+    }
+}
 
 /// Everything the backend retains for one live pane, keyed by [`PaneId`].
 ///
@@ -40,6 +76,13 @@ pub struct PaneEntry {
     /// by [`kill`](PortablePtyBackend::kill) to avoid signalling a dead process.
     exited: Arc<AtomicBool>,
     /// Reader thread: drains the master's read half into the output channel.
+    ///
+    /// Retained but deliberately never joined: a child can `setsid` into a new
+    /// process group while still holding the slave fd, so even `KillPolicy::Tree`
+    /// cannot guarantee the reader reaches EOF — joining it could block forever.
+    /// The handle is kept so a future backend-teardown path can join readers on
+    /// clean shutdown; `expect` flags the day that wiring lands.
+    #[expect(dead_code)]
     reader: JoinHandle<()>,
     /// Watcher thread: blocks on the child, records exit status, flips `exited`.
     watcher: JoinHandle<()>,
@@ -72,8 +115,7 @@ impl PtyBackend for PortablePtyBackend {
     /// Returns a [`PtyHandle`] the caller polls for output and exit status. The
     /// child runs detached on two background threads owned by the backend: a
     /// **reader** (master output → output channel) and a **watcher**
-    /// (`child.wait()` → exit channel, and flips the `exited` flag). Both are
-    /// joined later in [`kill`](Self::kill).
+    /// (`child.wait()` → exit channel, and flips the `exited` flag).
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
@@ -105,23 +147,27 @@ impl PtyBackend for PortablePtyBackend {
         }
         //    ...and launch it on the slave end. The child now owns the slave as
         //    its stdin/stdout/stderr; we keep `child` only to wait on / kill it.
-        let child = pair.slave.spawn_command(cmd).map_err(|e| PtyError::Spawn {
-            detail: e.to_string(),
-        })?;
+        //    A `portable-pty` child is not terminated by being dropped, so wrap it
+        //    in `ChildGuard`: if any step below returns early, the guard kills the
+        //    child instead of leaking an orphan with no owner.
+        let child =
+            ChildGuard::new(pair.slave.spawn_command(cmd).map_err(|e| PtyError::Spawn {
+                detail: e.to_string(),
+            })?);
 
         let pid = child.process_id().ok_or(PtyError::Spawn {
-            detail: "Fail to get PID".to_string(),
+            detail: "child has no PID".to_string(),
         })?;
 
-        // 4. Drop OUR copy of the slave. The child kept its own; once the child
-        //    exits and the kernel closes its end, the master's read half reports
-        //    EOF — that is how the reader thread (step 6) learns to stop.
-        drop(pair.slave);
-
-        // 5. Pull the control handles off the child/master before either is moved
-        //    away. `killer` signals the child; `reader` is a cloned read half of
-        //    the master (child output); `writer` is its write half (child input);
-        //    `exited` is the flag the watcher flips and `kill` reads.
+        // 4. Build the kill control right away. On Windows this assigns the child
+        //    to its Job Object, so do it as early as possible after spawn.
+        //
+        //    NOTE: we do not reinvent portable-pty's spawn (no CREATE_SUSPENDED or
+        //    job-at-creation), so the child is already running here. A program
+        //    that forks a grandchild in the instant before this assignment can
+        //    leave that grandchild outside the Job Object, where `KillPolicy::Tree`
+        //    cannot reach it. Closing that window entirely needs control over
+        //    `CreateProcess` that portable-pty does not expose.
         #[cfg(unix)]
         let killer = PtyChildKillControl::new(pid);
         #[cfg(windows)]
@@ -131,6 +177,15 @@ impl PtyBackend for PortablePtyBackend {
                 detail: "child has no process handle".to_string(),
             })?,
         )?;
+
+        // 5. Drop OUR copy of the slave. The child kept its own; once the child
+        //    exits and the kernel closes its end, the master's read half reports
+        //    EOF — that is how the reader thread (step 7) learns to stop.
+        drop(pair.slave);
+
+        // 6. Pull the master's read/write halves and the exit flag. `reader` is a
+        //    cloned read half (child output); `writer` is its write half (child
+        //    input); `exited` is the flag the watcher flips and `kill` reads.
         let reader = pair
             .master
             .try_clone_reader()
@@ -142,7 +197,11 @@ impl PtyBackend for PortablePtyBackend {
         })?;
         let exited = Arc::new(AtomicBool::new(false));
 
-        // 6. Reader thread: block on the master read half, forwarding each chunk
+        // Every fallible step is past: the watcher thread below now owns the child
+        // and is responsible for reaping it, so disarm the guard.
+        let child = child.disarm();
+
+        // 7. Reader thread: block on the master read half, forwarding each chunk
         //    of child output into the output channel until EOF (child gone) or
         //    the caller drops the receiver.
         let r_handle = thread::spawn(move || {
@@ -161,7 +220,7 @@ impl PtyBackend for PortablePtyBackend {
                 }
             }
         });
-        // 7. Watcher thread: block on `child.wait()`, map the OS exit status into
+        // 8. Watcher thread: block on `child.wait()`, map the OS exit status into
         //    our `ExitStatus`, flip `exited` so `kill` won't signal a corpse, then
         //    publish the status on the exit channel.
         let exited_w = Arc::clone(&exited);
@@ -175,7 +234,7 @@ impl PtyBackend for PortablePtyBackend {
             let _ = exit_sender.send(status);
         });
 
-        // 8. Retain the master, writer, killer, flag and both thread handles
+        // 9. Retain the master, writer, killer, flag and both thread handles
         //    under the pane id, then hand the caller its polling handle.
         self.panes.lock().unwrap().insert(
             pane_id,
@@ -224,35 +283,45 @@ impl PtyBackend for PortablePtyBackend {
             .remove(&pane)
             .ok_or(PtyError::UnknownPane { pane })?;
 
+        // `Force`/`Graceful` signal the leader PID, so skip them once the watcher
+        // has reaped it — a recycled PID could belong to an unrelated process.
+        // `Tree` signals the whole group/job (`killpg` / `TerminateJobObject`),
+        // which stays valid while any member lives, so it fires unconditionally:
+        // the leader can exit while a same-group descendant keeps running, and
+        // `Tree` must still reap it (the `exited` flag tracks only the leader, not
+        // whether the group is empty).
         match kill_policy {
             KillPolicy::Force => {
-                let _ = target_panes.killer.force();
+                if !target_panes.exited.load(Ordering::SeqCst) {
+                    let _ = target_panes.killer.force();
+                }
             }
             KillPolicy::Tree => {
                 let _ = target_panes.killer.tree();
             }
             KillPolicy::Graceful { timeout } => {
-                // Give the child the grace window to exit on its own, polling the
-                // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
-
-                // request a process termination first
-                let _ = target_panes.killer.request_stop();
-                let deadline = Instant::now() + timeout;
-                while Instant::now() < deadline {
-                    if target_panes.exited.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(25));
-                }
-
-                // after the define period, and it was not quited, force kill it
                 if !target_panes.exited.load(Ordering::SeqCst) {
-                    let _ = target_panes.killer.force();
+                    // Give the child the grace window to exit on its own, polling the
+                    // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
+
+                    // request a process termination first
+                    let _ = target_panes.killer.request_stop();
+                    let deadline = Instant::now() + timeout;
+                    while Instant::now() < deadline {
+                        if target_panes.exited.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(25));
+                    }
+
+                    // after the define period, and it was not quited, force kill it
+                    if !target_panes.exited.load(Ordering::SeqCst) {
+                        let _ = target_panes.killer.force();
+                    }
                 }
             }
         }
 
-        let _ = target_panes.reader.join();
         let _ = target_panes.watcher.join();
 
         Ok(())
@@ -323,3 +392,6 @@ fn sig_no(desc: &str) -> i32 {
         _ => 0,
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

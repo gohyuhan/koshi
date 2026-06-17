@@ -18,10 +18,10 @@ use nix::{
 use std::os::windows::io::RawHandle;
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE},
+    Foundation::{CloseHandle, DuplicateHandle, HANDLE},
     System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
     System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
-    System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+    System::Threading::{GetCurrentProcess, TerminateProcess, PROCESS_TERMINATE},
 };
 
 use crate::error::PtyError;
@@ -94,15 +94,36 @@ impl Drop for OwnedJob {
 #[cfg(windows)]
 unsafe impl Send for OwnedJob {}
 
-/// Terminates a spawned child by PID and Job Object.
+/// Owns a duplicated handle to the child process and closes it on drop.
 ///
-/// `force` terminates only the child process (`TerminateProcess`); `tree`
-/// terminates every process in the job (`TerminateJobObject`), reaping the
+/// `force` terminates through this handle instead of reopening the PID, so once
+/// the child has exited a recycled PID can never be killed by mistake — the
+/// handle refers to the exact process object, dead or alive.
+#[cfg(windows)]
+struct OwnedHandle(HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe impl Send for OwnedHandle {}
+
+/// Terminates a spawned child by process handle and Job Object.
+///
+/// `force` terminates only the child process via a duplicated, reuse-safe handle;
+/// `tree` terminates every process in the job (`TerminateJobObject`), reaping the
 /// child's descendants — the Windows analogue of `kill(pid)` vs `killpg(pgid)`.
 #[cfg(windows)]
 pub struct PtyChildKillControl {
     pid: u32,
     job: OwnedJob,
+    process: OwnedHandle,
 }
 
 #[cfg(windows)]
@@ -126,26 +147,41 @@ impl PtyChildKillControl {
                 });
             }
 
-            Ok(PtyChildKillControl { pid, job })
+            // Duplicate the child handle into one we own, carrying only
+            // PROCESS_TERMINATE. `force` terminates through this rather than
+            // reopening `self.pid`, so it can never hit a process that recycled
+            // the PID after the child exited.
+            let mut process: HANDLE = std::ptr::null_mut();
+            let current = GetCurrentProcess();
+            if DuplicateHandle(
+                current,
+                child_handle as HANDLE,
+                current,
+                &mut process,
+                PROCESS_TERMINATE,
+                0,
+                0,
+            ) == 0
+            {
+                return Err(PtyError::Signal {
+                    detail: "DuplicateHandle failed".to_string(),
+                });
+            }
+
+            Ok(PtyChildKillControl {
+                pid,
+                job,
+                process: OwnedHandle(process),
+            })
         }
     }
 
     /// Terminate only the child process; its descendants are left running.
     pub fn force(&self) -> Result<(), PtyError> {
-        unsafe {
-            let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid);
-            if handle.is_null() {
-                return Err(PtyError::Signal {
-                    detail: "OpenProcess failed".to_string(),
-                });
-            }
-            let terminated = TerminateProcess(handle, 137);
-            CloseHandle(handle);
-            if terminated == 0 {
-                return Err(PtyError::Signal {
-                    detail: "TerminateProcess failed".to_string(),
-                });
-            }
+        if unsafe { TerminateProcess(self.process.0, 137) } == 0 {
+            return Err(PtyError::Signal {
+                detail: "TerminateProcess failed".to_string(),
+            });
         }
         Ok(())
     }
@@ -161,7 +197,14 @@ impl PtyChildKillControl {
     }
 
     /// Best-effort Ctrl-Break to the child; callers escalate to `force` if it
-    /// does not exit. (No POSIX signals on Windows.)
+    /// does not exit.
+    ///
+    /// NOTE: `GenerateConsoleCtrlEvent` targets a process group, and a child is
+    /// its own group only when spawned with `CREATE_NEW_PROCESS_GROUP` — which
+    /// portable-pty's ConPTY spawn does not set and `CommandBuilder` does not
+    /// expose. So for these children the call usually does nothing and graceful
+    /// effectively becomes wait-then-`force`. (No POSIX signals on Windows;
+    /// fixing this needs control over `CreateProcess` we don't have here.)
     pub fn request_stop(&self) -> Result<(), PtyError> {
         if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid) } == 0 {
             return Err(PtyError::Signal {
