@@ -2,15 +2,17 @@ use std::collections::BTreeMap;
 
 use tile_core::process::{ShellKind, SpawnSpec};
 
-/// Build the environment a child is spawned with: the inherited parent env,
-/// plus tile's universal terminal identity and a shell-specific bootstrap, with
-/// the caller's explicit `spec.env` overrides layered on top.
-pub fn build_env(
-    specs: &SpawnSpec,
-    parent_env: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut env = parent_env.clone();
-    let specs_env = specs.env.clone();
+/// Build tile's environment *overlay* for a spawned child: the universal
+/// terminal identity and a shell-specific bootstrap, with the caller's explicit
+/// `spec.env` overrides layered on top.
+///
+/// This is only the overlay, not the full environment — the caller applies it
+/// over the inherited parent env (which `CommandBuilder` keeps), so parent vars
+/// survive and each overlay key overwrites its inherited counterpart. On Windows
+/// `portable-pty` folds names case-insensitively, so an override replaces a
+/// differently-cased inherited key.
+pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
 
     // Universal terminal identity. `xterm-256color` is a *compatibility
     // bootstrap*, not a permanent identity (TILE_07 staged plan): claiming
@@ -38,9 +40,12 @@ pub fn build_env(
         | ShellKind::Other(_) => {}
     }
 
-    // Explicit `spec.env` overrides win over both the inherited parent env and
-    // tile's own defaults above, so they are applied last.
-    env.extend(specs_env);
+    // Explicit `spec.env` overrides win over tile's own defaults above, so they
+    // are applied last. They also win over the inherited parent env because the
+    // caller layers this whole overlay on top of it at spawn time.
+    for (key, value) in &specs.env {
+        env.insert(key.to_string(), value.to_string());
+    }
     env
 }
 

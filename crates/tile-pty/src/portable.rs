@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     io::{ErrorKind, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -156,17 +156,15 @@ impl PtyBackend for PortablePtyBackend {
             cmd.cwd(cwd);
         }
 
-        //    ...including the environment. Capture the parent env via `vars_os`
-        //    and drop any non-UTF-8 entry: the spec env is `String`-keyed and a
-        //    malformed var must never panic the spawn path. `build_env` layers
-        //    tile's terminal identity + shell bootstrap + `spec.env` on top, then
-        //    `env_clear` makes the child see exactly that map — no inherited
-        //    `CommandBuilder` base env leaks through.
-        let parent_env: BTreeMap<String, String> = std::env::vars_os()
-            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect();
-        let pty_env = build_env(&spec, &parent_env);
-        cmd.env_clear();
+        //    ...including the environment. `CommandBuilder` is deliberately NOT
+        //    cleared, so the child inherits the full parent env — kept as
+        //    `OsString`, so non-UTF-8 vars survive intact. `build_env` returns
+        //    only tile's overlay (terminal identity + shell bootstrap +
+        //    `spec.env`); applying each key with `cmd.env` overwrites the
+        //    inherited value. On Windows `portable-pty` folds env names
+        //    case-insensitively, so an override (e.g. `PATH`) replaces a
+        //    differently-cased inherited key (`Path`) rather than duplicating it.
+        let pty_env = build_env(&spec);
         for (k, v) in pty_env {
             cmd.env(k.as_str(), v.as_str());
         }

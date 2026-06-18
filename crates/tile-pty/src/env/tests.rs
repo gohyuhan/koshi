@@ -1,5 +1,9 @@
-//! Unit tests for [`build_env`]: per-shell bootstrap snapshots, parent-env
-//! preservation, and `spec.env` override precedence.
+//! Unit tests for [`build_env`]: per-shell bootstrap snapshots and `spec.env`
+//! override precedence over tile's own defaults.
+//!
+//! `build_env` returns only tile's *overlay*; parent-env preservation and the
+//! Windows case-fold are properties of the spawn path (`portable-pty` applies
+//! the overlay over the un-cleared inherited env) and are covered there.
 
 use super::*;
 use std::path::PathBuf;
@@ -16,14 +20,6 @@ fn spec(shell_kind: ShellKind, env: BTreeMap<String, String>) -> SpawnSpec {
     }
 }
 
-/// A representative parent environment carrying a key tile never touches.
-fn parent() -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
-    env.insert("HOME".to_string(), "/home/user".to_string());
-    env.insert("PATH".to_string(), "/usr/bin".to_string());
-    env
-}
-
 #[test]
 fn universal_vars_set_for_every_shell() {
     for kind in [
@@ -34,7 +30,7 @@ fn universal_vars_set_for_every_shell() {
         ShellKind::Nu,
         ShellKind::Other("elvish".to_string()),
     ] {
-        let env = build_env(&spec(kind.clone(), BTreeMap::new()), &parent());
+        let env = build_env(&spec(kind.clone(), BTreeMap::new()));
         assert_eq!(
             env.get("TERM").map(String::as_str),
             Some("xterm-256color"),
@@ -50,7 +46,7 @@ fn universal_vars_set_for_every_shell() {
 
 #[test]
 fn zsh_sets_empty_prompt_eol_mark() {
-    let env = build_env(&spec(ShellKind::Zsh, BTreeMap::new()), &parent());
+    let env = build_env(&spec(ShellKind::Zsh, BTreeMap::new()));
     assert_eq!(
         env.get("PROMPT_EOL_MARK").map(String::as_str),
         Some(""),
@@ -67,7 +63,7 @@ fn non_zsh_shells_have_no_prompt_eol_mark() {
         ShellKind::Nu,
         ShellKind::Other("elvish".to_string()),
     ] {
-        let env = build_env(&spec(kind.clone(), BTreeMap::new()), &parent());
+        let env = build_env(&spec(kind.clone(), BTreeMap::new()));
         assert!(
             !env.contains_key("PROMPT_EOL_MARK"),
             "{kind:?} must not carry the zsh-specific PROMPT_EOL_MARK"
@@ -76,32 +72,33 @@ fn non_zsh_shells_have_no_prompt_eol_mark() {
 }
 
 #[test]
-fn parent_env_preserved_when_not_overridden() {
-    let env = build_env(&spec(ShellKind::Bash, BTreeMap::new()), &parent());
-    assert_eq!(env.get("HOME").map(String::as_str), Some("/home/user"));
-    assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+fn overlay_carries_only_tile_keys_and_spec_env() {
+    // No parent env is mixed in: a vanilla bash overlay is exactly the two
+    // universal keys, nothing inherited.
+    let env = build_env(&spec(ShellKind::Bash, BTreeMap::new()));
+    assert!(
+        !env.contains_key("HOME"),
+        "overlay must not invent parent keys"
+    );
+    assert!(
+        !env.contains_key("PATH"),
+        "overlay must not invent parent keys"
+    );
 }
 
 #[test]
-fn spec_env_overrides_win_over_defaults_and_parent() {
+fn spec_env_overrides_tile_default_and_adds_keys() {
     let mut overrides = BTreeMap::new();
     // Collides with a tile default...
     overrides.insert("TERM".to_string(), "screen-256color".to_string());
-    // ...with an inherited parent key...
-    overrides.insert("PATH".to_string(), "/opt/bin".to_string());
     // ...and adds a brand-new key.
     overrides.insert("MY_VAR".to_string(), "custom".to_string());
 
-    let env = build_env(&spec(ShellKind::Bash, overrides), &parent());
+    let env = build_env(&spec(ShellKind::Bash, overrides));
     assert_eq!(
         env.get("TERM").map(String::as_str),
         Some("screen-256color"),
         "explicit spec.env TERM must override tile's default"
-    );
-    assert_eq!(
-        env.get("PATH").map(String::as_str),
-        Some("/opt/bin"),
-        "explicit spec.env must override the inherited parent value"
     );
     assert_eq!(env.get("MY_VAR").map(String::as_str), Some("custom"));
 }
@@ -110,7 +107,7 @@ fn spec_env_overrides_win_over_defaults_and_parent() {
 fn spec_env_can_override_zsh_prompt_eol_mark() {
     let mut overrides = BTreeMap::new();
     overrides.insert("PROMPT_EOL_MARK".to_string(), "DONE".to_string());
-    let env = build_env(&spec(ShellKind::Zsh, overrides), &parent());
+    let env = build_env(&spec(ShellKind::Zsh, overrides));
     assert_eq!(
         env.get("PROMPT_EOL_MARK").map(String::as_str),
         Some("DONE"),
@@ -120,10 +117,8 @@ fn spec_env_can_override_zsh_prompt_eol_mark() {
 
 #[test]
 fn full_snapshot_zsh() {
-    let env = build_env(&spec(ShellKind::Zsh, BTreeMap::new()), &parent());
+    let env = build_env(&spec(ShellKind::Zsh, BTreeMap::new()));
     let mut expected = BTreeMap::new();
-    expected.insert("HOME".to_string(), "/home/user".to_string());
-    expected.insert("PATH".to_string(), "/usr/bin".to_string());
     expected.insert("TERM".to_string(), "xterm-256color".to_string());
     expected.insert("COLORTERM".to_string(), "truecolor".to_string());
     expected.insert("PROMPT_EOL_MARK".to_string(), String::new());
@@ -132,10 +127,8 @@ fn full_snapshot_zsh() {
 
 #[test]
 fn full_snapshot_bash_has_no_shell_specific_keys() {
-    let env = build_env(&spec(ShellKind::Bash, BTreeMap::new()), &parent());
+    let env = build_env(&spec(ShellKind::Bash, BTreeMap::new()));
     let mut expected = BTreeMap::new();
-    expected.insert("HOME".to_string(), "/home/user".to_string());
-    expected.insert("PATH".to_string(), "/usr/bin".to_string());
     expected.insert("TERM".to_string(), "xterm-256color".to_string());
     expected.insert("COLORTERM".to_string(), "truecolor".to_string());
     assert_eq!(env, expected);
