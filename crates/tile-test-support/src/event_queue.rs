@@ -11,17 +11,15 @@
 //!
 //! ## Why the drain helper is channel-agnostic
 //!
-//! The event bus delivers asynchronously over a bounded channel, and a natural
-//! source for a recorder is "drain whatever the bus mock has queued." The
-//! bus-mock crate and its concrete channel type have not landed yet, and the
-//! architecture commits only to "async + bounded" without naming a transport.
-//! Rather than hard-code `tokio::sync::mpsc` here — which would pull a full async
-//! runtime into a synchronous test helper and pin a transport the bus crate has
-//! not chosen — [`drain_from`](RecordedEvents::drain_from) takes a
-//! `FnMut() -> Option<Event>` puller. That composes with any channel: a tokio
-//! receiver (`|| rx.try_recv().ok()`), `std::sync::mpsc`, crossbeam, or the
-//! future bus mock, with no dependency edge. When the bus mock lands, a thin
-//! typed wrapper over its receiver can be added without changing this core.
+//! The event bus delivers over a bounded channel, and a natural source for a
+//! recorder is "drain whatever the bus mock has queued." The bus-mock crate and
+//! its concrete channel type have not landed yet, and the architecture commits
+//! only to "bounded channel" without pinning the exact type.
+//! Rather than hard-code one channel type here, [`drain_from`](RecordedEvents::drain_from)
+//! takes a `FnMut() -> Option<Event>` puller. That composes with any channel: a
+//! `std::sync::mpsc` receiver (`|| rx.try_recv().ok()`), crossbeam, or the future
+//! bus mock, with no dependency edge. When the bus mock lands, a thin typed
+//! wrapper over its receiver can be added without changing this core.
 
 use tile_core::event::Event;
 
@@ -52,7 +50,7 @@ impl RecordedEvents {
     /// Pull events until `next` returns `None`, appending each in order.
     ///
     /// `next` is the channel-agnostic source described in the module docs; for a
-    /// tokio receiver pass `|| rx.try_recv().ok()`.
+    /// `std::sync::mpsc` receiver pass `|| rx.try_recv().ok()`.
     pub fn drain_from(&mut self, mut next: impl FnMut() -> Option<Event>) {
         while let Some(event) = next() {
             self.inner.push(event);
