@@ -3,6 +3,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{channel, RecvTimeoutError, Sender},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -68,8 +69,17 @@ pub struct PaneEntry {
     /// Master end of the PTY. Held so the kernel keeps the pair open and so
     /// [`resize`](PortablePtyBackend::resize) can retune the window size.
     master: Box<dyn MasterPty + Send>,
-    /// Write half of the master — input bytes pushed here arrive at the child.
-    writer: Box<dyn Write + Send>,
+    /// Input channel to the per-pane writer thread. Bytes sent here are written
+    /// to the master (and so reach the child) off the dispatcher, so a child that
+    /// has stopped reading its stdin blocks only the writer thread, never the
+    /// dispatcher. Dropping this `Sender` (on `kill`/teardown) closes the channel
+    /// so a writer parked in `recv` exits. A writer already blocked *inside*
+    /// `write_all` — child stopped reading while a `setsid` descendant still holds
+    /// the slave open (Linux; macOS `revoke`s it) — cannot be interrupted; like the
+    /// reader it detaches and exits only once that fd finally closes. `kill` never
+    /// joins it, so this can leak a thread + fd in that case but never blocks the
+    /// dispatcher.
+    writer: Sender<Vec<u8>>,
     /// Kill handle for the child process; `kill()` sends the terminating signal.
     killer: PtyChildKillControl,
     /// Flipped to `true` by the watcher thread the moment the child exits; read
@@ -79,9 +89,10 @@ pub struct PaneEntry {
     ///
     /// Retained but deliberately never joined: a child can `setsid` into a new
     /// process group while still holding the slave fd, so even `KillPolicy::Tree`
-    /// cannot guarantee the reader reaches EOF — joining it could block forever.
-    /// The handle is kept so a future backend-teardown path can join readers on
-    /// clean shutdown; `expect` flags the day that wiring lands.
+    /// cannot guarantee the reader reaches EOF — joining it could block forever
+    /// (the `*_does_not_hang_*` tests pin this). Teardown therefore detaches the
+    /// handle rather than joining it; the thread exits on its own once the fd
+    /// finally closes. Retained only so the struct owns it.
     #[expect(dead_code)]
     reader: JoinHandle<()>,
     /// Watcher thread: blocks on the child, records exit status, flips `exited`.
@@ -89,8 +100,8 @@ pub struct PaneEntry {
 }
 
 /// Real OS-PTY backend built on the `portable-pty` crate. Each spawned pane gets
-/// a kernel PTY plus two helper threads (reader + watcher); the backend owns
-/// them all through the [`PaneEntry`] map.
+/// a kernel PTY plus three helper threads (reader, writer, watcher); the backend
+/// owns them all through the [`PaneEntry`] map.
 pub struct PortablePtyBackend {
     panes: Mutex<HashMap<PaneId, PaneEntry>>,
 }
@@ -113,8 +124,9 @@ impl PtyBackend for PortablePtyBackend {
     /// Open a fresh PTY, launch `spec` as a child inside it, and wire up its I/O.
     ///
     /// Returns a [`PtyHandle`] the caller polls for output and exit status. The
-    /// child runs detached on two background threads owned by the backend: a
-    /// **reader** (master output → output channel) and a **watcher**
+    /// child runs detached on three background threads owned by the backend: a
+    /// **reader** (master output → output channel), a **writer** (input channel →
+    /// master, so writes never block the dispatcher), and a **watcher**
     /// (`child.wait()` → exit channel, and flips the `exited` flag).
     ///
     /// # Errors
@@ -234,13 +246,41 @@ impl PtyBackend for PortablePtyBackend {
             let _ = exit_sender.send(status);
         });
 
-        // 9. Retain the master, writer, killer, flag and both thread handles
+        // 9. Writer thread: own the master's write half and drain the input
+        //    channel onto it, so a write to a child that has stopped reading
+        //    blocks only this thread, never the dispatcher. It exits on either
+        //    teardown path: the channel closing (the entry's `Sender` dropped by
+        //    `kill`/teardown → `Disconnected`), or the watcher flagging the child
+        //    as exited — `recv_timeout` wakes periodically to check `exited` so a
+        //    pane kept open past its child's death still reclaims the thread.
+        let (writer_sender_handler, writer_receiver) = channel::<Vec<u8>>();
+        let exited_writer = Arc::clone(&exited);
+
+        let _ = thread::spawn(move || {
+            let writer_receiver = writer_receiver;
+            let mut writer = writer;
+            loop {
+                match writer_receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(bytes) => {
+                        let _ = writer.write_all(&bytes).and_then(|_| writer.flush());
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if exited_writer.load(Ordering::SeqCst) {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+
+        // 10. Retain the master, writer, killer, flag and both thread handles
         //    under the pane id, then hand the caller its polling handle.
         self.panes.lock().unwrap().insert(
             pane_id,
             PaneEntry {
                 master: pair.master,
-                writer,
+                writer: writer_sender_handler,
                 killer,
                 exited,
                 reader: r_handle,
@@ -269,8 +309,7 @@ impl PtyBackend for PortablePtyBackend {
 
         target_pane
             .writer
-            .write_all(bytes)
-            .and_then(|_| target_pane.writer.flush())
+            .send(bytes.to_vec())
             .map_err(|e| PtyError::Io {
                 detail: e.to_string(),
             })
@@ -322,6 +361,7 @@ impl PtyBackend for PortablePtyBackend {
             }
         }
 
+        drop(target_panes.writer);
         let _ = target_panes.watcher.join();
 
         Ok(())
