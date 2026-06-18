@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{ErrorKind, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -18,6 +18,7 @@ use tile_core::{
 
 use crate::{
     backend::state::{PtyBackend, PtyHandle},
+    env::build_env,
     error::PtyError,
     kill::PtyChildKillControl,
 };
@@ -154,9 +155,22 @@ impl PtyBackend for PortablePtyBackend {
         if let Some(cwd) = &spec.cwd {
             cmd.cwd(cwd);
         }
-        for (k, v) in &spec.env {
+
+        //    ...including the environment. Capture the parent env via `vars_os`
+        //    and drop any non-UTF-8 entry: the spec env is `String`-keyed and a
+        //    malformed var must never panic the spawn path. `build_env` layers
+        //    tile's terminal identity + shell bootstrap + `spec.env` on top, then
+        //    `env_clear` makes the child see exactly that map — no inherited
+        //    `CommandBuilder` base env leaks through.
+        let parent_env: BTreeMap<String, String> = std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect();
+        let pty_env = build_env(&spec, &parent_env);
+        cmd.env_clear();
+        for (k, v) in pty_env {
             cmd.env(k.as_str(), v.as_str());
         }
+
         //    ...and launch it on the slave end. The child now owns the slave as
         //    its stdin/stdout/stderr; we keep `child` only to wait on / kill it.
         //    A `portable-pty` child is not terminated by being dropped, so wrap it
