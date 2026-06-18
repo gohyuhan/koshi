@@ -18,6 +18,7 @@ use tile_core::{
 
 use crate::{
     backend::state::{PtyBackend, PtyHandle},
+    env::build_env,
     error::PtyError,
     kill::PtyChildKillControl,
 };
@@ -154,9 +155,20 @@ impl PtyBackend for PortablePtyBackend {
         if let Some(cwd) = &spec.cwd {
             cmd.cwd(cwd);
         }
-        for (k, v) in &spec.env {
+
+        //    ...including the environment. `CommandBuilder` is deliberately NOT
+        //    cleared, so the child inherits the full parent env — kept as
+        //    `OsString`, so non-UTF-8 vars survive intact. `build_env` returns
+        //    only tile's overlay (terminal identity + shell bootstrap +
+        //    `spec.env`); applying each key with `cmd.env` overwrites the
+        //    inherited value. On Windows `portable-pty` folds env names
+        //    case-insensitively, so an override (e.g. `PATH`) replaces a
+        //    differently-cased inherited key (`Path`) rather than duplicating it.
+        let pty_env = build_env(&spec);
+        for (k, v) in pty_env {
             cmd.env(k.as_str(), v.as_str());
         }
+
         //    ...and launch it on the slave end. The child now owns the slave as
         //    its stdin/stdout/stderr; we keep `child` only to wait on / kill it.
         //    A `portable-pty` child is not terminated by being dropped, so wrap it
