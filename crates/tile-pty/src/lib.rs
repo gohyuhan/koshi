@@ -5,6 +5,7 @@ mod env;
 pub mod error;
 pub mod kill;
 pub mod portable;
+pub mod resize;
 pub mod types;
 
 pub mod backend;
