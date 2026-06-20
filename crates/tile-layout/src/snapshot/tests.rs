@@ -97,8 +97,9 @@ fn a_stack_beside_a_pane_suppresses_as_a_unit_while_the_sibling_survives() {
         ],
     ));
 
-    // One row: the stack needs two (header + active), a alone fits.
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 1 });
+    // Three rows: the stack needs four (one header plus a bordered active),
+    // a alone fits.
+    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 3 });
     let result = solve(&tree, tab);
     assert_eq!(result.panes[0], (a, tab));
     assert_eq!(result.suppressed, [b, c]);

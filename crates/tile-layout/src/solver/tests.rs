@@ -189,7 +189,7 @@ fn an_out_of_range_percent_caps_at_the_whole_axis() {
 
     let result = solve(&tree, tab);
     let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
-    assert_eq!(widths, [39_998, 2]);
+    assert_eq!(widths, [39_996, 4]);
     assert_tiles_exactly(&result, tab);
 }
 
@@ -266,7 +266,9 @@ fn min_floor_is_honored_when_the_layout_fits() {
 
     let result = solve(&tree, tab);
     let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
-    assert_eq!(widths, [20, 8, 2]);
+    // `a` holds its declared min of 20; the two default siblings split the
+    // remaining 10 down to their border-inclusive floor of 4.
+    assert_eq!(widths, [20, 6, 4]);
     assert_tiles_exactly(&result, tab);
     assert_min_size_respected(&result.panes, Size { cols: 2, rows: 1 }).unwrap();
 }
@@ -386,7 +388,7 @@ fn resize_deltas_clamp_at_zero_and_at_the_full_axis() {
         tab,
     );
     let widths: Vec<u16> = grown.panes.iter().map(|(_, r)| r.size.cols).collect();
-    assert_eq!(widths, [78, 2]);
+    assert_eq!(widths, [76, 4]);
     assert_tiles_exactly(&grown, tab);
 
     // A runaway negative delta clamps to zero, and the floor clamp brings
@@ -403,7 +405,7 @@ fn resize_deltas_clamp_at_zero_and_at_the_full_axis() {
         tab,
     );
     let widths: Vec<u16> = shrunk.panes.iter().map(|(_, r)| r.size.cols).collect();
-    assert_eq!(widths, [2, 78]);
+    assert_eq!(widths, [4, 76]);
     assert_tiles_exactly(&shrunk, tab);
 }
 
@@ -430,7 +432,9 @@ fn underfilled_percents_leave_the_remainder_to_flex() {
 fn fits_accepts_a_layout_with_room_for_every_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b]);
-    assert!(fits(&tree, rect(0, 0, 4, 1), MIN_PANE_SIZE));
+    // Two bordered panes need a four-by-three box each: eight columns, three
+    // rows side by side.
+    assert!(fits(&tree, rect(0, 0, 8, 3), MIN_PANE_SIZE));
     assert!(fits(&tree, rect(0, 0, 80, 24), MIN_PANE_SIZE));
 }
 
@@ -454,10 +458,12 @@ fn fits_accounts_for_nested_axis_minimums() {
         vec![leaf(a), LayoutChild::new(column)],
     ));
 
-    // The column needs three rows; the leaf beside it needs two columns.
-    assert!(fits(&tree, rect(0, 0, 4, 3), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 4, 2), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 3, 3), MIN_PANE_SIZE));
+    // Each bordered pane needs a four-by-three box. The three-deep column
+    // stacks to nine rows; the leaf beside it adds its four columns, so the
+    // tree needs eight columns and nine rows.
+    assert!(fits(&tree, rect(0, 0, 8, 9), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 8, 8), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 7, 9), MIN_PANE_SIZE));
 }
 
 #[test]
@@ -468,16 +474,18 @@ fn fits_uses_declared_floors_not_just_defaults() {
         SplitDirection::Horizontal,
         vec![(a, wide), (b, SizeWeight::default())],
     );
-    assert!(fits(&tree, rect(0, 0, 32, 24), MIN_PANE_SIZE));
-    assert!(!fits(&tree, rect(0, 0, 31, 24), MIN_PANE_SIZE));
+    // `a`'s declared 30 plus the default sibling's border-inclusive floor of
+    // 4 need 34 columns.
+    assert!(fits(&tree, rect(0, 0, 34, 24), MIN_PANE_SIZE));
+    assert!(!fits(&tree, rect(0, 0, 33, 24), MIN_PANE_SIZE));
 }
 
 #[test]
 fn shrink_suppresses_trailing_panes_deterministically() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b, c]);
-    // Three panes need six columns; five fit only the first two.
-    let tab = rect(0, 0, 5, 24);
+    // Three bordered panes need twelve columns; nine fit only the first two.
+    let tab = rect(0, 0, 9, 24);
 
     let first = solve(&tree, tab);
     assert_eq!(first.suppressed, [c]);
@@ -485,8 +493,8 @@ fn shrink_suppresses_trailing_panes_deterministically() {
     assert_eq!(
         first.panes,
         [
-            (a, rect(0, 0, 2, 24)),
-            (b, rect(2, 0, 3, 24)),
+            (a, rect(0, 0, 4, 24)),
+            (b, rect(4, 0, 5, 24)),
             (c, Rect::zero()),
         ]
     );
@@ -501,7 +509,7 @@ fn regrow_restores_suppressed_panes() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b, c]);
 
-    let shrunk = solve(&tree, rect(0, 0, 5, 24));
+    let shrunk = solve(&tree, rect(0, 0, 9, 24));
     assert_eq!(shrunk.suppressed, [c]);
 
     let regrown = solve(&tree, rect(0, 0, 80, 24));
@@ -524,8 +532,9 @@ fn all_panes_suppressed_is_flagged_for_the_overlay() {
 #[test]
 fn cross_axis_too_small_suppresses_only_the_unfittable_subtree() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
-    // A pane beside a two-row column, in a tab only one row tall: the column
-    // cannot fit, the lone pane still can.
+    // A pane beside a column of two, in a tab only three rows tall: the column
+    // needs six bordered rows and cannot fit, the lone pane (needing three)
+    // still can.
     let column = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![leaf(b), leaf(c)],
@@ -534,7 +543,7 @@ fn cross_axis_too_small_suppresses_only_the_unfittable_subtree() {
         SplitDirection::Horizontal,
         vec![leaf(a), LayoutChild::new(column)],
     ));
-    let tab = rect(0, 0, 80, 1);
+    let tab = rect(0, 0, 80, 3);
 
     let result = solve(&tree, tab);
     assert_eq!(result.suppressed, [b, c]);
@@ -734,6 +743,48 @@ fn border_inclusive_min_adds_one_cell_per_side() {
         Size { cols: 4, rows: 3 }
     );
     assert_eq!(border_inclusive_min(content, false), content);
+}
+
+#[test]
+fn a_layout_whose_content_mins_fit_but_borders_do_not_suppresses_trailing() {
+    // Two panes fit at the bare (2,1) content floor in four columns, but each
+    // is drawn inside a one-cell border, so together they truly need eight. At
+    // seven the leading pane keeps its border-inclusive slot and the trailing
+    // pane is suppressed rather than drawn under an overlapping border.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+    let tab = rect(0, 0, 7, 3);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.suppressed, [b]);
+    assert!(!result.all_suppressed);
+    assert_eq!(result.panes, [(a, rect(0, 0, 7, 3)), (b, Rect::zero())]);
+}
+
+#[test]
+fn every_visible_pane_insets_to_at_least_the_content_floor() {
+    // The border-inclusive floor is the load-bearing guarantee: any pane the
+    // solver leaves visible must, after the one-cell border inset, still hold
+    // the (2,1) content minimum. Sweep tight tabs and check the inner rect of
+    // every non-suppressed pane.
+    let panes: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
+    let tree = split(SplitDirection::Horizontal, &panes);
+    for cols in 1..24 {
+        for rows in 1..7 {
+            let tab = rect(0, 0, cols, rows);
+            let result = solve(&tree, tab);
+            for (_, outer) in &result.panes {
+                if outer.is_empty() {
+                    continue;
+                }
+                let inner = outer.inner_with_border();
+                assert!(
+                    inner.size.cols >= 2 && inner.size.rows >= 1,
+                    "visible pane {outer:?} insets to {inner:?}, below the content floor",
+                );
+            }
+        }
+    }
 }
 
 #[test]

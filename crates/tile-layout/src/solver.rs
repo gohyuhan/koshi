@@ -143,11 +143,15 @@ pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> S
     }
 
     let mut state = SolveState::default();
+    // Same border-inclusive floor the tiled backstop uses: a tab too small to
+    // inset the focused pane to its content minimum suppresses it instead of
+    // drawing it under an overlapping border, so fullscreen and tiled agree on
+    // when the too-small overlay shows.
+    let floor = border_inclusive_min(MIN_PANE_SIZE, true);
     for pane in tree.leaf_panes() {
         if pane != focused {
             state.panes.push((pane, Rect::zero()));
-        } else if tab_rect.size.cols < MIN_PANE_SIZE.cols || tab_rect.size.rows < MIN_PANE_SIZE.rows
-        {
+        } else if tab_rect.size.cols < floor.cols || tab_rect.size.rows < floor.rows {
             state.panes.push((pane, Rect::zero()));
             state.suppressed.push(pane);
         } else {
@@ -185,13 +189,17 @@ pub fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
 
 /// The smallest rectangle this subtree can be solved into.
 ///
-/// Directional splits sum their children's floors along the split axis and
-/// take the largest across it. A stack needs its widest child, one header row
-/// per collapsed child, plus the active child's rows.
+/// Each leaf reserves its one-cell border ([`border_inclusive_min`]) on top of
+/// the content floor, since every visible pane is drawn inside that border
+/// ([`crate::content::content_rects`] insets the outer rect by one cell per
+/// side). Borders are per-pane boxes, never shared between siblings, so
+/// directional splits sum their children's border-inclusive floors along the
+/// split axis and take the largest across it. A stack needs its widest child,
+/// one header row per collapsed child, plus the active child's rows.
 #[must_use]
 pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
     match node {
-        LayoutNode::Pane(_) => default_min,
+        LayoutNode::Pane(_) => border_inclusive_min(default_min, true),
         LayoutNode::Split(split) => match split.direction {
             SplitDirection::Horizontal => {
                 let mut cols: u16 = 0;
@@ -274,9 +282,13 @@ fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
 fn solve_node(node: &LayoutNode, rect: Rect, state: &mut SolveState) {
     match node {
         LayoutNode::Pane(id) => {
-            // Backstop: a leaf that cannot show a usable pane is suppressed,
-            // never rendered as a sliver.
-            if rect.size.cols < MIN_PANE_SIZE.cols || rect.size.rows < MIN_PANE_SIZE.rows {
+            // Backstop: a leaf whose outer rect cannot hold the border plus a
+            // usable content cell is suppressed, never rendered as a sliver
+            // under an overlapping border. Mirrors the border-inclusive floor
+            // `min_size` feeds the distribution path, so this only fires when an
+            // upstream rect slips below it.
+            let floor = border_inclusive_min(MIN_PANE_SIZE, true);
+            if rect.size.cols < floor.cols || rect.size.rows < floor.rows {
                 state.panes.push((*id, Rect::zero()));
                 state.suppressed.push(*id);
             } else {

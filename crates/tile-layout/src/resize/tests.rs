@@ -138,20 +138,21 @@ fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
     let tree = LayoutNode::Split(stack);
 
     // One header row leaves 23 rows for the pair: upper 11, lower 12. The
-    // donor above can spare ten rows, not the eleven the uncarved 24-row
-    // rect would suggest.
+    // donor above can spare eight rows — its eleven minus the border-inclusive
+    // floor of three — measured inside the header-carved active rect, not the
+    // whole stack rect.
     let err = resize(&tree, tab(), lower, Direction::Up, 11).unwrap_err();
     assert_eq!(
         err,
         ResizeError::MinSize {
             requested: 11,
-            spare: 10,
+            spare: 8,
         }
     );
 
-    let allowed = resize(&tree, tab(), lower, Direction::Up, 10).unwrap();
-    assert_eq!(solved_size(&allowed, tab(), upper).rows, 1);
-    assert_eq!(solved_size(&allowed, tab(), lower).rows, 22);
+    let allowed = resize(&tree, tab(), lower, Direction::Up, 8).unwrap();
+    assert_eq!(solved_size(&allowed, tab(), upper).rows, 3);
+    assert_eq!(solved_size(&allowed, tab(), lower).rows, 20);
 }
 
 #[test]
@@ -197,19 +198,20 @@ fn resize_blocked_by_the_neighbors_floor() {
     let tree = pair(SplitDirection::Horizontal, a, b);
     let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
 
-    // b solves to five columns and must keep two: three are spare.
+    // b solves to five columns and must keep its border-inclusive four: one
+    // is spare.
     let err = resize(&tree, narrow, a, Direction::Right, 4).unwrap_err();
     assert_eq!(
         err,
         ResizeError::MinSize {
             requested: 4,
-            spare: 3,
+            spare: 1,
         }
     );
 
-    let allowed = resize(&tree, narrow, a, Direction::Right, 3).unwrap();
-    assert_eq!(solved_size(&allowed, narrow, a).cols, 8);
-    assert_eq!(solved_size(&allowed, narrow, b).cols, 2);
+    let allowed = resize(&tree, narrow, a, Direction::Right, 1).unwrap();
+    assert_eq!(solved_size(&allowed, narrow, a).cols, 6);
+    assert_eq!(solved_size(&allowed, narrow, b).cols, 4);
 }
 
 #[test]
