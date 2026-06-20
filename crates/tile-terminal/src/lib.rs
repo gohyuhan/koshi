@@ -2,6 +2,8 @@
 //! alternate screen, cursor state, modes, and terminal operations.
 
 pub mod error;
-pub mod types;
-
 pub mod grid;
+pub mod scrollback;
+pub mod state;
+pub mod style;
+pub mod types;
