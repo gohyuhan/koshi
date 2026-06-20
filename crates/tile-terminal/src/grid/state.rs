@@ -13,13 +13,6 @@ pub struct Cell {
     style: Style,
 }
 
-/// A fixed-size grid of cells, addressed `rows[row][col]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Grid {
-    /// Row-major cell storage: `rows[row][col]`.
-    rows: Vec<Vec<Cell>>,
-}
-
 impl Cell {
     /// A blank cell: a single space in the default style.
     pub fn blank() -> Self {
@@ -29,6 +22,34 @@ impl Cell {
             style: Style::default(),
         }
     }
+
+    /// A cell holding `ch` of the given display `width`, in `style`.
+    pub fn new(ch: char, width: u8, style: Style) -> Self {
+        Cell { ch, width, style }
+    }
+
+    /// The character occupying this cell.
+    pub fn ch(&self) -> char {
+        self.ch
+    }
+
+    /// The cell's display width: 0 (combining/continuation), 1 (narrow), or 2
+    /// (wide).
+    pub fn width(&self) -> u8 {
+        self.width
+    }
+
+    /// The cell's visual style.
+    pub fn style(&self) -> Style {
+        self.style
+    }
+}
+
+/// A fixed-size grid of cells, addressed `rows[row][col]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grid {
+    /// Row-major cell storage: `rows[row][col]`.
+    rows: Vec<Vec<Cell>>,
 }
 
 impl Grid {
@@ -47,6 +68,46 @@ impl Grid {
         Grid {
             rows: blank_grid_rows,
         }
+    }
+
+    /// The grid's dimensions as `(rows, cols)`.
+    pub fn dimensions(&self) -> (u16, u16) {
+        (
+            self.rows.len() as u16,
+            self.rows.first().map_or(0, Vec::len) as u16,
+        )
+    }
+
+    /// A reference to the cell at (`row`, `col`), or `None` if out of bounds.
+    pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
+        if row as usize >= self.rows.len() {
+            return None;
+        }
+
+        if col as usize >= self.rows[row as usize].len() {
+            return None;
+        }
+
+        Some(&self.rows[row as usize][col as usize])
+    }
+
+    /// A mutable reference to the cell at (`row`, `col`), or `None` if out of
+    /// bounds — the write path used by the VTE performer.
+    pub fn cell_mut(&mut self, row: u16, col: u16) -> Option<&mut Cell> {
+        if row as usize >= self.rows.len() {
+            return None;
+        }
+
+        if col as usize >= self.rows[row as usize].len() {
+            return None;
+        }
+
+        Some(&mut self.rows[row as usize][col as usize])
+    }
+
+    /// All rows, row-major, for read-only iteration by the renderer.
+    pub fn rows(&self) -> &[Vec<Cell>] {
+        &self.rows
     }
 }
 
