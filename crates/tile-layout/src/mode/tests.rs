@@ -135,3 +135,28 @@ fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
     assert_eq!(result.suppressed, [a]);
     assert!(result.all_suppressed);
 }
+
+#[test]
+fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
+    // The focused pane clears the bare (2,1) content floor in a 3x2 tab but not
+    // the border-inclusive (4,3). Fullscreen must suppress it — matching the
+    // tiled solve — instead of drawing it under an overlapping border. At
+    // exactly (4,3) it becomes visible, insetting to the (2,1) content minimum.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b)],
+    ));
+
+    let cramped = Rect::new(Point { x: 0, y: 0 }, Size { cols: 3, rows: 2 });
+    let suppressed = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, cramped);
+    assert_eq!(suppressed.suppressed, [a]);
+    assert!(suppressed.all_suppressed);
+
+    let snug = Rect::new(Point { x: 0, y: 0 }, Size { cols: 4, rows: 3 });
+    let shown = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, snug);
+    assert!(shown.suppressed.is_empty());
+    assert!(!shown.all_suppressed);
+    assert_eq!(shown.panes, [(a, snug), (b, Rect::zero())]);
+    assert_eq!(snug.inner_with_border().size, Size { cols: 2, rows: 1 });
+}
