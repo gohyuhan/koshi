@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 thiserror = "2.0.18"
 tile-core = { version = "0.1.0", path = "../tile-core" }
+tracing = "0.1.44"
+vte = "0.15.0"
