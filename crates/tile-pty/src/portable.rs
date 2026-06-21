@@ -1,3 +1,10 @@
+//! Real OS-PTY backend built on the `portable-pty` crate.
+//!
+//! A spawned pane gets a kernel PTY and three helper threads (reader, writer,
+//! watcher), all owned through the [`PortablePtyBackend`] pane map. The
+//! implementation handles child output streaming, input queuing, process
+//! termination (with cross-platform kill policies), and exit status tracking.
+
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
@@ -355,7 +362,7 @@ impl PtyBackend for PortablePtyBackend {
                     // Give the child the grace window to exit on its own, polling the
                     // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
 
-                    // request a process termination first
+                    // Request a process termination first.
                     let _ = target_panes.killer.request_stop();
                     let deadline = Instant::now() + timeout;
                     while Instant::now() < deadline {
@@ -365,7 +372,7 @@ impl PtyBackend for PortablePtyBackend {
                         thread::sleep(Duration::from_millis(25));
                     }
 
-                    // after the define period, and it was not quited, force kill it
+                    // If the deadline passes and the child has not exited, force kill it.
                     if !target_panes.exited.load(Ordering::SeqCst) {
                         let _ = target_panes.killer.force();
                     }

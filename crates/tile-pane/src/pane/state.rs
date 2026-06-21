@@ -26,7 +26,9 @@ use crate::pane::{
 /// kind tells the runtime which path drives the pane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneKind {
+    /// A terminal pane backed by a PTY and emulated terminal.
     Terminal,
+    /// A plugin pane rendered by an external plugin.
     Plugin { plugin_id: PluginId },
 }
 
@@ -113,6 +115,7 @@ impl PaneRecord {
         &self.kind
     }
 
+    /// Where this pane sits in its lifecycle state machine.
     pub fn lifecycle(&self) -> &PaneLifecycle {
         &self.lifecycle
     }

@@ -22,18 +22,17 @@ use crate::{error::InvalidTransition, pane::state::PaneKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycle {
+    /// The pane is being created; the child process hasn't started yet.
     Spawning,
+    /// The child process is running.
     Running,
     /// The child exited. `code` is `None` when the pane was signal-killed or
     /// its status was unavailable, mirroring `PaneRecord::exit_code` and the
     /// `PaneProcessExited` event.
-    Exited {
-        code: Option<i32>,
-        at: SystemTime,
-    },
-    Closing {
-        since: SystemTime,
-    },
+    Exited { code: Option<i32>, at: SystemTime },
+    /// The pane is shutting down.
+    Closing { since: SystemTime },
+    /// The pane has been removed from the registry.
     Removed,
 }
 

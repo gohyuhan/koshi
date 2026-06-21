@@ -35,11 +35,17 @@ pub enum KillPolicy {
 /// `Other` carries the raw program name for shells we do not special-case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellKind {
+    /// Z shell.
     Zsh,
+    /// Bourne-again shell.
     Bash,
+    /// Friendly interactive shell.
     Fish,
+    /// PowerShell.
     PowerShell,
+    /// Nu shell.
     Nu,
+    /// Unrecognized shell; carries the lowercased program name.
     Other(String),
 }
 
@@ -87,7 +93,9 @@ pub struct SpawnSpec {
 /// PTY dimension is never accidentally interchanged with a grid `Size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PtySize {
+    /// Width in cells (columns).
     pub cols: u16,
+    /// Height in cells (rows).
     pub rows: u16,
 }
 

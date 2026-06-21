@@ -1,3 +1,5 @@
+//! Tests for geometry solver: tree + rect → pane rectangles.
+
 use tile_core::geometry::{Point, SplitDirection};
 use tile_test_support::layout_assert::{
     assert_all_space_occupied, assert_min_size_respected, assert_no_outside, assert_no_overlap,

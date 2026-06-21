@@ -1,3 +1,5 @@
+//! Tests for layout modes: fullscreen and tiled.
+
 use tile_core::geometry::{Point, Rect, Size, SplitDirection};
 
 use super::*;

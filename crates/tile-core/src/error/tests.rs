@@ -1,3 +1,5 @@
+//! Tests for error categories and severity.
+
 use super::*;
 use serde::de::DeserializeOwned;
 use serde::Serialize;

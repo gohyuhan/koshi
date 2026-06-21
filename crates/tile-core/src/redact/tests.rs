@@ -1,3 +1,5 @@
+//! Tests for redaction helpers.
+
 use super::*;
 
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

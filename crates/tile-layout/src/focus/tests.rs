@@ -1,3 +1,5 @@
+//! Tests for focus candidate ranking and stack activation.
+
 use tile_core::geometry::{Point, Size};
 
 use super::*;

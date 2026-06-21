@@ -1,3 +1,5 @@
+//! Tests for resize transactions: moving pane borders by exact cell counts.
+
 use tile_core::geometry::{Point, Size};
 use tile_test_support::layout_assert::{
     assert_all_space_occupied, assert_no_outside, assert_no_overlap,

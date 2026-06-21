@@ -1,1 +1,1 @@
-//! Module tests. Placeholder per standard source layout.
+//! Unit tests for the grid module.

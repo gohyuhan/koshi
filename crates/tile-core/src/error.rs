@@ -8,14 +8,23 @@ use serde::{Deserialize, Serialize};
 /// this is classification only and carries no payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainCategory {
+    /// Configuration or settings error.
     Config,
+    /// Command-line interface error.
     Cli,
+    /// Inter-process communication error.
     Ipc,
+    /// Pseudo-terminal error.
     Pty,
+    /// Terminal state or rendering error.
     Terminal,
+    /// Layout calculation or management error.
     Layout,
+    /// Plugin system error.
     Plugin,
+    /// Session management error.
     Session,
+    /// Data storage or persistence error.
     Storage,
 }
 

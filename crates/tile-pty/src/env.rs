@@ -15,10 +15,9 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
     // Universal terminal identity. `xterm-256color` is a *compatibility
-    // bootstrap*, not a permanent identity (TILE_07 staged plan): claiming
-    // xterm-like behaviour is safe today, whereas `TERM=tile` would break many
-    // apps because no `tile` terminfo entry is shipped. Only revisit once a
-    // terminfo is published.
+    // bootstrap*, not a permanent identity: claiming xterm-like behaviour is
+    // safe today, whereas `TERM=tile` would break many apps because no `tile`
+    // terminfo entry is shipped. Only revisit once a terminfo is published.
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 

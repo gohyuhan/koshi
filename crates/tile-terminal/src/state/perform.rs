@@ -2,10 +2,12 @@
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
 //! basic C0 control bytes move the cursor and scroll.
 //!
-//! Only `print` and `execute` are implemented; every other `Perform` method
-//! keeps its default no-op so later tasks (CSI cursor/erase, SGR, OSC, …) add
-//! them without re-touching this file. `vte` decodes UTF-8 upstream, so `print`
-//! receives a ready `char`.
+//! Implemented so far: `print` (printable glyphs), `execute` (C0 control
+//! bytes), and `csi_dispatch` (CSI cursor moves + erase). The remaining
+//! `Perform` methods (`osc_dispatch`, `hook`/`put`/`unhook`, `esc_dispatch`)
+//! keep their default no-op until later tasks fill them in; SGR styling is a
+//! CSI final byte, so it will extend `csi_dispatch` rather than add a method.
+//! `vte` decodes UTF-8 upstream, so `print` receives a ready `char`.
 
 use crate::grid::state::Cell;
 use crate::state::TerminalState;
@@ -165,9 +167,11 @@ impl vte::Perform for TerminalState {
                             self.active_grid_mut().clear_line(row, 0, cols);
                         }
                     }
-                    // Erase scrollback (xterm). Scrollback is a stub until
-                    // TERM-009; the visible screen is left untouched.
+                    // Erase scrollback only (an xterm extension). Scrollback
+                    // storage is still a stub, so this is a no-op; the visible
+                    // screen is deliberately left untouched.
                     3 => {}
+                    // Unknown ED mode: ignored.
                     _ => {}
                 }
             }
@@ -181,15 +185,18 @@ impl vte::Perform for TerminalState {
                     1 => self.active_grid_mut().clear_line(r, 0, c.saturating_add(1)),
                     // Whole line.
                     2 => self.active_grid_mut().clear_line(r, 0, cols),
+                    // Unknown EL mode: ignored.
                     _ => {}
                 }
             }
+            // Any other CSI final byte (SGR, DEC private modes, …) is not
+            // handled yet; ignored rather than mis-applied.
             _ => {}
         }
     }
 }
 
-/// The first CSI parameter's primary value, or `None` when the list is empty.
+/// The first CSI parameter's primary value, or `None` if empty.
 fn first_param(params: &vte::Params) -> Option<u16> {
     params.iter().next().and_then(|p| p.first().copied())
 }

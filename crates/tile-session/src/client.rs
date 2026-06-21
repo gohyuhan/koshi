@@ -98,6 +98,7 @@ impl Client {
         self.focus_by_tab.get(&tab_id).copied()
     }
 
+    /// Every focused pane this client remembers, keyed by tab id.
     #[must_use]
     pub fn focused_panes(&self) -> &HashMap<TabId, PaneId> {
         &self.focus_by_tab
@@ -115,30 +116,37 @@ impl Client {
         self.pending_resize_drag.as_ref()
     }
 
+    /// Update this client's lock mode.
     pub fn update_lock_mode(&mut self, lock_mode: LockMode) {
         self.lock_mode = lock_mode
     }
 
+    /// Set the pane this client has focused in `tab_id`, returning the prior pane if one was set.
     pub fn update_focused_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
         self.focus_by_tab.insert(tab_id, pane_id)
     }
 
+    /// Forget the pane this client focused in `tab_id`.
     pub fn remove_focused_pane(&mut self, tab_id: TabId) {
         self.focus_by_tab.remove(&tab_id);
     }
 
+    /// Switch this client to viewing `tab_id`.
     pub fn update_active_tab(&mut self, tab_id: TabId) {
         self.active_tab = tab_id
     }
 
+    /// Update this client's viewport size.
     pub fn update_viewport(&mut self, viewport: Size) {
         self.viewport = viewport
     }
 
+    /// Update this client's mouse state.
     pub fn update_mouse_state(&mut self, mouse_state: MouseState) {
         self.mouse_state = mouse_state
     }
 
+    /// Update this client's in-flight resize drag.
     pub fn update_pending_resize_drag(&mut self, pending_resize_drag: Option<ResizeDragState>) {
         self.pending_resize_drag = pending_resize_drag
     }
