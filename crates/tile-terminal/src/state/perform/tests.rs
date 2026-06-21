@@ -207,3 +207,186 @@ fn driven_through_the_parser_newline_and_carriage_return() {
     assert_eq!(glyph(&state, 1, 1), Some('d'));
     assert_eq!((state.cursor.row, state.cursor.col), (1, 2));
 }
+
+// --- CSI cursor + erase (driven through the parser, the only way to build
+// `vte::Params`) ---
+
+/// Feed `bytes` through a fresh parser into `state`.
+fn advance(state: &mut TerminalState, bytes: &[u8]) {
+    let mut parser = vte::Parser::new();
+    parser.advance(state, bytes);
+}
+
+/// Row `row` of the active grid as a string; blank cells read as spaces.
+fn row_text(state: &TerminalState, row: u16) -> String {
+    let (_, cols) = state.active_grid().dimensions();
+    (0..cols)
+        .map(|c| glyph(state, row, c).unwrap_or(' '))
+        .collect()
+}
+
+/// Fill a 3×3 grid with rows `"abc"`, `"def"`, `"ghi"`.
+fn fill_3x3(state: &mut TerminalState) {
+    advance(state, b"abc\r\ndef\r\nghi");
+}
+
+#[test]
+fn cup_sets_an_absolute_one_based_position() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[2;3H");
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 2)); // 2;3 -> 0-based
+}
+
+#[test]
+fn cup_with_no_arguments_homes_the_cursor() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[4;4H"); // move away first
+    advance(&mut state, b"\x1b[H");
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 0));
+}
+
+#[test]
+fn cup_zero_arguments_are_treated_as_one() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[0;0H");
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 0));
+}
+
+#[test]
+fn cup_clamps_out_of_range_arguments_to_the_grid_edges() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[99;99H");
+    assert_eq!((state.cursor.row, state.cursor.col), (4, 9)); // last row, last col
+}
+
+#[test]
+fn hvp_positions_like_cup() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[2;4f");
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 3));
+}
+
+#[test]
+fn cuu_moves_up_by_the_count() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[4;4H"); // (3, 3)
+    advance(&mut state, b"\x1b[2A");
+    assert_eq!(state.cursor.row, 1);
+}
+
+#[test]
+fn cud_moves_down_and_clamps_to_the_last_row() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[99B");
+    assert_eq!(state.cursor.row, 4);
+}
+
+#[test]
+fn cuf_moves_forward_and_clamps_to_the_last_column() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[99C");
+    assert_eq!(state.cursor.col, 9);
+}
+
+#[test]
+fn cub_moves_back_and_floors_at_column_zero() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[1;4H"); // col 3
+    advance(&mut state, b"\x1b[5D");
+    assert_eq!(state.cursor.col, 0);
+}
+
+#[test]
+fn a_missing_or_zero_move_count_defaults_to_one() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[A"); // no argument -> up one
+    assert_eq!(state.cursor.row, 1);
+    advance(&mut state, b"\x1b[0A"); // explicit zero -> up one
+    assert_eq!(state.cursor.row, 0);
+}
+
+#[test]
+fn a_csi_cursor_move_clears_the_pending_wrap_latch() {
+    let mut state = state(2, 2);
+    print_str(&mut state, "ab"); // parked on the last column
+    assert!(state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b[C"); // CUF clears the latch
+    assert!(!state.cursor.pending_wrap);
+}
+
+#[test]
+fn a_private_mode_sequence_is_ignored_not_treated_as_erase() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde"); // fills row 0
+    advance(&mut state, b"\x1b[?2J"); // `?` -> private mode, not ED 2
+    assert_eq!(row_text(&state, 0), "abcde"); // untouched
+}
+
+#[test]
+fn el_0_erases_from_the_cursor_to_the_end_of_the_line() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[1;3H"); // row 0, col 2
+    advance(&mut state, b"\x1b[K"); // EL 0
+    assert_eq!(row_text(&state, 0), "ab   ");
+}
+
+#[test]
+fn el_1_erases_from_the_start_through_the_cursor() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[1;3H"); // col 2
+    advance(&mut state, b"\x1b[1K"); // EL 1 — cursor column inclusive
+    assert_eq!(row_text(&state, 0), "   de");
+}
+
+#[test]
+fn el_2_erases_the_whole_line() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[2K");
+    assert_eq!(row_text(&state, 0), "     ");
+}
+
+#[test]
+fn ed_0_erases_from_the_cursor_to_the_end_of_the_screen() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[2;2H"); // (1, 1)
+    advance(&mut state, b"\x1b[J"); // ED 0
+    assert_eq!(row_text(&state, 0), "abc"); // above kept
+    assert_eq!(row_text(&state, 1), "d  "); // cursor column onward cleared
+    assert_eq!(row_text(&state, 2), "   "); // row below cleared
+}
+
+#[test]
+fn ed_1_erases_from_the_start_of_the_screen_through_the_cursor() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[2;2H"); // (1, 1)
+    advance(&mut state, b"\x1b[1J"); // ED 1
+    assert_eq!(row_text(&state, 0), "   "); // row above cleared
+    assert_eq!(row_text(&state, 1), "  f"); // start through cursor cleared
+    assert_eq!(row_text(&state, 2), "ghi"); // below kept
+}
+
+#[test]
+fn ed_2_erases_the_whole_screen() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[2J");
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "   ");
+    assert_eq!(row_text(&state, 2), "   ");
+}
+
+#[test]
+fn ed_3_leaves_the_visible_screen_untouched() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[3J"); // erase scrollback only (stub) — screen intact
+    assert_eq!(row_text(&state, 0), "abc");
+    assert_eq!(row_text(&state, 1), "def");
+    assert_eq!(row_text(&state, 2), "ghi");
+}
