@@ -127,3 +127,43 @@ fn scroll_up_on_an_empty_grid_is_a_no_op() {
     assert_eq!(grid.dimensions(), (0, 0));
     assert!(grid.rows().is_empty());
 }
+
+#[test]
+fn clear_line_blanks_the_half_open_span() {
+    let mut grid = Grid::blank(1, 5);
+    for col in 0..5 {
+        *grid.cell_mut(0, col).expect("in bounds") = Cell::new('x', 1, Style::default());
+    }
+    grid.clear_line(0, 1, 4); // columns 1, 2, 3 — `to` (4) is excluded
+    assert_eq!(grid.cell(0, 0).map(Cell::ch), Some('x')); // before the span
+    assert_eq!(grid.cell(0, 1), Some(&Cell::blank()));
+    assert_eq!(grid.cell(0, 2), Some(&Cell::blank()));
+    assert_eq!(grid.cell(0, 3), Some(&Cell::blank()));
+    assert_eq!(grid.cell(0, 4).map(Cell::ch), Some('x')); // excluded end kept
+}
+
+#[test]
+fn clear_line_with_an_inverted_range_is_a_no_op() {
+    let mut grid = Grid::blank(1, 3);
+    *grid.cell_mut(0, 1).expect("in bounds") = Cell::new('y', 1, Style::default());
+    grid.clear_line(0, 3, 1); // from >= to
+    assert_eq!(grid.cell(0, 1).map(Cell::ch), Some('y'));
+}
+
+#[test]
+fn clear_line_clamps_an_oversized_span() {
+    let mut grid = Grid::blank(1, 3);
+    for col in 0..3 {
+        *grid.cell_mut(0, col).expect("in bounds") = Cell::new('z', 1, Style::default());
+    }
+    grid.clear_line(0, 0, 99); // runs past the row width — no panic
+    assert!((0..3).all(|c| grid.cell(0, c) == Some(&Cell::blank())));
+}
+
+#[test]
+fn clear_line_on_an_out_of_range_row_is_a_no_op() {
+    let mut grid = Grid::blank(2, 2);
+    *grid.cell_mut(0, 0).expect("in bounds") = Cell::new('q', 1, Style::default());
+    grid.clear_line(9, 0, 2); // row out of range
+    assert_eq!(grid.cell(0, 0).map(Cell::ch), Some('q'));
+}

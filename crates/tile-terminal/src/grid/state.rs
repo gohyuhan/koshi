@@ -122,6 +122,18 @@ impl Grid {
 
         self.rows.push(new_cell_row);
     }
+
+    /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
+    /// each to a [`Cell::blank`]. Coordinates outside the grid are skipped via
+    /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
+    /// (`from >= to`), or an empty grid is a safe no-op rather than a panic.
+    pub fn clear_line(&mut self, row: u16, from: u16, to: u16) {
+        for i in from..to {
+            if let Some(cell) = self.cell_mut(row, i) {
+                *cell = Cell::blank();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
