@@ -13,6 +13,7 @@ use tile_core::process::PtySize;
 use crate::grid::state::Grid;
 use crate::scrollback::Scrollback;
 use crate::style::Style;
+mod perform;
 
 /// Which of the two screen buffers is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +49,8 @@ pub struct Cursor {
     /// Position and style snapshot from DECSC, restored by DECRC; `None` until
     /// a save has happened.
     saved: Option<SavedCursor>,
+
+    pending_wrap: bool,
 }
 
 /// Terminal mode flags (bracketed paste, mouse tracking, …).
@@ -90,6 +93,7 @@ impl TerminalState {
             col: 0,
             is_visible: true,
             saved: None,
+            pending_wrap: false,
         };
         TerminalState {
             primary: terminal_size.clone(),
@@ -112,6 +116,9 @@ impl TerminalState {
 
         self.cursor.row = min(self.cursor.row, size.rows.saturating_sub(1));
         self.cursor.col = min(self.cursor.col, size.cols.saturating_sub(1));
+        // The deferred-wrap latch refers to the old right edge; the new grid is
+        // blank and the cursor was just clamped, so drop it.
+        self.cursor.pending_wrap = false;
     }
 
     /// The screen buffer currently displayed and written to — `primary` or

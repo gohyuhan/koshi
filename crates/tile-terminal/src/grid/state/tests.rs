@@ -98,3 +98,32 @@ fn rows_exposes_every_row() {
     assert_eq!(grid.rows().len(), 3);
     assert!(grid.rows().iter().all(|row| row.len() == 5));
 }
+
+#[test]
+fn scroll_up_drops_the_top_row_and_blanks_a_new_bottom_row() {
+    let mut grid = Grid::blank(3, 2);
+    *grid.cell_mut(0, 0).expect("in bounds") = Cell::new('a', 1, Style::default());
+    *grid.cell_mut(1, 0).expect("in bounds") = Cell::new('b', 1, Style::default());
+    *grid.cell_mut(2, 0).expect("in bounds") = Cell::new('c', 1, Style::default());
+
+    grid.scroll_up();
+
+    assert_eq!(grid.cell(0, 0).map(Cell::ch), Some('b')); // old row 1 rises
+    assert_eq!(grid.cell(1, 0).map(Cell::ch), Some('c')); // old row 2 rises
+    assert_eq!(grid.cell(2, 0), Some(&Cell::blank())); // fresh blank bottom
+}
+
+#[test]
+fn scroll_up_preserves_dimensions() {
+    let mut grid = Grid::blank(2, 4);
+    grid.scroll_up();
+    assert_eq!(grid.dimensions(), (2, 4));
+}
+
+#[test]
+fn scroll_up_on_an_empty_grid_is_a_no_op() {
+    let mut grid = Grid::blank(0, 5);
+    grid.scroll_up();
+    assert_eq!(grid.dimensions(), (0, 0));
+    assert!(grid.rows().is_empty());
+}
