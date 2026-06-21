@@ -3,24 +3,25 @@
 //! basic C0 control bytes move the cursor and scroll.
 //!
 //! Implemented so far: `print` (printable glyphs), `execute` (C0 control
-//! bytes), and `csi_dispatch` (CSI cursor moves + erase). The remaining
-//! `Perform` methods (`osc_dispatch`, `hook`/`put`/`unhook`, `esc_dispatch`)
-//! keep their default no-op until later tasks fill them in; SGR styling is a
-//! CSI final byte, so it will extend `csi_dispatch` rather than add a method.
+//! bytes), and `csi_dispatch` (CSI cursor moves, erase, and SGR pen styling).
+//! The remaining `Perform` methods (`osc_dispatch`, `hook`/`put`/`unhook`,
+//! `esc_dispatch`) keep their default no-op until later tasks fill them in.
 //! `vte` decodes UTF-8 upstream, so `print` receives a ready `char`.
 
 use crate::grid::state::Cell;
 use crate::state::TerminalState;
+use crate::style::{Color, Style};
 
 impl TerminalState {
     /// Move the cursor down one line, scrolling the active grid up when it is
     /// already on the last row. The column is left unchanged (LNM is off, so a
     /// line feed is a pure vertical move).
     fn linefeed(&mut self) {
+        let fill = self.style.bg_fill();
         let (rows, _) = self.active_grid().dimensions();
         let last_row = rows.saturating_sub(1);
         if self.cursor.row >= last_row {
-            self.active_grid_mut().scroll_up();
+            self.active_grid_mut().scroll_up(fill);
         } else {
             self.cursor.row += 1;
         }
@@ -143,28 +144,30 @@ impl vte::Perform for TerminalState {
             }
             // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
             'J' => {
+                let fill = self.style.bg_fill();
                 let (r, c) = (self.cursor.row, self.cursor.col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of screen: rest of this row, then every row
                     // below.
                     0 => {
-                        self.active_grid_mut().clear_line(r, c, cols);
+                        self.active_grid_mut().clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
                     }
                     // Start of screen to cursor: every row above, then this row
                     // through the cursor column inclusive.
                     1 => {
                         for row in 0..r {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
-                        self.active_grid_mut().clear_line(r, 0, c.saturating_add(1));
+                        self.active_grid_mut()
+                            .clear_line(r, 0, c.saturating_add(1), fill);
                     }
                     // Whole screen.
                     2 => {
                         for row in 0..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
                     }
                     // Erase scrollback only (an xterm extension). Scrollback
@@ -177,21 +180,75 @@ impl vte::Perform for TerminalState {
             }
             // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
             'K' => {
+                let fill = self.style.bg_fill();
                 let (r, c) = (self.cursor.row, self.cursor.col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of line.
-                    0 => self.active_grid_mut().clear_line(r, c, cols),
+                    0 => self.active_grid_mut().clear_line(r, c, cols, fill),
                     // Start of line through the cursor column inclusive.
-                    1 => self.active_grid_mut().clear_line(r, 0, c.saturating_add(1)),
+                    1 => self
+                        .active_grid_mut()
+                        .clear_line(r, 0, c.saturating_add(1), fill),
                     // Whole line.
-                    2 => self.active_grid_mut().clear_line(r, 0, cols),
+                    2 => self.active_grid_mut().clear_line(r, 0, cols, fill),
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
             }
-            // Any other CSI final byte (SGR, DEC private modes, …) is not
-            // handled yet; ignored rather than mis-applied.
+            // SGR — set graphic rendition: update the pen colors and text
+            // attributes applied to subsequently printed cells.
+            'm' => apply_sgr(&mut self.style, params),
+            // Any other CSI final byte (DEC private modes, device queries, …)
+            // is not handled yet; ignored rather than mis-applied.
             _ => {}
+        }
+    }
+}
+
+/// Apply an SGR (Select Graphic Rendition, `CSI … m`) sequence to `style`:
+/// update the pen colors and text attributes carried by subsequently printed
+/// cells. Empty parameters are an implicit reset (equivalent to SGR `0`); the
+/// extended-color selectors `38`/`48` are parsed by [`extended_color`].
+fn apply_sgr(style: &mut Style, params: &vte::Params) {
+    if params.is_empty() {
+        style.reset();
+        return;
+    }
+
+    let mut iter = params.iter();
+    while let Some(p) = iter.next() {
+        // Dispatch on the SGR code number `p.first()`; an empty parameter (e.g.
+        // `CSI ;m`) carries no value, so `unwrap_or(0)` makes it code 0 (reset).
+        // Each arm's comment names the code so the mapping reads without the spec.
+        match p.first().copied().unwrap_or(0) {
+            0 => style.reset(),               // 0: reset all attributes + colors
+            1 => style.set_bold(true),        // 1: bold
+            3 => style.set_italic(true),      // 3: italic
+            4 => style.set_underline(true),   // 4: underline
+            7 => style.set_reverse(true),     // 7: reverse video (swap fg/bg)
+            22 => style.set_bold(false),      // 22: bold off (normal intensity; no faint attr)
+            23 => style.set_italic(false),    // 23: italic off
+            24 => style.set_underline(false), // 24: underline off
+            27 => style.set_reverse(false),   // 27: reverse off
+            c @ 30..=37 => style.set_fg(Color::Indexed((c - 30) as u8)), // 30-37: fg palette 0-7
+            c @ 90..=97 => style.set_fg(Color::Indexed((c - 90 + 8) as u8)), // 90-97: bright fg 8-15
+            39 => style.set_fg(Color::Default),                              // 39: default fg
+            c @ 40..=47 => style.set_bg(Color::Indexed((c - 40) as u8)), // 40-47: bg palette 0-7
+            c @ 100..=107 => style.set_bg(Color::Indexed((c - 100 + 8) as u8)), // 100-107: bright bg 8-15
+            49 => style.set_bg(Color::Default),                                 // 49: default bg
+            // 38: extended fg — 256-palette (`38;5;n`) or truecolor (`38;2;r;g;b`).
+            38 => {
+                if let Some(col) = extended_color(p, &mut iter) {
+                    style.set_fg(col);
+                }
+            }
+            // 48: extended bg — 256-palette (`48;5;n`) or truecolor (`48;2;r;g;b`).
+            48 => {
+                if let Some(col) = extended_color(p, &mut iter) {
+                    style.set_bg(col);
+                }
+            }
+            _ => {} // unknown / out-of-scope SGR code: ignore
         }
     }
 }
@@ -218,6 +275,64 @@ fn coord_param(params: &vte::Params, n: usize) -> u16 {
         .filter(|&v| v != 0)
         .unwrap_or(1)
         .saturating_sub(1)
+}
+
+/// The primary value of the iterator's next CSI parameter, or `None` when the
+/// iterator is exhausted. Used to walk the separate params of a semicolon-form
+/// extended color (`38;5;n` / `38;2;r;g;b`).
+fn next_val<'a>(iter: &mut impl Iterator<Item = &'a [u16]>) -> Option<u16> {
+    iter.next().and_then(|p| p.first().copied())
+}
+
+/// Parse a `38` (foreground) or `48` (background) extended-color payload into a
+/// [`Color`], for whichever of the two wire forms `vte` produced:
+///
+/// - **colon** — `38:5:n` / `38:2:r:g:b`: the selector and values are
+///   subparameters grouped into the single `first` slice (`first[0]` is the
+///   `38`/`48`), so everything is read from `first`.
+/// - **semicolon** — `38;5;n` / `38;2;r;g;b`: the selector and values are
+///   separate following parameters, pulled in turn from `iter`.
+///
+/// Selector `5` is a 256-color palette index; selector `2` is 24-bit RGB. A
+/// missing or unrecognized payload yields `None`, leaving the pen unchanged.
+fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>) -> Option<Color> {
+    if first.len() > 1 {
+        // Colon form: selector at first[1], its values follow in the same slice.
+        match first.get(1).copied()? {
+            // `38:5:n` — 256-palette index sits at first[2].
+            5 => Some(Color::Indexed(*first.get(2)? as u8)),
+            2 => {
+                // The colon RGB form may carry a leading colorspace id
+                // (`38:2::r:g:b`, whose empty field `vte` stores as `0`), so the
+                // real r, g, b are always the last three subparameters.
+                let vals = &first[2..];
+                let rgb = if vals.len() >= 4 {
+                    &vals[vals.len() - 3..]
+                } else {
+                    vals
+                };
+                Some(Color::Rgb(
+                    *rgb.first()? as u8,
+                    *rgb.get(1)? as u8,
+                    *rgb.get(2)? as u8,
+                ))
+            }
+            _ => None,
+        }
+    } else {
+        // Semicolon form: selector then values are the next separate params.
+        match next_val(iter)? {
+            // `38;5;n` — one following param is the 256-palette index.
+            5 => Some(Color::Indexed(next_val(iter)? as u8)),
+            // `38;2;r;g;b` — three following params are the RGB channels.
+            2 => Some(Color::Rgb(
+                next_val(iter)? as u8,
+                next_val(iter)? as u8,
+                next_val(iter)? as u8,
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -16,10 +16,17 @@ pub struct Cell {
 impl Cell {
     /// A blank cell: a single space in the default style.
     pub fn blank() -> Self {
+        Cell::blank_with(Style::default())
+    }
+
+    /// A blank cell — a single space — in the given `style`. Used to carry the
+    /// current background into erased and scrolled cells (background-color
+    /// erase); `style` is typically the pen's background only.
+    pub fn blank_with(style: Style) -> Self {
         Cell {
             ch: ' ',
             width: 1,
-            style: Style::default(),
+            style,
         }
     }
 
@@ -53,14 +60,14 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// Build a `rows × cols` grid filled with [`blank`](Cell::blank) cells.
-    pub fn blank(rows: u16, cols: u16) -> Self {
+    /// Build a `rows × cols` grid, every cell a blank space in `fill`.
+    pub fn blank(rows: u16, cols: u16, fill: Style) -> Self {
         let mut blank_grid_rows = Vec::new();
 
         for _ in 0..rows {
             let mut row = Vec::new();
             for _ in 0..cols {
-                row.push(Cell::blank());
+                row.push(Cell::blank_with(fill));
             }
             blank_grid_rows.push(row);
         }
@@ -111,30 +118,30 @@ impl Grid {
     }
 
     /// Scroll the whole grid up by one line: drop the top row and append a
-    /// fresh blank row of the same width at the bottom, so the dimensions are
-    /// preserved. An empty grid (no rows) is a no-op. Called when a line feed
-    /// reaches the last row.
-    pub fn scroll_up(&mut self) {
+    /// fresh row of `fill` cells of the same width at the bottom, so the
+    /// dimensions are preserved. An empty grid (no rows) is a no-op. Called
+    /// when a line feed reaches the last row.
+    pub fn scroll_up(&mut self, fill: Style) {
         if self.rows.is_empty() {
             return;
         }
         let removed_top_row = self.rows.remove(0);
         let mut new_cell_row = Vec::new();
         for _ in 0..removed_top_row.len() {
-            new_cell_row.push(Cell::blank());
+            new_cell_row.push(Cell::blank_with(fill));
         }
 
         self.rows.push(new_cell_row);
     }
 
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
-    /// each to a [`Cell::blank`]. Coordinates outside the grid are skipped via
+    /// each to a blank space in `fill`. Coordinates outside the grid are skipped via
     /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
     /// (`from >= to`), or an empty grid is a safe no-op rather than a panic.
-    pub fn clear_line(&mut self, row: u16, from: u16, to: u16) {
+    pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
         for i in from..to {
             if let Some(cell) = self.cell_mut(row, i) {
-                *cell = Cell::blank();
+                *cell = Cell::blank_with(fill);
             }
         }
     }

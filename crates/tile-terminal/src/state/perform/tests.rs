@@ -390,3 +390,248 @@ fn ed_3_leaves_the_visible_screen_untouched() {
     assert_eq!(row_text(&state, 1), "def");
     assert_eq!(row_text(&state, 2), "ghi");
 }
+
+// --- SGR: set graphic rendition (pen colors + text attributes) ---
+
+/// The default pen with the setters in `f` applied — the expected pen for an
+/// SGR assertion, built the same way the performer mutates `self.style`.
+fn styled(f: impl FnOnce(&mut Style)) -> Style {
+    let mut style = Style::default();
+    f(&mut style);
+    style
+}
+
+#[test]
+fn sgr_bold_sets_the_bold_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1m");
+    assert_eq!(state.style, styled(|s| s.set_bold(true)));
+}
+
+#[test]
+fn sgr_zero_resets_the_pen() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;31m"); // bold + red
+    advance(&mut state, b"\x1b[0m");
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_empty_params_reset_like_zero() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1m");
+    advance(&mut state, b"\x1b[m"); // bare CSI m is an implicit reset
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_attribute_off_codes_clear_each_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;3;4;7m"); // bold, italic, underline, reverse on
+    advance(&mut state, b"\x1b[22;23;24;27m"); // each turned back off
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_sixteen_color_foreground_and_background() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[31;42m"); // fg red (1), bg green (2)
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_fg(Color::Indexed(1));
+            s.set_bg(Color::Indexed(2));
+        })
+    );
+}
+
+#[test]
+fn sgr_bright_colors_map_to_indices_eight_through_fifteen() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[91;102m"); // bright red fg (8+1), bright green bg (8+2)
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_fg(Color::Indexed(9));
+            s.set_bg(Color::Indexed(10));
+        })
+    );
+}
+
+#[test]
+fn sgr_default_color_codes_restore_the_default() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[31;42m");
+    advance(&mut state, b"\x1b[39;49m"); // default fg + bg
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_256_color_foreground() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38;5;196m");
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+}
+
+#[test]
+fn sgr_256_color_background() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[48;5;21m");
+    assert_eq!(state.style, styled(|s| s.set_bg(Color::Indexed(21))));
+}
+
+#[test]
+fn sgr_truecolor_foreground_semicolon_form() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38;2;255;128;0m");
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+}
+
+#[test]
+fn sgr_truecolor_background_semicolon_form() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[48;2;10;20;30m");
+    assert_eq!(state.style, styled(|s| s.set_bg(Color::Rgb(10, 20, 30))));
+}
+
+#[test]
+fn sgr_256_color_colon_form() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:5:196m");
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+}
+
+#[test]
+fn sgr_truecolor_colon_form() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:2:255:128:0m");
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+}
+
+#[test]
+fn sgr_truecolor_colon_form_with_empty_colorspace_id() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:2::255:128:0m"); // ITU form: empty colorspace slot
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+}
+
+#[test]
+fn sgr_combines_multiple_codes_in_one_sequence() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;4;38;5;200;48;2;1;2;3m");
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_underline(true);
+            s.set_fg(Color::Indexed(200));
+            s.set_bg(Color::Rgb(1, 2, 3));
+        })
+    );
+}
+
+#[test]
+fn sgr_pen_is_stamped_onto_subsequently_printed_glyphs() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;31m");
+    state.print('x');
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(
+        cell.style(),
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+        })
+    );
+}
+
+#[test]
+fn sgr_unknown_code_is_ignored() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1m"); // bold on
+    advance(&mut state, b"\x1b[99m"); // unknown SGR code -> pen unchanged
+    assert_eq!(state.style, styled(|s| s.set_bold(true)));
+}
+
+#[test]
+fn sgr_incomplete_extended_color_leaves_the_pen_unchanged() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38;5m"); // 256-color selector with no index
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_incomplete_colon_extended_color_leaves_the_pen_unchanged() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:5m"); // colon 256-color selector with no index
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_does_not_move_the_cursor() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "ab"); // col 2
+    advance(&mut state, b"\x1b[1;31m");
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 2));
+}
+
+#[test]
+fn sgr_preserves_the_pending_wrap_latch() {
+    let mut state = state(2, 2);
+    print_str(&mut state, "ab"); // parked on the last column
+    assert!(state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b[1m"); // SGR is not a cursor move
+    assert!(state.cursor.pending_wrap); // latch survives, unlike a cursor move
+}
+
+// --- BCE: erase / scroll fill with the current background (not default) ---
+
+#[test]
+fn el_erases_the_line_to_the_current_background() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[44m"); // bg = blue (Indexed 4)
+    advance(&mut state, b"\x1b[K"); // EL 0 from col 0 -> whole row
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    assert!((0..5).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
+}
+
+#[test]
+fn ed_2_erases_the_screen_to_the_current_background() {
+    let mut state = state(3, 2);
+    advance(&mut state, b"\x1b[42m"); // bg = green (Indexed 2)
+    advance(&mut state, b"\x1b[2J"); // ED 2 — whole screen
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    for row in 0..2 {
+        assert!((0..3).all(|c| state.active_grid().cell(row, c).map(Cell::style) == Some(fill)));
+    }
+}
+
+#[test]
+fn erase_uses_the_background_only_not_the_full_pen() {
+    let mut state = state(3, 1);
+    advance(&mut state, b"\x1b[1;31;44m"); // bold + fg red + bg blue
+    advance(&mut state, b"\x1b[K"); // erase row 0
+                                    // Erased cells carry ONLY the background; bold + foreground are dropped.
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    assert!((0..3).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
+    // The pen itself is unchanged by the erase.
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+            s.set_bg(Color::Indexed(4));
+        })
+    );
+}
+
+#[test]
+fn scroll_fills_the_exposed_row_with_the_current_background() {
+    let mut state = state(2, 2);
+    advance(&mut state, b"\x1b[42m"); // bg = green
+    advance(&mut state, b"\x1b[2;1H"); // move to the bottom row (row 1)
+    state.execute(b'\n'); // line feed on the last row -> scroll
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    // The freshly exposed bottom row carries the current background.
+    assert!((0..2).all(|c| state.active_grid().cell(1, c).map(Cell::style) == Some(fill)));
+}
