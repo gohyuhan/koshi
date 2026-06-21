@@ -49,6 +49,17 @@ impl Style {
     pub fn set_fg(&mut self, fg_color: Color) {
         self.fg = fg_color
     }
+
+    /// The background-color-erase fill style: this pen's background only, with
+    /// the foreground and all attributes reset to default. Used to fill cells
+    /// cleared by erase, scroll, and resize.
+    pub fn bg_fill(&self) -> Self {
+        Style {
+            fg: Color::Default,
+            bg: self.bg,
+            attrs: AttrFlags::default(),
+        }
+    }
 }
 
 /// A foreground or background color.

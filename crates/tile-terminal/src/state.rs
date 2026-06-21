@@ -91,7 +91,7 @@ impl TerminalState {
     /// Create per-pane state for a terminal of `size`: both screen buffers
     /// blank, the cursor at the top-left and visible, default pen, no title.
     pub fn new(size: PtySize) -> Self {
-        let terminal_size = Grid::blank(size.rows, size.cols);
+        let terminal_size = Grid::blank(size.rows, size.cols, Style::default());
         let terminal_cursor = Cursor {
             row: 0,
             col: 0,
@@ -114,7 +114,8 @@ impl TerminalState {
     /// Resize both screen buffers to `size` and clamp the cursor into the new
     /// bounds. Existing cell contents are discarded — reflow is not done here.
     pub fn resize(&mut self, size: PtySize) {
-        let resized_terminal_size = Grid::blank(size.rows, size.cols);
+        let fill = self.style.bg_fill();
+        let resized_terminal_size = Grid::blank(size.rows, size.cols, fill);
         self.primary = resized_terminal_size.clone();
         self.alternate = resized_terminal_size.clone();
 

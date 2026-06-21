@@ -100,3 +100,20 @@ fn reset_restores_the_default_pen() {
     style.reset();
     assert_eq!(style, Style::default());
 }
+
+#[test]
+fn bg_fill_keeps_only_the_background() {
+    let mut style = Style::default();
+    style.set_fg(Color::Indexed(1));
+    style.set_bg(Color::Indexed(4));
+    style.set_bold(true);
+    // The erase-fill style carries the background only — fg + attrs reset.
+    assert_eq!(
+        style.bg_fill(),
+        Style {
+            fg: Color::Default,
+            bg: Color::Indexed(4),
+            attrs: AttrFlags::default(),
+        }
+    );
+}

@@ -583,3 +583,55 @@ fn sgr_preserves_the_pending_wrap_latch() {
     advance(&mut state, b"\x1b[1m"); // SGR is not a cursor move
     assert!(state.cursor.pending_wrap); // latch survives, unlike a cursor move
 }
+
+// --- BCE: erase / scroll fill with the current background (not default) ---
+
+#[test]
+fn el_erases_the_line_to_the_current_background() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[44m"); // bg = blue (Indexed 4)
+    advance(&mut state, b"\x1b[K"); // EL 0 from col 0 -> whole row
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    assert!((0..5).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
+}
+
+#[test]
+fn ed_2_erases_the_screen_to_the_current_background() {
+    let mut state = state(3, 2);
+    advance(&mut state, b"\x1b[42m"); // bg = green (Indexed 2)
+    advance(&mut state, b"\x1b[2J"); // ED 2 — whole screen
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    for row in 0..2 {
+        assert!((0..3).all(|c| state.active_grid().cell(row, c).map(Cell::style) == Some(fill)));
+    }
+}
+
+#[test]
+fn erase_uses_the_background_only_not_the_full_pen() {
+    let mut state = state(3, 1);
+    advance(&mut state, b"\x1b[1;31;44m"); // bold + fg red + bg blue
+    advance(&mut state, b"\x1b[K"); // erase row 0
+                                    // Erased cells carry ONLY the background; bold + foreground are dropped.
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    assert!((0..3).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
+    // The pen itself is unchanged by the erase.
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+            s.set_bg(Color::Indexed(4));
+        })
+    );
+}
+
+#[test]
+fn scroll_fills_the_exposed_row_with_the_current_background() {
+    let mut state = state(2, 2);
+    advance(&mut state, b"\x1b[42m"); // bg = green
+    advance(&mut state, b"\x1b[2;1H"); // move to the bottom row (row 1)
+    state.execute(b'\n'); // line feed on the last row -> scroll
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    // The freshly exposed bottom row carries the current background.
+    assert!((0..2).all(|c| state.active_grid().cell(1, c).map(Cell::style) == Some(fill)));
+}

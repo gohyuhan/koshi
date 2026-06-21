@@ -17,10 +17,11 @@ impl TerminalState {
     /// already on the last row. The column is left unchanged (LNM is off, so a
     /// line feed is a pure vertical move).
     fn linefeed(&mut self) {
+        let fill = self.style.bg_fill();
         let (rows, _) = self.active_grid().dimensions();
         let last_row = rows.saturating_sub(1);
         if self.cursor.row >= last_row {
-            self.active_grid_mut().scroll_up();
+            self.active_grid_mut().scroll_up(fill);
         } else {
             self.cursor.row += 1;
         }
@@ -143,28 +144,30 @@ impl vte::Perform for TerminalState {
             }
             // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
             'J' => {
+                let fill = self.style.bg_fill();
                 let (r, c) = (self.cursor.row, self.cursor.col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of screen: rest of this row, then every row
                     // below.
                     0 => {
-                        self.active_grid_mut().clear_line(r, c, cols);
+                        self.active_grid_mut().clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
                     }
                     // Start of screen to cursor: every row above, then this row
                     // through the cursor column inclusive.
                     1 => {
                         for row in 0..r {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
-                        self.active_grid_mut().clear_line(r, 0, c.saturating_add(1));
+                        self.active_grid_mut()
+                            .clear_line(r, 0, c.saturating_add(1), fill);
                     }
                     // Whole screen.
                     2 => {
                         for row in 0..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols);
+                            self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
                     }
                     // Erase scrollback only (an xterm extension). Scrollback
@@ -177,14 +180,17 @@ impl vte::Perform for TerminalState {
             }
             // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
             'K' => {
+                let fill = self.style.bg_fill();
                 let (r, c) = (self.cursor.row, self.cursor.col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of line.
-                    0 => self.active_grid_mut().clear_line(r, c, cols),
+                    0 => self.active_grid_mut().clear_line(r, c, cols, fill),
                     // Start of line through the cursor column inclusive.
-                    1 => self.active_grid_mut().clear_line(r, 0, c.saturating_add(1)),
+                    1 => self
+                        .active_grid_mut()
+                        .clear_line(r, 0, c.saturating_add(1), fill),
                     // Whole line.
-                    2 => self.active_grid_mut().clear_line(r, 0, cols),
+                    2 => self.active_grid_mut().clear_line(r, 0, cols, fill),
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
