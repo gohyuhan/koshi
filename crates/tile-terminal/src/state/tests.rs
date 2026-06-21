@@ -73,3 +73,11 @@ fn resize_leaves_in_bounds_cursor_untouched() {
     assert_eq!(state.cursor.row, 2);
     assert_eq!(state.cursor.col, 3);
 }
+
+#[test]
+fn resize_clears_a_pending_wrap_latched_to_the_old_edge() {
+    let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
+    state.cursor.pending_wrap = true;
+    state.resize(PtySize { cols: 10, rows: 5 });
+    assert!(!state.cursor.pending_wrap);
+}

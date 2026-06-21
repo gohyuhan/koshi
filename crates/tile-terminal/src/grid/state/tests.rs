@@ -119,3 +119,11 @@ fn scroll_up_preserves_dimensions() {
     grid.scroll_up();
     assert_eq!(grid.dimensions(), (2, 4));
 }
+
+#[test]
+fn scroll_up_on_an_empty_grid_is_a_no_op() {
+    let mut grid = Grid::blank(0, 5);
+    grid.scroll_up();
+    assert_eq!(grid.dimensions(), (0, 0));
+    assert!(grid.rows().is_empty());
+}

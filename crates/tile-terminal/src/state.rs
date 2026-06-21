@@ -116,6 +116,9 @@ impl TerminalState {
 
         self.cursor.row = min(self.cursor.row, size.rows.saturating_sub(1));
         self.cursor.col = min(self.cursor.col, size.cols.saturating_sub(1));
+        // The deferred-wrap latch refers to the old right edge; the new grid is
+        // blank and the cursor was just clamped, so drop it.
+        self.cursor.pending_wrap = false;
     }
 
     /// The screen buffer currently displayed and written to — `primary` or

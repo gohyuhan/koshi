@@ -111,6 +111,9 @@ impl Grid {
     }
 
     pub fn scroll_up(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
         let removed_top_row = self.rows.remove(0);
         let mut new_cell_row = Vec::new();
         for _ in 0..removed_top_row.len() {
