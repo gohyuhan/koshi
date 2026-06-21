@@ -22,9 +22,13 @@ pub mod state;
 #[error("invalid config at {path}: key `{key}` {reason}")]
 #[diagnostic(code(tile::config), help("{help}"))]
 pub struct ConfigDiagnostic {
+    /// The config file path.
     path: String,
+    /// The invalid configuration key.
     key: String,
+    /// What is wrong with the value.
     reason: String,
+    /// How to fix it.
     help: String,
 }
 
@@ -33,8 +37,11 @@ pub struct ConfigDiagnostic {
 #[error("cannot {context}: {reason}")]
 #[diagnostic(code(tile::command), help("{help}"))]
 pub struct CommandRejectDiagnostic {
+    /// The action the user attempted (e.g. "focus pane").
     context: String,
+    /// Why the runtime rejected it.
     reason: RejectReason,
+    /// How to fix it or work around it.
     help: String,
 }
 
@@ -48,8 +55,11 @@ pub struct CommandRejectDiagnostic {
     help("free space by resizing or closing a neighboring pane")
 )]
 pub struct ResizeMinSizeDiagnostic {
+    /// The direction of the attempted resize.
     direction: &'static str,
+    /// The pane's current size.
     current: u16,
+    /// The minimum size the resize would breach.
     min: u16,
 }
 

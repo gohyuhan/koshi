@@ -110,6 +110,10 @@ impl Grid {
         &self.rows
     }
 
+    /// Scroll the whole grid up by one line: drop the top row and append a
+    /// fresh blank row of the same width at the bottom, so the dimensions are
+    /// preserved. An empty grid (no rows) is a no-op. Called when a line feed
+    /// reaches the last row.
     pub fn scroll_up(&mut self) {
         if self.rows.is_empty() {
             return;

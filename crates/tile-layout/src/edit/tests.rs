@@ -1,3 +1,5 @@
+//! Tests for structural edits: split, stack, replace, and remove.
+
 use tile_core::geometry::{Point, Rect, Size};
 use tile_test_support::layout_assert::{
     assert_all_space_occupied, assert_no_outside, assert_no_overlap,

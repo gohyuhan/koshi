@@ -15,11 +15,14 @@ use tile_core::{constant::GRACEFUL_TIMEOUT_DURATION, process::KillPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
+    /// Close gracefully with a timeout for cleanup.
     Graceful {
         #[serde(with = "tile_core::process::duration_secs")]
         timeout: Duration,
     },
+    /// Force-kill the process immediately.
     Force,
+    /// Prompt the user if the pane is busy, then close gracefully.
     ConfirmIfBusy,
 }
 
@@ -49,8 +52,10 @@ impl PaneClosePolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PaneExitPolicy {
+    /// Close the pane when its process exits.
     #[default]
     CloseOnExit,
+    /// Respawn a new shell in the pane when the child exits.
     RespawnShell,
 }
 

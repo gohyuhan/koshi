@@ -1,3 +1,5 @@
+//! Tests for layout tree structure and navigation.
+
 use tile_core::geometry::SplitDirection;
 use tile_core::ids::PaneId;
 

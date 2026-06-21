@@ -1,3 +1,5 @@
+//! Tests for snapshot capture and restore.
+
 use tile_core::geometry::{Point, Rect, Size};
 
 use super::*;

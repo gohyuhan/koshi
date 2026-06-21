@@ -1,3 +1,5 @@
+//! Tests for size constraints and weights.
+
 use super::*;
 
 fn roundtrip(weight: &SizeWeight) {

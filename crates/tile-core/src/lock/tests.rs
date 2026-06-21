@@ -1,3 +1,5 @@
+//! Tests for client lock mode.
+
 use super::LockMode;
 
 #[test]

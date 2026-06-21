@@ -3,8 +3,8 @@
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The runtime owns the `PaneId → TerminalState` map, so the state
-//! itself carries no identity. The VTE performer (added later) mutates this
-//! model as PTY output arrives.
+//! itself carries no identity. The VTE performer (see the `perform` submodule)
+//! mutates this model as PTY output arrives.
 
 use std::cmp::min;
 
@@ -49,14 +49,18 @@ pub struct Cursor {
     /// Position and style snapshot from DECSC, restored by DECRC; `None` until
     /// a save has happened.
     saved: Option<SavedCursor>,
-
+    /// Deferred-wrap latch (xterm-style): set when a glyph is printed into the
+    /// last column, leaving the cursor parked there instead of advancing. The
+    /// next printable glyph first wraps to the following line, so a row that
+    /// exactly fills the width does not scroll early. Any cursor-moving
+    /// operation clears it.
     pending_wrap: bool,
 }
 
 /// Terminal mode flags (bracketed paste, mouse tracking, …).
 ///
-/// Placeholder: the individual mode fields are added in a later task; it exists
-/// now so [`TerminalState`] can own it.
+/// Placeholder: the individual mode fields are added later; it exists now so
+/// [`TerminalState`] can own it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TerminalModes {}
 

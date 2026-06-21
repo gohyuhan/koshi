@@ -14,14 +14,18 @@ use serde::{Deserialize, Serialize};
 /// A single cell coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Point {
+    /// Horizontal position (column).
     pub x: u16,
+    /// Vertical position (row).
     pub y: u16,
 }
 
 /// A size in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Size {
+    /// Width in cells (columns).
     pub cols: u16,
+    /// Height in cells (rows).
     pub rows: u16,
 }
 
@@ -42,31 +46,42 @@ pub struct Size {
 /// `size.cols` is the width, and `size.rows` is the height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rect {
+    /// Top-left cell position.
     pub origin: Point,
+    /// Width and height in cells.
     pub size: Size,
 }
 
 /// The two layout axes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Axis {
+    /// X-axis (left-right).
     Horizontal,
+    /// Y-axis (top-bottom).
     Vertical,
 }
 
 /// A cardinal direction, e.g. for focus movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Direction {
+    /// Leftward (negative x).
     Left,
+    /// Rightward (positive x).
     Right,
+    /// Upward (negative y).
     Up,
+    /// Downward (positive y).
     Down,
 }
 
 /// How a split divides space between its children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SplitDirection {
+    /// Left-right split.
     Horizontal,
+    /// Top-bottom split.
     Vertical,
+    /// Overlaid split (z-axis).
     Stacked,
 }
 

@@ -1,3 +1,5 @@
+//! Tests for layout normalization: cleanup after edits and snapshot restore.
+
 use tile_core::geometry::{Point, Rect, Size};
 
 use super::*;

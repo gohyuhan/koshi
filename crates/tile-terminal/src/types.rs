@@ -1,1 +1,1 @@
-//! Shared types. Placeholder per standard source layout.
+//! Shared types — currently empty; reserved for cross-module type definitions.

@@ -108,14 +108,17 @@ impl Tab {
         }
     }
 
+    /// The panes this tab has focused, most-recent first.
     pub fn focus_mru(&self) -> &[PaneId] {
         &self.focus_mru
     }
 
+    /// Remove `pane_id` from this tab's focus history.
     pub fn remove_focus_mru(&mut self, pane_id: PaneId) {
         self.focus_mru.retain(|&p| p != pane_id);
     }
 
+    /// This tab's current lifecycle state.
     pub fn lifecycle(&self) -> &TabLifecycle {
         &self.lifecycle
     }
