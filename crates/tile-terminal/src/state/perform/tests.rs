@@ -658,6 +658,21 @@ fn decsc_decrc_restores_the_cursor_and_pen() {
 }
 
 #[test]
+fn decsc_decrc_preserves_the_pending_wrap_latch() {
+    let mut state = state(2, 2);
+    print_str(&mut state, "ab"); // fills row 0, parks at the last column
+    assert!(state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b7"); // DECSC saves the latch
+    advance(&mut state, b"\x1b[1;1H"); // a cursor move clears it
+    assert!(!state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b8"); // DECRC restores the latch
+    assert!(state.cursor.pending_wrap);
+    state.print('c'); // the latch makes the next glyph wrap, not overwrite
+    assert_eq!(glyph(&state, 0, 0), Some('a')); // row 0 untouched
+    assert_eq!(glyph(&state, 1, 0), Some('c')); // wrapped onto row 1
+}
+
+#[test]
 fn scosc_scorc_save_and_restore_the_cursor() {
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[2;5H"); // (1, 4)
@@ -771,7 +786,7 @@ fn dch_deletes_cells_pulling_the_line_left() {
 }
 
 #[test]
-fn il_inserts_a_blank_line_and_resets_the_column() {
+fn il_inserts_a_blank_line_and_keeps_the_cursor() {
     let mut state = state(3, 3);
     fill_3x3(&mut state); // abc / def / ghi
     advance(&mut state, b"\x1b[2;3H"); // cursor -> (1, 2)
@@ -779,7 +794,7 @@ fn il_inserts_a_blank_line_and_resets_the_column() {
     assert_eq!(row_text(&state, 0), "abc"); // above, untouched
     assert_eq!(row_text(&state, 1), "   "); // blank inserted
     assert_eq!(row_text(&state, 2), "def"); // def pushed down; ghi fell off
-    assert_eq!(state.cursor.col, 0); // IL snaps the cursor to column 0
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 2)); // cursor unchanged (column kept)
 }
 
 #[test]
@@ -824,6 +839,18 @@ fn sd_scrolls_the_region_down_leaving_the_cursor() {
     fill_3x3(&mut state);
     advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
     advance(&mut state, b"\x1b[T"); // SD 1
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "abc");
+    assert_eq!(row_text(&state, 2), "def"); // ghi fell off the bottom
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 1)); // cursor unmoved
+}
+
+#[test]
+fn sd_via_the_ecma48_caret_form_scrolls_the_region_down() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    advance(&mut state, b"\x1b[^"); // CSI ^ = SD (ECMA-48 form)
     assert_eq!(row_text(&state, 0), "   ");
     assert_eq!(row_text(&state, 1), "abc");
     assert_eq!(row_text(&state, 2), "def"); // ghi fell off the bottom

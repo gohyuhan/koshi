@@ -58,6 +58,7 @@ impl TerminalState {
             row: self.cursor.row,
             col: self.cursor.col,
             style: self.style,
+            pending_wrap: self.cursor.pending_wrap,
         });
     }
 
@@ -73,14 +74,15 @@ impl TerminalState {
                 self.cursor.row = saved.row.min(last_row);
                 self.cursor.col = saved.col.min(last_col);
                 self.style = saved.style;
+                self.cursor.pending_wrap = saved.pending_wrap;
             }
             None => {
                 self.cursor.row = 0;
                 self.cursor.col = 0;
                 self.style = Style::default();
+                self.cursor.pending_wrap = false;
             }
         }
-        self.cursor.pending_wrap = false;
     }
 }
 
@@ -277,8 +279,9 @@ impl vte::Perform for TerminalState {
             // SCORC — restore cursor (ANSI.SYS), companion to DECRC.
             'u' => self.restore_cursor(),
             // IL — insert n blank lines at the cursor row, scrolling the rest of
-            // the region down. Ignored when the cursor is outside the region;
-            // otherwise the cursor snaps to column 0.
+            // the region down. Ignored when the cursor is outside the region; the
+            // cursor position (row, column, and wrap latch) is left unchanged,
+            // matching the DEC/xterm lineage that TUIs target.
             'L' => {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.cursor.row) {
@@ -286,12 +289,10 @@ impl vte::Perform for TerminalState {
                     let fill = self.style.bg_fill();
                     let r = self.cursor.row;
                     self.active_grid_mut().insert_lines(r, bottom, n, fill);
-                    self.cursor.col = 0;
-                    self.cursor.pending_wrap = false;
                 }
             }
             // DL — delete n lines at the cursor row, scrolling the rest of the
-            // region up. Same region guard and column reset as IL.
+            // region up. Same region guard and cursor handling as IL.
             'M' => {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.cursor.row) {
@@ -299,23 +300,25 @@ impl vte::Perform for TerminalState {
                     let fill = self.style.bg_fill();
                     let r = self.cursor.row;
                     self.active_grid_mut().delete_lines(r, bottom, n, fill);
-                    self.cursor.col = 0;
-                    self.cursor.pending_wrap = false;
                 }
             }
-            // SU / SD — scroll the region up / down by n; the cursor stays put.
-            // `CSI <many> T` is xterm highlight mouse tracking (a later task), so
-            // only the 0/1-parameter form is treated as a scroll.
-            'S' | 'T' => {
-                if params.len() <= 1 {
+            // SU — scroll the region up by n (`CSI Ps S`); the cursor stays put.
+            'S' => {
+                let n = move_count(params);
+                let fill = self.style.bg_fill();
+                let (top, bottom) = self.region_bounds();
+                self.active_grid_mut().delete_lines(top, bottom, n, fill);
+            }
+            // SD — scroll the region down by n; the cursor stays put. `CSI Ps T`
+            // is the common form, but `CSI <5 params> T` is xterm highlight mouse
+            // tracking (a later task), so only T's 0/1-param form scrolls; `CSI Ps ^`
+            // is the unambiguous ECMA-48 form and always scrolls.
+            'T' | '^' => {
+                if action == '^' || params.len() <= 1 {
                     let n = move_count(params);
                     let fill = self.style.bg_fill();
                     let (top, bottom) = self.region_bounds();
-                    if action == 'S' {
-                        self.active_grid_mut().delete_lines(top, bottom, n, fill);
-                    } else {
-                        self.active_grid_mut().insert_lines(top, bottom, n, fill);
-                    }
+                    self.active_grid_mut().insert_lines(top, bottom, n, fill);
                 }
             }
             // DECSTBM — set the top/bottom scroll margins (1-based; defaults are

@@ -34,6 +34,9 @@ pub struct SavedCursor {
     col: u16,
     /// The pen style in effect when the cursor was saved.
     style: Style,
+    /// The deferred-wrap latch at save time, restored alongside the position so
+    /// a glyph parked at the last column still wraps after a save/restore.
+    pending_wrap: bool,
 }
 
 /// The text cursor: position, visibility, and any saved state.
