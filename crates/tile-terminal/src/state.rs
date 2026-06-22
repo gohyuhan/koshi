@@ -39,7 +39,7 @@ pub struct SavedCursor {
     pending_wrap: bool,
 }
 
-/// The text cursor: position, visibility, and any saved state.
+/// The text cursor: position, visibility, and the deferred-wrap latch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
     /// Zero-based row within the active grid (internally 0-based despite
@@ -49,9 +49,6 @@ pub struct Cursor {
     col: u16,
     /// Whether the cursor is currently shown (toggled by DEC mode `?25`).
     is_visible: bool,
-    /// Position and style snapshot from DECSC, restored by DECRC; `None` until
-    /// a save has happened.
-    saved: Option<SavedCursor>,
     /// Deferred-wrap latch (xterm-style): set when a glyph is printed into the
     /// last column, leaving the cursor parked there instead of advancing. The
     /// next printable glyph first wraps to the following line, so a row that
@@ -92,6 +89,11 @@ pub struct TerminalState {
     title: Option<String>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
+    /// Per-screen DECSC/DECRC snapshot, indexed by `active` (`Primary` = 0,
+    /// `Alternate` = 1); `None` until that screen has saved. One slot per
+    /// screen means a save on the alternate screen cannot clobber the cursor
+    /// stashed for the primary by `?1049`/`?1048`.
+    saved: [Option<SavedCursor>; 2],
 }
 
 impl TerminalState {
@@ -103,7 +105,6 @@ impl TerminalState {
             row: 0,
             col: 0,
             is_visible: true,
-            saved: None,
             pending_wrap: false,
         };
         TerminalState {
@@ -116,6 +117,7 @@ impl TerminalState {
             scroll_region: None,
             title: None,
             scrollback: Scrollback {},
+            saved: [None, None],
         }
     }
 
@@ -152,6 +154,17 @@ impl TerminalState {
             Screen::Primary => &mut self.primary,
             Screen::Alternate => &mut self.alternate,
         }
+    }
+
+    /// The window/tab title set by OSC 0/1/2, or `None` if the app has not set
+    /// one.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor.is_visible
     }
 }
 

@@ -21,13 +21,13 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
             row: 0,
             col: 0,
             is_visible: true,
-            saved: None,
             pending_wrap: false,
         }
     );
     assert_eq!(state.style, Style::default());
     assert_eq!(state.modes, TerminalModes {});
     assert_eq!(state.title, None);
+    assert_eq!(state.saved, [None, None]);
 }
 
 #[test]

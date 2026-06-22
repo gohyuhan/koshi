@@ -4,14 +4,15 @@
 //!
 //! Implemented so far: `print` (printable glyphs), `execute` (C0 control
 //! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
-//! scroll up/down, and the DECSTBM scroll region), and `esc_dispatch` (cursor
-//! save/restore and reverse index). The remaining `Perform` methods
-//! (`osc_dispatch`, `hook`/`put`/`unhook`) keep their default no-op until later
-//! tasks fill them in. `vte` decodes UTF-8 upstream, so `print` receives a
-//! ready `char`.
+//! scroll up/down, the DECSTBM scroll region, and the DEC private modes for the
+//! alternate screen and cursor visibility), `esc_dispatch` (cursor save/restore
+//! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title). The
+//! remaining `Perform` methods (`hook`/`put`/`unhook`) keep their default no-op
+//! until later tasks fill them in. `vte` decodes UTF-8 upstream, so `print`
+//! receives a ready `char`.
 
 use crate::grid::state::Cell;
-use crate::state::{SavedCursor, TerminalState};
+use crate::state::{SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
 
 impl TerminalState {
@@ -52,9 +53,10 @@ impl TerminalState {
         self.cursor.pending_wrap = false;
     }
 
-    /// Save the cursor position and pen style (DECSC / SCOSC).
+    /// Save the cursor position and pen style (DECSC / SCOSC) into the active
+    /// screen's slot, so the primary and alternate screens snapshot separately.
     fn save_cursor(&mut self) {
-        self.cursor.saved = Some(SavedCursor {
+        self.saved[self.active as usize] = Some(SavedCursor {
             row: self.cursor.row,
             col: self.cursor.col,
             style: self.style,
@@ -69,7 +71,7 @@ impl TerminalState {
     fn restore_cursor(&mut self) {
         let (rows, cols) = self.active_grid().dimensions();
         let (last_row, last_col) = (rows.saturating_sub(1), cols.saturating_sub(1));
-        match self.cursor.saved {
+        match self.saved[self.active as usize] {
             Some(saved) => {
                 self.cursor.row = saved.row.min(last_row);
                 self.cursor.col = saved.col.min(last_col);
@@ -82,6 +84,17 @@ impl TerminalState {
                 self.style = Style::default();
                 self.cursor.pending_wrap = false;
             }
+        }
+    }
+
+    /// Blank every cell of the active grid, filling with the current pen
+    /// background (BCE). Used when entering (`?1049`) or leaving (`?1047`) the
+    /// alternate screen, mirroring the whole-screen ED 2 erase.
+    fn clear_active_grid(&mut self) {
+        let fill = self.style.bg_fill();
+        let (rows, cols) = self.active_grid().dimensions();
+        for row in 0..rows {
+            self.active_grid_mut().clear_line(row, 0, cols, fill);
         }
     }
 }
@@ -157,12 +170,73 @@ impl vte::Perform for TerminalState {
         ignore: bool,
         action: char,
     ) {
-        // Plain cursor/erase sequences carry no intermediate or private-marker
-        // bytes. Private markers (`?`/`>`/`<`/`=`) are collected into
-        // `intermediates` by vte, so a non-empty slice means a mode-set or
-        // device query owned by a later task — skip it here. `ignore` flags a
-        // sequence with too many params/intermediates to have been kept intact.
-        if ignore || !intermediates.is_empty() {
+        // `ignore` flags a sequence with too many params/intermediates to have
+        // been kept intact — drop it.
+        if ignore {
+            return;
+        }
+
+        // DEC private modes carry a `?` private marker, which vte collects into
+        // `intermediates`. Handle the alternate-screen and cursor-visibility
+        // modes here; any other `?`-mode is owned by a later task.
+        if intermediates == b"?" {
+            if let Some(mode) = first_param(params) {
+                match (action, mode) {
+                    // DECSET `?47`/`?1047` — switch to the alternate buffer.
+                    ('h', 47 | 1047) => {
+                        if self.active != Screen::Alternate {
+                            self.active = Screen::Alternate;
+                        }
+                    }
+                    // DECSET `?1049` — save the cursor, switch to the alternate
+                    // buffer, then clear it.
+                    ('h', 1049) => {
+                        if self.active != Screen::Alternate {
+                            self.save_cursor();
+                            self.active = Screen::Alternate;
+                            self.clear_active_grid();
+                        }
+                    }
+                    // DECSET `?1048` — save the cursor only.
+                    ('h', 1048) => self.save_cursor(),
+                    // DECSET `?25` (DECTCEM) — show the cursor.
+                    ('h', 25) => self.cursor.is_visible = true,
+                    // DECRST `?47` — switch back to the primary buffer.
+                    ('l', 47) => {
+                        if self.active == Screen::Alternate {
+                            self.active = Screen::Primary;
+                        }
+                    }
+                    // DECRST `?1047` — clear the alternate buffer, then switch
+                    // back to the primary.
+                    ('l', 1047) => {
+                        if self.active == Screen::Alternate {
+                            self.clear_active_grid();
+                            self.active = Screen::Primary;
+                        }
+                    }
+                    // DECRST `?1049` — switch back to the primary buffer, then
+                    // restore the saved cursor.
+                    ('l', 1049) => {
+                        if self.active == Screen::Alternate {
+                            self.active = Screen::Primary;
+                            self.restore_cursor();
+                        }
+                    }
+                    // DECRST `?1048` — restore the saved cursor only.
+                    ('l', 1048) => self.restore_cursor(),
+                    // DECRST `?25` (DECTCEM) — hide the cursor.
+                    ('l', 25) => self.cursor.is_visible = false,
+                    // Any other DEC private mode is not handled yet.
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // A non-`?` intermediate marks a sequence (charset, device query, …)
+        // owned by a later task — skip it.
+        if !intermediates.is_empty() {
             return;
         }
 
@@ -364,6 +438,22 @@ impl vte::Perform for TerminalState {
             b'M' => self.reverse_index(),
             // Other ESC finals (charset selection, …) are not handled yet.
             _ => {}
+        }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 0/1/2 set the window/icon title. `params[0]` is the command
+        // number. vte splits the payload on every `;`, but for a title only the
+        // first `;` is the command/text separator, so rejoin `params[1..]` with
+        // `;` to keep a title that itself contains one. Decode lossily so a
+        // non-UTF-8 title still shows. Other OSC commands (e.g. OSC 7 cwd) are
+        // owned by later tasks.
+        let Some(&command) = params.first() else {
+            return;
+        };
+        if matches!(std::str::from_utf8(command), Ok("0" | "1" | "2")) && params.len() > 1 {
+            let title = params[1..].join(&b';');
+            self.title = Some(String::from_utf8_lossy(&title).into_owned());
         }
     }
 }

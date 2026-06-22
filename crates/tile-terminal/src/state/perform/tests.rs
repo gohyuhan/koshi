@@ -897,3 +897,206 @@ fn the_highlight_tracking_form_of_csi_t_does_not_scroll() {
     assert_eq!(row_text(&state, 1), "def");
     assert_eq!(row_text(&state, 2), "ghi");
 }
+
+// --- Alternate screen (`?47`/`?1047`/`?1048`/`?1049`), DECTCEM (`?25`), and
+// OSC 0/1/2 title ---
+
+#[test]
+fn dec_47_swaps_to_the_alternate_buffer_and_back() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?47h");
+    assert_eq!(state.active, Screen::Alternate);
+    advance(&mut state, b"\x1b[?47l");
+    assert_eq!(state.active, Screen::Primary);
+}
+
+#[test]
+fn alternate_screen_output_leaves_the_primary_grid_untouched() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"abc"); // primary row 0
+    advance(&mut state, b"\x1b[?47h");
+    advance(&mut state, b"ZZ"); // written to the alternate grid
+    advance(&mut state, b"\x1b[?47l");
+    assert_eq!(row_text(&state, 0), "abc  "); // primary unchanged
+}
+
+#[test]
+fn dec_1049_saves_the_cursor_switches_and_restores() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // primary cursor -> (2, 3)
+    advance(&mut state, b"\x1b[?1049h");
+    assert_eq!(state.active, Screen::Alternate);
+    let saved = state.saved[Screen::Primary as usize].expect("primary cursor saved");
+    assert_eq!((saved.row, saved.col), (2, 3));
+    advance(&mut state, b"\x1b[1;1H"); // move on the alternate screen
+    advance(&mut state, b"\x1b[?1049l");
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!((state.cursor.row, state.cursor.col), (2, 3)); // restored
+}
+
+#[test]
+fn dec_1049_clears_the_alternate_buffer_on_entry_using_the_background() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?47h"); // enter without clearing
+    advance(&mut state, b"xyz"); // alternate row 0 = "xyz"
+    advance(&mut state, b"\x1b[?47l"); // leave; the alternate keeps "xyz"
+    advance(&mut state, b"\x1b[44m"); // pen bg = blue (Indexed 4)
+    advance(&mut state, b"\x1b[?1049h"); // re-enter; clears with the current bg
+    assert_eq!(state.active, Screen::Alternate);
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    for row in 0..3 {
+        assert!((0..5).all(|c| state.active_grid().cell(row, c).map(Cell::style) == Some(fill)));
+    }
+    assert_eq!(row_text(&state, 0), "     "); // blanked
+}
+
+#[test]
+fn dec_1047_clears_the_alternate_buffer_on_exit_using_the_background() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1047h");
+    advance(&mut state, b"xyz"); // alternate row 0 = "xyz"
+    advance(&mut state, b"\x1b[44m"); // pen bg = blue before the clearing exit
+    advance(&mut state, b"\x1b[?1047l"); // clears the alternate with the current bg, back to primary
+    assert_eq!(state.active, Screen::Primary);
+    advance(&mut state, b"\x1b[?1047h"); // re-enter (1047 does not clear on entry)
+    let fill = styled(|s| s.set_bg(Color::Indexed(4)));
+    for row in 0..3 {
+        assert!((0..5).all(|c| state.active_grid().cell(row, c).map(Cell::style) == Some(fill)));
+    }
+    assert_eq!(row_text(&state, 0), "     "); // was cleared on the prior exit
+}
+
+#[test]
+fn dec_1048_saves_and_restores_the_cursor_and_pen_without_swapping() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // (2, 3)
+    advance(&mut state, b"\x1b[1;31m"); // bold + fg red
+    advance(&mut state, b"\x1b[?1048h"); // save (no buffer swap)
+    assert_eq!(state.active, Screen::Primary);
+    advance(&mut state, b"\x1b[1;1H\x1b[0m"); // move home + reset pen
+    advance(&mut state, b"\x1b[?1048l"); // restore
+    assert_eq!((state.cursor.row, state.cursor.col), (2, 3)); // position restored
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+        })
+    ); // pen restored
+}
+
+#[test]
+fn a_save_on_the_alternate_screen_does_not_clobber_the_primary_stash() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // primary cursor -> (2, 3)
+    advance(&mut state, b"\x1b[?1049h"); // stash (2, 3) in the primary slot
+    advance(&mut state, b"\x1b[2;2H\x1b7"); // on the alternate: move to (1, 1), DECSC
+    advance(&mut state, b"\x1b[?1049l"); // back to primary, restore
+    assert_eq!((state.cursor.row, state.cursor.col), (2, 3)); // primary stash intact
+    let alt = state.saved[Screen::Alternate as usize].expect("alternate saved");
+    assert_eq!((alt.row, alt.col), (1, 1)); // the alternate kept its own snapshot
+}
+
+#[test]
+fn re_entering_the_alternate_screen_does_not_re_clear_it() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[?1049h"); // enter + clear
+    advance(&mut state, b"\x1b[1;1Hhi"); // write "hi" at the top-left of the alternate
+    advance(&mut state, b"\x1b[?1049h"); // already on the alternate: must not re-clear
+    assert_eq!(glyph(&state, 0, 0), Some('h'));
+    assert_eq!(glyph(&state, 0, 1), Some('i'));
+}
+
+#[test]
+fn dectcem_toggles_cursor_visibility() {
+    let mut state = state(5, 3);
+    assert!(state.cursor_visible()); // visible by default
+    advance(&mut state, b"\x1b[?25l");
+    assert!(!state.cursor_visible());
+    advance(&mut state, b"\x1b[?25h");
+    assert!(state.cursor_visible());
+}
+
+#[test]
+fn osc_2_sets_the_window_title() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;hello\x07");
+    assert_eq!(state.title(), Some("hello"));
+}
+
+#[test]
+fn osc_0_and_1_also_set_the_title() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]0;zero\x07");
+    assert_eq!(state.title(), Some("zero"));
+    advance(&mut state, b"\x1b]1;icon\x07");
+    assert_eq!(state.title(), Some("icon"));
+}
+
+#[test]
+fn osc_title_keeps_embedded_semicolons() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;a;b;c\x07");
+    assert_eq!(state.title(), Some("a;b;c"));
+}
+
+#[test]
+fn osc_title_accepts_a_string_terminator() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;via-st\x1b\\");
+    assert_eq!(state.title(), Some("via-st"));
+}
+
+#[test]
+fn the_title_is_none_until_an_osc_sets_it() {
+    let state = state(5, 3);
+    assert_eq!(state.title(), None);
+}
+
+#[test]
+fn dec_47_reset_is_a_noop_when_already_on_primary() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"abc"); // primary row 0
+    advance(&mut state, b"\x1b[?47l"); // already on primary: must do nothing
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!(row_text(&state, 0), "abc  "); // primary untouched
+}
+
+#[test]
+fn dec_1047_reset_when_already_on_primary_does_not_clear_it() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"abc"); // primary row 0
+    advance(&mut state, b"\x1b[?1047l"); // already on primary: the guard must stop the clear
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!(row_text(&state, 0), "abc  "); // primary not wiped
+}
+
+#[test]
+fn dec_1049_preserves_primary_content_across_the_cycle() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"abc"); // primary row 0
+    advance(&mut state, b"\x1b[?1049h"); // enter the alternate (clears the alternate, not the primary)
+    advance(&mut state, b"\x1b[1;1HZZ"); // write on the alternate
+    advance(&mut state, b"\x1b[?1049l"); // back to the primary
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!(row_text(&state, 0), "abc  "); // primary intact
+}
+
+#[test]
+fn an_unknown_dec_private_mode_is_ignored() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"abc");
+    advance(&mut state, b"\x1b[?9999h"); // unknown DEC private mode
+    advance(&mut state, b"\x1b[?9999l");
+    assert_eq!(state.active, Screen::Primary); // no screen change
+    assert_eq!(row_text(&state, 0), "abc  "); // grid untouched
+}
+
+#[test]
+fn an_unknown_osc_command_does_not_change_the_title() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]2;keep\x07");
+    advance(&mut state, b"\x1b]3;ignored\x07"); // OSC 3 is not handled
+    assert_eq!(state.title(), Some("keep"));
+}
