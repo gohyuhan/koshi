@@ -16,11 +16,31 @@ use crate::state::{SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
 
 impl TerminalState {
+    /// The scroll-region margins for the active screen.
+    fn active_scroll_region(&self) -> Option<(u16, u16)> {
+        match self.active {
+            Screen::Primary => self.primary_scroll_region,
+            Screen::Alternate => self.alternate_scroll_region,
+        }
+    }
+
+    /// Override the alternate cursor's *position* with the primary cursor's, run
+    /// after [`Self::reset_alternate_buffer`] on a `?1049` entry so the entering
+    /// app continues from where the primary cursor was. Only the position is
+    /// touched here — visibility, the wrap latch, and the saved stash were
+    /// already reset to fresh defaults by `reset_alternate_buffer`. The plain
+    /// `?47`/`?1047` switches never call this (or the reset): they leave the
+    /// alternate buffer intact so a re-entry resumes where it left off.
+    fn seed_alternate_cursor(&mut self) {
+        self.alternate_cursor.row = self.primary_cursor.row;
+        self.alternate_cursor.col = self.primary_cursor.col;
+    }
+
     /// The scroll-region margins as 0-based inclusive `(top, bottom)` rows,
     /// resolving `None` to the whole active grid.
     fn region_bounds(&self) -> (u16, u16) {
         let last_row = self.active_grid().dimensions().0.saturating_sub(1);
-        self.scroll_region.unwrap_or((0, last_row))
+        self.active_scroll_region().unwrap_or((0, last_row))
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
@@ -30,12 +50,12 @@ impl TerminalState {
     fn linefeed(&mut self) {
         let fill = self.style.bg_fill();
         let (top, bottom) = self.region_bounds();
-        if self.cursor.row == bottom {
+        if self.active_cursor().row == bottom {
             self.active_grid_mut().delete_lines(top, bottom, 1, fill);
         } else {
             let last_row = self.active_grid().dimensions().0.saturating_sub(1);
-            if self.cursor.row < last_row {
-                self.cursor.row += 1;
+            if self.active_cursor().row < last_row {
+                self.active_cursor_mut().row += 1;
             }
         }
     }
@@ -45,22 +65,25 @@ impl TerminalState {
     fn reverse_index(&mut self) {
         let fill = self.style.bg_fill();
         let (top, bottom) = self.region_bounds();
-        if self.cursor.row == top {
+        if self.active_cursor().row == top {
             self.active_grid_mut().insert_lines(top, bottom, 1, fill);
-        } else if self.cursor.row > 0 {
-            self.cursor.row -= 1;
+        } else if self.active_cursor().row > 0 {
+            self.active_cursor_mut().row -= 1;
         }
-        self.cursor.pending_wrap = false;
+        self.active_cursor_mut().pending_wrap = false;
     }
 
     /// Save the cursor position and pen style (DECSC / SCOSC) into the active
-    /// screen's slot, so the primary and alternate screens snapshot separately.
+    /// screen's cursor, so the primary and alternate screens snapshot separately.
     fn save_cursor(&mut self) {
-        self.saved[self.active as usize] = Some(SavedCursor {
-            row: self.cursor.row,
-            col: self.cursor.col,
+        let row = self.active_cursor().row;
+        let col = self.active_cursor().col;
+        let pending_wrap = self.active_cursor().pending_wrap;
+        self.active_cursor_mut().saved = Some(SavedCursor {
+            row,
+            col,
             style: self.style,
-            pending_wrap: self.cursor.pending_wrap,
+            pending_wrap,
         });
     }
 
@@ -71,31 +94,66 @@ impl TerminalState {
     fn restore_cursor(&mut self) {
         let (rows, cols) = self.active_grid().dimensions();
         let (last_row, last_col) = (rows.saturating_sub(1), cols.saturating_sub(1));
-        match self.saved[self.active as usize] {
+        match self.active_cursor().saved {
             Some(saved) => {
-                self.cursor.row = saved.row.min(last_row);
-                self.cursor.col = saved.col.min(last_col);
+                self.active_cursor_mut().row = saved.row.min(last_row);
+                self.active_cursor_mut().col = saved.col.min(last_col);
                 self.style = saved.style;
-                self.cursor.pending_wrap = saved.pending_wrap;
+                self.active_cursor_mut().pending_wrap = saved.pending_wrap;
             }
             None => {
-                self.cursor.row = 0;
-                self.cursor.col = 0;
+                self.active_cursor_mut().row = 0;
+                self.active_cursor_mut().col = 0;
                 self.style = Style::default();
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().pending_wrap = false;
             }
         }
     }
 
-    /// Blank every cell of the active grid, filling with the current pen
-    /// background (BCE). Used when entering (`?1049`) or leaving (`?1047`) the
-    /// alternate screen, mirroring the whole-screen ED 2 erase.
-    fn clear_active_grid(&mut self) {
+    /// Reset the alternate screen to a brand-new, blank state — the single
+    /// definition of "a fresh alternate buffer". Resets **every** piece of the
+    /// alternate's per-screen state so a new session can inherit none of the
+    /// previous one:
+    /// - cells blanked to the current pen background (BCE),
+    /// - scroll region (DECSTBM) back to the full screen,
+    /// - cursor home, shown, no wrap latch, no DECSC stash.
+    ///
+    /// The wrap latch in particular is *cell-coupled* — it means "a glyph is
+    /// parked at the last column", so blanking the cells must drop it or a later
+    /// print would wrap against an erased glyph. Operates on `self.alternate`
+    /// directly (not the active grid), so it stays correct even when an earlier
+    /// mode in the same DECRST list (e.g. `?47 l`) already switched the active
+    /// screen back to the primary. Called wherever a switch *clears* the
+    /// alternate: `?1049 h` entry (which then re-seeds the cursor position from
+    /// the primary) and the `?1047 l`/`?1049 l` clearing exits. The plain
+    /// `?47`/`?1047` switches never clear, so they never call this — they
+    /// preserve the buffer and a re-entry resumes exactly where it left off.
+    fn reset_alternate_buffer(&mut self) {
         let fill = self.style.bg_fill();
-        let (rows, cols) = self.active_grid().dimensions();
+        let (rows, cols) = self.alternate.dimensions();
         for row in 0..rows {
-            self.active_grid_mut().clear_line(row, 0, cols, fill);
+            self.alternate.clear_line(row, 0, cols, fill);
         }
+        self.alternate_scroll_region = None;
+        self.alternate_cursor.row = 0;
+        self.alternate_cursor.col = 0;
+        self.alternate_cursor.is_visible = true;
+        self.alternate_cursor.pending_wrap = false;
+        self.alternate_cursor.saved = None;
+    }
+
+    /// DECSC the primary screen's cursor into its own saved slot. Used by the
+    /// `?1049` entry specifically: it must stash the *primary* cursor even when
+    /// an earlier mode in the same DECSET list (e.g. `?47 h`) already switched the
+    /// active screen to the alternate, which would make the active-relative
+    /// `save_cursor` stash the alternate cursor instead.
+    fn save_primary_cursor(&mut self) {
+        self.primary_cursor.saved = Some(SavedCursor {
+            row: self.primary_cursor.row,
+            col: self.primary_cursor.col,
+            style: self.style,
+            pending_wrap: self.primary_cursor.pending_wrap,
+        });
     }
 }
 
@@ -104,16 +162,16 @@ impl vte::Perform for TerminalState {
         // Deferred wrap: a prior print parked on the last column. Wrap to the
         // next line before placing this glyph, so a row that exactly fills the
         // width is not scrolled early.
-        if self.cursor.pending_wrap {
+        if self.active_cursor().pending_wrap {
             self.linefeed();
-            self.cursor.col = 0;
-            self.cursor.pending_wrap = false;
+            self.active_cursor_mut().col = 0;
+            self.active_cursor_mut().pending_wrap = false;
         }
 
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
-        let row = self.cursor.row;
-        let col = self.cursor.col;
+        let row = self.active_cursor().row;
+        let col = self.active_cursor().col;
         let style = self.style;
 
         if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
@@ -122,9 +180,9 @@ impl vte::Perform for TerminalState {
 
         if col >= last_col {
             // Park on the last column; the next print performs the wrap.
-            self.cursor.pending_wrap = true;
+            self.active_cursor_mut().pending_wrap = true;
         } else {
-            self.cursor.col += 1;
+            self.active_cursor_mut().col += 1;
         }
     }
 
@@ -133,26 +191,26 @@ impl vte::Perform for TerminalState {
             // LF, VT, FF: line feed (VT/FF treated as LF).
             0x0A..=0x0C => {
                 self.linefeed();
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().pending_wrap = false;
             }
             // CR: carriage return to column 0.
             0x0D => {
-                self.cursor.col = 0;
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().col = 0;
+                self.active_cursor_mut().pending_wrap = false;
             }
             // BS: backspace one column (no erase).
             0x08 => {
-                self.cursor.col = self.cursor.col.saturating_sub(1);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().col = self.active_cursor().col.saturating_sub(1);
+                self.active_cursor_mut().pending_wrap = false;
             }
             // HT: advance to the next 8-column tab stop, clamped to the grid.
             0x09 => {
                 let (_, cols) = self.active_grid().dimensions();
                 let last_col = cols.saturating_sub(1);
-                let to_next_stop = 8 - (self.cursor.col % 8);
-                let next_tab = self.cursor.col.saturating_add(to_next_stop);
-                self.cursor.col = next_tab.min(last_col);
-                self.cursor.pending_wrap = false;
+                let to_next_stop = 8 - (self.active_cursor().col % 8);
+                let next_tab = self.active_cursor().col.saturating_add(to_next_stop);
+                self.active_cursor_mut().col = next_tab.min(last_col);
+                self.active_cursor_mut().pending_wrap = false;
             }
             // BEL: discarded.
             0x07 => {}
@@ -177,56 +235,94 @@ impl vte::Perform for TerminalState {
         }
 
         // DEC private modes carry a `?` private marker, which vte collects into
-        // `intermediates`. Handle the alternate-screen and cursor-visibility
-        // modes here; any other `?`-mode is owned by a later task.
+        // `intermediates`. DECSET/DECRST take a parameter list (`CSI ? Pm h/l`),
+        // so apply every mode in the sequence; any mode not handled here is
+        // owned by a later task.
         if intermediates == b"?" {
-            if let Some(mode) = first_param(params) {
+            // Modes in one DECSET/DECRST list are applied left-to-right, each
+            // taking effect immediately (matching xterm/alacritty), so per-screen
+            // state like `?25` visibility lands on whichever screen is active at
+            // that point in the list. Switches are guarded on the **live**
+            // `self.active` (alacritty's whichBuf guard), so a second swap-mode in
+            // the same list is a no-op once the first has flipped buffers — e.g. a
+            // trailing `?1047 l` after `?1049 l` does not re-clear (that would blank
+            // with the wrong pen, since `?1049 l`'s DECRC already restored the
+            // primary's). The one exception is `?1049 h` entry, guarded on the
+            // screen active at the *start* of the list (`screen_at_start`): it must
+            // still save the primary cursor + freshen the alternate when the list
+            // began on the primary, even if an earlier `?47` already swapped (a
+            // deliberate, safer deviation from alacritty, which no-ops it). Entry
+            // re-firing is idempotent (no SGR can change the pen mid-`?`-list), so
+            // it needs no whichBuf guard; exit re-firing is not, so it does.
+            let screen_at_start = self.active;
+            for param in params.iter() {
+                let mode = param.first().copied().unwrap_or(0);
                 match (action, mode) {
-                    // DECSET `?47`/`?1047` — switch to the alternate buffer.
+                    // DECSET `?47`/`?1047` — switch to the alternate buffer (no
+                    // clear on entry). The alternate cursor is left untouched:
+                    // these modes leave the buffer intact across a `?47 l`/`?1047 l`
+                    // round-trip, so re-entry must resume where the previous
+                    // alternate session left off, not reseed from the primary.
                     ('h', 47 | 1047) => {
-                        if self.active != Screen::Alternate {
-                            self.active = Screen::Alternate;
-                        }
+                        self.active = Screen::Alternate;
                     }
-                    // DECSET `?1049` — save the cursor, switch to the alternate
-                    // buffer, then clear it.
+                    // DECSET `?1049` — DECSC the primary cursor, reset the alternate
+                    // to a brand-new buffer, re-seed its cursor position from the
+                    // primary, then switch. Guarded on the *start* screen so an
+                    // earlier `?47` in the same list cannot suppress any of this;
+                    // the save targets the primary buffer explicitly so that
+                    // earlier switch cannot redirect it onto the alternate cursor.
+                    // `?1049` always starts a fresh session, so it inherits no
+                    // cells, cursor, wrap latch, saved cursor, or scroll region
+                    // from the previous one (unlike the preserving `?47`/`?1047`).
                     ('h', 1049) => {
-                        if self.active != Screen::Alternate {
-                            self.save_cursor();
+                        if screen_at_start != Screen::Alternate {
+                            self.save_primary_cursor();
+                            self.reset_alternate_buffer();
+                            self.seed_alternate_cursor();
                             self.active = Screen::Alternate;
-                            self.clear_active_grid();
                         }
                     }
-                    // DECSET `?1048` — save the cursor only.
+                    // DECSET `?1048` — save the active screen's cursor only.
                     ('h', 1048) => self.save_cursor(),
-                    // DECSET `?25` (DECTCEM) — show the cursor.
-                    ('h', 25) => self.cursor.is_visible = true,
+                    // DECSET `?25` (DECTCEM) — show the cursor. Visibility is
+                    // tracked per screen (a deliberate deviation from xterm's
+                    // global DECTCEM), so this toggles only the active screen.
+                    ('h', 25) => self.active_cursor_mut().is_visible = true,
                     // DECRST `?47` — switch back to the primary buffer.
                     ('l', 47) => {
                         if self.active == Screen::Alternate {
                             self.active = Screen::Primary;
                         }
                     }
-                    // DECRST `?1047` — clear the alternate buffer, then switch
-                    // back to the primary.
+                    // DECRST `?1047` — reset the alternate buffer (clear cells +
+                    // scroll region + cursor), then switch back to the primary.
+                    // Guarded on the **live** screen (whichBuf): once an earlier
+                    // exit in the same list already left the alternate, this is a
+                    // no-op — re-clearing on the primary would blank with the wrong
+                    // pen.
                     ('l', 1047) => {
                         if self.active == Screen::Alternate {
-                            self.clear_active_grid();
+                            self.reset_alternate_buffer();
                             self.active = Screen::Primary;
                         }
                     }
-                    // DECRST `?1049` — switch back to the primary buffer, then
-                    // restore the saved cursor.
+                    // DECRST `?1049` — xterm/alacritty define `?1049 l` as `?1047 l`
+                    // + `?1048 l`: the clear + switch-to-primary apply only while
+                    // still on the alternate (live whichBuf guard, so a second
+                    // clearing exit is a no-op), but the DECRC cursor restore (the
+                    // `?1048 l` part) runs unconditionally.
                     ('l', 1049) => {
                         if self.active == Screen::Alternate {
+                            self.reset_alternate_buffer();
                             self.active = Screen::Primary;
-                            self.restore_cursor();
                         }
+                        self.restore_cursor();
                     }
-                    // DECRST `?1048` — restore the saved cursor only.
+                    // DECRST `?1048` — restore the active screen's cursor only.
                     ('l', 1048) => self.restore_cursor(),
                     // DECRST `?25` (DECTCEM) — hide the cursor.
-                    ('l', 25) => self.cursor.is_visible = false,
+                    ('l', 25) => self.active_cursor_mut().is_visible = false,
                     // Any other DEC private mode is not handled yet.
                     _ => {}
                 }
@@ -247,37 +343,41 @@ impl vte::Perform for TerminalState {
         match action {
             // CUU — cursor up; absent/zero count means one.
             'A' => {
-                self.cursor.row = self.cursor.row.saturating_sub(move_count(params));
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().row =
+                    self.active_cursor().row.saturating_sub(move_count(params));
+                self.active_cursor_mut().pending_wrap = false;
             }
             // CUD — cursor down, clamped to the last row.
             'B' => {
                 let n = move_count(params);
-                self.cursor.row = self.cursor.row.saturating_add(n).min(last_row);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().row =
+                    self.active_cursor().row.saturating_add(n).min(last_row);
+                self.active_cursor_mut().pending_wrap = false;
             }
             // CUF — cursor forward, clamped to the last column.
             'C' => {
                 let n = move_count(params);
-                self.cursor.col = self.cursor.col.saturating_add(n).min(last_col);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().col =
+                    self.active_cursor().col.saturating_add(n).min(last_col);
+                self.active_cursor_mut().pending_wrap = false;
             }
             // CUB — cursor back.
             'D' => {
-                self.cursor.col = self.cursor.col.saturating_sub(move_count(params));
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().col =
+                    self.active_cursor().col.saturating_sub(move_count(params));
+                self.active_cursor_mut().pending_wrap = false;
             }
             // CUP / HVP — absolute position; 1-based row;col arguments mapped to
             // 0-based coordinates and clamped into the grid.
             'H' | 'f' => {
-                self.cursor.row = coord_param(params, 0).min(last_row);
-                self.cursor.col = coord_param(params, 1).min(last_col);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().row = coord_param(params, 0).min(last_row);
+                self.active_cursor_mut().col = coord_param(params, 1).min(last_col);
+                self.active_cursor_mut().pending_wrap = false;
             }
             // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
             'J' => {
                 let fill = self.style.bg_fill();
-                let (r, c) = (self.cursor.row, self.cursor.col);
+                let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of screen: rest of this row, then every row
                     // below.
@@ -313,7 +413,7 @@ impl vte::Perform for TerminalState {
             // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
             'K' => {
                 let fill = self.style.bg_fill();
-                let (r, c) = (self.cursor.row, self.cursor.col);
+                let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of line.
                     0 => self.active_grid_mut().clear_line(r, c, cols, fill),
@@ -335,18 +435,18 @@ impl vte::Perform for TerminalState {
             '@' => {
                 let n = move_count(params);
                 let fill = self.style.bg_fill();
-                let (r, c) = (self.cursor.row, self.cursor.col);
+                let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().insert_cells(r, c, n, fill);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().pending_wrap = false;
             }
             // DCH — delete n cells at the cursor, pulling the rest of the line
             // left; the right end is refilled with blanks.
             'P' => {
                 let n = move_count(params);
                 let fill = self.style.bg_fill();
-                let (r, c) = (self.cursor.row, self.cursor.col);
+                let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().delete_cells(r, c, n, fill);
-                self.cursor.pending_wrap = false;
+                self.active_cursor_mut().pending_wrap = false;
             }
             // SCOSC — save cursor (ANSI.SYS), companion to DECSC.
             's' => self.save_cursor(),
@@ -358,10 +458,10 @@ impl vte::Perform for TerminalState {
             // matching the DEC/xterm lineage that TUIs target.
             'L' => {
                 let (top, bottom) = self.region_bounds();
-                if (top..=bottom).contains(&self.cursor.row) {
+                if (top..=bottom).contains(&self.active_cursor().row) {
                     let n = move_count(params);
                     let fill = self.style.bg_fill();
-                    let r = self.cursor.row;
+                    let r = self.active_cursor().row;
                     self.active_grid_mut().insert_lines(r, bottom, n, fill);
                 }
             }
@@ -369,10 +469,10 @@ impl vte::Perform for TerminalState {
             // region up. Same region guard and cursor handling as IL.
             'M' => {
                 let (top, bottom) = self.region_bounds();
-                if (top..=bottom).contains(&self.cursor.row) {
+                if (top..=bottom).contains(&self.active_cursor().row) {
                     let n = move_count(params);
                     let fill = self.style.bg_fill();
-                    let r = self.cursor.row;
+                    let r = self.active_cursor().row;
                     self.active_grid_mut().delete_lines(r, bottom, n, fill);
                 }
             }
@@ -407,14 +507,18 @@ impl vte::Perform for TerminalState {
                     .unwrap_or(last_row)
                     .min(last_row);
                 if top < bottom {
-                    self.scroll_region = if top == 0 && bottom == last_row {
+                    let region = if top == 0 && bottom == last_row {
                         None
                     } else {
                         Some((top, bottom))
                     };
-                    self.cursor.row = 0;
-                    self.cursor.col = 0;
-                    self.cursor.pending_wrap = false;
+                    match self.active {
+                        Screen::Primary => self.primary_scroll_region = region,
+                        Screen::Alternate => self.alternate_scroll_region = region,
+                    }
+                    self.active_cursor_mut().row = 0;
+                    self.active_cursor_mut().col = 0;
+                    self.active_cursor_mut().pending_wrap = false;
                 }
             }
             // Any other CSI final byte (DEC private modes, device queries, …)

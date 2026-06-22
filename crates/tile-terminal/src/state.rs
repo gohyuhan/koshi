@@ -55,6 +55,10 @@ pub struct Cursor {
     /// exactly fills the width does not scroll early. Any cursor-moving
     /// operation clears it.
     pending_wrap: bool,
+    /// Saved cursor position and style from DECSC/DECRC (xterm form) or
+    /// SCOSC/SCORC (ANSI form), kept per screen so each screen buffer has its
+    /// own snapshot independent of the other.
+    saved: Option<SavedCursor>,
 }
 
 /// Terminal mode flags (bracketed paste, mouse tracking, …).
@@ -75,25 +79,27 @@ pub struct TerminalState {
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
     active: Screen,
-    /// The text cursor, addressing the active grid.
-    cursor: Cursor,
+    /// The cursor for the primary screen, holding its own position, visibility,
+    /// wrap latch, and saved snapshot.
+    primary_cursor: Cursor,
+    /// The cursor for the alternate screen, independent of the primary cursor
+    /// so that position and wrap state do not leak across screen switches.
+    alternate_cursor: Cursor,
     /// The current pen style applied to printed cells.
     style: Style,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
-    /// Scroll-region margins as 0-based inclusive `(top, bottom)` rows set by
-    /// DECSTBM; `None` scrolls the whole screen. Line feed, reverse index,
-    /// IL/DL, and SU/SD all clamp to this band.
-    scroll_region: Option<(u16, u16)>,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
-    /// Per-screen DECSC/DECRC snapshot, indexed by `active` (`Primary` = 0,
-    /// `Alternate` = 1); `None` until that screen has saved. One slot per
-    /// screen means a save on the alternate screen cannot clobber the cursor
-    /// stashed for the primary by `?1049`/`?1048`.
-    saved: [Option<SavedCursor>; 2],
+    /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
+    /// `(top, bottom)`; `None` scrolls the whole screen. Kept per screen (not
+    /// shared) so an alt-screen app's margins do not leak onto the primary
+    /// after it exits.
+    primary_scroll_region: Option<(u16, u16)>,
+    /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
+    alternate_scroll_region: Option<(u16, u16)>,
 }
 
 impl TerminalState {
@@ -106,18 +112,20 @@ impl TerminalState {
             col: 0,
             is_visible: true,
             pending_wrap: false,
+            saved: None,
         };
         TerminalState {
             primary: terminal_size.clone(),
             alternate: terminal_size.clone(),
             active: Screen::Primary,
-            cursor: terminal_cursor,
+            primary_cursor: terminal_cursor,
+            alternate_cursor: terminal_cursor,
             style: Style::default(),
             modes: TerminalModes {},
-            scroll_region: None,
             title: None,
             scrollback: Scrollback {},
-            saved: [None, None],
+            primary_scroll_region: None,
+            alternate_scroll_region: None,
         }
     }
 
@@ -129,14 +137,19 @@ impl TerminalState {
         self.primary = resized_terminal_size.clone();
         self.alternate = resized_terminal_size.clone();
 
-        self.cursor.row = min(self.cursor.row, size.rows.saturating_sub(1));
-        self.cursor.col = min(self.cursor.col, size.cols.saturating_sub(1));
-        // The deferred-wrap latch refers to the old right edge; the new grid is
-        // blank and the cursor was just clamped, so drop it.
-        self.cursor.pending_wrap = false;
+        // Clamp both cursors to the new bounds.
+        self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
+        self.primary_cursor.col = min(self.primary_cursor.col, size.cols.saturating_sub(1));
+        self.primary_cursor.pending_wrap = false;
+
+        self.alternate_cursor.row = min(self.alternate_cursor.row, size.rows.saturating_sub(1));
+        self.alternate_cursor.col = min(self.alternate_cursor.col, size.cols.saturating_sub(1));
+        self.alternate_cursor.pending_wrap = false;
+
         // Margins index the old geometry; drop the region so the resized screen
         // scrolls in full until the app issues DECSTBM again.
-        self.scroll_region = None;
+        self.primary_scroll_region = None;
+        self.alternate_scroll_region = None;
     }
 
     /// The screen buffer currently displayed and written to — `primary` or
@@ -164,7 +177,37 @@ impl TerminalState {
 
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
     pub fn cursor_visible(&self) -> bool {
-        self.cursor.is_visible
+        self.active_cursor().is_visible
+    }
+
+    pub fn scroll_region(&self) -> Option<(u16, u16)> {
+        match self.active {
+            Screen::Primary => self.primary_scroll_region,
+            Screen::Alternate => self.alternate_scroll_region,
+        }
+    }
+
+    pub fn scroll_region_mut(&mut self) -> &mut Option<(u16, u16)> {
+        match self.active {
+            Screen::Primary => &mut self.primary_scroll_region,
+            Screen::Alternate => &mut self.alternate_scroll_region,
+        }
+    }
+
+    /// The cursor for the active screen.
+    fn active_cursor(&self) -> &Cursor {
+        match self.active {
+            Screen::Primary => &self.primary_cursor,
+            Screen::Alternate => &self.alternate_cursor,
+        }
+    }
+
+    /// Mutable access to the cursor for the active screen.
+    fn active_cursor_mut(&mut self) -> &mut Cursor {
+        match self.active {
+            Screen::Primary => &mut self.primary_cursor,
+            Screen::Alternate => &mut self.alternate_cursor,
+        }
     }
 }
 
