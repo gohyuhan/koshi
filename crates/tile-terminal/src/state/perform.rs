@@ -3,28 +3,84 @@
 //! basic C0 control bytes move the cursor and scroll.
 //!
 //! Implemented so far: `print` (printable glyphs), `execute` (C0 control
-//! bytes), and `csi_dispatch` (CSI cursor moves, erase, and SGR pen styling).
-//! The remaining `Perform` methods (`osc_dispatch`, `hook`/`put`/`unhook`,
-//! `esc_dispatch`) keep their default no-op until later tasks fill them in.
-//! `vte` decodes UTF-8 upstream, so `print` receives a ready `char`.
+//! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
+//! scroll up/down, and the DECSTBM scroll region), and `esc_dispatch` (cursor
+//! save/restore and reverse index). The remaining `Perform` methods
+//! (`osc_dispatch`, `hook`/`put`/`unhook`) keep their default no-op until later
+//! tasks fill them in. `vte` decodes UTF-8 upstream, so `print` receives a
+//! ready `char`.
 
 use crate::grid::state::Cell;
-use crate::state::TerminalState;
+use crate::state::{SavedCursor, TerminalState};
 use crate::style::{Color, Style};
 
 impl TerminalState {
-    /// Move the cursor down one line, scrolling the active grid up when it is
-    /// already on the last row. The column is left unchanged (LNM is off, so a
-    /// line feed is a pure vertical move).
+    /// The scroll-region margins as 0-based inclusive `(top, bottom)` rows,
+    /// resolving `None` to the whole active grid.
+    fn region_bounds(&self) -> (u16, u16) {
+        let last_row = self.active_grid().dimensions().0.saturating_sub(1);
+        self.scroll_region.unwrap_or((0, last_row))
+    }
+
+    /// Move the cursor down one line. At the scroll region's bottom margin the
+    /// region scrolls up instead of the cursor advancing; below the margin the
+    /// cursor just descends to the last grid row. The column is left unchanged
+    /// (LNM is off, so a line feed is a pure vertical move).
     fn linefeed(&mut self) {
         let fill = self.style.bg_fill();
-        let (rows, _) = self.active_grid().dimensions();
-        let last_row = rows.saturating_sub(1);
-        if self.cursor.row >= last_row {
-            self.active_grid_mut().scroll_up(fill);
+        let (top, bottom) = self.region_bounds();
+        if self.cursor.row == bottom {
+            self.active_grid_mut().delete_lines(top, bottom, 1, fill);
         } else {
-            self.cursor.row += 1;
+            let last_row = self.active_grid().dimensions().0.saturating_sub(1);
+            if self.cursor.row < last_row {
+                self.cursor.row += 1;
+            }
         }
+    }
+
+    /// Reverse index (RI): move the cursor up one line. At the scroll region's
+    /// top margin the region scrolls down instead.
+    fn reverse_index(&mut self) {
+        let fill = self.style.bg_fill();
+        let (top, bottom) = self.region_bounds();
+        if self.cursor.row == top {
+            self.active_grid_mut().insert_lines(top, bottom, 1, fill);
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    /// Save the cursor position and pen style (DECSC / SCOSC).
+    fn save_cursor(&mut self) {
+        self.cursor.saved = Some(SavedCursor {
+            row: self.cursor.row,
+            col: self.cursor.col,
+            style: self.style,
+        });
+    }
+
+    /// Restore the cursor position and pen style saved by `save_cursor` (DECRC /
+    /// SCORC). With no prior save, xterm homes the cursor and resets the pen to
+    /// defaults; the restored position is clamped into the current grid in case
+    /// it shrank since the save.
+    fn restore_cursor(&mut self) {
+        let (rows, cols) = self.active_grid().dimensions();
+        let (last_row, last_col) = (rows.saturating_sub(1), cols.saturating_sub(1));
+        match self.cursor.saved {
+            Some(saved) => {
+                self.cursor.row = saved.row.min(last_row);
+                self.cursor.col = saved.col.min(last_col);
+                self.style = saved.style;
+            }
+            None => {
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+                self.style = Style::default();
+            }
+        }
+        self.cursor.pending_wrap = false;
     }
 }
 
@@ -198,8 +254,112 @@ impl vte::Perform for TerminalState {
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
             'm' => apply_sgr(&mut self.style, params),
+            // ICH — insert n blank cells at the cursor, shifting the rest of the
+            // line right; cells pushed past the right edge fall off.
+            '@' => {
+                let n = move_count(params);
+                let fill = self.style.bg_fill();
+                let (r, c) = (self.cursor.row, self.cursor.col);
+                self.active_grid_mut().insert_cells(r, c, n, fill);
+                self.cursor.pending_wrap = false;
+            }
+            // DCH — delete n cells at the cursor, pulling the rest of the line
+            // left; the right end is refilled with blanks.
+            'P' => {
+                let n = move_count(params);
+                let fill = self.style.bg_fill();
+                let (r, c) = (self.cursor.row, self.cursor.col);
+                self.active_grid_mut().delete_cells(r, c, n, fill);
+                self.cursor.pending_wrap = false;
+            }
+            // SCOSC — save cursor (ANSI.SYS), companion to DECSC.
+            's' => self.save_cursor(),
+            // SCORC — restore cursor (ANSI.SYS), companion to DECRC.
+            'u' => self.restore_cursor(),
+            // IL — insert n blank lines at the cursor row, scrolling the rest of
+            // the region down. Ignored when the cursor is outside the region;
+            // otherwise the cursor snaps to column 0.
+            'L' => {
+                let (top, bottom) = self.region_bounds();
+                if (top..=bottom).contains(&self.cursor.row) {
+                    let n = move_count(params);
+                    let fill = self.style.bg_fill();
+                    let r = self.cursor.row;
+                    self.active_grid_mut().insert_lines(r, bottom, n, fill);
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            // DL — delete n lines at the cursor row, scrolling the rest of the
+            // region up. Same region guard and column reset as IL.
+            'M' => {
+                let (top, bottom) = self.region_bounds();
+                if (top..=bottom).contains(&self.cursor.row) {
+                    let n = move_count(params);
+                    let fill = self.style.bg_fill();
+                    let r = self.cursor.row;
+                    self.active_grid_mut().delete_lines(r, bottom, n, fill);
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
+            }
+            // SU / SD — scroll the region up / down by n; the cursor stays put.
+            // `CSI <many> T` is xterm highlight mouse tracking (a later task), so
+            // only the 0/1-parameter form is treated as a scroll.
+            'S' | 'T' => {
+                if params.len() <= 1 {
+                    let n = move_count(params);
+                    let fill = self.style.bg_fill();
+                    let (top, bottom) = self.region_bounds();
+                    if action == 'S' {
+                        self.active_grid_mut().delete_lines(top, bottom, n, fill);
+                    } else {
+                        self.active_grid_mut().insert_lines(top, bottom, n, fill);
+                    }
+                }
+            }
+            // DECSTBM — set the top/bottom scroll margins (1-based; defaults are
+            // the full screen). An invalid range (top not above bottom) is
+            // ignored; a full-screen span clears the region to `None`. The cursor
+            // is homed to the top-left.
+            'r' => {
+                let top = coord_param(params, 0).min(last_row);
+                let bottom = nth_param(params, 1)
+                    .filter(|&v| v != 0)
+                    .map(|v| v - 1)
+                    .unwrap_or(last_row)
+                    .min(last_row);
+                if top < bottom {
+                    self.scroll_region = if top == 0 && bottom == last_row {
+                        None
+                    } else {
+                        Some((top, bottom))
+                    };
+                    self.cursor.row = 0;
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
+            }
             // Any other CSI final byte (DEC private modes, device queries, …)
             // is not handled yet; ignored rather than mis-applied.
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        // A plain ESC sequence carries no intermediate byte; an intermediate
+        // marks a charset designation or other ESC form owned by a later task.
+        if ignore || !intermediates.is_empty() {
+            return;
+        }
+        match byte {
+            // DECSC — save cursor and pen.
+            b'7' => self.save_cursor(),
+            // DECRC — restore cursor and pen.
+            b'8' => self.restore_cursor(),
+            // RI — reverse index (reverse line feed).
+            b'M' => self.reverse_index(),
+            // Other ESC finals (charset selection, …) are not handled yet.
             _ => {}
         }
     }

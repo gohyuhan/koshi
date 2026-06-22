@@ -1,5 +1,7 @@
 //! The cell grid: the 2-D array of [`Cell`]s backing one screen buffer.
+
 use crate::style::Style;
+use std::cmp::min;
 
 /// A single grid cell: its character, display width, and style.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,23 +119,6 @@ impl Grid {
         &self.rows
     }
 
-    /// Scroll the whole grid up by one line: drop the top row and append a
-    /// fresh row of `fill` cells of the same width at the bottom, so the
-    /// dimensions are preserved. An empty grid (no rows) is a no-op. Called
-    /// when a line feed reaches the last row.
-    pub fn scroll_up(&mut self, fill: Style) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let removed_top_row = self.rows.remove(0);
-        let mut new_cell_row = Vec::new();
-        for _ in 0..removed_top_row.len() {
-            new_cell_row.push(Cell::blank_with(fill));
-        }
-
-        self.rows.push(new_cell_row);
-    }
-
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
     /// each to a blank space in `fill`. Coordinates outside the grid are skipped via
     /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
@@ -143,6 +128,65 @@ impl Grid {
             if let Some(cell) = self.cell_mut(row, i) {
                 *cell = Cell::blank_with(fill);
             }
+        }
+    }
+
+    pub fn insert_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
+        let (rows, cols) = self.dimensions();
+        if row >= rows || col >= cols {
+            return;
+        }
+
+        let r = &mut self.rows[row as usize];
+        let blanks = vec![Cell::blank_with(fill); n as usize];
+
+        r.splice(col as usize..col as usize, blanks);
+        r.truncate(cols as usize);
+    }
+
+    pub fn delete_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
+        let (rows, cols) = self.dimensions();
+        if row >= rows || col >= cols {
+            return;
+        }
+
+        let r = &mut self.rows[row as usize];
+        let del = min(cols - col, n);
+        let blanks = vec![Cell::blank_with(fill); del as usize];
+
+        r.drain(col as usize..(col + del) as usize);
+        r.extend(blanks);
+    }
+
+    pub fn delete_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
+        let (rows, cols) = self.dimensions();
+        if first >= rows || last >= rows || first > last {
+            return;
+        }
+
+        let blank_row = vec![Cell::blank_with(fill); cols as usize];
+
+        let remove_count = min(n, last - first + 1);
+
+        for _ in 0..remove_count as usize {
+            self.rows.remove(first as usize);
+            self.rows.insert(last as usize, blank_row.clone());
+        }
+    }
+
+    pub fn insert_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
+        let (rows, cols) = self.dimensions();
+        if first >= rows || last >= rows || first > last {
+            return;
+        }
+
+        let blank_row = vec![Cell::blank_with(fill); cols as usize];
+
+        let insert_count = min(n, last - first + 1);
+
+        for _ in 0..insert_count as usize {
+            self.rows.insert(first as usize, blank_row.clone());
+            self.rows.remove(last as usize + 1);
         }
     }
 }
