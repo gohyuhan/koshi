@@ -635,3 +635,234 @@ fn scroll_fills_the_exposed_row_with_the_current_background() {
     // The freshly exposed bottom row carries the current background.
     assert!((0..2).all(|c| state.active_grid().cell(1, c).map(Cell::style) == Some(fill)));
 }
+
+// --- TERM-005: save/restore, insert/delete, scroll regions ---
+
+#[test]
+fn decsc_decrc_restores_the_cursor_and_pen() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // cursor -> (2, 3)
+    advance(&mut state, b"\x1b[1;31m"); // bold + fg red
+    advance(&mut state, b"\x1b7"); // DECSC
+    advance(&mut state, b"\x1b[1;1H"); // move home
+    advance(&mut state, b"\x1b[0m"); // reset pen
+    advance(&mut state, b"\x1b8"); // DECRC
+    assert_eq!((state.cursor.row, state.cursor.col), (2, 3));
+    assert_eq!(
+        state.style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+        })
+    );
+}
+
+#[test]
+fn decsc_decrc_preserves_the_pending_wrap_latch() {
+    let mut state = state(2, 2);
+    print_str(&mut state, "ab"); // fills row 0, parks at the last column
+    assert!(state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b7"); // DECSC saves the latch
+    advance(&mut state, b"\x1b[1;1H"); // a cursor move clears it
+    assert!(!state.cursor.pending_wrap);
+    advance(&mut state, b"\x1b8"); // DECRC restores the latch
+    assert!(state.cursor.pending_wrap);
+    state.print('c'); // the latch makes the next glyph wrap, not overwrite
+    assert_eq!(glyph(&state, 0, 0), Some('a')); // row 0 untouched
+    assert_eq!(glyph(&state, 1, 0), Some('c')); // wrapped onto row 1
+}
+
+#[test]
+fn scosc_scorc_save_and_restore_the_cursor() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[2;5H"); // (1, 4)
+    advance(&mut state, b"\x1b[s"); // SCOSC
+    advance(&mut state, b"\x1b[5;5H"); // move away
+    advance(&mut state, b"\x1b[u"); // SCORC
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 4));
+}
+
+#[test]
+fn decrc_without_a_save_homes_and_resets_the_pen() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // move away
+    advance(&mut state, b"\x1b[1;31m"); // dirty the pen
+    advance(&mut state, b"\x1b8"); // DECRC with no prior DECSC
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 0));
+    assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn decrc_clamps_the_restored_cursor_into_a_shrunk_grid() {
+    let mut state = state(10, 10);
+    advance(&mut state, b"\x1b[6;9H"); // (5, 8)
+    advance(&mut state, b"\x1b7"); // save
+    state.resize(PtySize { cols: 3, rows: 3 });
+    advance(&mut state, b"\x1b8"); // restore -> clamped to the new bounds
+    assert_eq!((state.cursor.row, state.cursor.col), (2, 2));
+}
+
+#[test]
+fn reverse_index_moves_the_cursor_up_one_line() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[3;1H"); // row 2
+    advance(&mut state, b"\x1bM"); // RI
+    assert_eq!(state.cursor.row, 1);
+}
+
+#[test]
+fn reverse_index_at_the_top_scrolls_the_region_down() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[1;1H"); // home — at the top margin
+    advance(&mut state, b"\x1bM"); // RI scrolls down
+    assert_eq!(row_text(&state, 0), "   "); // fresh blank top
+    assert_eq!(row_text(&state, 1), "abc"); // pushed down
+    assert_eq!(row_text(&state, 2), "def"); // ghi fell off the bottom
+}
+
+#[test]
+fn decstbm_sets_the_region_and_homes_the_cursor() {
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[3;1H"); // move away from home first
+    advance(&mut state, b"\x1b[2;4r"); // margins rows 2..4 (1-based) -> (1, 3)
+    assert_eq!(state.scroll_region, Some((1, 3)));
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 0));
+}
+
+#[test]
+fn decstbm_full_span_clears_the_region() {
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[2;4r"); // set a region
+    advance(&mut state, b"\x1b[1;5r"); // whole screen -> None
+    assert_eq!(state.scroll_region, None);
+}
+
+#[test]
+fn decstbm_with_no_parameters_clears_the_region() {
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[2;4r"); // set a region
+    advance(&mut state, b"\x1b[r"); // CSI r, defaults = whole screen -> None
+    assert_eq!(state.scroll_region, None);
+}
+
+#[test]
+fn decstbm_with_an_invalid_range_is_ignored() {
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[2;4r"); // valid region (1, 3)
+    advance(&mut state, b"\x1b[4;2r"); // top not above bottom -> ignored
+    assert_eq!(state.scroll_region, Some((1, 3)));
+}
+
+#[test]
+fn line_feed_scrolls_only_within_the_region() {
+    let mut state = state(3, 4); // 4 rows
+    advance(&mut state, b"AAA\r\nBBB\r\nCCC\r\nDDD");
+    advance(&mut state, b"\x1b[2;3r"); // region rows 2..3 -> (1, 2); homes cursor
+    advance(&mut state, b"\x1b[3;1H"); // to the bottom margin (row 2)
+    state.execute(b'\n'); // line feed at the bottom margin -> scroll region up
+    assert_eq!(row_text(&state, 0), "AAA"); // above region, untouched
+    assert_eq!(row_text(&state, 1), "CCC"); // old row 2 rose
+    assert_eq!(row_text(&state, 2), "   "); // blank exposed at the region bottom
+    assert_eq!(row_text(&state, 3), "DDD"); // below region, untouched
+}
+
+#[test]
+fn ich_inserts_blank_cells_shifting_the_line_right() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"abcde"); // fills row 0
+    advance(&mut state, b"\x1b[1;3H"); // cursor -> (0, 2) on 'c'
+    advance(&mut state, b"\x1b[2@"); // ICH 2
+    assert_eq!(row_text(&state, 0), "ab  c"); // c shifts right; d, e fall off
+}
+
+#[test]
+fn dch_deletes_cells_pulling_the_line_left() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"abcde");
+    advance(&mut state, b"\x1b[1;2H"); // cursor -> (0, 1) on 'b'
+    advance(&mut state, b"\x1b[2P"); // DCH 2
+    assert_eq!(row_text(&state, 0), "ade  "); // b, c removed; padded right
+}
+
+#[test]
+fn il_inserts_a_blank_line_and_keeps_the_cursor() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;3H"); // cursor -> (1, 2)
+    advance(&mut state, b"\x1b[L"); // IL 1
+    assert_eq!(row_text(&state, 0), "abc"); // above, untouched
+    assert_eq!(row_text(&state, 1), "   "); // blank inserted
+    assert_eq!(row_text(&state, 2), "def"); // def pushed down; ghi fell off
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 2)); // cursor unchanged (column kept)
+}
+
+#[test]
+fn dl_deletes_a_line_within_the_region() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[1;1H"); // cursor -> (0, 0)
+    advance(&mut state, b"\x1b[M"); // DL 1
+    assert_eq!(row_text(&state, 0), "def"); // def rose
+    assert_eq!(row_text(&state, 1), "ghi");
+    assert_eq!(row_text(&state, 2), "   "); // blank at the bottom
+}
+
+#[test]
+fn il_outside_the_region_is_ignored() {
+    let mut state = state(3, 4); // 4 rows
+    advance(&mut state, b"AAA\r\nBBB\r\nCCC\r\nDDD");
+    advance(&mut state, b"\x1b[2;3r"); // region rows 2..3 -> (1, 2); homes cursor
+    advance(&mut state, b"\x1b[1;1H"); // cursor row 0 — above the region
+    advance(&mut state, b"\x1b[L"); // IL ignored outside the region
+    assert_eq!(row_text(&state, 0), "AAA");
+    assert_eq!(row_text(&state, 1), "BBB");
+    assert_eq!(row_text(&state, 2), "CCC");
+    assert_eq!(row_text(&state, 3), "DDD");
+}
+
+#[test]
+fn su_scrolls_the_region_up_leaving_the_cursor() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    advance(&mut state, b"\x1b[S"); // SU 1
+    assert_eq!(row_text(&state, 0), "def");
+    assert_eq!(row_text(&state, 1), "ghi");
+    assert_eq!(row_text(&state, 2), "   ");
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 1)); // cursor unmoved
+}
+
+#[test]
+fn sd_scrolls_the_region_down_leaving_the_cursor() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    advance(&mut state, b"\x1b[T"); // SD 1
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "abc");
+    assert_eq!(row_text(&state, 2), "def"); // ghi fell off the bottom
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 1)); // cursor unmoved
+}
+
+#[test]
+fn sd_via_the_ecma48_caret_form_scrolls_the_region_down() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // abc / def / ghi
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    advance(&mut state, b"\x1b[^"); // CSI ^ = SD (ECMA-48 form)
+    assert_eq!(row_text(&state, 0), "   ");
+    assert_eq!(row_text(&state, 1), "abc");
+    assert_eq!(row_text(&state, 2), "def"); // ghi fell off the bottom
+    assert_eq!((state.cursor.row, state.cursor.col), (1, 1)); // cursor unmoved
+}
+
+#[test]
+fn the_highlight_tracking_form_of_csi_t_does_not_scroll() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[1;2;3;4;5T"); // 5-param CSI T = highlight tracking, not SD
+    assert_eq!(row_text(&state, 0), "abc"); // grid unchanged
+    assert_eq!(row_text(&state, 1), "def");
+    assert_eq!(row_text(&state, 2), "ghi");
+}

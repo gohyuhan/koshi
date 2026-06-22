@@ -34,6 +34,9 @@ pub struct SavedCursor {
     col: u16,
     /// The pen style in effect when the cursor was saved.
     style: Style,
+    /// The deferred-wrap latch at save time, restored alongside the position so
+    /// a glyph parked at the last column still wraps after a save/restore.
+    pending_wrap: bool,
 }
 
 /// The text cursor: position, visibility, and any saved state.
@@ -81,6 +84,10 @@ pub struct TerminalState {
     style: Style,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
+    /// Scroll-region margins as 0-based inclusive `(top, bottom)` rows set by
+    /// DECSTBM; `None` scrolls the whole screen. Line feed, reverse index,
+    /// IL/DL, and SU/SD all clamp to this band.
+    scroll_region: Option<(u16, u16)>,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
     /// Lines that have scrolled off the top of the primary screen.
@@ -106,6 +113,7 @@ impl TerminalState {
             cursor: terminal_cursor,
             style: Style::default(),
             modes: TerminalModes {},
+            scroll_region: None,
             title: None,
             scrollback: Scrollback {},
         }
@@ -124,6 +132,9 @@ impl TerminalState {
         // The deferred-wrap latch refers to the old right edge; the new grid is
         // blank and the cursor was just clamped, so drop it.
         self.cursor.pending_wrap = false;
+        // Margins index the old geometry; drop the region so the resized screen
+        // scrolls in full until the app issues DECSTBM again.
+        self.scroll_region = None;
     }
 
     /// The screen buffer currently displayed and written to — `primary` or

@@ -16,6 +16,21 @@ fn bg(color: Color) -> Style {
     style
 }
 
+/// Write `s` left-to-right into `row`, one default-styled char per cell.
+fn write_row(grid: &mut Grid, row: u16, s: &str) {
+    for (col, ch) in s.chars().enumerate() {
+        *grid.cell_mut(row, col as u16).expect("in bounds") = Cell::new(ch, 1, Style::default());
+    }
+}
+
+/// Read `row` of the grid as a string; blank cells read as spaces.
+fn row_text(grid: &Grid, row: u16) -> String {
+    let (_, cols) = grid.dimensions();
+    (0..cols)
+        .map(|c| grid.cell(row, c).map(Cell::ch).unwrap_or(' '))
+        .collect()
+}
+
 #[test]
 fn blank_cell_is_a_space_of_width_one_in_the_default_style() {
     let cell = Cell::blank();
@@ -132,13 +147,14 @@ fn rows_exposes_every_row() {
 }
 
 #[test]
-fn scroll_up_drops_the_top_row_and_blanks_a_new_bottom_row() {
+fn delete_lines_full_grid_scrolls_up_dropping_the_top_row() {
     let mut grid = default_grid(3, 2);
     *grid.cell_mut(0, 0).expect("in bounds") = Cell::new('a', 1, Style::default());
     *grid.cell_mut(1, 0).expect("in bounds") = Cell::new('b', 1, Style::default());
     *grid.cell_mut(2, 0).expect("in bounds") = Cell::new('c', 1, Style::default());
 
-    grid.scroll_up(Style::default());
+    // A whole-grid band scrolled up by one is the old scroll-up behavior.
+    grid.delete_lines(0, 2, 1, Style::default());
 
     assert_eq!(grid.cell(0, 0).map(Cell::ch), Some('b')); // old row 1 rises
     assert_eq!(grid.cell(1, 0).map(Cell::ch), Some('c')); // old row 2 rises
@@ -146,25 +162,25 @@ fn scroll_up_drops_the_top_row_and_blanks_a_new_bottom_row() {
 }
 
 #[test]
-fn scroll_up_fills_the_new_bottom_row_with_the_given_fill_style() {
+fn delete_lines_fills_the_new_bottom_row_with_the_given_fill_style() {
     let fill = bg(Color::Indexed(4));
     let mut grid = default_grid(2, 3);
-    grid.scroll_up(fill);
+    grid.delete_lines(0, 1, 1, fill);
     // The freshly exposed bottom row carries the fill background.
     assert!((0..3).all(|c| grid.cell(1, c).map(Cell::style) == Some(fill)));
 }
 
 #[test]
-fn scroll_up_preserves_dimensions() {
+fn delete_lines_preserves_dimensions() {
     let mut grid = default_grid(2, 4);
-    grid.scroll_up(Style::default());
+    grid.delete_lines(0, 1, 1, Style::default());
     assert_eq!(grid.dimensions(), (2, 4));
 }
 
 #[test]
-fn scroll_up_on_an_empty_grid_is_a_no_op() {
+fn delete_lines_on_an_empty_grid_is_a_no_op() {
     let mut grid = default_grid(0, 5);
-    grid.scroll_up(Style::default());
+    grid.delete_lines(0, 0, 1, Style::default());
     assert_eq!(grid.dimensions(), (0, 0));
     assert!(grid.rows().is_empty());
 }
@@ -220,4 +236,119 @@ fn clear_line_on_an_out_of_range_row_is_a_no_op() {
     *grid.cell_mut(0, 0).expect("in bounds") = Cell::new('q', 1, Style::default());
     grid.clear_line(9, 0, 2, Style::default()); // row out of range
     assert_eq!(grid.cell(0, 0).map(Cell::ch), Some('q'));
+}
+
+#[test]
+fn insert_cells_shifts_right_and_drops_overflow() {
+    let mut grid = default_grid(1, 5);
+    write_row(&mut grid, 0, "abcde");
+    grid.insert_cells(0, 2, 2, Style::default()); // two blanks at col 2
+    assert_eq!(row_text(&grid, 0), "ab  c"); // c shifts right; d, e fall off
+}
+
+#[test]
+fn insert_cells_with_n_past_the_row_blanks_to_the_edge() {
+    let mut grid = default_grid(1, 4);
+    write_row(&mut grid, 0, "abcd");
+    grid.insert_cells(0, 1, 99, Style::default()); // far more than fits
+    assert_eq!(row_text(&grid, 0), "a   "); // everything from col 1 pushed off
+    assert_eq!(grid.dimensions(), (1, 4)); // width preserved
+}
+
+#[test]
+fn insert_cells_fills_with_the_given_style() {
+    let fill = bg(Color::Indexed(3));
+    let mut grid = default_grid(1, 3);
+    write_row(&mut grid, 0, "abc");
+    grid.insert_cells(0, 0, 1, fill);
+    assert_eq!(grid.cell(0, 0).map(Cell::style), Some(fill)); // inserted blank carries fill
+}
+
+#[test]
+fn insert_cells_out_of_bounds_is_a_no_op() {
+    let mut grid = default_grid(2, 3);
+    write_row(&mut grid, 0, "xyz");
+    grid.insert_cells(9, 0, 1, Style::default()); // bad row
+    grid.insert_cells(0, 9, 1, Style::default()); // bad col
+    assert_eq!(row_text(&grid, 0), "xyz");
+}
+
+#[test]
+fn delete_cells_pulls_left_and_pads_the_right() {
+    let mut grid = default_grid(1, 5);
+    write_row(&mut grid, 0, "abcde");
+    grid.delete_cells(0, 1, 2, Style::default()); // remove b, c
+    assert_eq!(row_text(&grid, 0), "ade  ");
+}
+
+#[test]
+fn delete_cells_clamps_n_and_preserves_width() {
+    let mut grid = default_grid(1, 4);
+    write_row(&mut grid, 0, "abcd");
+    grid.delete_cells(0, 2, 99, Style::default()); // n exceeds the cells to the right
+    assert_eq!(row_text(&grid, 0), "ab  ");
+    assert_eq!(grid.dimensions(), (1, 4)); // width must not grow when n > remaining
+}
+
+#[test]
+fn delete_cells_fills_with_the_given_style() {
+    let fill = bg(Color::Indexed(3));
+    let mut grid = default_grid(1, 3);
+    write_row(&mut grid, 0, "abc");
+    grid.delete_cells(0, 0, 1, fill);
+    assert_eq!(grid.cell(0, 2).map(Cell::style), Some(fill)); // pad cell carries fill
+}
+
+#[test]
+fn delete_lines_scrolls_a_band_up_leaving_outside_rows() {
+    let mut grid = default_grid(4, 3);
+    write_row(&mut grid, 0, "AAA");
+    write_row(&mut grid, 1, "BBB");
+    write_row(&mut grid, 2, "CCC");
+    write_row(&mut grid, 3, "DDD");
+    grid.delete_lines(1, 2, 1, Style::default()); // band rows 1..=2
+    assert_eq!(row_text(&grid, 0), "AAA"); // above band, kept
+    assert_eq!(row_text(&grid, 1), "CCC"); // rose
+    assert_eq!(row_text(&grid, 2), "   "); // blank at band bottom
+    assert_eq!(row_text(&grid, 3), "DDD"); // below band, kept
+}
+
+#[test]
+fn insert_lines_scrolls_a_band_down_dropping_the_bottom() {
+    let mut grid = default_grid(4, 3);
+    write_row(&mut grid, 0, "AAA");
+    write_row(&mut grid, 1, "BBB");
+    write_row(&mut grid, 2, "CCC");
+    write_row(&mut grid, 3, "DDD");
+    grid.insert_lines(1, 2, 1, Style::default());
+    assert_eq!(row_text(&grid, 0), "AAA"); // above band, kept
+    assert_eq!(row_text(&grid, 1), "   "); // blank opened
+    assert_eq!(row_text(&grid, 2), "BBB"); // pushed down (CCC fell off band bottom)
+    assert_eq!(row_text(&grid, 3), "DDD"); // below band, kept
+}
+
+#[test]
+fn line_ops_clamp_n_to_the_band_height() {
+    let mut grid = default_grid(3, 2);
+    write_row(&mut grid, 0, "AA");
+    write_row(&mut grid, 1, "BB");
+    write_row(&mut grid, 2, "CC");
+    grid.delete_lines(0, 1, 99, Style::default()); // n far exceeds the 2-row band
+    assert_eq!(row_text(&grid, 0), "  "); // whole band blanked
+    assert_eq!(row_text(&grid, 1), "  ");
+    assert_eq!(row_text(&grid, 2), "CC"); // outside band, kept
+    assert_eq!(grid.dimensions(), (3, 2));
+}
+
+#[test]
+fn line_ops_with_an_inverted_or_oob_band_are_no_ops() {
+    let mut grid = default_grid(3, 2);
+    write_row(&mut grid, 0, "AA");
+    write_row(&mut grid, 1, "BB");
+    write_row(&mut grid, 2, "CC");
+    grid.delete_lines(2, 1, 1, Style::default()); // first > last
+    grid.insert_lines(0, 9, 1, Style::default()); // last out of range
+    assert_eq!(row_text(&grid, 0), "AA");
+    assert_eq!(row_text(&grid, 1), "BB");
+    assert_eq!(row_text(&grid, 2), "CC");
 }
