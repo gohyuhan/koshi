@@ -636,7 +636,7 @@ fn scroll_fills_the_exposed_row_with_the_current_background() {
     assert!((0..2).all(|c| state.active_grid().cell(1, c).map(Cell::style) == Some(fill)));
 }
 
-// --- TERM-005: save/restore, insert/delete, scroll regions ---
+// --- save/restore, insert/delete, scroll regions ---
 
 #[test]
 fn decsc_decrc_restores_the_cursor_and_pen() {
@@ -673,13 +673,17 @@ fn decsc_decrc_preserves_the_pending_wrap_latch() {
 }
 
 #[test]
-fn scosc_scorc_save_and_restore_the_cursor() {
+fn scosc_scorc_save_and_restore_the_cursor_and_pen() {
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[2;5H"); // (1, 4)
+    advance(&mut state, b"\x1b[1;31m"); // bold + fg red
+    let saved_style = state.style;
     advance(&mut state, b"\x1b[s"); // SCOSC
     advance(&mut state, b"\x1b[5;5H"); // move away
+    advance(&mut state, b"\x1b[0m"); // reset the pen to a different style
     advance(&mut state, b"\x1b[u"); // SCORC
     assert_eq!((state.cursor.row, state.cursor.col), (1, 4));
+    assert_eq!(state.style, saved_style); // pen restored too
 }
 
 #[test]
@@ -774,6 +778,20 @@ fn ich_inserts_blank_cells_shifting_the_line_right() {
     advance(&mut state, b"\x1b[1;3H"); // cursor -> (0, 2) on 'c'
     advance(&mut state, b"\x1b[2@"); // ICH 2
     assert_eq!(row_text(&state, 0), "ab  c"); // c shifts right; d, e fall off
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 2)); // cursor unchanged
+    assert!(!state.cursor.pending_wrap);
+}
+
+#[test]
+fn ich_fills_inserted_cells_with_the_current_background() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"\x1b[42m"); // bg = green
+    advance(&mut state, b"abcde");
+    advance(&mut state, b"\x1b[1;3H"); // cursor -> (0, 2)
+    advance(&mut state, b"\x1b[2@"); // ICH 2 — inserted blanks carry the bg
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    assert_eq!(state.active_grid().cell(0, 2).map(Cell::style), Some(fill));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::style), Some(fill));
 }
 
 #[test]
@@ -783,6 +801,19 @@ fn dch_deletes_cells_pulling_the_line_left() {
     advance(&mut state, b"\x1b[1;2H"); // cursor -> (0, 1) on 'b'
     advance(&mut state, b"\x1b[2P"); // DCH 2
     assert_eq!(row_text(&state, 0), "ade  "); // b, c removed; padded right
+    assert_eq!((state.cursor.row, state.cursor.col), (0, 1)); // cursor unchanged
+    assert!(!state.cursor.pending_wrap);
+}
+
+#[test]
+fn dch_fills_padded_cells_with_the_current_background() {
+    let mut state = state(5, 1);
+    advance(&mut state, b"\x1b[42m"); // bg = green
+    advance(&mut state, b"abcde");
+    advance(&mut state, b"\x1b[1;2H"); // cursor -> (0, 1)
+    advance(&mut state, b"\x1b[2P"); // DCH 2 — the right-end pad carries the bg
+    let fill = styled(|s| s.set_bg(Color::Indexed(2)));
+    assert_eq!(state.active_grid().cell(0, 4).map(Cell::style), Some(fill));
 }
 
 #[test]
