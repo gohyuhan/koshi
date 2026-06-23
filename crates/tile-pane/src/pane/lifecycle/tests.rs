@@ -174,6 +174,38 @@ fn a_respawned_pane_runs_through_the_normal_start_path() {
 }
 
 #[test]
+fn a_close_during_spawn_wins_over_a_late_child_exit() {
+    // Race: the pane is closed while still Spawning (close is askable before the
+    // child runs), then the child that was coming up exits anyway. The close
+    // moves it to Closing; the late exit is not a legal edge from Closing, so it
+    // is rejected and the state is unchanged — a late exit can neither revive
+    // the pane nor corrupt the teardown.
+    let since = SystemTime::UNIX_EPOCH;
+    let closing = PaneLifecycle::Spawning
+        .transition(
+            PaneLifecycleEvent::CloseRequested { since },
+            PaneKind::Terminal,
+        )
+        .unwrap();
+    assert_eq!(closing, PaneLifecycle::Closing { since });
+
+    let late_exit = closing.transition(
+        PaneLifecycleEvent::ProcessExited {
+            code: Some(0),
+            at: since,
+        },
+        PaneKind::Terminal,
+    );
+    assert!(late_exit.is_err());
+
+    // The close still completes normally to Removed.
+    assert_eq!(
+        closing.transition(PaneLifecycleEvent::Cleaned, PaneKind::Terminal),
+        Ok(PaneLifecycle::Removed)
+    );
+}
+
+#[test]
 fn a_removed_pane_rejects_every_event() {
     let from = PaneLifecycle::Removed;
 

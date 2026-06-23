@@ -8,9 +8,12 @@ use std::cmp::min;
 pub struct Cell {
     /// The base character occupying the cell.
     ch: char,
-    /// Zero-width marks (combining accents, ZWJ, variation selectors, …)
-    /// layered over [`ch`](Cell::ch), in arrival order. Empty for a plain cell;
-    /// the renderer draws the base glyph with these stacked on top.
+    /// The rest of the grapheme cluster layered over the base [`ch`](Cell::ch),
+    /// in arrival order: combining accents, variation selectors, and the joined
+    /// parts of a multi-codepoint emoji (ZWJ-joined glyphs, skin-tone modifiers,
+    /// the second half of a flag). Empty for a plain cell; the renderer draws
+    /// `ch` followed by these as one glyph. Named for the common case (combining
+    /// marks) though it also carries non-zero-width emoji continuations.
     combining: Vec<char>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
@@ -52,14 +55,16 @@ impl Cell {
         self.ch
     }
 
-    /// The zero-width marks layered over the base character, in arrival order;
-    /// empty for a plain cell.
+    /// The rest of the grapheme cluster layered over the base character, in
+    /// arrival order (combining marks plus any emoji continuation); empty for a
+    /// plain cell.
     pub fn combining(&self) -> &[char] {
         &self.combining
     }
 
-    /// Layer one zero-width `mark` (combining accent, ZWJ, …) onto this cell,
-    /// keeping the base character and width unchanged.
+    /// Layer one continuation code point (combining mark, ZWJ, variation
+    /// selector, joined emoji part, …) onto this cell, keeping the base
+    /// character and width unchanged.
     pub fn push_combining(&mut self, mark: char) {
         self.combining.push(mark);
     }

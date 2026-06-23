@@ -62,13 +62,14 @@ fn category_display_is_human() {
         (DomainCategory::Pty, "pty"),
         (DomainCategory::Terminal, "terminal"),
         (DomainCategory::Layout, "layout"),
+        (DomainCategory::Session, "session"),
         (DomainCategory::Plugin, "plugin"),
         (DomainCategory::Storage, "storage"),
     ];
     for (cat, want) in &cases {
         assert_eq!(cat.to_string(), *want);
     }
-    assert_eq!(cases.len(), 8);
+    assert_eq!(cases.len(), 9);
 }
 
 #[test]
