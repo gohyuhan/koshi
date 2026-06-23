@@ -1,5 +1,6 @@
-//! Unit tests for the VTE performer: printing, deferred wrap, scrolling, and
-//! the C0 control bytes.
+//! Unit tests for the VTE performer: printing, display width (wide glyphs,
+//! combining marks, ambiguous width), deferred wrap, scrolling, and the C0
+//! control bytes.
 
 use super::*;
 use tile_core::process::PtySize;
@@ -1547,4 +1548,157 @@ fn cursor_visibility_is_independent_per_screen() {
     assert!(state.cursor_visible()); // alternate keeps its own (visible) state — per-screen, deliberate xterm deviation
     advance(&mut state, b"\x1b[?1049l"); // back to primary
     assert!(!state.cursor_visible()); // primary still hidden
+}
+
+// --- Unicode display-width: wide glyphs, combining marks, ambiguous width ---
+
+#[test]
+fn wide_char_occupies_two_cells_and_advances_by_two() {
+    let mut state = state(5, 3);
+    state.print('中'); // CJK ideograph, display width 2
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '中');
+    assert_eq!(base.width(), 2);
+    // The second column is a width-0 continuation placeholder.
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    // Cursor steps past both cells.
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(!state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn emoji_is_wide() {
+    let mut state = state(5, 3);
+    state.print('😀'); // emoji, display width 2
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::ch), Some('😀'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(2));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn two_wide_chars_lay_side_by_side() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "中文");
+    assert_eq!(glyph(&state, 0, 0), Some('中'));
+    assert_eq!(glyph(&state, 0, 2), Some('文'));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 4);
+}
+
+#[test]
+fn ambiguous_width_char_is_narrow() {
+    let mut state = state(5, 3);
+    state.print('§'); // East-Asian Ambiguous → narrow under the default policy
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(state.active_cursor().col, 1);
+}
+
+#[test]
+fn combining_mark_attaches_to_the_previous_cell_without_advancing() {
+    let mut state = state(5, 3);
+    state.print('e');
+    state.print('\u{301}'); // combining acute accent → é
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), ['\u{301}']);
+    assert_eq!(cell.width(), 1); // base width unchanged
+    assert_eq!(state.active_cursor().col, 1); // cursor did not advance
+}
+
+#[test]
+fn multiple_combining_marks_stack_in_arrival_order() {
+    let mut state = state(5, 3);
+    state.print('a');
+    state.print('\u{301}'); // acute
+    state.print('\u{308}'); // diaeresis
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.combining(), ['\u{301}', '\u{308}']);
+    assert_eq!(state.active_cursor().col, 1);
+}
+
+#[test]
+fn combining_mark_attaches_to_a_wide_base_not_its_continuation() {
+    let mut state = state(6, 2);
+    state.print('中'); // base at col 0, continuation at col 1, cursor → 2
+    state.print('\u{301}'); // must land on the base at col 0, stepping over col 1
+    assert_eq!(
+        state.active_grid().cell(0, 0).expect("base").combining(),
+        ['\u{301}']
+    );
+    assert!(state
+        .active_grid()
+        .cell(0, 1)
+        .expect("continuation")
+        .combining()
+        .is_empty());
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn combining_mark_at_line_start_is_dropped() {
+    let mut state = state(5, 3);
+    state.print('\u{301}'); // nothing precedes it on the line
+    assert!(state
+        .active_grid()
+        .cell(0, 0)
+        .expect("in bounds")
+        .combining()
+        .is_empty());
+    assert_eq!(state.active_cursor().col, 0); // no advance, no panic
+}
+
+#[test]
+fn combining_mark_attaches_to_a_parked_glyph() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // row 0 full, cursor parked at col 2 with the wrap latch
+    assert!(state.active_cursor().pending_wrap);
+    state.print('\u{301}'); // attaches to the parked 'c' without wrapping
+    let cell = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(cell.ch(), 'c');
+    assert_eq!(cell.combining(), ['\u{301}']);
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(state.active_cursor().pending_wrap); // latch preserved
+}
+
+#[test]
+fn wide_char_at_the_last_column_wraps_and_blanks_the_freed_cell() {
+    let mut state = state(3, 2); // columns 0..=2; last col = 2
+    print_str(&mut state, "ab"); // a@0, b@1, cursor at the last free col 2
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(!state.active_cursor().pending_wrap);
+    state.print('中'); // width 2, only col 2 free → blank it and wrap whole
+    let freed = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(freed.ch(), ' '); // freed column blanked
+    assert_eq!(freed.width(), 1);
+    assert_eq!(glyph(&state, 1, 0), Some('中')); // glyph starts the next line whole
+    assert_eq!(state.active_grid().cell(1, 1).map(Cell::width), Some(0));
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (1, 2)
+    );
+}
+
+#[test]
+fn wide_char_reaching_the_last_column_parks() {
+    let mut state = state(4, 2); // last col = 3
+    print_str(&mut state, "xx"); // cursor at col 2
+    state.print('中'); // occupies cols 2 and 3 (the last) → park, no wrap yet
+    assert_eq!(glyph(&state, 0, 2), Some('中'));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(0));
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 3);
+    assert!(cur.pending_wrap);
+    state.print('y'); // the deferred wrap fires here
+    assert_eq!(glyph(&state, 1, 0), Some('y'));
+}
+
+#[test]
+fn control_char_reaching_print_is_ignored() {
+    let mut state = state(5, 3);
+    state.print('a');
+    state.print('\u{0}'); // NUL: a control char, no display width
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(state.active_cursor().col, 1); // nothing written, no advance
 }

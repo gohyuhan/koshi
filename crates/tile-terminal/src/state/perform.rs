@@ -2,7 +2,9 @@
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
 //! basic C0 control bytes move the cursor and scroll.
 //!
-//! Implemented so far: `print` (printable glyphs), `execute` (C0 control
+//! Implemented so far: `print` (printable glyphs, display-width aware: wide
+//! CJK/emoji span two cells, combining marks stack onto the prior glyph),
+//! `execute` (C0 control
 //! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
 //! scroll up/down, the DECSTBM scroll region, and the DEC private modes for the
 //! alternate screen and cursor visibility), `esc_dispatch` (cursor save/restore
@@ -14,6 +16,7 @@
 use crate::grid::state::Cell;
 use crate::state::{SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
+use unicode_width::UnicodeWidthChar;
 
 impl TerminalState {
     /// The scroll-region margins for the active screen.
@@ -155,10 +158,63 @@ impl TerminalState {
             pending_wrap: self.primary_cursor.pending_wrap,
         });
     }
+
+    /// Attach a zero-width mark (combining accent, ZWJ, variation selector, …)
+    /// to the base cell of the most recently printed glyph, so it renders
+    /// stacked on that glyph rather than consuming a column.
+    ///
+    /// The base cell is the cursor's *own* cell when a glyph parked there with
+    /// the deferred-wrap latch, otherwise the cell just left of the cursor (the
+    /// cursor having already advanced past the glyph). A wide glyph's width-0
+    /// continuation cell is stepped over to reach the base that actually holds
+    /// the character. A mark with no preceding glyph on the line — column 0 and
+    /// nothing parked — is dropped, since there is nothing to combine with.
+    fn attach_combining(&mut self, mark: char) {
+        let row = self.active_cursor().row;
+        let col = self.active_cursor().col;
+
+        // The glyph's rightmost cell: the cursor itself if parked, else the
+        // cell behind it.
+        let right = if self.active_cursor().pending_wrap {
+            col
+        } else if col > 0 {
+            col - 1
+        } else {
+            return;
+        };
+
+        // A width-0 cell here is a wide glyph's continuation half; the base
+        // holding the char sits one column to its left.
+        let base = if self.active_grid().cell(row, right).map_or(0, Cell::width) == 0 {
+            right.saturating_sub(1)
+        } else {
+            right
+        };
+
+        if let Some(cell) = self.active_grid_mut().cell_mut(row, base) {
+            cell.push_combining(mark);
+        }
+    }
 }
 
 impl vte::Perform for TerminalState {
     fn print(&mut self, c: char) {
+        // A zero-width glyph (combining mark, ZWJ, …) occupies no column: stack
+        // it onto the most recently printed base cell and advance nothing.
+        if c.width() == Some(0) {
+            self.attach_combining(c);
+            return;
+        }
+
+        // A control char that slipped past `execute` has no display width
+        // (`None`): ignore it rather than render it raw. Otherwise the glyph is
+        // narrow (1) or wide (2, e.g. CJK / emoji); `unicode-width` treats
+        // ambiguous-width characters as narrow.
+        let Some(raw_width) = c.width() else {
+            return;
+        };
+        let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
+
         // Deferred wrap: a prior print parked on the last column. Wrap to the
         // next line before placing this glyph, so a row that exactly fills the
         // width is not scrolled early.
@@ -170,19 +226,45 @@ impl vte::Perform for TerminalState {
 
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
-        let row = self.active_cursor().row;
-        let col = self.active_cursor().col;
         let style = self.style;
 
-        if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
-            *cell = Cell::new(c, 1, style);
+        // A wide glyph needs two columns; when only the last column is free it
+        // cannot fit. Blank that lone column and wrap, so the glyph begins the
+        // next line whole rather than straddling the edge.
+        if glyph_width == 2 && self.active_cursor().col == last_col {
+            let row = self.active_cursor().row;
+            if let Some(cell) = self.active_grid_mut().cell_mut(row, last_col) {
+                *cell = Cell::blank_with(style.bg_fill());
+            }
+            self.linefeed();
+            self.active_cursor_mut().col = 0;
+            self.active_cursor_mut().pending_wrap = false;
         }
 
-        if col >= last_col {
-            // Park on the last column; the next print performs the wrap.
+        let row = self.active_cursor().row;
+        let col = self.active_cursor().col;
+
+        // Place the base glyph carrying its display width.
+        if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
+            *cell = Cell::new(c, glyph_width as u8, style);
+        }
+        // A wide glyph's second column is a width-0 continuation placeholder,
+        // covered by the glyph's left half; the renderer skips it.
+        if glyph_width == 2 {
+            if let Some(cell) = self.active_grid_mut().cell_mut(row, col + 1) {
+                *cell = Cell::new(' ', 0, style);
+            }
+        }
+
+        // Advance past the glyph. If it reached the last column, park there with
+        // the wrap latch set so the next glyph wraps; otherwise step to the
+        // first free column after it.
+        let end_col = col + glyph_width - 1;
+        if end_col >= last_col {
+            self.active_cursor_mut().col = last_col;
             self.active_cursor_mut().pending_wrap = true;
         } else {
-            self.active_cursor_mut().col += 1;
+            self.active_cursor_mut().col = end_col + 1;
         }
     }
 
