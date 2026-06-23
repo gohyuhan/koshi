@@ -15,16 +15,15 @@ fn new_initializes_both_screens_to_blank_of_size() {
 fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
     let state = TerminalState::new(PtySize { cols: 80, rows: 24 });
     assert_eq!(state.active, Screen::Primary);
-    assert_eq!(
-        state.cursor,
-        Cursor {
-            row: 0,
-            col: 0,
-            is_visible: true,
-            saved: None,
-            pending_wrap: false,
-        }
-    );
+    let expected_cursor = Cursor {
+        row: 0,
+        col: 0,
+        is_visible: true,
+        pending_wrap: false,
+        saved: None,
+    };
+    assert_eq!(state.primary_cursor, expected_cursor);
+    assert_eq!(state.alternate_cursor, expected_cursor);
     assert_eq!(state.style, Style::default());
     assert_eq!(state.modes, TerminalModes {});
     assert_eq!(state.title, None);
@@ -75,27 +74,27 @@ fn resize_fills_the_new_grids_with_the_current_background() {
 #[test]
 fn resize_clamps_out_of_bounds_cursor_to_last_cell() {
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
-    state.cursor.row = 23;
-    state.cursor.col = 79;
+    state.primary_cursor.row = 23;
+    state.primary_cursor.col = 79;
     state.resize(PtySize { cols: 10, rows: 5 });
-    assert_eq!(state.cursor.row, 4);
-    assert_eq!(state.cursor.col, 9);
+    assert_eq!(state.primary_cursor.row, 4);
+    assert_eq!(state.primary_cursor.col, 9);
 }
 
 #[test]
 fn resize_leaves_in_bounds_cursor_untouched() {
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
-    state.cursor.row = 2;
-    state.cursor.col = 3;
+    state.primary_cursor.row = 2;
+    state.primary_cursor.col = 3;
     state.resize(PtySize { cols: 10, rows: 5 });
-    assert_eq!(state.cursor.row, 2);
-    assert_eq!(state.cursor.col, 3);
+    assert_eq!(state.primary_cursor.row, 2);
+    assert_eq!(state.primary_cursor.col, 3);
 }
 
 #[test]
 fn resize_clears_a_pending_wrap_latched_to_the_old_edge() {
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
-    state.cursor.pending_wrap = true;
+    state.primary_cursor.pending_wrap = true;
     state.resize(PtySize { cols: 10, rows: 5 });
-    assert!(!state.cursor.pending_wrap);
+    assert!(!state.primary_cursor.pending_wrap);
 }
