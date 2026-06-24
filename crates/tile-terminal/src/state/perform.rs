@@ -2,18 +2,32 @@
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
 //! basic C0 control bytes move the cursor and scroll.
 //!
-//! Implemented so far: `print` (printable glyphs), `execute` (C0 control
+//! Implemented so far: `print` (printable glyphs, display-width aware: wide
+//! CJK/emoji span two cells; grapheme continuations — combining marks, ZWJ
+//! emoji sequences, variation selectors, skin-tone modifiers, flags — fold onto
+//! the base cell, with variation-selector width promotion), `execute` (C0 control
 //! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
 //! scroll up/down, the DECSTBM scroll region, and the DEC private modes for the
 //! alternate screen and cursor visibility), `esc_dispatch` (cursor save/restore
 //! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title). The
-//! remaining `Perform` methods (`hook`/`put`/`unhook`) keep their default no-op
-//! until later tasks fill them in. `vte` decodes UTF-8 upstream, so `print`
-//! receives a ready `char`.
+//! device-control-string callbacks `hook`/`unhook` clear the in-progress
+//! grapheme cluster (a DCS ends a text run, like any non-printing event); their
+//! payload handling, and `put`, are otherwise left to a later task. `vte` decodes
+//! UTF-8 upstream, so `print` receives a ready `char`.
 
 use crate::grid::state::Cell;
 use crate::state::{SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
+use unicode_segmentation::GraphemeCursor;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Upper bound on the number of continuation code points folded onto one cell's
+/// base (the `combining` tail). Real grapheme clusters — even a skin-toned ZWJ
+/// emoji family — stay well under this; the cap exists only to bound per-cell
+/// memory against pathological input (e.g. a flood of combining marks, "zalgo"
+/// text) that would otherwise grow a single cell without limit. Continuations
+/// past the cap are dropped.
+const MAX_GRAPHEME_CONTINUATIONS: usize = 32;
 
 impl TerminalState {
     /// The scroll-region margins for the active screen.
@@ -155,10 +169,314 @@ impl TerminalState {
             pending_wrap: self.primary_cursor.pending_wrap,
         });
     }
+
+    /// Discard any in-progress grapheme cluster. Called by every non-printing
+    /// event (control bytes, CSI / ESC / OSC, DCS hook/unhook), since anything
+    /// other than a printed glyph ends the run a continuation could attach to.
+    ///
+    /// One edge is deliberately not covered: a malformed CSI that vte routes to
+    /// its internal `CsiIgnore` state (e.g. `CSI 1 < m`, a private marker after a
+    /// parameter) terminates straight to ground with NO `Perform` callback at
+    /// all, so there is nothing to hook here. A combining mark printed afterward
+    /// folds onto the preceding glyph — which matches xterm/alacritty, since the
+    /// ignored sequence neither moved the cursor nor printed, so the mark still
+    /// belongs to the cell left of the (unmoved) cursor. Harmless (the base cell
+    /// is bounds-checked); flagged here so it is a known, accepted behavior.
+    fn reset_cluster(&mut self) {
+        self.cluster.clear();
+        self.cluster_base = None;
+    }
+
+    /// Whether `c` continues the current grapheme cluster rather than starting a
+    /// new one — i.e. there is no grapheme-cluster boundary between the cluster
+    /// built so far and `c`. This is what folds combining marks, ZWJ emoji
+    /// sequences, variation selectors, skin-tone modifiers, and regional-
+    /// indicator flags onto a single base. An ambiguous / incomplete result is
+    /// treated as a boundary (start fresh) — the safe default.
+    fn continues_cluster(&self, c: char) -> bool {
+        let mut probe = self.cluster.clone();
+        probe.push(c);
+        let mut cursor = GraphemeCursor::new(self.cluster.len(), probe.len(), true);
+        !cursor.is_boundary(&probe, 0).unwrap_or(true)
+    }
+
+    /// Fold `c` into the current cluster: stack it on the base cell (so the
+    /// renderer draws the whole cluster) without consuming a column, and — if
+    /// the cluster's display width grew from one column to two (e.g. a variation
+    /// selector promoting a text-presentation glyph to its wider emoji form) —
+    /// widen the base.
+    fn extend_cluster(&mut self, c: char) {
+        let Some((row, col)) = self.cluster_base else {
+            return;
+        };
+        // Bound per-cell memory: once the base already carries the maximum
+        // continuations, drop further ones (and stop growing the tracking
+        // string) so pathological input cannot grow a single cell without limit.
+        if self
+            .active_grid()
+            .cell(row, col)
+            .map_or(0, |cell| cell.combining().len())
+            >= MAX_GRAPHEME_CONTINUATIONS
+        {
+            return;
+        }
+        let old_width = UnicodeWidthStr::width(self.cluster.as_str());
+        self.cluster.push(c);
+        let new_width = UnicodeWidthStr::width(self.cluster.as_str());
+
+        if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
+            cell.push_combining(c);
+        }
+        if old_width == 1 && new_width == 2 {
+            self.promote_cluster_to_wide(row, col);
+        } else if old_width == 2 && new_width == 1 {
+            self.demote_cluster_to_narrow(row, col);
+        }
+    }
+
+    /// Narrow the cluster's base at (`row`, `col`) from two cells to one after a
+    /// continuation shrank its display width — e.g. a text-presentation selector
+    /// (VS15, `U+FE0E`) forcing an emoji-presentation base back to its narrow
+    /// text form. The base keeps its character, combining marks, and style but
+    /// becomes `width == 1`; the continuation to its right is blanked, and the
+    /// cursor steps back over the column the glyph no longer occupies. The base
+    /// of a wide glyph never sits in the last column (a wide write wraps first),
+    /// so the narrowed glyph always has room and never parks.
+    fn demote_cluster_to_narrow(&mut self, row: u16, col: u16) {
+        let narrowed = self
+            .active_grid()
+            .cell(row, col)
+            .map(|cell| rebuilt_with_width(cell, 1));
+        if let Some(narrowed) = narrowed {
+            if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
+                *slot = narrowed;
+            }
+        }
+        let fill = self.style.bg_fill();
+        if let Some(slot) = self.active_grid_mut().cell_mut(row, col + 1) {
+            *slot = Cell::blank_with(fill);
+        }
+        // The glyph now occupies one column; the cursor sits just past the base.
+        let (_, cols) = self.active_grid().dimensions();
+        let last_col = cols.saturating_sub(1);
+        if col >= last_col {
+            self.active_cursor_mut().col = last_col;
+            self.active_cursor_mut().pending_wrap = true;
+        } else {
+            self.active_cursor_mut().col = col + 1;
+            self.active_cursor_mut().pending_wrap = false;
+        }
+    }
+
+    /// Widen the cluster's base at (`row`, `col`) from one cell to two after a
+    /// continuation grew its display width. The base keeps its character,
+    /// combining marks, and style but becomes `width == 2`; the column to its
+    /// right becomes a width-0 continuation, and the cursor advances over the
+    /// newly claimed column. If the base sits in the last column — no room to
+    /// its right — the whole cluster moves to the next line, the same way a wide
+    /// glyph wraps rather than straddling the edge.
+    fn promote_cluster_to_wide(&mut self, row: u16, col: u16) {
+        let (_, cols) = self.active_grid().dimensions();
+        let last_col = cols.saturating_sub(1);
+
+        if col < last_col {
+            // Room to the right: widen the base in place and claim col + 1.
+            let Some(widened) = self
+                .active_grid()
+                .cell(row, col)
+                .map(|cell| rebuilt_with_width(cell, 2))
+            else {
+                return;
+            };
+            self.place_glyph(row, col, widened);
+            // The base advanced the cursor by one as a narrow glyph; the second
+            // column it now occupies advances it once more, or parks at the edge.
+            if col + 1 >= last_col {
+                self.active_cursor_mut().col = last_col;
+                self.active_cursor_mut().pending_wrap = true;
+            } else {
+                self.active_cursor_mut().col = col + 2;
+            }
+        } else if last_col > 0 {
+            // Base in the last column of a multi-column grid: it cannot widen in
+            // place, so move the whole cluster to the next line as a wide glyph.
+            let Some((base_ch, style, marks)) = self
+                .active_grid()
+                .cell(row, col)
+                .map(|cell| (cell.ch(), cell.style(), cell.combining().to_vec()))
+            else {
+                return;
+            };
+            let fill = self.style.bg_fill();
+            if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
+                *slot = Cell::blank_with(fill);
+            }
+            self.linefeed();
+            self.active_cursor_mut().col = 0;
+            self.active_cursor_mut().pending_wrap = false;
+
+            let new_row = self.active_cursor().row;
+            let mut widened = Cell::new(base_ch, 2, style);
+            for mark in &marks {
+                widened.push_combining(*mark);
+            }
+            // The destination row may already hold a wide glyph; `place_glyph`
+            // clears any pair these writes would split before installing the
+            // promoted cluster — otherwise a wide base at col 1 would leave its
+            // width-0 continuation at col 2 orphaned.
+            self.place_glyph(new_row, 0, widened);
+            self.cluster_base = Some((new_row, 0));
+            if 1 >= last_col {
+                self.active_cursor_mut().col = last_col;
+                self.active_cursor_mut().pending_wrap = true;
+            } else {
+                self.active_cursor_mut().col = 2;
+            }
+        }
+        // No final `else`: in a 1-column pane (`last_col == 0`) the base cannot
+        // widen here or on any other line, and `extend_cluster` has already folded
+        // the promoting mark onto it, so the base simply stays narrow in place.
+    }
+
+    /// Before a glyph is written at (`row`, `col`), blank the orphaned half of
+    /// any wide glyph this write would split, so a renderer never sees a wide
+    /// base without its continuation or a continuation without its base. If the
+    /// cell currently holds a wide base (`width == 2`), its continuation to the
+    /// right is cleared; if it holds a continuation (`width == 0`), the base to
+    /// its left is cleared. The freed half becomes a blank in the current pen
+    /// background, matching the erase/scroll fill convention.
+    fn clear_wide_at(&mut self, row: u16, col: u16) {
+        let fill = self.style.bg_fill();
+        match self.active_grid().cell(row, col).map_or(1, Cell::width) {
+            // Wide base: clear its continuation half on the right.
+            2 => {
+                if let Some(cell) = self.active_grid_mut().cell_mut(row, col + 1) {
+                    *cell = Cell::blank_with(fill);
+                }
+            }
+            // Continuation half: clear the wide base on its left.
+            0 if col > 0 => {
+                if let Some(cell) = self.active_grid_mut().cell_mut(row, col - 1) {
+                    *cell = Cell::blank_with(fill);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Install `base` at (`row`, `col`), first clearing any wide glyph the write
+    /// would split so the wide-pair invariant always holds. This is the single
+    /// path EVERY base/continuation write goes through (a fresh base, an in-place
+    /// widen, a wrapped widen), so no call site can forget to clear and orphan a
+    /// half. `base` already carries its display width (1 or 2), character,
+    /// combining marks, and style. A width-2 base also lays its width-0
+    /// continuation placeholder at `col + 1` (after clearing whatever pair sat
+    /// there); a width-1 base writes `col` alone. Cursor and cluster bookkeeping
+    /// stay with the caller, since they differ per write site.
+    fn place_glyph(&mut self, row: u16, col: u16, base: Cell) {
+        let (_, cols) = self.active_grid().dimensions();
+        // A wide glyph needs its continuation column in bounds. In a pane too
+        // narrow to hold the pair (e.g. a 1-column split, where even col 0 is the
+        // last column) there is no room, so store the base as a single narrow
+        // cell instead of a width-2 base with no continuation — the latter breaks
+        // the wide-pair invariant, so a later erase / cell op would treat the lone
+        // cell as an orphan and blank it, and a renderer trusting widths would see
+        // an impossible row.
+        let wide = base.width() == 2 && col + 1 < cols;
+        let base = if base.width() == 2 && !wide {
+            rebuilt_with_width(&base, 1)
+        } else {
+            base
+        };
+        let style = base.style();
+        // Clear any wide pair this write would split, on every column it lands on
+        // — for a width-1 base over its own narrow cell this is a no-op.
+        self.clear_wide_at(row, col);
+        if wide {
+            self.clear_wide_at(row, col + 1);
+        }
+        if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
+            *slot = base;
+        }
+        // A wide glyph's second column is a width-0 continuation placeholder,
+        // covered by the glyph's left half; the renderer skips it.
+        if wide {
+            if let Some(slot) = self.active_grid_mut().cell_mut(row, col + 1) {
+                *slot = Cell::new(' ', 0, style);
+            }
+        }
+    }
+
+    /// Repair `row`'s wide-glyph pairs after a cell op (erase / insert / delete)
+    /// may have split one. The pair invariant: a wide base (`width == 2`) is
+    /// always immediately followed by a width-0 continuation, and a continuation
+    /// always immediately follows a wide base. Any half that breaks it — a base
+    /// with no continuation to its right, or a continuation with no base to its
+    /// left — is blanked in the current pen background. Scanned left-to-right so
+    /// a freshly blanked base cascades to clear its now-orphaned continuation on
+    /// the next column. Keeps a renderer (or later logic) that trusts `width`
+    /// from drawing an erased wide glyph or a stray continuation.
+    fn normalize_wide_pairs(&mut self, row: u16) {
+        let (_, cols) = self.active_grid().dimensions();
+        let fill = self.style.bg_fill();
+        for col in 0..cols {
+            let orphan = match self.active_grid().cell(row, col).map_or(1, Cell::width) {
+                // Wide base needs a continuation immediately to its right.
+                2 => self
+                    .active_grid()
+                    .cell(row, col + 1)
+                    .is_none_or(|c| c.width() != 0),
+                // Continuation needs a wide base immediately to its left.
+                0 => {
+                    col == 0
+                        || self
+                            .active_grid()
+                            .cell(row, col - 1)
+                            .is_none_or(|c| c.width() != 2)
+                }
+                _ => false,
+            };
+            if orphan {
+                if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
+                    *cell = Cell::blank_with(fill);
+                }
+            }
+        }
+    }
 }
 
 impl vte::Perform for TerminalState {
     fn print(&mut self, c: char) {
+        // A continuation (combining mark, ZWJ-joined emoji part, variation
+        // selector, skin-tone modifier, flag half) folds onto the current
+        // cluster's base instead of taking its own cell.
+        if !self.cluster.is_empty() && self.continues_cluster(c) {
+            self.extend_cluster(c);
+            return;
+        }
+
+        // `c` starts a new grapheme. A control char that slipped past `execute`
+        // has no display width (`None`) → ignore it. A zero-width char with no
+        // cluster to join (e.g. a combining mark at the very start of a line)
+        // has no base to attach to → drop it. Otherwise the glyph is narrow (1)
+        // or wide (2, e.g. CJK / emoji); `unicode-width` treats ambiguous-width
+        // characters as narrow.
+        let Some(raw_width) = c.width() else {
+            // A control char with no display width slipped past `execute`; it is
+            // not text, so it ends the run. Drop it but reset, so a following
+            // continuation cannot attach across it.
+            self.reset_cluster();
+            return;
+        };
+        if raw_width == 0 {
+            // A zero-width char that did NOT continue the cluster is a grapheme
+            // boundary (e.g. ZWSP U+200B): it ends the run. Drop it but reset, so
+            // a following combining mark / VS16 cannot attach across the break.
+            self.reset_cluster();
+            return;
+        }
+        let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
+
         // Deferred wrap: a prior print parked on the last column. Wrap to the
         // next line before placing this glyph, so a row that exactly fills the
         // width is not scrolled early.
@@ -170,23 +488,55 @@ impl vte::Perform for TerminalState {
 
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
-        let row = self.active_cursor().row;
-        let col = self.active_cursor().col;
         let style = self.style;
 
-        if let Some(cell) = self.active_grid_mut().cell_mut(row, col) {
-            *cell = Cell::new(c, 1, style);
+        // A wide glyph needs two columns; when only the last column is free it
+        // cannot fit. Blank that lone column and wrap, so the glyph begins the
+        // next line whole rather than straddling the edge. Skipped in a 1-column
+        // pane (`last_col == 0`), where wrapping cannot help — `place_glyph` then
+        // stores the glyph narrow in place instead of thrashing the screen.
+        if glyph_width == 2 && self.active_cursor().col == last_col && last_col > 0 {
+            let row = self.active_cursor().row;
+            // If the last column is the continuation of an existing wide glyph,
+            // blanking it alone would orphan that glyph's base one column to the
+            // left; clear the pair before blanking the freed column.
+            self.clear_wide_at(row, last_col);
+            if let Some(cell) = self.active_grid_mut().cell_mut(row, last_col) {
+                *cell = Cell::blank_with(style.bg_fill());
+            }
+            self.linefeed();
+            self.active_cursor_mut().col = 0;
+            self.active_cursor_mut().pending_wrap = false;
         }
 
-        if col >= last_col {
-            // Park on the last column; the next print performs the wrap.
+        let row = self.active_cursor().row;
+        let col = self.active_cursor().col;
+
+        // Install the base glyph (and, when wide, its continuation), clearing any
+        // wide pair the write would split — see `place_glyph`.
+        self.place_glyph(row, col, Cell::new(c, glyph_width as u8, style));
+
+        // Anchor a new cluster at this base so any continuations that follow
+        // (combining marks, ZWJ emoji parts, …) fold onto it.
+        self.cluster.clear();
+        self.cluster.push(c);
+        self.cluster_base = Some((row, col));
+
+        // Advance past the glyph. If it reached the last column, park there with
+        // the wrap latch set so the next glyph wraps; otherwise step to the
+        // first free column after it.
+        let end_col = col + glyph_width - 1;
+        if end_col >= last_col {
+            self.active_cursor_mut().col = last_col;
             self.active_cursor_mut().pending_wrap = true;
         } else {
-            self.active_cursor_mut().col += 1;
+            self.active_cursor_mut().col = end_col + 1;
         }
     }
 
     fn execute(&mut self, byte: u8) {
+        // A control byte ends any text run, so no following glyph folds into it.
+        self.reset_cluster();
         match byte {
             // LF, VT, FF: line feed (VT/FF treated as LF).
             0x0A..=0x0C => {
@@ -228,6 +578,20 @@ impl vte::Perform for TerminalState {
         ignore: bool,
         action: char,
     ) {
+        // Most CSI sequences end a text run, so no following glyph folds into
+        // it. A style-only SGR (`CSI Pm m`) is the exception: it changes the pen
+        // but neither moves the cursor nor edits the grid, so a combining mark or
+        // variation selector that follows must still fold onto the preceding base
+        // (e.g. `e \x1b[31m \u{0301}` → an accented `e`), matching xterm/alacritty.
+        // The exception must mirror EXACTLY what the dispatch below treats as a
+        // real, applied SGR: empty intermediates (a private/intermediate `m` is
+        // not SGR) AND `!ignore` — an overlong CSI that vte flags `ignore` is
+        // malformed and dropped (see the early return), so even one ending in `m`
+        // must break the cluster like every other non-printing CSI. Every other
+        // CSI moves the cursor or mutates cells, so it breaks the cluster too.
+        if !(action == 'm' && intermediates.is_empty() && !ignore) {
+            self.reset_cluster();
+        }
         // `ignore` flags a sequence with too many params/intermediates to have
         // been kept intact — drop it.
         if ignore {
@@ -409,6 +773,9 @@ impl vte::Perform for TerminalState {
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
+                // Only the cursor row is partially cleared (the others are whole
+                // rows, which cannot split a pair); repair it.
+                self.normalize_wide_pairs(r);
             }
             // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
             'K' => {
@@ -426,6 +793,7 @@ impl vte::Perform for TerminalState {
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
+                self.normalize_wide_pairs(r);
             }
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
@@ -437,6 +805,7 @@ impl vte::Perform for TerminalState {
                 let fill = self.style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().insert_cells(r, c, n, fill);
+                self.normalize_wide_pairs(r);
                 self.active_cursor_mut().pending_wrap = false;
             }
             // DCH — delete n cells at the cursor, pulling the rest of the line
@@ -446,6 +815,7 @@ impl vte::Perform for TerminalState {
                 let fill = self.style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().delete_cells(r, c, n, fill);
+                self.normalize_wide_pairs(r);
                 self.active_cursor_mut().pending_wrap = false;
             }
             // SCOSC — save cursor (ANSI.SYS), companion to DECSC.
@@ -528,6 +898,8 @@ impl vte::Perform for TerminalState {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        // Any ESC sequence ends a text run, so no following glyph folds into it.
+        self.reset_cluster();
         // A plain ESC sequence carries no intermediate byte; an intermediate
         // marks a charset designation or other ESC form owned by a later task.
         if ignore || !intermediates.is_empty() {
@@ -546,6 +918,8 @@ impl vte::Perform for TerminalState {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // Any OSC ends a text run, so no following glyph folds into it.
+        self.reset_cluster();
         // OSC 0/1/2 set the window/icon title. `params[0]` is the command
         // number. vte splits the payload on every `;`, but for a title only the
         // first `;` is the command/text separator, so rejoin `params[1..]` with
@@ -560,6 +934,36 @@ impl vte::Perform for TerminalState {
             self.title = Some(String::from_utf8_lossy(&title).into_owned());
         }
     }
+
+    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        // A device control string (DCS, `ESC P … ST`) is a non-printing control
+        // sequence, so it ends a text run: a combining mark or variation selector
+        // that follows must not fold onto the glyph before the DCS. Clearing here,
+        // at DCS entry, covers the whole string — the body bytes arrive via `put`,
+        // which never prints, so they cannot extend a cluster. The DCS payload
+        // itself is owned by a later task.
+        self.reset_cluster();
+    }
+
+    fn unhook(&mut self) {
+        // DCS termination. Redundant with `hook` for a well-formed string, but it
+        // also covers a DCS closed by the 8-bit C1 ST (`0x9C`), whose only `Perform`
+        // callback is this one — it does not route through `esc_dispatch`/`execute`,
+        // so without this the cluster would survive such a DCS.
+        self.reset_cluster();
+    }
+}
+
+/// Rebuild `cell` with a new display `width`, preserving its character,
+/// combining marks, and style — used to re-width a cluster's base when a
+/// continuation promotes it to a two-column emoji glyph or demotes it back to a
+/// one-column text glyph.
+fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
+    let mut out = Cell::new(cell.ch(), width, cell.style());
+    for mark in cell.combining() {
+        out.push_combining(*mark);
+    }
+    out
 }
 
 /// Apply an SGR (Select Graphic Rendition, `CSI … m`) sequence to `style`:
@@ -651,13 +1055,16 @@ fn next_val<'a>(iter: &mut impl Iterator<Item = &'a [u16]>) -> Option<u16> {
 ///   separate following parameters, pulled in turn from `iter`.
 ///
 /// Selector `5` is a 256-color palette index; selector `2` is 24-bit RGB. A
-/// missing or unrecognized payload yields `None`, leaving the pen unchanged.
+/// missing or unrecognized payload — or an out-of-range value (a palette index
+/// or channel > 255) — yields `None`, leaving the pen unchanged.
 fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>) -> Option<Color> {
     if first.len() > 1 {
         // Colon form: selector at first[1], its values follow in the same slice.
         match first.get(1).copied()? {
-            // `38:5:n` — 256-palette index sits at first[2].
-            5 => Some(Color::Indexed(*first.get(2)? as u8)),
+            // `38:5:n` — 256-palette index sits at first[2]. An index that does
+            // not fit a u8 (> 255) is out of range, so reject the color (`None`,
+            // pen unchanged), matching vte's own `ansi.rs` (`u8::try_from(..).ok()?`).
+            5 => Some(Color::Indexed(u8::try_from(*first.get(2)?).ok()?)),
             2 => {
                 // The colon RGB form may carry a leading colorspace id
                 // (`38:2::r:g:b`, whose empty field `vte` stores as `0`), so the
@@ -668,10 +1075,12 @@ fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
                 } else {
                     vals
                 };
+                // A channel that does not fit a u8 (> 255) is out of range →
+                // reject the whole color, as vte's `ansi.rs` does.
                 Some(Color::Rgb(
-                    *rgb.first()? as u8,
-                    *rgb.get(1)? as u8,
-                    *rgb.get(2)? as u8,
+                    u8::try_from(*rgb.first()?).ok()?,
+                    u8::try_from(*rgb.get(1)?).ok()?,
+                    u8::try_from(*rgb.get(2)?).ok()?,
                 ))
             }
             _ => None,
@@ -679,14 +1088,23 @@ fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
     } else {
         // Semicolon form: selector then values are the next separate params.
         match next_val(iter)? {
-            // `38;5;n` — one following param is the 256-palette index.
-            5 => Some(Color::Indexed(next_val(iter)? as u8)),
+            // `38;5;n` — one following param is the 256-palette index; reject an
+            // out-of-range (> 255) index, matching vte's `ansi.rs`.
+            5 => Some(Color::Indexed(u8::try_from(next_val(iter)?).ok()?)),
             // `38;2;r;g;b` — three following params are the RGB channels.
-            2 => Some(Color::Rgb(
-                next_val(iter)? as u8,
-                next_val(iter)? as u8,
-                next_val(iter)? as u8,
-            )),
+            // Consume all THREE before validating: a malformed (out-of-range)
+            // channel must still drain its g/b params, or the leftover values
+            // bleed back into the outer SGR loop as standalone color codes (e.g.
+            // `38;2;999;31;32m` would set fg-red then fg-green). Once drained, a
+            // channel > 255 rejects the whole color (`None`, pen unchanged).
+            2 => {
+                let (r, g, b) = (next_val(iter)?, next_val(iter)?, next_val(iter)?);
+                Some(Color::Rgb(
+                    u8::try_from(r).ok()?,
+                    u8::try_from(g).ok()?,
+                    u8::try_from(b).ok()?,
+                ))
+            }
             _ => None,
         }
     }

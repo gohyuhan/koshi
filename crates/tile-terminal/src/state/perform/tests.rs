@@ -1,5 +1,6 @@
-//! Unit tests for the VTE performer: printing, deferred wrap, scrolling, and
-//! the C0 control bytes.
+//! Unit tests for the VTE performer: printing, display width (wide glyphs,
+//! combining marks, ambiguous width), deferred wrap, scrolling, and the C0
+//! control bytes.
 
 use super::*;
 use tile_core::process::PtySize;
@@ -581,6 +582,39 @@ fn sgr_incomplete_colon_extended_color_leaves_the_pen_unchanged() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5m"); // colon 256-color selector with no index
     assert_eq!(state.style, Style::default());
+}
+
+#[test]
+fn sgr_256_color_index_out_of_range_leaves_the_pen_unchanged() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38;5;256m"); // index 256 > 255 — out of range
+    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Indexed(0)
+    advance(&mut state, b"\x1b[38:5:300m"); // colon form, index 300 > 255
+    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Indexed(44)
+}
+
+#[test]
+fn sgr_truecolor_channel_out_of_range_leaves_the_pen_unchanged() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38;2;999;0;0m"); // semicolon form, r = 999 > 255
+    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Rgb(231, 0, 0)
+    advance(&mut state, b"\x1b[48:2:0:256:0m"); // colon form bg, g = 256 > 255
+    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Rgb(0, 0, 0)
+}
+
+#[test]
+fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_to_later_codes() {
+    let mut state = state(5, 2);
+    // r = 999 is out of range → the color is rejected, but 31 and 32 are its g/b
+    // channels and must be CONSUMED, not reinterpreted as standalone SGR codes
+    // (fg red / fg green). The pen must end fully unchanged.
+    advance(&mut state, b"\x1b[38;2;999;31;32m");
+    assert_eq!(state.style, Style::default()); // no leak
+
+    // Exactly three channels (999, 1, 2) are drained, then a genuine trailing
+    // `1` is applied as SGR bold — proving we consume three and no more.
+    advance(&mut state, b"\x1b[38;2;999;1;2;1m");
+    assert_eq!(state.style, styled(|s| s.set_bold(true)));
 }
 
 #[test]
@@ -1547,4 +1581,651 @@ fn cursor_visibility_is_independent_per_screen() {
     assert!(state.cursor_visible()); // alternate keeps its own (visible) state — per-screen, deliberate xterm deviation
     advance(&mut state, b"\x1b[?1049l"); // back to primary
     assert!(!state.cursor_visible()); // primary still hidden
+}
+
+// --- Unicode display-width: wide glyphs, combining marks, ambiguous width ---
+
+#[test]
+fn wide_char_occupies_two_cells_and_advances_by_two() {
+    let mut state = state(5, 3);
+    state.print('中'); // CJK ideograph, display width 2
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '中');
+    assert_eq!(base.width(), 2);
+    // The second column is a width-0 continuation placeholder.
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    // Cursor steps past both cells.
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(!state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn emoji_is_wide() {
+    let mut state = state(5, 3);
+    state.print('😀'); // emoji, display width 2
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::ch), Some('😀'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(2));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn two_wide_chars_lay_side_by_side() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "中文");
+    assert_eq!(glyph(&state, 0, 0), Some('中'));
+    assert_eq!(glyph(&state, 0, 2), Some('文'));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 4);
+}
+
+#[test]
+fn ambiguous_width_char_is_narrow() {
+    let mut state = state(5, 3);
+    state.print('§'); // East-Asian Ambiguous → narrow under the default policy
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(state.active_cursor().col, 1);
+}
+
+#[test]
+fn combining_mark_attaches_to_the_previous_cell_without_advancing() {
+    let mut state = state(5, 3);
+    state.print('e');
+    state.print('\u{301}'); // combining acute accent → é
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), ['\u{301}']);
+    assert_eq!(cell.width(), 1); // base width unchanged
+    assert_eq!(state.active_cursor().col, 1); // cursor did not advance
+}
+
+#[test]
+fn multiple_combining_marks_stack_in_arrival_order() {
+    let mut state = state(5, 3);
+    state.print('a');
+    state.print('\u{301}'); // acute
+    state.print('\u{308}'); // diaeresis
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.combining(), ['\u{301}', '\u{308}']);
+    assert_eq!(state.active_cursor().col, 1);
+}
+
+#[test]
+fn combining_mark_attaches_to_a_wide_base_not_its_continuation() {
+    let mut state = state(6, 2);
+    state.print('中'); // base at col 0, continuation at col 1, cursor → 2
+    state.print('\u{301}'); // must land on the base at col 0, stepping over col 1
+    assert_eq!(
+        state.active_grid().cell(0, 0).expect("base").combining(),
+        ['\u{301}']
+    );
+    assert!(state
+        .active_grid()
+        .cell(0, 1)
+        .expect("continuation")
+        .combining()
+        .is_empty());
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn combining_mark_at_line_start_is_dropped() {
+    let mut state = state(5, 3);
+    state.print('\u{301}'); // nothing precedes it on the line
+    assert!(state
+        .active_grid()
+        .cell(0, 0)
+        .expect("in bounds")
+        .combining()
+        .is_empty());
+    assert_eq!(state.active_cursor().col, 0); // no advance, no panic
+}
+
+#[test]
+fn combining_mark_attaches_to_a_parked_glyph() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // row 0 full, cursor parked at col 2 with the wrap latch
+    assert!(state.active_cursor().pending_wrap);
+    state.print('\u{301}'); // attaches to the parked 'c' without wrapping
+    let cell = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(cell.ch(), 'c');
+    assert_eq!(cell.combining(), ['\u{301}']);
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(state.active_cursor().pending_wrap); // latch preserved
+}
+
+#[test]
+fn wide_char_at_the_last_column_wraps_and_blanks_the_freed_cell() {
+    let mut state = state(3, 2); // columns 0..=2; last col = 2
+    print_str(&mut state, "ab"); // a@0, b@1, cursor at the last free col 2
+    assert_eq!(state.active_cursor().col, 2);
+    assert!(!state.active_cursor().pending_wrap);
+    state.print('中'); // width 2, only col 2 free → blank it and wrap whole
+    let freed = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(freed.ch(), ' '); // freed column blanked
+    assert_eq!(freed.width(), 1);
+    assert_eq!(glyph(&state, 1, 0), Some('中')); // glyph starts the next line whole
+    assert_eq!(state.active_grid().cell(1, 1).map(Cell::width), Some(0));
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (1, 2)
+    );
+}
+
+#[test]
+fn wide_char_reaching_the_last_column_parks() {
+    let mut state = state(4, 2); // last col = 3
+    print_str(&mut state, "xx"); // cursor at col 2
+    state.print('中'); // occupies cols 2 and 3 (the last) → park, no wrap yet
+    assert_eq!(glyph(&state, 0, 2), Some('中'));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(0));
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 3);
+    assert!(cur.pending_wrap);
+    state.print('y'); // the deferred wrap fires here
+    assert_eq!(glyph(&state, 1, 0), Some('y'));
+}
+
+#[test]
+fn control_char_reaching_print_is_ignored() {
+    let mut state = state(5, 3);
+    state.print('a');
+    state.print('\u{0}'); // NUL: a control char, no display width
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(state.active_cursor().col, 1); // nothing written, no advance
+}
+
+#[test]
+fn overwriting_a_wide_base_with_a_narrow_clears_the_orphan_continuation() {
+    let mut state = state(5, 2);
+    state.print('中'); // col 0 base (width 2), col 1 continuation (width 0)
+    advance(&mut state, b"\x1b[1;1H"); // cursor home (0, 0)
+    state.print('a'); // overwrite the base with a narrow glyph
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    // The stale continuation must be blanked, not left as a width-0 orphan.
+    let cont = state.active_grid().cell(0, 1).expect("in bounds");
+    assert_eq!(cont.ch(), ' ');
+    assert_eq!(cont.width(), 1);
+}
+
+#[test]
+fn overwriting_a_wide_continuation_with_a_narrow_clears_the_orphan_base() {
+    let mut state = state(5, 2);
+    state.print('中'); // col 0 base, col 1 continuation
+    advance(&mut state, b"\x1b[1;2H"); // cursor to (0, 1), the continuation
+    state.print('a'); // overwrite the continuation with a narrow glyph
+                      // The orphaned wide base must be blanked, not left claiming two columns.
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), ' ');
+    assert_eq!(base.width(), 1);
+    assert_eq!(glyph(&state, 0, 1), Some('a'));
+}
+
+#[test]
+fn a_wide_write_splitting_an_adjacent_wide_clears_its_far_half() {
+    let mut state = state(6, 2);
+    advance(&mut state, b"\x1b[1;2H"); // cursor to (0, 1)
+    state.print('文'); // col 1 base (width 2), col 2 continuation (width 0)
+    advance(&mut state, b"\x1b[1;1H"); // home (0, 0)
+    state.print('中'); // wide write over cols 0,1 — splits the old glyph
+    assert_eq!(glyph(&state, 0, 0), Some('中'));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0)); // new continuation
+                                                                          // The old glyph's far continuation at col 2 is now orphaned → blanked.
+    let far = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(far.ch(), ' ');
+    assert_eq!(far.width(), 1);
+}
+
+// --- Wide-pair integrity across erase / insert / delete cell ops ---
+
+#[test]
+fn el_to_eol_from_a_continuation_column_clears_the_orphan_base() {
+    let mut state = state(5, 2);
+    state.print('中'); // col 0 base (w2), col 1 continuation (w0)
+    advance(&mut state, b"\x1b[1;2H"); // cursor onto the continuation (0, 1)
+    advance(&mut state, b"\x1b[0K"); // erase cursor→EOL: clears col 1, splits the pair
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), ' '); // orphaned base blanked
+    assert_eq!(base.width(), 1);
+}
+
+#[test]
+fn el_to_cursor_ending_on_a_wide_base_clears_the_orphan_continuation() {
+    let mut state = state(5, 2);
+    state.print('中'); // col 0 base, col 1 continuation
+    advance(&mut state, b"\x1b[1;1H"); // cursor home (0, 0) = the base
+    advance(&mut state, b"\x1b[1K"); // erase SOL→cursor: clears col 0, orphans col 1
+    let cont = state.active_grid().cell(0, 1).expect("in bounds");
+    assert_eq!(cont.ch(), ' ');
+    assert_eq!(cont.width(), 1);
+}
+
+#[test]
+fn ed_to_end_from_a_continuation_column_clears_the_orphan_base() {
+    let mut state = state(5, 2);
+    state.print('中'); // (0,0) base, (0,1) continuation
+    advance(&mut state, b"\x1b[1;2H"); // cursor onto the continuation
+    advance(&mut state, b"\x1b[0J"); // erase cursor→end of screen: clears (0,1)
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), ' ');
+    assert_eq!(base.width(), 1);
+}
+
+#[test]
+fn ich_between_a_wide_pair_clears_both_orphaned_halves() {
+    let mut state = state(6, 2);
+    state.print('中'); // col 0 base, col 1 continuation
+    advance(&mut state, b"\x1b[1;2H"); // cursor onto the continuation (0, 1)
+    advance(&mut state, b"\x1b[@"); // insert 1 blank at col 1, splitting the pair
+                                    // base@0 lost its continuation; the displaced continuation@2 lost its base.
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(state.active_grid().cell(0, 2).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 0), Some(' '));
+    assert_eq!(glyph(&state, 0, 2), Some(' '));
+}
+
+#[test]
+fn ich_truncating_a_wide_continuation_off_the_edge_clears_the_orphan_base() {
+    let mut state = state(4, 2);
+    print_str(&mut state, "xx"); // cols 0,1
+    state.print('中'); // col 2 base, col 3 continuation
+    advance(&mut state, b"\x1b[1;1H"); // home
+    advance(&mut state, b"\x1b[@"); // insert pushes the pair right; continuation falls off
+                                    // base now at the last column with no continuation → blanked.
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 3), Some(' '));
+}
+
+#[test]
+fn dch_deleting_a_continuation_clears_the_orphan_base() {
+    let mut state = state(5, 2);
+    state.print('中'); // col 0 base, col 1 continuation
+    advance(&mut state, b"\x1b[1;2H"); // cursor onto the continuation
+    advance(&mut state, b"\x1b[P"); // delete it, pulling the line left
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 0), Some(' '));
+}
+
+#[test]
+fn cell_ops_leave_an_untouched_wide_pair_intact() {
+    let mut state = state(6, 2);
+    advance(&mut state, b"\x1b[1;3H"); // cursor to col 2
+    state.print('中'); // col 2 base, col 3 continuation
+    advance(&mut state, b"\x1b[1;1H"); // home
+    advance(&mut state, b"\x1b[1K"); // clear SOL→cursor (col 0 only) — pair untouched
+    assert_eq!(glyph(&state, 0, 2), Some('中'));
+    assert_eq!(state.active_grid().cell(0, 2).map(Cell::width), Some(2));
+    assert_eq!(state.active_grid().cell(0, 3).map(Cell::width), Some(0));
+}
+
+// --- Multi-codepoint grapheme clusters: emoji ZWJ / VS16 / modifiers / flags ---
+
+#[test]
+fn vs16_promotes_a_text_glyph_to_a_wide_emoji_cell() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, text presentation, width 1
+    state.print('\u{FE0F}'); // VS16 → emoji presentation, width 2
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.combining(), ['\u{FE0F}']);
+    assert_eq!(base.width(), 2); // promoted from 1 to 2
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0)); // claimed continuation
+    assert_eq!(state.active_cursor().col, 2); // advanced over both columns
+}
+
+#[test]
+fn zwj_emoji_sequence_folds_into_one_wide_cell() {
+    let mut state = state(10, 2);
+    print_str(&mut state, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"); // 👨‍👩‍👧
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{1F468}');
+    assert_eq!(
+        base.combining(),
+        ['\u{200D}', '\u{1F469}', '\u{200D}', '\u{1F467}']
+    );
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 2); // one glyph, not three (would be 6)
+}
+
+#[test]
+fn skin_tone_modifier_folds_onto_the_base() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "\u{1F44D}\u{1F3FD}"); // 👍 + medium skin tone
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{1F44D}');
+    assert_eq!(base.combining(), ['\u{1F3FD}']);
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn regional_indicator_pair_is_one_flag_cell() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "\u{1F1EF}\u{1F1F5}"); // 🇯 + 🇵 = JP flag
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{1F1EF}');
+    assert_eq!(base.combining(), ['\u{1F1F5}']);
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn separate_emoji_without_a_joiner_stay_two_cells_each() {
+    let mut state = state(10, 2);
+    print_str(&mut state, "\u{1F468}\u{1F469}"); // 👨👩 — no ZWJ, two graphemes
+    assert_eq!(glyph(&state, 0, 0), Some('\u{1F468}'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(2));
+    assert!(state
+        .active_grid()
+        .cell(0, 0)
+        .expect("in bounds")
+        .combining()
+        .is_empty());
+    assert_eq!(glyph(&state, 0, 2), Some('\u{1F469}'));
+    assert_eq!(state.active_grid().cell(0, 2).map(Cell::width), Some(2));
+    assert_eq!(state.active_cursor().col, 4);
+}
+
+#[test]
+fn a_control_byte_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, width 1
+    advance(&mut state, b"\n"); // LF ends the run
+    state.print('\u{FE0F}'); // VS16 now has no cluster to join → dropped
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.ch(), '\u{2764}');
+    assert_eq!(heart.width(), 1); // NOT promoted across the control byte
+    assert!(heart.combining().is_empty());
+}
+
+#[test]
+fn vs16_promotion_at_the_last_column_wraps_to_the_next_line() {
+    let mut state = state(3, 3); // last col = 2
+    print_str(&mut state, "ab"); // a@0, b@1, cursor at col 2
+    state.print('\u{2764}'); // heart width 1 at col 2, parks
+    assert!(state.active_cursor().pending_wrap);
+    state.print('\u{FE0F}'); // VS16 promotes → no room at the edge → move whole cluster down
+    let freed = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(freed.ch(), ' '); // old narrow cell blanked
+    let base = state.active_grid().cell(1, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.combining(), ['\u{FE0F}']);
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(1, 1).map(Cell::width), Some(0));
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (1, 2)
+    );
+}
+
+#[test]
+fn vs16_promotes_the_immediately_preceding_glyph_only() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, width 1
+    state.print('X'); // boundary → the heart's cluster run ends here
+    state.print('\u{FE0F}'); // VS16 belongs to X's cluster, must not reach back to the heart
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.ch(), '\u{2764}');
+    assert_eq!(heart.width(), 1); // untouched — not promoted
+    assert!(heart.combining().is_empty());
+    assert_eq!(glyph(&state, 0, 1), Some('X'));
+}
+
+#[test]
+fn a_cursor_move_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, width 1
+    advance(&mut state, b"\x1b[1;1H"); // CUP — any CSI ends the run
+    state.print('\u{FE0F}'); // VS16 now has no cluster to join → dropped
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.width(), 1); // not promoted across the cursor move
+    assert!(heart.combining().is_empty());
+}
+
+#[test]
+fn a_dcs_passthrough_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, width 1
+    advance(&mut state, b"\x1bPq\x1b\\"); // DCS ... ST — a non-printing control string
+    state.print('\u{FE0F}'); // VS16 must NOT promote the heart across the DCS
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.ch(), '\u{2764}');
+    assert_eq!(heart.width(), 1); // not promoted across the DCS
+    assert!(heart.combining().is_empty());
+}
+
+#[test]
+fn a_dcs_terminated_by_c1_st_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('e'); // base
+    advance(&mut state, b"\x1bPq\x9c"); // DCS closed by the 8-bit C1 ST (0x9C),
+                                        // whose only Perform callback is `unhook`
+    state.print('\u{301}'); // combining acute must NOT fold onto 'e'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert!(cell.combining().is_empty()); // the DCS ended the run
+}
+
+#[test]
+fn an_apc_string_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('e'); // base
+    advance(&mut state, b"\x1b_payload\x1b\\"); // APC ... ST — silently consumed by vte
+    state.print('\u{301}'); // combining acute must NOT fold onto 'e'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert!(cell.combining().is_empty());
+}
+
+#[test]
+fn a_style_only_sgr_does_not_break_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('e'); // base at (0, 0)
+    advance(&mut state, b"\x1b[31m"); // SGR set fg red — pen only, no cursor move
+    state.print('\u{301}'); // combining acute must still fold onto the 'e'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), ['\u{301}']); // attached across the SGR
+    assert_eq!(cell.width(), 1);
+    assert_eq!(state.active_cursor().col, 1); // no advance
+}
+
+#[test]
+fn a_style_only_sgr_does_not_break_a_vs16_promotion() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, text presentation, width 1
+    advance(&mut state, b"\x1b[1m"); // bold — pen only, no cursor move
+    state.print('\u{FE0F}'); // VS16 must still promote the heart across the SGR
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.combining(), ['\u{FE0F}']);
+    assert_eq!(base.width(), 2); // promoted across the SGR
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    assert_eq!(state.active_cursor().col, 2);
+}
+
+#[test]
+fn an_sgr_preserved_cluster_does_not_fold_a_later_mark_onto_the_old_base() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart at (0, 0), width 1
+    advance(&mut state, b"\x1b[1m"); // SGR preserves the heart's cluster run
+    state.print('X'); // boundary → starts a fresh cluster at (0, 1)
+    state.print('\u{FE0F}'); // VS16 belongs to X, must NOT reach back to the heart
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.width(), 1); // untouched — not promoted
+    assert!(heart.combining().is_empty());
+    assert_eq!(glyph(&state, 0, 1), Some('X'));
+}
+
+#[test]
+fn an_overlong_ignored_sgr_shaped_csi_breaks_a_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('e'); // base
+                      // A CSI with more parameters than vte keeps (MAX_PARAMS = 32) is flagged
+                      // `ignore` and dropped. It ends in `m` but is NOT a real applied SGR, so it
+                      // must break the cluster like any other non-printing CSI — the SGR-preserve
+                      // exception only applies to a well-formed (`!ignore`) style-only SGR.
+    let mut seq = Vec::from(&b"\x1b["[..]);
+    for _ in 0..40 {
+        seq.extend_from_slice(b"0;"); // 40 params overflow vte's 32-param buffer
+    }
+    seq.push(b'm');
+    advance(&mut state, &seq);
+    state.print('\u{301}'); // combining acute must NOT fold onto 'e'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert!(cell.combining().is_empty()); // the malformed CSI ended the run
+}
+
+#[test]
+fn a_wrapped_vs16_promotion_clears_a_wide_glyph_it_lands_on() {
+    let mut state = state(4, 3); // last col = 3
+    advance(&mut state, b"\x1b[2;2H"); // cursor -> (1, 1)
+    state.print('中'); // destination row: base@(1,1), continuation@(1,2)
+    advance(&mut state, b"\x1b[1;1H"); // home (0, 0)
+    print_str(&mut state, "xyz"); // fill row 0 cols 0..2, cursor at the last col 3
+    state.print('\u{2764}'); // heart width 1 parks at (0, 3)
+    assert!(state.active_cursor().pending_wrap);
+    state.print('\u{FE0F}'); // VS16 promotes -> no room at the edge -> wrap the cluster to row 1
+                             // The promoted pair overwrites (1,0)+(1,1); 中's base at col 1 is gone,
+                             // so its old continuation at col 2 must be cleared, not left orphaned.
+    let base = state.active_grid().cell(1, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(1, 1).map(Cell::width), Some(0)); // the pair's continuation
+    let orphan = state.active_grid().cell(1, 2).expect("in bounds");
+    assert_eq!(orphan.ch(), ' '); // 中's stale continuation cleared
+    assert_eq!(orphan.width(), 1); // not a width-0 orphan
+}
+
+#[test]
+fn an_in_place_vs16_promotion_clears_a_wide_glyph_it_claims() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;2H"); // cursor -> (0, 1)
+    state.print('中'); // wide glyph at cols 1-2 (base@1, continuation@2)
+    advance(&mut state, b"\x1b[1;1H"); // home (0, 0)
+    state.print('\u{2764}'); // heart width 1 at col 0; 中 left intact at 1-2
+    state.print('\u{FE0F}'); // VS16 promotes the heart in place, claiming col 1
+                             // The promotion overwrites 中's base at col 1, so 中's
+                             // old continuation at col 2 must be cleared, not orphaned.
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0)); // heart's continuation
+    let orphan = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(orphan.ch(), ' '); // 中's stale continuation cleared
+    assert_eq!(orphan.width(), 1); // not a width-0 orphan
+}
+
+#[test]
+fn a_wide_glyph_in_a_one_column_pane_degrades_to_a_narrow_cell() {
+    let mut state = state(1, 2); // 1 column — no room for a wide pair
+    state.print('中'); // cannot occupy two cells in a single-column pane
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), '中');
+    assert_eq!(cell.width(), 1); // narrow, NOT a width-2 base with no continuation
+}
+
+#[test]
+fn wide_glyphs_in_a_one_column_pane_do_not_scroll_thrash() {
+    let mut state = state(1, 3); // 1 column, 3 rows
+    state.print('中'); // stored narrow at (0, 0), no wasteful wrap
+    state.print('文'); // advances one line; must not scroll the first glyph away
+    assert_eq!(glyph(&state, 0, 0), Some('中')); // first glyph still on row 0
+    assert_eq!(glyph(&state, 1, 0), Some('文'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(state.active_grid().cell(1, 0).map(Cell::width), Some(1));
+}
+
+#[test]
+fn a_vs16_promotion_in_a_one_column_pane_never_orphans_a_wide_base() {
+    let mut state = state(1, 3); // 1 column
+    state.print('\u{2764}'); // heart width 1 at (0, 0)
+    state.print('\u{FE0F}'); // VS16 would promote to width 2 — but there is no room
+                             // No cell anywhere may be left a width-2 base: in a
+                             // 1-column pane it could never carry a continuation.
+    for row in 0..3 {
+        assert_ne!(
+            state.active_grid().cell(row, 0).map(Cell::width),
+            Some(2),
+            "row {row}: a width-2 base cannot exist in a 1-column pane"
+        );
+    }
+}
+
+#[test]
+fn combining_marks_are_capped_to_bound_per_cell_memory() {
+    let mut state = state(6, 2);
+    state.print('a'); // base at (0, 0)
+    for _ in 0..10_000 {
+        state.print('\u{0301}'); // flood of combining acutes ("zalgo")
+    }
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'a');
+    assert_eq!(cell.combining().len(), MAX_GRAPHEME_CONTINUATIONS); // bounded, not 10_000
+    assert_eq!(state.active_cursor().col, 1); // never advanced
+}
+
+#[test]
+fn wide_at_edge_wrap_clears_an_existing_wide_pair_it_splits() {
+    let mut state = state(3, 2); // last col = 2
+    state.print('x'); // col 0
+    state.print('中'); // base col 1, continuation col 2 (the last column)
+    advance(&mut state, b"\x1b[1;3H"); // CUP onto the continuation (0,2); clears wrap + cluster
+    state.print('文'); // wide at the last col → wide-at-edge wrap; must not orphan 中's base
+                       // 中's base at col 1 was orphaned by blanking col 2 → cleared.
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 1), Some(' '));
+    assert_eq!(glyph(&state, 1, 0), Some('文')); // new glyph wrapped to the next line
+}
+
+#[test]
+fn a_boundary_zero_width_char_breaks_the_cluster_run() {
+    let mut state = state(6, 2);
+    state.print('\u{2764}'); // heart, width 1
+    state.print('\u{200B}'); // ZWSP — width 0 but a grapheme boundary; ends the run
+    state.print('\u{FE0F}'); // VS16 must NOT reach back across the ZWSP to the heart
+    let heart = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(heart.ch(), '\u{2764}');
+    assert_eq!(heart.width(), 1); // not promoted across the boundary
+    assert!(heart.combining().is_empty());
+}
+
+#[test]
+fn vs15_demotes_a_wide_emoji_base_to_a_narrow_text_glyph() {
+    let mut state = state(6, 2);
+    state.print('\u{26A1}'); // ⚡ high voltage, default emoji presentation → width 2
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(2));
+    assert_eq!(state.active_cursor().col, 2);
+    state.print('\u{FE0E}'); // VS15 → text presentation → width 1
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{26A1}');
+    assert_eq!(base.combining(), ['\u{FE0E}']);
+    assert_eq!(base.width(), 1); // demoted from 2 to 1
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(1)); // continuation cleared
+    assert_eq!(state.active_cursor().col, 1); // cursor stepped back over the freed column
+    assert!(!state.active_cursor().pending_wrap);
+    state.print('Z'); // next glyph lands at the freed column, not two ahead
+    assert_eq!(glyph(&state, 0, 1), Some('Z'));
+}
+
+#[test]
+fn vs16_promotion_wraps_correctly_in_a_two_column_grid() {
+    let mut state = state(2, 2); // last col = 1 — the narrow-grid promotion edge
+    state.print('a'); // col 0
+    state.print('\u{2764}'); // heart width 1 at col 1 (last), parks
+    assert!(state.active_cursor().pending_wrap);
+    state.print('\u{FE0F}'); // VS16 promotes; no room at col 1 → move the whole cluster down
+    assert_eq!(glyph(&state, 0, 1), Some(' ')); // old narrow cell blanked
+    let base = state.active_grid().cell(1, 0).expect("in bounds");
+    assert_eq!(base.ch(), '\u{2764}');
+    assert_eq!(base.width(), 2);
+    assert_eq!(state.active_grid().cell(1, 1).map(Cell::width), Some(0)); // continuation fills the row
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 1); // parked at the last column
+    assert!(cur.pending_wrap);
 }

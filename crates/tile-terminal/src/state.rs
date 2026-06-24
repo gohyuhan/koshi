@@ -100,6 +100,15 @@ pub struct TerminalState {
     primary_scroll_region: Option<(u16, u16)>,
     /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
     alternate_scroll_region: Option<(u16, u16)>,
+    /// The grapheme cluster currently being built at the cursor — the run of
+    /// printed code points that fold into one cell (a base plus its combining
+    /// marks and any emoji continuation: ZWJ-joined parts, variation selectors,
+    /// skin-tone modifiers, regional-indicator flags). Empty when no run is
+    /// active; any non-printing event resets it.
+    cluster: String,
+    /// The `(row, col)` of the cell holding `cluster`'s base, or `None` when no
+    /// run is active. Continuations attach here and width promotion widens it.
+    cluster_base: Option<(u16, u16)>,
 }
 
 impl TerminalState {
@@ -126,6 +135,8 @@ impl TerminalState {
             scrollback: Scrollback {},
             primary_scroll_region: None,
             alternate_scroll_region: None,
+            cluster: String::new(),
+            cluster_base: None,
         }
     }
 
@@ -150,6 +161,11 @@ impl TerminalState {
         // scrolls in full until the app issues DECSTBM again.
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
+
+        // The resized buffers discard their cells, so any in-progress cluster's
+        // base cell is gone; drop the run.
+        self.cluster.clear();
+        self.cluster_base = None;
     }
 
     /// The screen buffer currently displayed and written to — `primary` or

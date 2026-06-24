@@ -6,10 +6,17 @@ use std::cmp::min;
 /// A single grid cell: its character, display width, and style.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
-    /// The character occupying the cell.
+    /// The base character occupying the cell.
     ch: char,
-    /// Display width in cells: 0 (combining/continuation), 1 (narrow), or 2
-    /// (wide, e.g. CJK).
+    /// The rest of the grapheme cluster layered over the base [`ch`](Cell::ch),
+    /// in arrival order: combining accents, variation selectors, and the joined
+    /// parts of a multi-codepoint emoji (ZWJ-joined glyphs, skin-tone modifiers,
+    /// the second half of a flag). Empty for a plain cell; the renderer draws
+    /// `ch` followed by these as one glyph. Named for the common case (combining
+    /// marks) though it also carries non-zero-width emoji continuations.
+    combining: Vec<char>,
+    /// Display width in cells: 0 (continuation half of a wide glyph), 1
+    /// (narrow), or 2 (wide, e.g. CJK).
     width: u8,
     /// The cell's visual style.
     style: Style,
@@ -27,6 +34,7 @@ impl Cell {
     pub fn blank_with(style: Style) -> Self {
         Cell {
             ch: ' ',
+            combining: Vec::new(),
             width: 1,
             style,
         }
@@ -34,12 +42,31 @@ impl Cell {
 
     /// A cell holding `ch` of the given display `width`, in `style`.
     pub fn new(ch: char, width: u8, style: Style) -> Self {
-        Cell { ch, width, style }
+        Cell {
+            ch,
+            combining: Vec::new(),
+            width,
+            style,
+        }
     }
 
     /// The character occupying this cell.
     pub fn ch(&self) -> char {
         self.ch
+    }
+
+    /// The rest of the grapheme cluster layered over the base character, in
+    /// arrival order (combining marks plus any emoji continuation); empty for a
+    /// plain cell.
+    pub fn combining(&self) -> &[char] {
+        &self.combining
+    }
+
+    /// Layer one continuation code point (combining mark, ZWJ, variation
+    /// selector, joined emoji part, …) onto this cell, keeping the base
+    /// character and width unchanged.
+    pub fn push_combining(&mut self, mark: char) {
+        self.combining.push(mark);
     }
 
     /// The cell's display width: 0 (combining/continuation), 1 (narrow), or 2
