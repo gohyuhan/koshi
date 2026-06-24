@@ -1,8 +1,15 @@
 //! Unit tests for per-pane terminal state.
 
 use super::*;
-use crate::grid::state::Grid;
+use crate::grid::state::{Cell, Grid};
 use crate::style::{Color, Style};
+
+/// Overwrite the cell at (`row`, `col`) of the active grid with `ch` of the
+/// given display `width`, in the default style — used to plant wide glyphs
+/// (base `width == 2` + a `width == 0` continuation) for the `clip_row` tests.
+fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
+    *state.active_grid_mut().cell_mut(row, col).unwrap() = Cell::new(ch, width, Style::default());
+}
 
 #[test]
 fn new_initializes_both_screens_to_blank_of_size() {
@@ -97,4 +104,91 @@ fn resize_clears_a_pending_wrap_latched_to_the_old_edge() {
     state.primary_cursor.pending_wrap = true;
     state.resize(PtySize { cols: 10, rows: 5 });
     assert!(!state.primary_cursor.pending_wrap);
+}
+
+#[test]
+fn clip_row_passes_a_narrow_row_through_untouched() {
+    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
+    for col in 0..5 {
+        put(&mut state, 0, col, 'a', 1);
+    }
+    let clipped = state.clip_row(0, 5);
+    assert!(!clipped.right_pad());
+    assert_eq!(clipped.cells().len(), 5);
+}
+
+#[test]
+fn clip_row_pads_when_a_wide_base_is_the_last_visible_column() {
+    // Row: a a 世 <cont> a — the wide base sits at col 2, its continuation at
+    // col 3. Clipping to 3 columns ends between the halves.
+    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
+    put(&mut state, 0, 0, 'a', 1);
+    put(&mut state, 0, 1, 'a', 1);
+    put(&mut state, 0, 2, '世', 2);
+    put(&mut state, 0, 3, ' ', 0);
+    put(&mut state, 0, 4, 'a', 1);
+
+    let clipped = state.clip_row(0, 3);
+    assert!(clipped.right_pad());
+    // The wide base is dropped; only the two narrow cells before it remain.
+    assert_eq!(clipped.cells().len(), 2);
+    assert_eq!(clipped.cells()[0].ch(), 'a');
+    assert_eq!(clipped.cells()[1].ch(), 'a');
+}
+
+#[test]
+fn clip_row_keeps_a_whole_wide_glyph_when_both_halves_fit() {
+    // Same row, but clipping to 4 columns keeps the wide glyph's continuation.
+    let mut state = TerminalState::new(PtySize { cols: 5, rows: 1 });
+    put(&mut state, 0, 0, 'a', 1);
+    put(&mut state, 0, 1, 'a', 1);
+    put(&mut state, 0, 2, '世', 2);
+    put(&mut state, 0, 3, ' ', 0);
+    put(&mut state, 0, 4, 'a', 1);
+
+    let clipped = state.clip_row(0, 4);
+    assert!(!clipped.right_pad());
+    assert_eq!(clipped.cells().len(), 4);
+    assert_eq!(clipped.cells()[2].ch(), '世');
+    assert_eq!(clipped.cells()[2].width(), 2);
+    assert_eq!(clipped.cells()[3].width(), 0);
+}
+
+#[test]
+fn clip_row_with_zero_inner_width_returns_no_cells() {
+    let state = TerminalState::new(PtySize { cols: 5, rows: 1 });
+    let clipped = state.clip_row(0, 0);
+    assert!(!clipped.right_pad());
+    assert!(clipped.cells().is_empty());
+}
+
+#[test]
+fn clip_row_clamps_an_inner_width_past_the_row_length() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 1 });
+    for col in 0..4 {
+        put(&mut state, 0, col, 'a', 1);
+    }
+    let clipped = state.clip_row(0, 10);
+    assert!(!clipped.right_pad());
+    assert_eq!(clipped.cells().len(), 4);
+}
+
+#[test]
+fn clip_row_on_an_out_of_range_row_returns_no_cells() {
+    let state = TerminalState::new(PtySize { cols: 4, rows: 2 });
+    let clipped = state.clip_row(5, 4);
+    assert!(!clipped.right_pad());
+    assert!(clipped.cells().is_empty());
+}
+
+#[test]
+fn clip_row_in_a_single_column_pane_pads_a_wide_glyph() {
+    // A 1-column pane cannot hold a wide glyph's two halves; `print` stores the
+    // base (width 2) in that lone column. Clipping must still pad, never show
+    // the half.
+    let mut state = TerminalState::new(PtySize { cols: 1, rows: 1 });
+    put(&mut state, 0, 0, '世', 2);
+    let clipped = state.clip_row(0, 1);
+    assert!(clipped.right_pad());
+    assert!(clipped.cells().is_empty());
 }

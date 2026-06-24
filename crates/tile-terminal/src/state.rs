@@ -10,7 +10,7 @@ use std::cmp::min;
 
 use tile_core::process::PtySize;
 
-use crate::grid::state::Grid;
+use crate::grid::state::{Cell, Grid};
 use crate::scrollback::Scrollback;
 use crate::style::Style;
 mod perform;
@@ -59,6 +59,40 @@ pub struct Cursor {
     /// SCOSC/SCORC (ANSI form), kept per screen so each screen buffer has its
     /// own snapshot independent of the other.
     saved: Option<SavedCursor>,
+}
+
+/// One screen row trimmed to the renderer's inner width, with a flag for a
+/// wide glyph clipped at the right edge.
+///
+/// Produced by [`TerminalState::clip_row`]. Borrows the live grid row, so it
+/// lives only as long as that borrow. A wide glyph (CJK, emoji) occupies two
+/// columns; when the inner rect ends between its halves, drawing only the left
+/// half would show a broken glyph. `clip_row` instead drops that base from
+/// `cells` and sets `right_pad`, telling the renderer to fill the freed column
+/// with a blank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClippedRow<'a> {
+    /// The visible cells, left to right. When `right_pad` is set this stops one
+    /// column short of the inner width — the clipped wide base is excluded.
+    cells: &'a [Cell],
+    /// `true` when the last visible column would have shown only the left half
+    /// of a wide glyph; the renderer draws one blank pad cell there instead.
+    right_pad: bool,
+}
+
+impl<'a> ClippedRow<'a> {
+    /// The visible cells, left to right. The renderer draws these, then one
+    /// blank pad cell when `right_pad` is set. The slice borrows the underlying
+    /// grid row, so it outlives this `ClippedRow`.
+    pub fn cells(&self) -> &'a [Cell] {
+        self.cells
+    }
+
+    /// Whether the renderer should draw one blank pad cell after `cells` to
+    /// fill the column a clipped wide glyph would have half-occupied.
+    pub fn right_pad(&self) -> bool {
+        self.right_pad
+    }
 }
 
 /// Terminal mode flags (bracketed paste, mouse tracking, …).
@@ -223,6 +257,40 @@ impl TerminalState {
         match self.active {
             Screen::Primary => &mut self.primary_cursor,
             Screen::Alternate => &mut self.alternate_cursor,
+        }
+    }
+
+    /// Trim the active screen's `row` to the first `inner_width` columns for
+    /// rendering, guarding the right edge against a half-drawn wide glyph.
+    ///
+    /// Returns the visible cells plus a `right_pad` flag. When the last visible
+    /// column holds the left half of a wide glyph (its continuation falls
+    /// outside the inner rect), that base is dropped from the returned cells and
+    /// `right_pad` is set so the renderer blanks the freed column rather than
+    /// drawing half a glyph. An out-of-range `row`, a zero `inner_width`, or an
+    /// empty row yields no cells and no pad. `inner_width` is clamped to the
+    /// row length, so a width past the grid is harmless.
+    pub fn clip_row(&self, row: u16, inner_width: u16) -> ClippedRow<'_> {
+        let rows = self.active_grid().rows();
+        let Some(r) = rows.get(row as usize) else {
+            return ClippedRow {
+                cells: &[],
+                right_pad: false,
+            };
+        };
+
+        let w = min(inner_width as usize, r.len());
+
+        if w > 0 && r[w - 1].width() > 1 {
+            ClippedRow {
+                cells: &r[..w - 1],
+                right_pad: true,
+            }
+        } else {
+            ClippedRow {
+                cells: &r[..w],
+                right_pad: false,
+            }
         }
     }
 }
