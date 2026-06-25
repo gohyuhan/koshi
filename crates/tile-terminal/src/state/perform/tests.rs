@@ -402,10 +402,37 @@ fn ed_2_erases_the_whole_screen() {
 fn ed_3_leaves_the_visible_screen_untouched() {
     let mut state = state(3, 3);
     fill_3x3(&mut state);
-    advance(&mut state, b"\x1b[3J"); // erase scrollback only (stub) — screen intact
+    advance(&mut state, b"\x1b[3J"); // erase scrollback only — visible screen intact
     assert_eq!(row_text(&state, 0), "abc");
     assert_eq!(row_text(&state, 1), "def");
     assert_eq!(row_text(&state, 2), "ghi");
+}
+
+#[test]
+fn ed_3_clears_the_retained_scrollback() {
+    let mut state = state(3, 2); // two rows
+    state.active_cursor_mut().row = 1; // sit at the bottom so line feeds scroll
+    state.linefeed();
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 2); // history populated
+
+    advance(&mut state, b"\x1b[3J"); // xterm "erase saved lines"
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn ed_3_on_the_alternate_screen_leaves_primary_scrollback_intact() {
+    // Scrollback is the primary screen's history; a full-screen app on the
+    // alternate screen must not erase it with CSI 3 J.
+    let mut state = state(3, 2);
+    state.active_cursor_mut().row = 1; // bottom row, on the primary screen
+    state.linefeed();
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 2); // populated from the primary
+
+    state.active = Screen::Alternate;
+    advance(&mut state, b"\x1b[3J"); // ED 3 while on the alternate screen
+    assert_eq!(state.scrollback().len(), 2); // primary history untouched
 }
 
 // --- SGR: set graphic rendition (pen colors + text attributes) ---
@@ -2228,4 +2255,128 @@ fn vs16_promotion_wraps_correctly_in_a_two_column_grid() {
     let cur = state.active_cursor();
     assert_eq!(cur.col, 1); // parked at the last column
     assert!(cur.pending_wrap);
+}
+
+#[test]
+fn linefeed_pushes_the_top_primary_line_into_scrollback() {
+    let mut state = state(4, 2); // two rows; bottom margin is row 1
+    print_str(&mut state, "ab"); // row 0 = "ab.."
+    state.linefeed(); // row 0 -> 1 (descends; not yet at the bottom)
+    state.linefeed(); // at the bottom: the region scrolls, row 0 scrolls off
+    assert_eq!(state.scrollback().len(), 1);
+    let captured = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row");
+    assert_eq!(captured[0].ch(), 'a');
+    assert_eq!(captured[1].ch(), 'b');
+}
+
+#[test]
+fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
+    let mut state = state(4, 2);
+    state.active = Screen::Alternate; // full-screen apps never pollute history
+    state.linefeed(); // alt cursor 0 -> 1
+    state.linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn linefeed_below_a_top_margin_discards_rather_than_feeds() {
+    let mut state = state(4, 3); // three rows
+    *state.scroll_region_mut() = Some((1, 2)); // region top margin = row 1
+    state.active_cursor_mut().row = 2; // park at the region's bottom margin
+    state.linefeed(); // scrolls within rows 1..=2; top margin != 0 -> no feed
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn linefeed_in_a_region_anchored_at_the_top_feeds_scrollback() {
+    let mut state = state(4, 3);
+    *state.scroll_region_mut() = Some((0, 1)); // region top margin = row 0
+    state.active_cursor_mut().row = 1; // the region's bottom margin
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 1);
+}
+
+#[test]
+fn successive_bottom_linefeeds_accumulate_scrollback() {
+    let mut state = state(4, 2);
+    state.active_cursor_mut().row = 1; // sit at the bottom row
+    state.linefeed();
+    state.linefeed();
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 3);
+}
+
+#[test]
+fn su_on_a_top_anchored_region_feeds_scrollback() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "ab"); // row 0 = "ab "
+    advance(&mut state, b"\x1b[S"); // SU by 1; full region starts at row 0
+    assert_eq!(state.scrollback().len(), 1);
+    let captured = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row");
+    assert_eq!(captured[0].ch(), 'a');
+    assert_eq!(captured[1].ch(), 'b');
+}
+
+#[test]
+fn su_by_n_captures_each_departing_top_row_oldest_first() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // rows "abc" / "def" / "ghi"
+    advance(&mut state, b"\x1b[2S"); // SU by 2: rows 0 and 1 scroll off the top
+    assert_eq!(state.scrollback().len(), 2);
+    let history: Vec<String> = state
+        .scrollback()
+        .lines()
+        .iter()
+        .map(|row| row.iter().map(Cell::ch).collect())
+        .collect();
+    assert_eq!(history, vec!["abc", "def"]); // oldest (top) first
+}
+
+#[test]
+fn su_on_a_region_below_the_top_does_not_feed() {
+    let mut state = state(3, 3);
+    *state.scroll_region_mut() = Some((1, 2)); // region top margin = row 1
+    advance(&mut state, b"\x1b[S");
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn su_on_the_alternate_screen_does_not_feed() {
+    let mut state = state(3, 2);
+    state.active = Screen::Alternate;
+    advance(&mut state, b"\x1b[S");
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn dl_with_the_cursor_on_row_0_feeds_scrollback() {
+    // DL routes through the same scroll-off-top path: deleting at row 0 scrolls
+    // the top line off, so it joins history (matching alacritty's origin == 0).
+    let mut state = state(3, 2);
+    print_str(&mut state, "ab"); // row 0 = "ab ", cursor stays on row 0
+    advance(&mut state, b"\x1b[M"); // DL by 1 at the cursor row (0)
+    assert_eq!(state.scrollback().len(), 1);
+    let captured = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row");
+    assert_eq!(captured[0].ch(), 'a');
+    assert_eq!(captured[1].ch(), 'b');
+}
+
+#[test]
+fn dl_below_row_0_is_an_interior_delete_and_does_not_feed() {
+    let mut state = state(3, 3);
+    state.active_cursor_mut().row = 1; // interior delete, nothing leaves the top
+    advance(&mut state, b"\x1b[M");
+    assert!(state.scrollback().is_empty());
 }

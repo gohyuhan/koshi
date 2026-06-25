@@ -57,6 +57,35 @@ impl TerminalState {
         self.active_scroll_region().unwrap_or((0, last_row))
     }
 
+    /// Delete `n` lines starting at `first` (scrolling the band `first..=bottom`
+    /// up), first preserving into scrollback any rows that leave the *top* of the
+    /// primary screen.
+    ///
+    /// Rows leave the top only when `first == 0` on the primary screen — i.e. a
+    /// line feed at a top-anchored region's bottom margin, an SU whose region
+    /// starts at row 0, or a DL with the cursor on row 0. The alternate screen
+    /// never feeds history, and an interior delete (`first > 0`, e.g. DL below
+    /// the top or a scroll region whose top margin is below row 0) discards its
+    /// removed lines rather than retaining them. This matches xterm/alacritty,
+    /// where history is fed only when the scrolled region begins at row 0.
+    ///
+    /// The departing rows — `rows[0..min(n, bottom + 1)]`, exactly the rows
+    /// `delete_lines` removes — are pushed oldest-first so the topmost lands
+    /// deepest in history. Capture happens before the delete, which overwrites
+    /// them.
+    fn delete_lines_into_scrollback(&mut self, first: u16, bottom: u16, n: u16, fill: Style) {
+        if self.active == Screen::Primary && first == 0 {
+            let removed = n.min(bottom.saturating_sub(first).saturating_add(1));
+            for row in 0..removed {
+                if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
+                    let scrolled_off = scrolled_off.clone();
+                    self.scrollback.push_line(scrolled_off);
+                }
+            }
+        }
+        self.active_grid_mut().delete_lines(first, bottom, n, fill);
+    }
+
     /// Move the cursor down one line. At the scroll region's bottom margin the
     /// region scrolls up instead of the cursor advancing; below the margin the
     /// cursor just descends to the last grid row. The column is left unchanged
@@ -65,7 +94,7 @@ impl TerminalState {
         let fill = self.style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == bottom {
-            self.active_grid_mut().delete_lines(top, bottom, 1, fill);
+            self.delete_lines_into_scrollback(top, bottom, 1, fill);
         } else {
             let last_row = self.active_grid().dimensions().0.saturating_sub(1);
             if self.active_cursor().row < last_row {
@@ -766,10 +795,15 @@ impl vte::Perform for TerminalState {
                             self.active_grid_mut().clear_line(row, 0, cols, fill);
                         }
                     }
-                    // Erase scrollback only (an xterm extension). Scrollback
-                    // storage is still a stub, so this is a no-op; the visible
-                    // screen is deliberately left untouched.
-                    3 => {}
+                    // Erase scrollback only (xterm "erase saved lines"): drop
+                    // the retained history, leaving the visible screen untouched.
+                    // Scrollback belongs to the primary screen (the alternate
+                    // never feeds it), so an ED 3 from a full-screen app on the
+                    // alternate screen must not wipe the user's shell history;
+                    // guard to the primary, matching alacritty (whose alternate
+                    // grid has zero history, making the clear a no-op there). An
+                    // ED 3 on the alternate screen falls through to the `_` arm.
+                    3 if self.active == Screen::Primary => self.scrollback.clear(),
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
@@ -843,7 +877,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.style.bg_fill();
                     let r = self.active_cursor().row;
-                    self.active_grid_mut().delete_lines(r, bottom, n, fill);
+                    self.delete_lines_into_scrollback(r, bottom, n, fill);
                 }
             }
             // SU — scroll the region up by n (`CSI Ps S`); the cursor stays put.
@@ -851,7 +885,7 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 let fill = self.style.bg_fill();
                 let (top, bottom) = self.region_bounds();
-                self.active_grid_mut().delete_lines(top, bottom, n, fill);
+                self.delete_lines_into_scrollback(top, bottom, n, fill);
             }
             // SD — scroll the region down by n; the cursor stays put. `CSI Ps T`
             // is the common form, but `CSI <5 params> T` is xterm highlight mouse

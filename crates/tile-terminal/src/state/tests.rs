@@ -192,3 +192,12 @@ fn clip_row_in_a_single_column_pane_pads_a_wide_glyph() {
     assert!(clipped.right_pad());
     assert!(clipped.cells().is_empty());
 }
+
+#[test]
+fn new_starts_with_an_empty_scrollback() {
+    let state = TerminalState::new(PtySize { cols: 5, rows: 3 });
+    assert!(state.scrollback().is_empty());
+    assert_eq!(state.scrollback().len(), 0);
+    assert_eq!(state.scrollback().dropped_lines(), 0);
+    assert_eq!(state.scrollback().dropped_bytes(), 0);
+}

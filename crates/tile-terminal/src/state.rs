@@ -11,7 +11,7 @@ use std::cmp::min;
 use tile_core::process::PtySize;
 
 use crate::grid::state::{Cell, Grid};
-use crate::scrollback::Scrollback;
+use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::style::Style;
 mod perform;
 
@@ -166,7 +166,7 @@ impl TerminalState {
             style: Style::default(),
             modes: TerminalModes {},
             title: None,
-            scrollback: Scrollback {},
+            scrollback: Scrollback::new(ScrollbackLimit::default()),
             primary_scroll_region: None,
             alternate_scroll_region: None,
             cluster: String::new(),
@@ -228,6 +228,13 @@ impl TerminalState {
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
     pub fn cursor_visible(&self) -> bool {
         self.active_cursor().is_visible
+    }
+
+    /// The pane's scrollback history. The runtime reads its truncation tallies
+    /// to emit `PaneScrollbackTruncated`, and the renderer reads its lines to
+    /// compose a scrolled-back view.
+    pub fn scrollback(&self) -> &Scrollback {
+        &self.scrollback
     }
 
     pub fn scroll_region(&self) -> Option<(u16, u16)> {
