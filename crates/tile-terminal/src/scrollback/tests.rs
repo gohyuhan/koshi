@@ -52,6 +52,19 @@ fn line_bytes_sums_base_and_combining_as_utf8_lengths() {
 }
 
 #[test]
+fn line_bytes_skips_wide_glyph_continuation_placeholders() {
+    let sb = bounded(10, 1000);
+    // A wide glyph occupies two cells: a width-2 base carrying '世' (3 bytes)
+    // and a width-0 continuation placeholder (a blank space). Only the base's
+    // text is real; the placeholder must not be charged.
+    let row = vec![
+        Cell::new('世', 2, Style::default()),
+        Cell::new(' ', 0, Style::default()),
+    ];
+    assert_eq!(sb.line_bytes(&row), 3); // the space placeholder is skipped
+}
+
+#[test]
 fn pushing_within_both_caps_retains_every_row_in_order() {
     let mut sb = bounded(10, 1000);
     sb.push_line(line("one"));
@@ -149,4 +162,20 @@ fn dropped_tallies_accumulate_across_many_drops() {
     assert_eq!(retained(&sb), vec!["c"]);
     assert_eq!(sb.dropped_lines(), 2);
     assert_eq!(sb.dropped_bytes(), 5);
+}
+
+#[test]
+fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
+    let mut sb = bounded(1, 100_000); // line cap of 1 forces a drop
+    sb.push_line(line("aa"));
+    sb.push_line(line("bbb")); // drops "aa": dropped_lines 1, dropped_bytes 2
+    assert_eq!(sb.dropped_lines(), 1);
+
+    sb.clear();
+    assert!(sb.is_empty());
+    assert_eq!(sb.len(), 0);
+    assert_eq!(sb.byte_total, 0);
+    // An explicit erase is not a cap truncation, so the tallies are preserved.
+    assert_eq!(sb.dropped_lines(), 1);
+    assert_eq!(sb.dropped_bytes(), 2);
 }

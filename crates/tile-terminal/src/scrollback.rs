@@ -72,8 +72,15 @@ impl Scrollback {
     /// The byte size of one row: every cell's base character plus its combining
     /// continuations, summed as UTF-8 lengths. This is the metric the byte cap
     /// is measured against.
+    ///
+    /// Width-0 cells are skipped: they are the placeholder right halves of wide
+    /// (CJK/emoji) glyphs, which carry only a blank space — the glyph's real
+    /// text lives entirely in its width-2 base cell (character plus combining
+    /// marks). Counting the placeholder would over-charge one byte per wide
+    /// glyph and evict history early for wide-glyph-heavy output.
     pub fn line_bytes(&self, line: &[Cell]) -> usize {
         line.iter()
+            .filter(|cell| cell.width() != 0)
             .map(|cell| {
                 cell.ch().len_utf8()
                     + cell
@@ -105,6 +112,14 @@ impl Scrollback {
             self.dropped_bytes += oldest_bytes as u64;
             self.byte_total -= oldest_bytes;
         }
+    }
+
+    /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines"). The
+    /// cumulative drop tallies are left intact: an explicit erase is not a
+    /// cap-driven truncation, so it must not perturb the truncation reporting.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.byte_total = 0;
     }
 
     /// The number of rows currently retained.
