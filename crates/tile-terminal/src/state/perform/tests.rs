@@ -2229,3 +2229,56 @@ fn vs16_promotion_wraps_correctly_in_a_two_column_grid() {
     assert_eq!(cur.col, 1); // parked at the last column
     assert!(cur.pending_wrap);
 }
+
+#[test]
+fn linefeed_pushes_the_top_primary_line_into_scrollback() {
+    let mut state = state(4, 2); // two rows; bottom margin is row 1
+    print_str(&mut state, "ab"); // row 0 = "ab.."
+    state.linefeed(); // row 0 -> 1 (descends; not yet at the bottom)
+    state.linefeed(); // at the bottom: the region scrolls, row 0 scrolls off
+    assert_eq!(state.scrollback().len(), 1);
+    let captured = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row");
+    assert_eq!(captured[0].ch(), 'a');
+    assert_eq!(captured[1].ch(), 'b');
+}
+
+#[test]
+fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
+    let mut state = state(4, 2);
+    state.active = Screen::Alternate; // full-screen apps never pollute history
+    state.linefeed(); // alt cursor 0 -> 1
+    state.linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn linefeed_below_a_top_margin_discards_rather_than_feeds() {
+    let mut state = state(4, 3); // three rows
+    *state.scroll_region_mut() = Some((1, 2)); // region top margin = row 1
+    state.active_cursor_mut().row = 2; // park at the region's bottom margin
+    state.linefeed(); // scrolls within rows 1..=2; top margin != 0 -> no feed
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn linefeed_in_a_region_anchored_at_the_top_feeds_scrollback() {
+    let mut state = state(4, 3);
+    *state.scroll_region_mut() = Some((0, 1)); // region top margin = row 0
+    state.active_cursor_mut().row = 1; // the region's bottom margin
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 1);
+}
+
+#[test]
+fn successive_bottom_linefeeds_accumulate_scrollback() {
+    let mut state = state(4, 2);
+    state.active_cursor_mut().row = 1; // sit at the bottom row
+    state.linefeed();
+    state.linefeed();
+    state.linefeed();
+    assert_eq!(state.scrollback().len(), 3);
+}

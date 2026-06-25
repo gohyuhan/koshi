@@ -65,6 +65,17 @@ impl TerminalState {
         let fill = self.style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == bottom {
+            // The line about to scroll off the top of the screen is preserved in
+            // scrollback, but only when it leaves the *top* of the *primary*
+            // screen: the alternate screen (full-screen apps) never feeds
+            // history, and a scroll region whose top margin is below row 0
+            // discards its top line rather than retaining it (matching xterm).
+            if self.active == Screen::Primary && top == 0 {
+                if let Some(scrolled_off) = self.primary.rows().first() {
+                    let scrolled_off = scrolled_off.clone();
+                    self.scrollback.push_line(scrolled_off);
+                }
+            }
             self.active_grid_mut().delete_lines(top, bottom, 1, fill);
         } else {
             let last_row = self.active_grid().dimensions().0.saturating_sub(1);

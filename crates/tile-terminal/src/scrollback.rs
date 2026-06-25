@@ -1,10 +1,140 @@
-//! Per-pane scrollback history.
+//! Per-pane scrollback history: a bounded buffer of lines that have scrolled
+//! off the top of the primary screen.
 //!
-//! Placeholder: the bounded buffer — a `VecDeque` of lines with line- and
-//! byte-count caps and truncation accounting — is added in a later task. It
-//! exists now only so [`TerminalState`](crate::state::TerminalState) can own
-//! the field.
+//! The buffer is capped on two axes — a maximum line count and a maximum byte
+//! count — so a long-lived background pane cannot grow memory without bound.
+//! When a push exceeds either cap the oldest lines are dropped from the front;
+//! the count and byte size of everything dropped are tallied (never the content
+//! itself) so the runtime can report truncation via
+//! [`PaneScrollbackTruncated`](tile_core::event::PaneScrollbackTruncated).
 
-/// The scrollback buffer for one pane. Currently retains no lines.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Scrollback {}
+use std::collections::VecDeque;
+
+use crate::grid::state::Cell;
+
+/// Default scrollback line cap: 10 000 lines per pane.
+const DEFAULT_MAX_LINES: usize = 10_000;
+/// Default scrollback byte cap: 32 MiB of retained text per pane.
+const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// The line- and byte-count caps bounding one pane's [`Scrollback`].
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollbackLimit {
+    max_lines: usize,
+    max_bytes: usize,
+}
+
+impl Default for ScrollbackLimit {
+    /// The built-in caps applied when no configured limits are supplied: 10 000
+    /// lines and 32 MiB of retained text.
+    fn default() -> Self {
+        ScrollbackLimit {
+            max_lines: DEFAULT_MAX_LINES,
+            max_bytes: DEFAULT_MAX_BYTES,
+        }
+    }
+}
+
+/// The scrollback buffer for one pane: a `VecDeque` of rows (oldest at the
+/// front), bounded by line- and byte-count caps with truncation accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scrollback {
+    /// Retained rows, oldest at the front and newest at the back. Each row is a
+    /// full grid line captured as it scrolled off the top.
+    lines: VecDeque<Vec<Cell>>,
+    /// Maximum rows retained before the oldest are dropped.
+    max_lines: usize,
+    /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
+    /// are dropped.
+    max_bytes: usize,
+    /// Running sum of every retained row's byte size, kept incrementally so an
+    /// overflow check costs O(1) rather than rescanning the buffer.
+    byte_total: usize,
+    /// Cumulative count of rows ever dropped to honor the caps; monotonic.
+    dropped_lines: u64,
+    /// Cumulative bytes ever dropped to honor the caps; monotonic.
+    dropped_bytes: u64,
+}
+
+impl Scrollback {
+    /// An empty buffer bounded by `limit`.
+    pub fn new(limit: ScrollbackLimit) -> Self {
+        Scrollback {
+            lines: VecDeque::new(),
+            max_lines: limit.max_lines,
+            max_bytes: limit.max_bytes,
+            byte_total: 0,
+            dropped_lines: 0,
+            dropped_bytes: 0,
+        }
+    }
+
+    /// The byte size of one row: every cell's base character plus its combining
+    /// continuations, summed as UTF-8 lengths. This is the metric the byte cap
+    /// is measured against.
+    pub fn line_bytes(&self, line: &[Cell]) -> usize {
+        line.iter()
+            .map(|cell| {
+                cell.ch().len_utf8()
+                    + cell
+                        .combining()
+                        .iter()
+                        .map(|combining| combining.len_utf8())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Append `line` as the newest row, then drop oldest rows from the front
+    /// until both caps hold, tallying each drop. The byte cap never drops the
+    /// sole remaining row (`lines.len() > 1` guard), so a single row larger than
+    /// `max_bytes` is retained rather than discarded the instant it arrives; the
+    /// line cap has no such guard.
+    pub fn push_line(&mut self, line: Vec<Cell>) {
+        let new_bytes = self.line_bytes(&line);
+        self.lines.push_back(line);
+        self.byte_total += new_bytes;
+
+        while self.lines.len() > self.max_lines
+            || (self.byte_total > self.max_bytes && self.lines.len() > 1)
+        {
+            let oldest_line = self.lines.pop_front().unwrap();
+            let oldest_bytes = self.line_bytes(&oldest_line);
+
+            self.dropped_lines += 1;
+            self.dropped_bytes += oldest_bytes as u64;
+            self.byte_total -= oldest_bytes;
+        }
+    }
+
+    /// The number of rows currently retained.
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Whether the buffer retains no rows.
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// The retained rows, oldest at the front. Lets the renderer compose a
+    /// scrolled-back view above the live grid.
+    pub fn lines(&self) -> &VecDeque<Vec<Cell>> {
+        &self.lines
+    }
+
+    /// Cumulative count of rows dropped to honor the caps, for the runtime's
+    /// [`PaneScrollbackTruncated`](tile_core::event::PaneScrollbackTruncated)
+    /// reporting.
+    pub fn dropped_lines(&self) -> u64 {
+        self.dropped_lines
+    }
+
+    /// Cumulative bytes dropped to honor the caps.
+    pub fn dropped_bytes(&self) -> u64 {
+        self.dropped_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests;
