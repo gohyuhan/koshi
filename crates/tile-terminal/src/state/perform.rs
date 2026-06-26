@@ -6,9 +6,11 @@
 //! CJK/emoji span two cells; grapheme continuations — combining marks, ZWJ
 //! emoji sequences, variation selectors, skin-tone modifiers, flags — fold onto
 //! the base cell, with variation-selector width promotion), `execute` (C0 control
-//! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
-//! scroll up/down, the DECSTBM scroll region, and the DEC private modes for the
-//! alternate screen and cursor visibility), `esc_dispatch` (cursor save/restore
+//! bytes), `csi_dispatch` (relative + absolute cursor moves, line-relative
+//! moves, forward/back tab stops, erase in display/line and erase-char, SGR,
+//! insert/delete char & line, scroll up/down, the DECSTBM scroll region, and
+//! the DEC private modes for the alternate screen and cursor visibility),
+//! `esc_dispatch` (cursor save/restore
 //! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title and the
 //! OSC 7 working-directory report). The
 //! device-control-string callbacks `hook`/`unhook` clear the in-progress
@@ -155,6 +157,20 @@ impl TerminalState {
                 self.active_cursor_mut().pending_wrap = false;
             }
         }
+    }
+
+    /// Move the cursor to an absolute (`row`, `col`), clamped into the active
+    /// grid, and clear the deferred-wrap latch — the single chokepoint every
+    /// absolute cursor placement (CUP/HVP, CHA/HPA, VPA, CNL, CPL) routes
+    /// through. Centralizing here is deliberate: origin mode (DECOM) and
+    /// left/right margins (DECSLRM) become a one-place change when they land,
+    /// the same way alacritty funnels its absolute moves through one `goto`.
+    fn goto(&mut self, row: u16, col: u16) {
+        let (rows, cols) = self.active_grid().dimensions();
+        let cursor = self.active_cursor_mut();
+        cursor.row = row.min(rows.saturating_sub(1));
+        cursor.col = col.min(cols.saturating_sub(1));
+        cursor.pending_wrap = false;
     }
 
     /// Reset the alternate screen to a brand-new, blank state — the single
@@ -590,9 +606,8 @@ impl vte::Perform for TerminalState {
             0x09 => {
                 let (_, cols) = self.active_grid().dimensions();
                 let last_col = cols.saturating_sub(1);
-                let to_next_stop = 8 - (self.active_cursor().col % 8);
-                let next_tab = self.active_cursor().col.saturating_add(to_next_stop);
-                self.active_cursor_mut().col = next_tab.min(last_col);
+                let col = self.active_cursor().col;
+                self.active_cursor_mut().col = next_tab_stop(col, last_col);
                 self.active_cursor_mut().pending_wrap = false;
             }
             // BEL: discarded.
@@ -795,15 +810,17 @@ impl vte::Perform for TerminalState {
                     self.active_cursor().row.saturating_sub(move_count(params));
                 self.active_cursor_mut().pending_wrap = false;
             }
-            // CUD — cursor down, clamped to the last row.
-            'B' => {
+            // CUD / VPR — cursor down, clamped to the last row (VPR `e` is the
+            // same vertical move as CUD).
+            'B' | 'e' => {
                 let n = move_count(params);
                 self.active_cursor_mut().row =
                     self.active_cursor().row.saturating_add(n).min(last_row);
                 self.active_cursor_mut().pending_wrap = false;
             }
-            // CUF — cursor forward, clamped to the last column.
-            'C' => {
+            // CUF / HPR — cursor forward, clamped to the last column (HPR `a` is
+            // the same horizontal move as CUF).
+            'C' | 'a' => {
                 let n = move_count(params);
                 self.active_cursor_mut().col =
                     self.active_cursor().col.saturating_add(n).min(last_col);
@@ -816,10 +833,53 @@ impl vte::Perform for TerminalState {
                 self.active_cursor_mut().pending_wrap = false;
             }
             // CUP / HVP — absolute position; 1-based row;col arguments mapped to
-            // 0-based coordinates and clamped into the grid.
-            'H' | 'f' => {
-                self.active_cursor_mut().row = coord_param(params, 0).min(last_row);
-                self.active_cursor_mut().col = coord_param(params, 1).min(last_col);
+            // 0-based coordinates and clamped into the grid (via `goto`).
+            'H' | 'f' => self.goto(coord_param(params, 0), coord_param(params, 1)),
+            // CHA / HPA — absolute column on the current row; 1-based → 0-based.
+            'G' | '`' => {
+                let row = self.active_cursor().row;
+                self.goto(row, coord_param(params, 0));
+            }
+            // VPA — absolute row in the current column; 1-based → 0-based.
+            'd' => {
+                let col = self.active_cursor().col;
+                self.goto(coord_param(params, 0), col);
+            }
+            // CNL — cursor next line: n rows down (clamped, no scroll) to col 0.
+            'E' => {
+                let row = self.active_cursor().row.saturating_add(move_count(params));
+                self.goto(row, 0);
+            }
+            // CPL — cursor previous line: n rows up (clamped, no scroll) to col 0.
+            'F' => {
+                let row = self.active_cursor().row.saturating_sub(move_count(params));
+                self.goto(row, 0);
+            }
+            // CHT — cursor forward tabulation: advance n tab stops (every 8
+            // columns until configurable stops land), clamped to the last
+            // column; a cursor already at the last column does not move.
+            'I' => {
+                let mut col = self.active_cursor().col;
+                for _ in 0..move_count(params) {
+                    if col >= last_col {
+                        break;
+                    }
+                    col = next_tab_stop(col, last_col);
+                }
+                self.active_cursor_mut().col = col;
+                self.active_cursor_mut().pending_wrap = false;
+            }
+            // CBT — cursor backward tabulation: retreat n tab stops, floored at
+            // column 0; a cursor already at column 0 does not move.
+            'Z' => {
+                let mut col = self.active_cursor().col;
+                for _ in 0..move_count(params) {
+                    if col == 0 {
+                        break;
+                    }
+                    col = prev_tab_stop(col);
+                }
+                self.active_cursor_mut().col = col;
                 self.active_cursor_mut().pending_wrap = false;
             }
             // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
@@ -887,6 +947,20 @@ impl vte::Perform for TerminalState {
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
+                self.normalize_wide_pairs(r);
+            }
+            // ECH — erase n cells in place from the cursor (BCE background fill,
+            // no shift of the rest of the line), then repair any wide-glyph pair
+            // the erase split. Unlike EL 0, ECH erases even when a wrap is
+            // pending — the parked last-column glyph is cleared — and leaves the
+            // wrap latch untouched, matching alacritty's `erase_chars` (which
+            // neither early-returns on the latch nor clears it).
+            'X' => {
+                let n = move_count(params);
+                let fill = self.style.bg_fill();
+                let (r, c) = (self.active_cursor().row, self.active_cursor().col);
+                let end = c.saturating_add(n).min(cols);
+                self.active_grid_mut().clear_line(r, c, end, fill);
                 self.normalize_wide_pairs(r);
             }
             // SGR — set graphic rendition: update the pen colors and text
@@ -1197,6 +1271,21 @@ fn coord_param(params: &vte::Params, n: usize) -> u16 {
         .filter(|&v| v != 0)
         .unwrap_or(1)
         .saturating_sub(1)
+}
+
+/// The next 8-column tab stop strictly after `col`, clamped to `last_col`. With
+/// stops at every multiple of 8, this rounds `col` up to the next multiple (a
+/// column already on a stop still advances a full 8), bounded by the last
+/// column. A later task will replace the fixed 8-grid with a configurable stop
+/// table; this is the single place the forward-stop math lives (HT and CHT share it).
+fn next_tab_stop(col: u16, last_col: u16) -> u16 {
+    col.saturating_add(8 - col % 8).min(last_col)
+}
+
+/// The previous 8-column tab stop strictly before `col`, floored at column 0
+/// (itself a stop). A column already on a stop retreats a full 8.
+fn prev_tab_stop(col: u16) -> u16 {
+    col.saturating_sub(1) / 8 * 8
 }
 
 /// The primary value of the iterator's next CSI parameter, or `None` when the
