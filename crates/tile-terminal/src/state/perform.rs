@@ -16,7 +16,7 @@
 //! UTF-8 upstream, so `print` receives a ready `char`.
 
 use crate::grid::state::Cell;
-use crate::state::{SavedCursor, Screen, TerminalState};
+use crate::state::{MouseEncoding, MouseTracking, SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
 use unicode_segmentation::GraphemeCursor;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -716,6 +716,57 @@ impl vte::Perform for TerminalState {
                     ('l', 1048) => self.restore_cursor(),
                     // DECRST `?25` (DECTCEM) — hide the cursor.
                     ('l', 25) => self.active_cursor_mut().is_visible = false,
+                    // `?2004` — bracketed paste: wrap pasted text in
+                    // `ESC[200~`…`ESC[201~` so the app distinguishes typing.
+                    ('h', 2004) => self.modes.bracketed_paste = true,
+                    ('l', 2004) => self.modes.bracketed_paste = false,
+                    // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`). The
+                    // four levels are mutually exclusive, so each enable replaces
+                    // the prior one (matching alacritty, whose set arm clears the
+                    // other mouse bits before setting its own). A reset disables
+                    // reporting only when it names the *active* level; resetting a
+                    // mode that is not active is a no-op (falls through to `_`),
+                    // since alacritty's unset clears only that mode's own bit.
+                    ('h', 9) => self.modes.mouse_tracking = MouseTracking::X10,
+                    ('h', 1000) => self.modes.mouse_tracking = MouseTracking::Normal,
+                    ('h', 1002) => self.modes.mouse_tracking = MouseTracking::ButtonMotion,
+                    ('h', 1003) => self.modes.mouse_tracking = MouseTracking::AnyMotion,
+                    ('l', 9) if self.modes.mouse_tracking == MouseTracking::X10 => {
+                        self.modes.mouse_tracking = MouseTracking::Off;
+                    }
+                    ('l', 1000) if self.modes.mouse_tracking == MouseTracking::Normal => {
+                        self.modes.mouse_tracking = MouseTracking::Off;
+                    }
+                    ('l', 1002) if self.modes.mouse_tracking == MouseTracking::ButtonMotion => {
+                        self.modes.mouse_tracking = MouseTracking::Off;
+                    }
+                    ('l', 1003) if self.modes.mouse_tracking == MouseTracking::AnyMotion => {
+                        self.modes.mouse_tracking = MouseTracking::Off;
+                    }
+                    // Mouse report encoding (`?1005`/`?1006`/`?1015`), orthogonal
+                    // to the tracking level and mutually exclusive among
+                    // themselves (each enable replaces the prior — matching
+                    // alacritty, whose set arm removes the other encoding bit
+                    // before setting its own). A reset returns to the default
+                    // encoding only when it names the *active* encoding; resetting
+                    // an encoding that is not active is a no-op (falls through to
+                    // `_`), since alacritty's unset clears only that bit.
+                    ('h', 1005) => self.modes.mouse_encoding = MouseEncoding::Utf8,
+                    ('h', 1006) => self.modes.mouse_encoding = MouseEncoding::Sgr,
+                    ('h', 1015) => self.modes.mouse_encoding = MouseEncoding::Urxvt,
+                    ('l', 1005) if self.modes.mouse_encoding == MouseEncoding::Utf8 => {
+                        self.modes.mouse_encoding = MouseEncoding::Default;
+                    }
+                    ('l', 1006) if self.modes.mouse_encoding == MouseEncoding::Sgr => {
+                        self.modes.mouse_encoding = MouseEncoding::Default;
+                    }
+                    ('l', 1015) if self.modes.mouse_encoding == MouseEncoding::Urxvt => {
+                        self.modes.mouse_encoding = MouseEncoding::Default;
+                    }
+                    // `?1007` — alternate-screen scroll: wheel motion becomes
+                    // cursor arrow keys on the alternate screen.
+                    ('h', 1007) => self.modes.alt_scroll = true,
+                    ('l', 1007) => self.modes.alt_scroll = false,
                     // Any other DEC private mode is not handled yet.
                     _ => {}
                 }
@@ -816,7 +867,12 @@ impl vte::Perform for TerminalState {
                 let fill = self.style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 match first_param(params).unwrap_or(0) {
-                    // Cursor to end of line.
+                    // Cursor to end of line. With a wrap pending the cursor is
+                    // logically past the last column, so there is nothing to its
+                    // right to erase — matching alacritty's `clear_line`, which
+                    // returns early here and preserves the parked last-column
+                    // glyph.
+                    0 if self.active_cursor().pending_wrap => {}
                     0 => self.active_grid_mut().clear_line(r, c, cols, fill),
                     // Start of line through the cursor column inclusive.
                     1 => self
@@ -1095,10 +1151,14 @@ fn extended_color<'a>(first: &[u16], iter: &mut impl Iterator<Item = &'a [u16]>)
     if first.len() > 1 {
         // Colon form: selector at first[1], its values follow in the same slice.
         match first.get(1).copied()? {
-            // `38:5:n` — 256-palette index sits at first[2]. An index that does
+            // `38:5:n` — 256-palette index is the final subparameter. Reading
+            // the last (not `first[2]`) skips a leading empty colorspace slot in
+            // the malformed `38:5::n` form (which `vte` stores as a `0`), keeping
+            // the index symmetric with the RGB branch below; `len >= 3` requires
+            // the index to be present so `38:5` alone rejects. An index that does
             // not fit a u8 (> 255) is out of range, so reject the color (`None`,
             // pen unchanged), matching vte's own `ansi.rs` (`u8::try_from(..).ok()?`).
-            5 => Some(Color::Indexed(u8::try_from(*first.get(2)?).ok()?)),
+            5 if first.len() >= 3 => Some(Color::Indexed(u8::try_from(*first.last()?).ok()?)),
             2 => {
                 // The colon RGB form may carry a leading colorspace id
                 // (`38:2::r:g:b`, whose empty field `vte` stores as `0`), so the

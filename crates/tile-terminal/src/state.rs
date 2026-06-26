@@ -95,12 +95,59 @@ impl<'a> ClippedRow<'a> {
     }
 }
 
-/// Terminal mode flags (bracketed paste, mouse tracking, …).
-///
-/// Placeholder: the individual mode fields are added later; it exists now so
-/// [`TerminalState`] can own it.
+/// Which mouse events the running app has asked to be reported, set via the DEC
+/// private modes `?9`/`?1000`/`?1002`/`?1003`. The levels form a ladder (each
+/// reports strictly more than the one above); an app enables exactly one, and
+/// the last enabling sequence wins. Independent of [`MouseEncoding`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TerminalModes {}
+pub enum MouseTracking {
+    /// No mouse reporting (default).
+    #[default]
+    Off,
+    /// `?9` X10 compatibility — button presses only, no releases.
+    X10,
+    /// `?1000` normal tracking — button presses and releases.
+    Normal,
+    /// `?1002` button-event tracking — presses, releases, and motion while a
+    /// button is held (drag).
+    ButtonMotion,
+    /// `?1003` any-event tracking — all motion, whether or not a button is held.
+    AnyMotion,
+}
+
+/// How a mouse report's coordinate bytes are encoded, set via the DEC private
+/// modes `?1005`/`?1006`/`?1015`. Orthogonal to [`MouseTracking`]: an app sets a
+/// tracking level and an encoding independently (e.g. `?1000h` then `?1006h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEncoding {
+    /// Legacy X10 single-byte coordinates (default).
+    #[default]
+    Default,
+    /// `?1005` UTF-8 extended coordinates.
+    Utf8,
+    /// `?1006` SGR form (`CSI < … M`/`m`) — the encoding modern apps use.
+    Sgr,
+    /// `?1015` urxvt decimal form.
+    Urxvt,
+}
+
+/// Terminal mode flags the renderer and input/mouse layers consult: bracketed
+/// paste (`?2004`), the mouse [tracking][MouseTracking] level and
+/// [encoding][MouseEncoding] (`?9`/`?1000`/`?1002`/`?1003` and
+/// `?1005`/`?1006`/`?1015`), and alternate-scroll (`?1007`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalModes {
+    /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
+    /// typed input from a paste.
+    pub bracketed_paste: bool,
+    /// Which mouse events are reported; see [`MouseTracking`].
+    mouse_tracking: MouseTracking,
+    /// How mouse reports are encoded; see [`MouseEncoding`].
+    mouse_encoding: MouseEncoding,
+    /// `?1007` — on the alternate screen, translate wheel motion into cursor
+    /// arrow keys instead of emitting a mouse report.
+    alt_scroll: bool,
+}
 
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +211,7 @@ impl TerminalState {
             primary_cursor: terminal_cursor,
             alternate_cursor: terminal_cursor,
             style: Style::default(),
-            modes: TerminalModes {},
+            modes: TerminalModes::default(),
             title: None,
             scrollback: Scrollback::new(ScrollbackLimit::default()),
             primary_scroll_region: None,
@@ -228,6 +275,30 @@ impl TerminalState {
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
     pub fn cursor_visible(&self) -> bool {
         self.active_cursor().is_visible
+    }
+
+    /// Whether bracketed-paste mode (`?2004`) is active — the input layer reads
+    /// this to decide whether to bracket a paste in `ESC[200~`…`ESC[201~`.
+    pub fn bracketed_paste(&self) -> bool {
+        self.modes.bracketed_paste
+    }
+
+    /// The active mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`) — the
+    /// mouse layer reads this to decide which events to report to the app.
+    pub fn mouse_tracking(&self) -> MouseTracking {
+        self.modes.mouse_tracking
+    }
+
+    /// The active mouse report encoding (`?1005`/`?1006`/`?1015`) — the mouse
+    /// layer reads this to format the coordinates of a report.
+    pub fn mouse_encoding(&self) -> MouseEncoding {
+        self.modes.mouse_encoding
+    }
+
+    /// Whether alternate-scroll mode (`?1007`) is active — the mouse layer reads
+    /// this to translate wheel motion into arrow keys on the alternate screen.
+    pub fn alt_scroll(&self) -> bool {
+        self.modes.alt_scroll
     }
 
     /// The pane's scrollback history. The runtime reads its truncation tallies

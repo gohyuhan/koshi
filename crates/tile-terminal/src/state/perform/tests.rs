@@ -350,6 +350,17 @@ fn el_0_erases_from_the_cursor_to_the_end_of_the_line() {
 }
 
 #[test]
+fn el_0_is_a_noop_when_a_wrap_is_pending() {
+    // After printing into the last column the cursor parks there with a pending
+    // wrap, so it is logically past the line end: EL 0 (cursor-to-end) erases
+    // nothing and the parked last-column glyph survives (alacritty parity).
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde"); // 'e' lands at col 4 with the wrap pending
+    advance(&mut state, b"\x1b[K"); // EL 0
+    assert_eq!(row_text(&state, 0), "abcde"); // 'e' preserved, not erased
+}
+
+#[test]
 fn el_1_erases_from_the_start_through_the_cursor() {
     let mut state = state(5, 2);
     print_str(&mut state, "abcde");
@@ -542,6 +553,17 @@ fn sgr_truecolor_background_semicolon_form() {
 fn sgr_256_color_colon_form() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5:196m");
+    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+}
+
+#[test]
+fn sgr_256_color_colon_form_with_empty_colorspace_id() {
+    // `38:5::196` — a stray empty colorspace slot before the index (stored by vte
+    // as a leading `0`). The index is read from the final subparameter, so the
+    // slot is skipped and the palette index is honored (symmetric with the RGB
+    // colon form above).
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[38:5::196m");
     assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
 }
 
@@ -2379,4 +2401,139 @@ fn dl_below_row_0_is_an_interior_delete_and_does_not_feed() {
     state.active_cursor_mut().row = 1; // interior delete, nothing leaves the top
     advance(&mut state, b"\x1b[M");
     assert!(state.scrollback().is_empty());
+}
+
+// --- Bracketed paste + mouse mode state (DEC private modes) ---
+
+#[test]
+fn modes_start_at_their_defaults() {
+    let state = state(5, 3);
+    assert!(!state.bracketed_paste());
+    assert_eq!(state.mouse_tracking(), MouseTracking::Off);
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Default);
+    assert!(!state.alt_scroll());
+}
+
+#[test]
+fn bracketed_paste_enables_and_disables() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?2004h");
+    assert!(state.bracketed_paste());
+    advance(&mut state, b"\x1b[?2004l");
+    assert!(!state.bracketed_paste());
+}
+
+#[test]
+fn each_mouse_tracking_mode_sets_its_level() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?9h");
+    assert_eq!(state.mouse_tracking(), MouseTracking::X10);
+    advance(&mut state, b"\x1b[?1000h");
+    assert_eq!(state.mouse_tracking(), MouseTracking::Normal);
+    advance(&mut state, b"\x1b[?1002h");
+    assert_eq!(state.mouse_tracking(), MouseTracking::ButtonMotion);
+    advance(&mut state, b"\x1b[?1003h");
+    assert_eq!(state.mouse_tracking(), MouseTracking::AnyMotion);
+}
+
+#[test]
+fn disabling_the_active_mouse_tracking_mode_turns_it_off() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1000h");
+    advance(&mut state, b"\x1b[?1000l");
+    assert_eq!(state.mouse_tracking(), MouseTracking::Off);
+}
+
+#[test]
+fn a_later_mouse_tracking_mode_replaces_the_earlier_one() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1000h"); // Normal
+    advance(&mut state, b"\x1b[?1003h"); // AnyMotion supersedes
+    assert_eq!(state.mouse_tracking(), MouseTracking::AnyMotion);
+}
+
+#[test]
+fn disabling_a_non_active_tracking_mode_leaves_the_active_one() {
+    // A reset turns reporting off only when it names the active level. Resetting
+    // a mode that is not the active one is a no-op, matching alacritty (whose
+    // unset clears only that mode's own bit, leaving the active mode set).
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1003h"); // AnyMotion
+    advance(&mut state, b"\x1b[?1000l"); // resets a different mode number
+    assert_eq!(state.mouse_tracking(), MouseTracking::AnyMotion);
+}
+
+#[test]
+fn disabling_the_active_tracking_mode_after_a_replace_turns_it_off() {
+    // After a replace (`?1000h` then `?1003h` -> AnyMotion), resetting the now-
+    // active mode (`?1003l`) turns reporting off — the superseded `?1000` is gone.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1000h"); // Normal
+    advance(&mut state, b"\x1b[?1003h"); // AnyMotion supersedes
+    advance(&mut state, b"\x1b[?1003l"); // reset the active mode
+    assert_eq!(state.mouse_tracking(), MouseTracking::Off);
+}
+
+#[test]
+fn each_mouse_encoding_mode_sets_its_form_and_resets_to_default() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1005h");
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Utf8);
+    advance(&mut state, b"\x1b[?1006h");
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Sgr);
+    advance(&mut state, b"\x1b[?1015h");
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Urxvt);
+    advance(&mut state, b"\x1b[?1015l"); // reset the active encoding
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Default);
+}
+
+#[test]
+fn disabling_a_non_active_encoding_leaves_the_active_one() {
+    // A reset returns to the default only when it names the active encoding;
+    // resetting a different encoding is a no-op, matching alacritty (its unset
+    // clears only that encoding's own bit, leaving the active one set).
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1005h"); // Utf8 active
+    advance(&mut state, b"\x1b[?1006l"); // reset a non-active encoding
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Utf8);
+}
+
+#[test]
+fn disabling_the_active_encoding_after_a_replace_returns_to_default() {
+    // After a replace (`?1005h` then `?1006h` -> Sgr), resetting the now-active
+    // encoding (`?1006l`) returns to Default — the superseded Utf8 is gone.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1005h"); // Utf8
+    advance(&mut state, b"\x1b[?1006h"); // Sgr supersedes
+    advance(&mut state, b"\x1b[?1006l"); // reset the active encoding
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Default);
+}
+
+#[test]
+fn mouse_tracking_and_encoding_are_independent() {
+    // The orthogonal axes the two-enum model exists for: enabling SGR encoding
+    // must not clear the tracking level, and vice versa.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1000h"); // tracking: Normal
+    advance(&mut state, b"\x1b[?1006h"); // encoding: SGR
+    assert_eq!(state.mouse_tracking(), MouseTracking::Normal);
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Sgr);
+}
+
+#[test]
+fn one_decset_list_sets_tracking_and_encoding_together() {
+    // The common real handshake — tracking and encoding in a single sequence.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1000;1006h");
+    assert_eq!(state.mouse_tracking(), MouseTracking::Normal);
+    assert_eq!(state.mouse_encoding(), MouseEncoding::Sgr);
+}
+
+#[test]
+fn alt_scroll_enables_and_disables() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1007h");
+    assert!(state.alt_scroll());
+    advance(&mut state, b"\x1b[?1007l");
+    assert!(!state.alt_scroll());
 }
