@@ -2739,3 +2739,330 @@ fn alt_scroll_enables_and_disables() {
     advance(&mut state, b"\x1b[?1007l");
     assert!(!state.alt_scroll());
 }
+
+// --- Absolute / relative cursor positioning, tab moves, erase-char ---
+
+#[test]
+fn cha_sets_an_absolute_one_based_column() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[5G"); // column 5 -> 0-based 4, row unchanged
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 4));
+}
+
+#[test]
+fn cha_clamps_past_the_last_column() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[99G");
+    assert_eq!(state.active_cursor().col, 9); // clamped to the last column
+}
+
+#[test]
+fn cha_with_no_argument_homes_the_column() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[5;5H"); // (4, 4)
+    advance(&mut state, b"\x1b[G"); // default 1 -> column 0
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (4, 0));
+}
+
+#[test]
+fn hpa_backtick_is_the_same_as_cha() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[5\x60"); // HPA `CSI 5 \`` -> column 4
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 4));
+}
+
+#[test]
+fn cha_clears_the_pending_wrap_latch() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks at the last column with the latch set
+    assert!(state.active_cursor().pending_wrap);
+    advance(&mut state, b"\x1b[2G"); // column 2 -> 0-based 1
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 1);
+    assert!(!cur.pending_wrap);
+}
+
+#[test]
+fn vpa_sets_an_absolute_one_based_row() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[1;4H"); // (0, 3)
+    advance(&mut state, b"\x1b[3d"); // row 3 -> 0-based 2, column unchanged
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 3));
+}
+
+#[test]
+fn vpa_clamps_past_the_last_row() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[99d");
+    assert_eq!(state.active_cursor().row, 4); // clamped to the last row
+}
+
+#[test]
+fn hpr_moves_forward_like_cuf_and_clamps() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[1;3H"); // column 2
+    advance(&mut state, b"\x1b[2a"); // HPR forward 2 -> column 4
+    assert_eq!(state.active_cursor().col, 4);
+    advance(&mut state, b"\x1b[99a"); // clamps to the last column
+    assert_eq!(state.active_cursor().col, 9);
+}
+
+#[test]
+fn vpr_moves_down_like_cud_and_clamps() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[2;1H"); // row 1
+    advance(&mut state, b"\x1b[2e"); // VPR down 2 -> row 3
+    assert_eq!(state.active_cursor().row, 3);
+    advance(&mut state, b"\x1b[99e"); // clamps to the last row
+    assert_eq!(state.active_cursor().row, 4);
+}
+
+#[test]
+fn cnl_moves_down_to_column_zero() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[2;4H"); // (1, 3)
+    advance(&mut state, b"\x1b[1E"); // next line: down 1, column 0
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 0));
+}
+
+#[test]
+fn cnl_clamps_to_the_last_row_without_scrolling() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state); // rows "abc" / "def" / "ghi"
+    advance(&mut state, b"\x1b[3;2H"); // (2, 1) — the last row
+    advance(&mut state, b"\x1b[5E"); // down 5 clamps; no scroll
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 0));
+    assert_eq!(glyph(&state, 0, 0), Some('a')); // content did not scroll up
+}
+
+#[test]
+fn cpl_moves_up_to_column_zero() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;4H"); // (2, 3)
+    advance(&mut state, b"\x1b[1F"); // previous line: up 1, column 0
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (1, 0));
+}
+
+#[test]
+fn cpl_clamps_at_row_zero_without_scrolling() {
+    let mut state = state(3, 3);
+    fill_3x3(&mut state);
+    advance(&mut state, b"\x1b[1;2H"); // (0, 1) — the top row
+    advance(&mut state, b"\x1b[5F"); // up 5 clamps; no scroll
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (0, 0));
+    assert_eq!(glyph(&state, 2, 0), Some('g')); // content did not scroll down
+}
+
+#[test]
+fn cnl_clears_the_pending_wrap_latch() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks with the latch set
+    advance(&mut state, b"\x1b[1E");
+    assert!(!state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn cht_advances_to_the_next_tab_stop() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[I"); // default 1 stop, from column 0 -> 8
+    assert_eq!(state.active_cursor().col, 8);
+}
+
+#[test]
+fn cht_from_a_tab_stop_advances_a_full_eight() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[9G"); // column 8 (a stop)
+    advance(&mut state, b"\x1b[I");
+    assert_eq!(state.active_cursor().col, 16);
+}
+
+#[test]
+fn cht_count_advances_multiple_stops() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[2I"); // two stops from column 0 -> 8 -> 16
+    assert_eq!(state.active_cursor().col, 16);
+}
+
+#[test]
+fn cht_clamps_to_the_last_column() {
+    let mut state = state(20, 3); // last column 19
+    advance(&mut state, b"\x1b[9I"); // far more stops than fit
+    assert_eq!(state.active_cursor().col, 19);
+}
+
+#[test]
+fn cht_at_the_last_column_stays_put() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[20G"); // last column (19)
+    advance(&mut state, b"\x1b[I");
+    assert_eq!(state.active_cursor().col, 19);
+}
+
+#[test]
+fn cbt_retreats_to_the_previous_tab_stop() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[11G"); // column 10
+    advance(&mut state, b"\x1b[Z");
+    assert_eq!(state.active_cursor().col, 8);
+}
+
+#[test]
+fn cbt_from_a_tab_stop_retreats_a_full_eight() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[17G"); // column 16 (a stop)
+    advance(&mut state, b"\x1b[Z");
+    assert_eq!(state.active_cursor().col, 8);
+}
+
+#[test]
+fn cbt_at_column_zero_stays_put() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[Z");
+    assert_eq!(state.active_cursor().col, 0);
+}
+
+#[test]
+fn cbt_count_retreats_multiple_stops() {
+    let mut state = state(20, 3);
+    advance(&mut state, b"\x1b[18G"); // column 17
+    advance(&mut state, b"\x1b[2Z"); // 17 -> 16 -> 8
+    assert_eq!(state.active_cursor().col, 8);
+}
+
+#[test]
+fn cbt_clears_the_pending_wrap_latch() {
+    let mut state = state(20, 2);
+    print_str(&mut state, "aaaaaaaaaaaaaaaaaaaa"); // 20 chars -> parks at column 19
+    assert!(state.active_cursor().pending_wrap);
+    advance(&mut state, b"\x1b[Z"); // 19 -> 16
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 16);
+    assert!(!cur.pending_wrap);
+}
+
+#[test]
+fn ech_erases_n_cells_in_place_without_shifting() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[2G"); // column 1
+    advance(&mut state, b"\x1b[2X"); // erase 2 cells in place
+    assert_eq!(row_text(&state, 0), "a  de "); // d, e stay put; no shift
+}
+
+#[test]
+fn ech_with_no_argument_erases_one_cell() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[2G"); // column 1
+    advance(&mut state, b"\x1b[X"); // default 1 cell
+    assert_eq!(row_text(&state, 0), "a cde ");
+}
+
+#[test]
+fn ech_clamps_the_count_to_the_line_end() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abc");
+    advance(&mut state, b"\x1b[2G"); // column 1
+    advance(&mut state, b"\x1b[99X"); // far past the line end -> clamps
+    assert_eq!(row_text(&state, 0), "a    ");
+}
+
+#[test]
+fn ech_fills_with_the_current_background_only() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;31;44m"); // bold + fg red + bg blue
+    advance(&mut state, b"\x1b[3X"); // erase 3 cells from column 0
+    let fill = styled(|s| s.set_bg(Color::Indexed(4))); // background only — bold + fg dropped
+    assert!((0..3).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
+}
+
+#[test]
+fn ech_leaves_the_pending_wrap_latch_set() {
+    // Unlike EL 0 (which no-ops on a pending wrap), ECH erases the parked
+    // last-column glyph and leaves the latch set, so the next print still wraps.
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks at column 2 with the latch
+    assert!(state.active_cursor().pending_wrap);
+    advance(&mut state, b"\x1b[X"); // erases the parked glyph
+    assert_eq!(glyph(&state, 0, 2), Some(' '));
+    assert!(state.active_cursor().pending_wrap); // latch untouched
+    state.print('d'); // honors the surviving latch -> wraps to the next row
+    assert_eq!(glyph(&state, 1, 0), Some('d'));
+}
+
+#[test]
+fn ech_repairs_a_wide_glyph_whose_base_it_erases() {
+    let mut state = state(6, 2);
+    state.print('中'); // wide base at column 0, continuation at column 1
+    advance(&mut state, b"\x1b[1G"); // column 0 (the base)
+    advance(&mut state, b"\x1b[X"); // erase the base
+    assert_eq!(glyph(&state, 0, 0), Some(' '));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    // The orphaned continuation is repaired to a blank narrow cell.
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 1), Some(' '));
+}
+
+#[test]
+fn ech_starting_on_a_wide_continuation_repairs_the_base() {
+    let mut state = state(6, 2);
+    state.print('中'); // wide base at column 0, continuation at column 1
+    advance(&mut state, b"\x1b[2G"); // column 1 (the continuation)
+    advance(&mut state, b"\x1b[X"); // erase the continuation
+                                    // The now-orphaned wide base is repaired to a blank narrow cell.
+    assert_eq!(glyph(&state, 0, 0), Some(' '));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(1));
+    assert_eq!(glyph(&state, 0, 1), Some(' '));
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(1)); // pair fully unwound
+}
+
+#[test]
+fn cup_clears_the_pending_wrap_latch_through_goto() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks with the latch set
+    advance(&mut state, b"\x1b[1;1H"); // home, via the shared goto path
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (0, 0));
+    assert!(!cur.pending_wrap);
+}
+
+#[test]
+fn vpa_clears_the_pending_wrap_latch() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks at (0, 2) with the latch set
+    advance(&mut state, b"\x1b[2d"); // row 2 -> 0-based 1, column unchanged
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (1, 2));
+    assert!(!cur.pending_wrap);
+}
+
+#[test]
+fn cpl_clears_the_pending_wrap_latch() {
+    let mut state = state(3, 2);
+    print_str(&mut state, "abc"); // parks with the latch set
+    advance(&mut state, b"\x1b[1F"); // previous line clamps to row 0, column 0
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (0, 0));
+    assert!(!cur.pending_wrap);
+}
+
+#[test]
+fn cht_clears_the_pending_wrap_latch() {
+    let mut state = state(20, 2);
+    print_str(&mut state, "aaaaaaaaaaaaaaaaaaaa"); // 20 chars -> parks at column 19
+    assert!(state.active_cursor().pending_wrap);
+    advance(&mut state, b"\x1b[I"); // already at the last column: stays, but clears the latch
+    let cur = state.active_cursor();
+    assert_eq!(cur.col, 19);
+    assert!(!cur.pending_wrap);
+}
