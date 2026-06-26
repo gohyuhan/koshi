@@ -1,0 +1,51 @@
+# cargo-deny configuration. Audits the dependency tree for security
+# advisories, license compliance, banned/duplicate crates, and crate
+# sources. Run locally with `cargo deny check`; CI runs it via the
+# EmbarkStudios/cargo-deny-action job in .github/workflows/ci.yaml.
+
+[graph]
+# Resolve with every feature enabled so a feature-gated (and possibly
+# platform-specific) dependency is never silently skipped. Matches the
+# `--all-features` used by the CI test job.
+all-features = true
+
+[advisories]
+# Pull from the default RustSec advisory database. To consciously accept a
+# specific finding, add its advisory ID here with a justifying comment.
+ignore = []
+
+[licenses]
+# SPDX identifiers permitted anywhere in the dependency tree. Derived from
+# the current tree via `cargo metadata`. Extend when a new dependency
+# introduces a license not listed here (`cargo deny check licenses` reports
+# the gap). MPL-2.0 is file-level (weak) copyleft, pulled in transitively
+# by `option-ext`.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+# Allow-list entries not matched by the current tree are intentional
+# headroom for common licenses, so don't warn about them.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions of one crate bloat the build; surface them as a
+# warning rather than a hard failure.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only crates.io is permitted; flag anything from an unknown registry or
+# git source.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -14,13 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Installs the toolchain pinned in rust-toolchain.toml (channel +
+      # rustfmt/clippy components) and configures build caching. No version
+      # is named here, so the pin file stays the single source of truth.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+          rustflags: "" # keep the workflow-level RUSTFLAGS (-D warnings)
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -37,27 +37,41 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       - name: Dependency-direction guard
         run: cargo xtask dep-guard
 
-  test:
-    name: test
+  cargo-deny:
+    name: cargo-deny
     runs-on: ubuntu-latest
     needs: dep-guard
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Audits dependencies against deny.toml. Pin the compiler to the
+      # project version so cargo-deny reads the v4 Cargo.lock with a modern
+      # cargo (the action image ships an older default).
+      - name: Audit dependencies
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.96.0"
+          command: check advisories bans licenses sources
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: cargo-deny
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       - name: Check
         run: cargo check --workspace --all-targets --locked
