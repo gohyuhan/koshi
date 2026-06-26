@@ -3,6 +3,7 @@
 //! control bytes.
 
 use super::*;
+use std::path::{Path, PathBuf};
 use tile_core::process::PtySize;
 use vte::Perform;
 
@@ -1170,6 +1171,207 @@ fn osc_title_accepts_a_string_terminator() {
 fn the_title_is_none_until_an_osc_sets_it() {
     let state = state(5, 3);
     assert_eq!(state.title(), None);
+}
+
+#[test]
+fn osc_7_reports_the_working_directory() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///Users/me/proj\x07");
+    let cwd = state.current_cwd().expect("cwd set");
+    assert_eq!(cwd.path(), Path::new("/Users/me/proj"));
+    assert_eq!(cwd.host(), None); // empty authority
+}
+
+#[test]
+fn osc_7_preserves_the_host_component() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://myhost/home/u\x07");
+    let cwd = state.current_cwd().expect("cwd set");
+    assert_eq!(cwd.path(), Path::new("/home/u"));
+    assert_eq!(cwd.host(), Some("myhost")); // host kept for the spawn-layer check
+}
+
+#[test]
+fn osc_7_keeps_localhost_as_the_host() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://localhost/home/u\x07");
+    let cwd = state.current_cwd().expect("cwd set");
+    assert_eq!(cwd.path(), Path::new("/home/u"));
+    assert_eq!(cwd.host(), Some("localhost"));
+}
+
+#[test]
+fn osc_7_percent_decodes_the_path() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///home/a%20b\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/home/a b")
+    );
+}
+
+#[test]
+fn osc_7_percent_decodes_a_multibyte_sequence() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///p/%C3%A9\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/p/\u{e9}")
+    );
+}
+
+#[test]
+fn osc_7_accepts_a_string_terminator() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///srv\x1b\\");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/srv")
+    );
+}
+
+#[test]
+fn osc_7_keeps_an_embedded_semicolon_in_the_path() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///a;b\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/a;b")
+    );
+}
+
+#[test]
+fn the_cwd_is_none_until_osc_7_reports_one() {
+    let state = state(5, 3);
+    assert!(state.current_cwd().is_none());
+}
+
+#[test]
+fn osc_7_ignores_a_non_file_uri() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;http://example/x\x07");
+    assert!(state.current_cwd().is_none());
+}
+
+#[test]
+fn osc_7_ignores_a_uri_with_no_path() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://host\x07");
+    assert!(state.current_cwd().is_none());
+}
+
+#[test]
+fn osc_7_ignores_an_empty_payload() {
+    // `ESC ] 7 ST` → params = ["7"], so the `params.len() > 1` guard skips it.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7\x07");
+    assert!(state.current_cwd().is_none());
+}
+
+#[test]
+fn osc_7_accepts_a_case_insensitive_scheme() {
+    // RFC 3986: the scheme compares case-insensitively, the path does not.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;FILE:///srv\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/srv")
+    );
+    advance(&mut state, b"\x1b]7;File:///opt/App\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/opt/App")
+    );
+}
+
+#[test]
+fn osc_7_keeps_the_last_good_cwd_when_a_later_emit_is_invalid() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///good\x07");
+    advance(&mut state, b"\x1b]7;garbage\x07"); // unparseable
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/good")
+    );
+}
+
+#[test]
+fn osc_7_a_later_valid_report_updates_the_cwd() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///first\x07");
+    advance(&mut state, b"\x1b]7;file:///second\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/second")
+    );
+}
+
+#[test]
+fn osc_7_rejects_a_path_with_a_nul_byte() {
+    // `%00` decodes to a NUL, which cannot occur in a real path; the report is
+    // rejected and the previous good cwd is left intact.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///good\x07");
+    advance(&mut state, b"\x1b]7;file:///a%00b\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/good")
+    );
+}
+
+#[test]
+fn osc_7_cwd_survives_a_screen_switch() {
+    // The reported cwd belongs to the shell, not a screen buffer, so entering
+    // the alternate screen must not clear it.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///work\x07");
+    advance(&mut state, b"\x1b[?1049h"); // enter the alternate screen
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("/work")
+    );
+}
+
+#[test]
+fn osc_7_reports_the_root_directory() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///\x07");
+    assert_eq!(state.current_cwd().expect("cwd set").path(), Path::new("/"));
+}
+
+#[test]
+fn osc_7_decodes_an_encoded_slash_after_splitting_the_host() {
+    // The host/path split is on the first *raw* slash, so a `%2F` survives the
+    // split and only then decodes to `/` — yielding two path components.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file://host/a%2Fb\x07");
+    let cwd = state.current_cwd().expect("cwd set");
+    assert_eq!(cwd.path(), Path::new("/a/b"));
+    assert_eq!(cwd.host(), Some("host"));
+}
+
+#[cfg(windows)]
+#[test]
+fn osc_7_strips_the_leading_slash_before_a_windows_drive() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///C:/Users/me\x07");
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        Path::new("C:/Users/me")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn osc_7_preserves_a_non_utf8_path_on_unix() {
+    use std::os::unix::ffi::OsStringExt;
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]7;file:///p/%FF\x07");
+    let expected = PathBuf::from(std::ffi::OsString::from_vec(b"/p/\xff".to_vec()));
+    assert_eq!(
+        state.current_cwd().expect("cwd set").path(),
+        expected.as_path()
+    );
 }
 
 #[test]

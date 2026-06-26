@@ -1,5 +1,5 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style, modes, title,
-//! and scrollback.
+//! reported working directory, and scrollback.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The runtime owns the `PaneId → TerminalState` map, so the state
@@ -7,6 +7,7 @@
 //! mutates this model as PTY output arrives.
 
 use std::cmp::min;
+use std::path::{Path, PathBuf};
 
 use tile_core::process::PtySize;
 
@@ -149,6 +150,37 @@ pub struct TerminalModes {
     alt_scroll: bool,
 }
 
+/// A working directory reported by the shell via OSC 7: the decoded `path`
+/// together with the `host` the shell named in the URI authority.
+///
+/// The host is kept rather than discarded so the pane-spawn layer can compare
+/// it to the local machine and refuse to inherit a directory reported from a
+/// *remote* host — e.g. a shell running over SSH reports `file://remote/…`, and
+/// opening that path on the local machine would land in the wrong place. The
+/// parser stores the report verbatim and makes no local/remote decision; that
+/// admission check belongs at the spawn layer that owns the new pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedCwd {
+    /// The URI authority (the part between `//` and the path), or `None` when
+    /// it was empty (`file:///path`). `localhost` and the local machine's own
+    /// hostname both denote the local machine.
+    host: Option<String>,
+    /// The decoded working-directory path.
+    path: PathBuf,
+}
+
+impl ReportedCwd {
+    /// The host the shell named, or `None` for an empty authority.
+    pub fn host(&self) -> Option<&str> {
+        self.host.as_deref()
+    }
+
+    /// The decoded working-directory path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalState {
@@ -172,6 +204,10 @@ pub struct TerminalState {
     modes: TerminalModes,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
+    /// The working directory last reported by the shell via OSC 7 (host +
+    /// decoded path), or `None` until the shell reports one. Consumed by cwd
+    /// inheritance so a newly split pane can open in the same directory.
+    reported_cwd: Option<ReportedCwd>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
     /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
@@ -213,6 +249,7 @@ impl TerminalState {
             style: Style::default(),
             modes: TerminalModes::default(),
             title: None,
+            reported_cwd: None,
             scrollback: Scrollback::new(ScrollbackLimit::default()),
             primary_scroll_region: None,
             alternate_scroll_region: None,
@@ -270,6 +307,15 @@ impl TerminalState {
     /// one.
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// The working directory last reported by the shell via OSC 7 (its host and
+    /// decoded path), or `None` if none has been reported. Used by cwd
+    /// inheritance when spawning a new pane: the spawn layer compares the host
+    /// to the local machine before inheriting the path, so a directory reported
+    /// from a remote host (e.g. over SSH) is not opened locally.
+    pub fn current_cwd(&self) -> Option<&ReportedCwd> {
+        self.reported_cwd.as_ref()
     }
 
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
