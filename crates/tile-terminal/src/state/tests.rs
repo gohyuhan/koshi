@@ -32,7 +32,7 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
     assert_eq!(state.primary_cursor, expected_cursor);
     assert_eq!(state.alternate_cursor, expected_cursor);
     assert_eq!(state.style, Style::default());
-    assert_eq!(state.modes, TerminalModes {});
+    assert_eq!(state.modes, TerminalModes::default());
     assert_eq!(state.title, None);
 }
 
