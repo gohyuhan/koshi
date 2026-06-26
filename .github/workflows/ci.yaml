@@ -45,10 +45,26 @@ jobs:
       - name: Dependency-direction guard
         run: cargo xtask dep-guard
 
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    needs: dep-guard
+    steps:
+      - uses: actions/checkout@v6
+
+      # Audits dependencies against deny.toml. Pin the compiler to the
+      # project version so cargo-deny reads the v4 Cargo.lock with a modern
+      # cargo (the action image ships an older default).
+      - name: Audit dependencies
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.96.0"
+          command: check advisories bans licenses sources
+
   test:
     name: test
     runs-on: ubuntu-latest
-    needs: dep-guard
+    needs: cargo-deny
     steps:
       - uses: actions/checkout@v6
 
@@ -62,18 +78,3 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-features --locked
-
-  cargo-deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      # Audits dependencies against deny.toml. Pin the compiler to the
-      # project version so cargo-deny reads the v4 Cargo.lock with a modern
-      # cargo (the action image ships an older default).
-      - name: Audit dependencies
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: "1.96.0"
-          command: check advisories bans licenses sources
