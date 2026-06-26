@@ -9,15 +9,19 @@
 //! bytes), `csi_dispatch` (cursor moves, erase, SGR, insert/delete char & line,
 //! scroll up/down, the DECSTBM scroll region, and the DEC private modes for the
 //! alternate screen and cursor visibility), `esc_dispatch` (cursor save/restore
-//! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title). The
+//! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title and the
+//! OSC 7 working-directory report). The
 //! device-control-string callbacks `hook`/`unhook` clear the in-progress
 //! grapheme cluster (a DCS ends a text run, like any non-printing event); their
 //! payload handling, and `put`, are otherwise left to a later task. `vte` decodes
 //! UTF-8 upstream, so `print` receives a ready `char`.
 
+use std::path::PathBuf;
+
 use crate::grid::state::Cell;
-use crate::state::{MouseEncoding, MouseTracking, SavedCursor, Screen, TerminalState};
+use crate::state::{MouseEncoding, MouseTracking, ReportedCwd, SavedCursor, Screen, TerminalState};
 use crate::style::{Color, Style};
+use percent_encoding::percent_decode;
 use unicode_segmentation::GraphemeCursor;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -1014,14 +1018,24 @@ impl vte::Perform for TerminalState {
         // number. vte splits the payload on every `;`, but for a title only the
         // first `;` is the command/text separator, so rejoin `params[1..]` with
         // `;` to keep a title that itself contains one. Decode lossily so a
-        // non-UTF-8 title still shows. Other OSC commands (e.g. OSC 7 cwd) are
-        // owned by later tasks.
+        // non-UTF-8 title still shows. OSC 7 (the working directory) is handled
+        // by its own arm below.
         let Some(&command) = params.first() else {
             return;
         };
         if matches!(std::str::from_utf8(command), Ok("0" | "1" | "2")) && params.len() > 1 {
             let title = params[1..].join(&b';');
             self.title = Some(String::from_utf8_lossy(&title).into_owned());
+        }
+        // OSC 7 reports the shell's working directory as a `file://host/path`
+        // URI. Rejoin `params[1..]` on `;` like the title (a path may carry a
+        // literal `;`), then parse; an unparseable URI leaves the last cwd
+        // unchanged so a bad emit does not erase a good value.
+        if matches!(std::str::from_utf8(command), Ok("7")) && params.len() > 1 {
+            let uri = params[1..].join(&b';');
+            if let Some(cwd) = parse_osc7_cwd(&uri) {
+                self.reported_cwd = Some(cwd);
+            }
         }
     }
 
@@ -1042,6 +1056,63 @@ impl vte::Perform for TerminalState {
         // so without this the cluster would survive such a DCS.
         self.reset_cluster();
     }
+}
+
+/// Parse an OSC 7 cwd URI (`file://host/path`) into a [`ReportedCwd`], or
+/// `None` when it is not a `file://` URI or carries no path.
+///
+/// The `host` component (between `//` and the next `/`) is kept on the result —
+/// the spawn layer needs it to tell a local report from a remote one. An empty
+/// authority (`file:///path`) yields no host. The path keeps its leading `/`
+/// and is percent-decoded (`%20` → space, `%C3%A9` → `é`) before being turned
+/// into a [`PathBuf`] by [`bytes_to_path`]; a decoded NUL byte (which cannot
+/// occur in a real path) rejects the whole report.
+fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
+    // The `file` scheme is case-insensitive (RFC 3986 §3.1: schemes compare
+    // case-insensitively); the `//` authority separator and the path are not.
+    if uri.len() < 7 || !uri[..4].eq_ignore_ascii_case(b"file") || &uri[4..7] != b"://" {
+        return None;
+    }
+    let rest = &uri[7..];
+    let slash = rest.iter().position(|&b| b == b'/')?;
+    // The authority between `//` and the first `/` is the host; an empty
+    // authority means no host. Hosts are ASCII in practice, so decode lossily.
+    let host = match &rest[..slash] {
+        [] => None,
+        bytes => Some(String::from_utf8_lossy(bytes).into_owned()),
+    };
+    let decoded = percent_decode(&rest[slash..]).collect::<Vec<u8>>();
+    // A NUL cannot appear in a real path; reject so a malformed report never
+    // stores an unusable directory (and never silently truncates at a later
+    // filesystem call).
+    if decoded.contains(&0) {
+        return None;
+    }
+    let path = bytes_to_path(decoded)?;
+    Some(ReportedCwd { host, path })
+}
+
+/// Turn percent-decoded path bytes into a [`PathBuf`], honoring each platform's
+/// path encoding. On Unix the bytes become an `OsString` directly, so a path
+/// that is not valid UTF-8 survives intact. On Windows the bytes are required
+/// UTF-8 (invalid → `None`) and a `file:///C:/…` URI's leading slash before the
+/// drive letter is stripped so the resulting path is well-formed.
+#[cfg(unix)]
+fn bytes_to_path(decoded: Vec<u8>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+}
+
+#[cfg(windows)]
+fn bytes_to_path(mut decoded: Vec<u8>) -> Option<PathBuf> {
+    // `file:///C:/Users` gives path bytes `/C:/Users`; drop the leading slash
+    // before the drive letter so the drive-rooted path is well-formed.
+    let drive_prefixed =
+        matches!(decoded.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
+    if drive_prefixed {
+        decoded.remove(0);
+    }
+    String::from_utf8(decoded).ok().map(PathBuf::from)
 }
 
 /// Rebuild `cell` with a new display `width`, preserving its character,
