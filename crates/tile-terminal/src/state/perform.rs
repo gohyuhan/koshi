@@ -216,6 +216,21 @@ impl TerminalState {
         cursor.pending_wrap = false;
     }
 
+    /// Park the cursor on `last_col` and arm the deferred-wrap latch — but ONLY
+    /// when autowrap (DECAWM `?7`) is on. The latch is purely an autowrap
+    /// mechanism: with autowrap off, a glyph landing on the last column leaves the
+    /// cursor resting there with no wrap pending, so the next glyph overwrites in
+    /// place (DEC: a character at the right margin replaces when autowrap is
+    /// reset). Re-enabling autowrap afterward does not retroactively arm a wrap.
+    /// Every site where a glyph lands on the last column funnels through here, so
+    /// the arm-iff-autowrap rule lives in one place.
+    fn arm_wrap_latch(&mut self, last_col: u16) {
+        let armed = self.modes.autowrap;
+        let cursor = self.active_cursor_mut();
+        cursor.col = last_col;
+        cursor.pending_wrap = armed;
+    }
+
     /// Reset the alternate screen to a fresh, blank buffer:
     /// - cells blanked to the current pen background (BCE),
     /// - scroll region (DECSTBM) back to the full screen,
@@ -343,8 +358,7 @@ impl TerminalState {
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
         if col >= last_col {
-            self.active_cursor_mut().col = last_col;
-            self.active_cursor_mut().pending_wrap = true;
+            self.arm_wrap_latch(last_col);
         } else {
             self.active_cursor_mut().col = col + 1;
             self.active_cursor_mut().pending_wrap = false;
@@ -375,14 +389,20 @@ impl TerminalState {
             // The base advanced the cursor by one as a narrow glyph; the second
             // column it now occupies advances it once more, or parks at the edge.
             if col + 1 >= last_col {
-                self.active_cursor_mut().col = last_col;
-                self.active_cursor_mut().pending_wrap = true;
+                self.arm_wrap_latch(last_col);
             } else {
                 self.active_cursor_mut().col = col + 2;
             }
         } else if last_col > 0 {
             // Base in the last column of a multi-column grid: it cannot widen in
-            // place, so move the whole cluster to the next line as a wide glyph.
+            // place. With autowrap off there is no wrap to make room, so the
+            // cluster keeps its narrow form where it sits (the continuation is
+            // already recorded on the base) and the cursor stays parked.
+            if !self.modes.autowrap {
+                return;
+            }
+            // Under autowrap the whole cluster moves to the next line as a wide
+            // glyph.
             let Some((base_ch, style, marks)) = self
                 .active_grid()
                 .cell(row, col)
@@ -410,8 +430,7 @@ impl TerminalState {
             self.place_glyph(new_row, 0, widened);
             self.cluster_base = Some((new_row, 0));
             if 1 >= last_col {
-                self.active_cursor_mut().col = last_col;
-                self.active_cursor_mut().pending_wrap = true;
+                self.arm_wrap_latch(last_col);
             } else {
                 self.active_cursor_mut().col = 2;
             }
@@ -566,12 +585,16 @@ impl vte::Perform for TerminalState {
         }
         let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
 
-        // Deferred wrap: a prior print parked on the last column. Wrap to the
-        // next line before placing this glyph, so a row that exactly fills the
-        // width is not scrolled early.
+        // Deferred wrap: a prior print parked on the last column. Under autowrap
+        // (DECAWM `?7`, the default) wrap to the next line before placing this
+        // glyph, so a row that exactly fills the width is not scrolled early. With
+        // autowrap off the cursor stays pinned at the last column and this glyph
+        // overwrites in place; either way the parked latch is cleared.
         if self.active_cursor().pending_wrap {
-            self.linefeed();
-            self.active_cursor_mut().col = 0;
+            if self.modes.autowrap {
+                self.linefeed();
+                self.active_cursor_mut().col = 0;
+            }
             self.active_cursor_mut().pending_wrap = false;
         }
 
@@ -585,6 +608,16 @@ impl vte::Perform for TerminalState {
         // pane (`last_col == 0`), where wrapping cannot help — `place_glyph` then
         // stores the glyph narrow in place instead of thrashing the screen.
         if glyph_width == 2 && self.active_cursor().col == last_col && last_col > 0 {
+            // A 2-cell glyph cannot fit in the lone last column. With autowrap off
+            // there is no next line to move it onto, so drop it; the cursor rests
+            // on the last column and the next glyph overwrites there (no wrap is
+            // armed under autowrap-off). The dropped glyph is its own new grapheme,
+            // so reset the cluster: a following combining mark must not fold onto
+            // the previous cell.
+            if !self.modes.autowrap {
+                self.reset_cluster();
+                return;
+            }
             let row = self.active_cursor().row;
             // If the last column is the continuation of an existing wide glyph,
             // blanking it alone would orphan that glyph's base one column to the
@@ -611,13 +644,12 @@ impl vte::Perform for TerminalState {
         self.cluster.push(c);
         self.cluster_base = Some((row, col));
 
-        // Advance past the glyph. If it reached the last column, park there with
-        // the wrap latch set so the next glyph wraps; otherwise step to the
-        // first free column after it.
+        // Advance past the glyph. If it reached the last column, park there (and,
+        // under autowrap, arm the wrap latch so the next glyph wraps); otherwise
+        // step to the first free column after it.
         let end_col = col + glyph_width - 1;
         if end_col >= last_col {
-            self.active_cursor_mut().col = last_col;
-            self.active_cursor_mut().pending_wrap = true;
+            self.arm_wrap_latch(last_col);
         } else {
             self.active_cursor_mut().col = end_col + 1;
         }
@@ -834,6 +866,30 @@ impl vte::Perform for TerminalState {
                     // cursor arrow keys on the alternate screen.
                     ('h', 1007) => self.modes.alt_scroll = true,
                     ('l', 1007) => self.modes.alt_scroll = false,
+                    // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
+                    // last column parks there and the next glyph wraps to a new
+                    // line. Off: the cursor stays pinned and further glyphs
+                    // overwrite the last column in place.
+                    ('h', 7) => self.modes.autowrap = true,
+                    ('l', 7) => self.modes.autowrap = false,
+                    // `?1` (DECCKM) — application cursor keys. The input layer reads
+                    // this to pick the arrow-key byte form (`ESC O A` vs `ESC [ A`).
+                    ('h', 1) => self.modes.app_cursor_keys = true,
+                    ('l', 1) => self.modes.app_cursor_keys = false,
+                    // `?5` (DECSCNM) — reverse video. The renderer reads this to
+                    // swap foreground and background across the whole screen.
+                    ('h', 5) => self.modes.reverse_video = true,
+                    ('l', 5) => self.modes.reverse_video = false,
+                    // `?12` (att610) — cursor blink. The renderer reads this to
+                    // blink the cursor cell.
+                    ('h', 12) => self.modes.cursor_blink = true,
+                    ('l', 12) => self.modes.cursor_blink = false,
+                    // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
+                    // keyboard auto-repeat): modes tile does not implement. Trace
+                    // and ignore.
+                    ('h' | 'l', 2 | 3 | 8) => {
+                        tracing::trace!(mode, "unsupported DEC private mode; ignored");
+                    }
                     // Any other DEC private mode is not handled yet.
                     _ => {}
                 }
@@ -930,11 +986,13 @@ impl vte::Perform for TerminalState {
                 self.active_cursor_mut().col = col;
                 self.active_cursor_mut().pending_wrap = false;
             }
-            // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
+            // ED — erase in display (cursor unmoved; an erasing mode clears the
+            // wrap latch, see below).
             'J' => {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
-                match first_param(params).unwrap_or(0) {
+                let mode = first_param(params).unwrap_or(0);
+                match mode {
                     // Cursor to end of screen: rest of this row, then every row
                     // below.
                     0 => {
@@ -970,21 +1028,25 @@ impl vte::Perform for TerminalState {
                     // Unknown ED mode: ignored.
                     _ => {}
                 }
+                // ED 0/1/2 wipe the cursor's cell (un-filling its line), so clear
+                // the parked wrap latch — the cursor is a concrete column and its
+                // armed glyph is gone. ED 3 (scrollback only) and unknown modes
+                // leave the visible grid and the latch untouched.
+                if matches!(mode, 0..=2) {
+                    self.active_cursor_mut().pending_wrap = false;
+                }
                 // Only the cursor row is partially cleared (the others are whole
                 // rows, which cannot split a pair); repair it.
                 self.normalize_wide_pairs(r);
             }
-            // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
+            // EL — erase in line (cursor unmoved; an erasing mode clears the wrap
+            // latch, see below).
             'K' => {
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
-                match first_param(params).unwrap_or(0) {
-                    // Cursor to end of line. With a wrap pending the cursor is
-                    // logically past the last column, so there is nothing to its
-                    // right to erase — matching alacritty's `clear_line`, which
-                    // returns early here and preserves the parked last-column
-                    // glyph.
-                    0 if self.active_cursor().pending_wrap => {}
+                let mode = first_param(params).unwrap_or(0);
+                match mode {
+                    // Cursor to end of line.
                     0 => self.active_grid_mut().clear_line(r, c, cols, fill),
                     // Start of line through the cursor column inclusive.
                     1 => self
@@ -995,20 +1057,28 @@ impl vte::Perform for TerminalState {
                     // Unknown EL mode: ignored.
                     _ => {}
                 }
+                // Every EL mode (0/1/2) wipes the cursor's cell, un-filling the
+                // line, so clear the parked wrap latch — the cursor is a concrete
+                // column and its armed glyph is gone, so the next print overwrites
+                // it rather than wrapping. An unknown mode erases nothing and
+                // leaves the latch.
+                if matches!(mode, 0..=2) {
+                    self.active_cursor_mut().pending_wrap = false;
+                }
                 self.normalize_wide_pairs(r);
             }
             // ECH — erase n cells in place from the cursor (BCE background fill,
             // no shift of the rest of the line), then repair any wide-glyph pair
-            // the erase split. Unlike EL 0, ECH erases even when a wrap is
-            // pending — the parked last-column glyph is cleared — and leaves the
-            // wrap latch untouched, matching alacritty's `erase_chars` (which
-            // neither early-returns on the latch nor clears it).
+            // the erase split. The cursor is a concrete column, so erasing from it
+            // clears the parked last-column glyph and clears the wrap latch — the
+            // cell that armed the wrap is gone, so no wrap remains pending.
             'X' => {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let end = c.saturating_add(n).min(cols);
                 self.active_grid_mut().clear_line(r, c, end, fill);
+                self.active_cursor_mut().pending_wrap = false;
                 self.normalize_wide_pairs(r);
             }
             // SGR — set graphic rendition: update the pen colors and text

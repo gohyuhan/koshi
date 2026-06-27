@@ -351,14 +351,63 @@ fn el_0_erases_from_the_cursor_to_the_end_of_the_line() {
 }
 
 #[test]
-fn el_0_is_a_noop_when_a_wrap_is_pending() {
-    // After printing into the last column the cursor parks there with a pending
-    // wrap, so it is logically past the line end: EL 0 (cursor-to-end) erases
-    // nothing and the parked last-column glyph survives (alacritty parity).
+fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
+    // The cursor is a concrete grid column: filling the last column parks the
+    // cursor there with a wrap pending. EL 0 (cursor-to-end) erases from that
+    // concrete column — clearing the parked glyph — and clears the wrap latch,
+    // since the cell that armed the wrap is gone. The next print then overwrites
+    // at the last column rather than wrapping.
     let mut state = state(5, 2);
     print_str(&mut state, "abcde"); // 'e' lands at col 4 with the wrap pending
+    assert!(state.active_cursor().pending_wrap);
     advance(&mut state, b"\x1b[K"); // EL 0
-    assert_eq!(row_text(&state, 0), "abcde"); // 'e' preserved, not erased
+    assert_eq!(row_text(&state, 0), "abcd "); // 'e' erased
+    assert!(!state.active_cursor().pending_wrap); // latch cleared
+    state.print('f');
+    assert_eq!(glyph(&state, 0, 4), Some('f')); // overwrote at the last column
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // did NOT wrap
+}
+
+#[test]
+fn el_0_erases_the_last_column_when_autowrap_is_off() {
+    // With autowrap off there is no deferred wrap: the cursor sits concretely on
+    // the last column, so EL 0 erases from it (including that column) rather than
+    // treating the parked latch as "past the line end".
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[?7l"); // autowrap off
+    print_str(&mut state, "abcde"); // fills the row; cursor parked on col 4
+    advance(&mut state, b"\x1b[K"); // EL 0
+    assert_eq!(row_text(&state, 0), "abcd "); // last column erased, rest intact
+}
+
+#[test]
+fn el_1_and_el_2_clear_the_wrap_latch_when_parked() {
+    // EL 1 and EL 2 both wipe the parked cursor's cell, un-filling the line, so
+    // the wrap latch clears (next print overwrites rather than wraps).
+    for seq in [&b"\x1b[1K"[..], &b"\x1b[2K"[..]] {
+        let mut state = state(5, 2);
+        print_str(&mut state, "abcde"); // parks at col 4 with the latch
+        assert!(state.active_cursor().pending_wrap);
+        advance(&mut state, seq);
+        assert!(!state.active_cursor().pending_wrap);
+    }
+}
+
+#[test]
+fn ed_clears_the_wrap_latch_for_erasing_modes_but_not_ed_3() {
+    // ED 0/1/2 wipe the cursor's cell → clear the latch; ED 3 (scrollback only)
+    // leaves the visible grid and the latch untouched.
+    for seq in [&b"\x1b[J"[..], &b"\x1b[1J"[..], &b"\x1b[2J"[..]] {
+        let mut state = state(5, 2);
+        print_str(&mut state, "abcde"); // parks at col 4
+        assert!(state.active_cursor().pending_wrap);
+        advance(&mut state, seq);
+        assert!(!state.active_cursor().pending_wrap);
+    }
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde");
+    advance(&mut state, b"\x1b[3J"); // scrollback only — visible grid untouched
+    assert!(state.active_cursor().pending_wrap); // latch survives
 }
 
 #[test]
@@ -3011,17 +3060,19 @@ fn ech_fills_with_the_current_background_only() {
 }
 
 #[test]
-fn ech_leaves_the_pending_wrap_latch_set() {
-    // Unlike EL 0 (which no-ops on a pending wrap), ECH erases the parked
-    // last-column glyph and leaves the latch set, so the next print still wraps.
+fn ech_erases_the_parked_glyph_and_clears_the_wrap_latch() {
+    // ECH erases from the concrete cursor column, clearing the parked last-column
+    // glyph AND the wrap latch (the cell that armed the wrap is gone), so the next
+    // print overwrites in place rather than wrapping.
     let mut state = state(3, 2);
     print_str(&mut state, "abc"); // parks at column 2 with the latch
     assert!(state.active_cursor().pending_wrap);
     advance(&mut state, b"\x1b[X"); // erases the parked glyph
     assert_eq!(glyph(&state, 0, 2), Some(' '));
-    assert!(state.active_cursor().pending_wrap); // latch untouched
-    state.print('d'); // honors the surviving latch -> wraps to the next row
-    assert_eq!(glyph(&state, 1, 0), Some('d'));
+    assert!(!state.active_cursor().pending_wrap); // latch cleared
+    state.print('d');
+    assert_eq!(glyph(&state, 0, 2), Some('d')); // overwrote at the last column
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // did NOT wrap
 }
 
 #[test]
@@ -3509,4 +3560,227 @@ fn a_combining_mark_folds_onto_a_line_drawing_glyph() {
     assert_eq!(cell.ch(), '─');
     assert_eq!(cell.combining(), &['\u{0301}']);
     assert_eq!(state.active_cursor().col, 1); // cursor did not advance a 2nd column
+}
+
+// --- Autowrap (DECAWM ?7) ---
+
+#[test]
+fn autowrap_is_on_by_default() {
+    let state = state(5, 3);
+    assert!(state.autowrap());
+}
+
+#[test]
+fn autowrap_on_wraps_at_the_last_column() {
+    // Default mode: a glyph past the last column moves onto the next row.
+    let mut state = state(5, 3);
+    print_str(&mut state, "abcdef"); // 6 chars into a 5-wide row
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(glyph(&state, 0, 4), Some('e'));
+    assert_eq!(glyph(&state, 1, 0), Some('f')); // wrapped onto row 1
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (1, 1)
+    );
+}
+
+#[test]
+fn autowrap_off_overwrites_the_last_column_in_place() {
+    // With ?7l the cursor parks at the last column and further glyphs overwrite
+    // it; nothing wraps onto the next row.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "abcdef"); // 'e' fills col 4, 'f' overwrites it
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(glyph(&state, 0, 3), Some('d'));
+    assert_eq!(glyph(&state, 0, 4), Some('f')); // overwrote 'e' in place
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // nothing wrapped down
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (0, 4)
+    );
+}
+
+#[test]
+fn autowrap_round_trips() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?7l");
+    assert!(!state.autowrap());
+    advance(&mut state, b"\x1b[?7h");
+    assert!(state.autowrap());
+}
+
+#[test]
+fn disabling_autowrap_after_parking_does_not_wrap() {
+    // The wrap decision is made when the parked latch is consumed, against the
+    // mode in effect THEN — not when the glyph first parked. Filling the row with
+    // autowrap on parks the latch; turning autowrap off before the next glyph
+    // makes it overwrite in place instead of wrapping.
+    let mut state = state(5, 3);
+    print_str(&mut state, "abcde"); // parks at col 4 with the wrap latch set
+    advance(&mut state, b"\x1b[?7l"); // disable autowrap while parked
+    state.print('f');
+    assert_eq!(glyph(&state, 0, 4), Some('f')); // overwrote 'e', did not wrap
+    assert_eq!(glyph(&state, 1, 0), Some(' '));
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (0, 4)
+    );
+}
+
+#[test]
+fn a_last_column_write_under_autowrap_off_arms_no_wrap_when_re_enabled() {
+    // The deferred-wrap latch is armed only when a glyph lands on the last column
+    // while autowrap is ON. Writing the last column under ?7l arms nothing, so
+    // re-enabling ?7h must NOT retroactively wrap: the next glyph overwrites the
+    // last column, and only THAT write (now under autowrap) arms a wrap for the
+    // glyph after it.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "abcde"); // 'e' lands on col 4 under autowrap-off → no latch
+    assert!(!state.active_cursor().pending_wrap);
+    advance(&mut state, b"\x1b[?7h"); // re-enable autowrap
+    state.print('f');
+    assert_eq!(glyph(&state, 0, 4), Some('f')); // overwrote 'e', did NOT wrap
+    assert_eq!(glyph(&state, 1, 0), Some(' '));
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (0, 4)
+    );
+    state.print('g'); // now wrapping is armed → this glyph wraps
+    assert_eq!(glyph(&state, 1, 0), Some('g'));
+    assert_eq!(state.active_cursor().row, 1);
+}
+
+#[test]
+fn a_wide_glyph_at_the_last_column_is_dropped_when_autowrap_off() {
+    // A 2-cell glyph cannot fit in the lone last column; with no wrap to move it
+    // onto, it is dropped and the cursor stays pinned.
+    let mut state = state(4, 2);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "abc"); // cursor at col 3 (the last column)
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (0, 3)
+    );
+    state.print('中'); // wide; does not fit, autowrap off → dropped
+    assert_eq!(glyph(&state, 0, 3), Some(' ')); // last column untouched
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // nothing wrapped down
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (0, 3)
+    );
+}
+
+#[test]
+fn a_wide_glyph_at_the_last_column_wraps_when_autowrap_on() {
+    // Control for the ?7l case: with autowrap on the wide glyph wraps whole onto
+    // the next row, blanking the freed last column.
+    let mut state = state(4, 2);
+    print_str(&mut state, "abc"); // cursor at col 3 (the last column)
+    state.print('中');
+    assert_eq!(glyph(&state, 0, 3), Some(' ')); // freed column blanked
+    assert_eq!(glyph(&state, 1, 0), Some('中')); // wrapped whole onto row 1
+    assert_eq!(state.active_cursor().row, 1);
+}
+
+#[test]
+fn enabling_autowrap_after_a_dropped_wide_glyph_overwrites_not_wraps() {
+    // A wide glyph dropped at the last column under ?7l arms NO wrap — autowrap
+    // was off, and the deferred-wrap latch is purely an autowrap mechanism.
+    // Re-enabling ?7h does not retroactively wrap: the next glyph overwrites at
+    // the last column, and only then is wrapping armed for a following glyph.
+    let mut state = state(4, 2);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "abc"); // cursor at col 3 (the last column)
+    state.print('中'); // wide; does not fit, autowrap off → dropped, no wrap armed
+    advance(&mut state, b"\x1b[?7h"); // re-enable autowrap
+    state.print('x');
+    assert_eq!(glyph(&state, 0, 3), Some('x')); // overwrote at the last column
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // did NOT wrap onto row 1
+    assert_eq!(state.active_cursor().row, 0);
+}
+
+#[test]
+fn a_dropped_wide_glyph_does_not_capture_a_following_combining_mark() {
+    // Under ?7l a wide glyph dropped at the last column is its own new grapheme;
+    // a following combining mark belongs to it (and is itself dropped), and must
+    // NOT fold onto the previous cell.
+    let mut state = state(4, 2);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "abc"); // 'c' at col 2, cursor at col 3 (last column)
+    state.print('中'); // wide; dropped at the last column
+    state.print('\u{0301}'); // combining acute — belongs to the dropped glyph
+    let c_cell = state.active_grid().cell(0, 2).expect("in bounds");
+    assert_eq!(c_cell.ch(), 'c');
+    assert!(c_cell.combining().is_empty()); // the acute did NOT attach to 'c'
+}
+
+#[test]
+fn a_vs16_promotion_at_the_last_column_does_not_wrap_when_autowrap_off() {
+    // A narrow text-presentation glyph in the last column, promoted toward its
+    // wide emoji form by VS16, cannot widen (no room). Under ?7l there is no wrap
+    // to make room, so it stays in place — nothing scrolls onto the next row.
+    let mut state = state(3, 2);
+    advance(&mut state, b"\x1b[?7l");
+    print_str(&mut state, "ab"); // cursor at col 2 (last column)
+    state.print('\u{2764}'); // heart, text presentation, width 1, rests at col 2
+    assert!(!state.active_cursor().pending_wrap); // autowrap off arms no wrap latch
+    state.print('\u{FE0F}'); // VS16 wants the wide emoji form
+    assert_eq!(glyph(&state, 0, 2), Some('\u{2764}')); // stayed in place
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // did NOT wrap onto row 1
+    assert_eq!(state.active_cursor().row, 0);
+}
+
+// --- Application cursor keys / reverse video / cursor blink + unsupported modes ---
+
+#[test]
+fn the_new_dec_modes_start_at_their_defaults() {
+    let state = state(5, 3);
+    assert!(state.autowrap()); // ?7 defaults on
+    assert!(!state.app_cursor_keys()); // ?1
+    assert!(!state.reverse_video()); // ?5
+    assert!(!state.cursor_blink()); // ?12
+}
+
+#[test]
+fn application_cursor_keys_toggles() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1h");
+    assert!(state.app_cursor_keys());
+    advance(&mut state, b"\x1b[?1l");
+    assert!(!state.app_cursor_keys());
+}
+
+#[test]
+fn reverse_video_toggles() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?5h");
+    assert!(state.reverse_video());
+    advance(&mut state, b"\x1b[?5l");
+    assert!(!state.reverse_video());
+}
+
+#[test]
+fn cursor_blink_toggles() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?12h");
+    assert!(state.cursor_blink());
+    advance(&mut state, b"\x1b[?12l");
+    assert!(!state.cursor_blink());
+}
+
+#[test]
+fn unsupported_dec_modes_are_ignored() {
+    // ?2 (VT52), ?3 (132-column), ?8 (auto-repeat): traced no-ops. They must not
+    // panic or disturb other mode state, and printing still works afterward.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?2h");
+    advance(&mut state, b"\x1b[?3h");
+    advance(&mut state, b"\x1b[?8h");
+    advance(&mut state, b"\x1b[?8l");
+    assert!(state.autowrap()); // untouched
+    assert!(!state.app_cursor_keys());
+    state.print('x');
+    assert_eq!(glyph(&state, 0, 0), Some('x'));
 }
