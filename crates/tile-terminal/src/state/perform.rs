@@ -2,16 +2,17 @@
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
 //! basic C0 control bytes move the cursor and scroll.
 //!
-//! Implemented so far: `print` (printable glyphs, display-width aware: wide
+//! Implemented so far: `print` (printable glyphs, translated through the active
+//! GL charset — DEC line-drawing, UK — then display-width aware: wide
 //! CJK/emoji span two cells; grapheme continuations — combining marks, ZWJ
 //! emoji sequences, variation selectors, skin-tone modifiers, flags — fold onto
 //! the base cell, with variation-selector width promotion), `execute` (C0 control
-//! bytes), `csi_dispatch` (relative + absolute cursor moves, line-relative
+//! bytes, including the `SI`/`SO` charset shifts), `csi_dispatch` (relative + absolute cursor moves, line-relative
 //! moves, forward/back tab stops, erase in display/line and erase-char, SGR,
 //! insert/delete char & line, scroll up/down, the DECSTBM scroll region, and
 //! the DEC private modes for the alternate screen and cursor visibility),
-//! `esc_dispatch` (cursor save/restore
-//! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title and the
+//! `esc_dispatch` (cursor save/restore,
+//! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (the OSC 0/1/2 window title and the
 //! OSC 7 working-directory report). The
 //! device-control-string callbacks `hook`/`unhook` clear the in-progress
 //! grapheme cluster (a DCS ends a text run, like any non-printing event); their
@@ -21,7 +22,10 @@
 use std::path::PathBuf;
 
 use crate::grid::state::Cell;
-use crate::state::{MouseEncoding, MouseTracking, ReportedCwd, SavedCursor, Screen, TerminalState};
+use crate::state::{
+    Charset, MouseEncoding, MouseTracking, RenderState, ReportedCwd, SavedCursor, Screen,
+    TerminalState,
+};
 use crate::style::{Color, Style};
 use percent_encoding::percent_decode;
 use unicode_segmentation::GraphemeCursor;
@@ -44,13 +48,50 @@ impl TerminalState {
         }
     }
 
-    /// Override the alternate cursor's *position* with the primary cursor's, run
-    /// after [`Self::reset_alternate_buffer`] on a `?1049` entry so the entering
-    /// app continues from where the primary cursor was. Only the position is
-    /// touched here — visibility, the wrap latch, and the saved stash were
-    /// already reset to fresh defaults by `reset_alternate_buffer`. The plain
-    /// `?47`/`?1047` switches never call this (or the reset): they leave the
-    /// alternate buffer intact so a re-entry resumes where it left off.
+    /// The charset currently selected into GL — the active screen's render
+    /// state's `G0`–`G3` slot named by its `gl` — used to translate each printed
+    /// byte.
+    fn active_charset(&self) -> Charset {
+        let render = self.active_render();
+        render.charsets[render.gl]
+    }
+
+    /// Translate a printable `c` through the active GL charset before it is
+    /// placed. ASCII passes everything through; DEC line-drawing remaps the
+    /// `0x5F`–`0x7E` range to box-drawing/symbol glyphs; UK remaps only `#`.
+    /// Every output glyph is a single narrow, non-combining `char`, so the rest
+    /// of `print` (cluster folding, width) is unaffected.
+    fn map_charset(&self, c: char) -> char {
+        match self.active_charset() {
+            Charset::Ascii => c,
+            Charset::DecLineDrawing => map_dec_line_drawing(c),
+            Charset::Uk if c == '#' => '£',
+            Charset::Uk => c,
+        }
+    }
+
+    /// Designate the `G0`–`G3` slot `index` (from the `ESC ( ) * +`
+    /// intermediate) to the charset named by the final `byte`: `0` = DEC line
+    /// drawing, `B` = ASCII, `A` = UK; any other final falls back to ASCII (a
+    /// passthrough) and is traced. Writes the active screen's render state.
+    fn designate_charset(&mut self, index: usize, byte: u8) {
+        let charset = match byte {
+            b'0' => Charset::DecLineDrawing,
+            b'B' => Charset::Ascii,
+            b'A' => Charset::Uk,
+            _ => {
+                tracing::trace!(byte, "unsupported charset designation; treated as ASCII");
+                Charset::Ascii
+            }
+        };
+        self.active_render_mut().charsets[index] = charset;
+    }
+
+    /// Copy the primary cursor's *position* onto the alternate cursor on a
+    /// `?1049` entry, run after [`Self::reset_alternate_buffer`], so the entering
+    /// app starts from where the primary cursor was. The render state is cloned
+    /// separately by the screen-switch arm; visibility, the wrap latch, and the
+    /// saved stash keep the reset's fresh defaults.
     fn seed_alternate_cursor(&mut self) {
         self.alternate_cursor.row = self.primary_cursor.row;
         self.alternate_cursor.col = self.primary_cursor.col;
@@ -97,7 +138,7 @@ impl TerminalState {
     /// cursor just descends to the last grid row. The column is left unchanged
     /// (LNM is off, so a line feed is a pure vertical move).
     fn linefeed(&mut self) {
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == bottom {
             self.delete_lines_into_scrollback(top, bottom, 1, fill);
@@ -112,7 +153,7 @@ impl TerminalState {
     /// Reverse index (RI): move the cursor up one line. At the scroll region's
     /// top margin the region scrolls down instead.
     fn reverse_index(&mut self) {
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == top {
             self.active_grid_mut().insert_lines(top, bottom, 1, fill);
@@ -122,17 +163,19 @@ impl TerminalState {
         self.active_cursor_mut().pending_wrap = false;
     }
 
-    /// Save the cursor position and pen style (DECSC / SCOSC) into the active
-    /// screen's cursor, so the primary and alternate screens snapshot separately.
+    /// Save the cursor position and the active screen's render state (DECSC /
+    /// SCOSC) into the active screen's cursor, so the primary and alternate
+    /// screens snapshot separately.
     fn save_cursor(&mut self) {
         let row = self.active_cursor().row;
         let col = self.active_cursor().col;
         let pending_wrap = self.active_cursor().pending_wrap;
+        let render = *self.active_render();
         self.active_cursor_mut().saved = Some(SavedCursor {
             row,
             col,
-            style: self.style,
             pending_wrap,
+            render,
         });
     }
 
@@ -147,14 +190,14 @@ impl TerminalState {
             Some(saved) => {
                 self.active_cursor_mut().row = saved.row.min(last_row);
                 self.active_cursor_mut().col = saved.col.min(last_col);
-                self.style = saved.style;
                 self.active_cursor_mut().pending_wrap = saved.pending_wrap;
+                *self.active_render_mut() = saved.render;
             }
             None => {
                 self.active_cursor_mut().row = 0;
                 self.active_cursor_mut().col = 0;
-                self.style = Style::default();
                 self.active_cursor_mut().pending_wrap = false;
+                *self.active_render_mut() = RenderState::fresh();
             }
         }
     }
@@ -173,26 +216,18 @@ impl TerminalState {
         cursor.pending_wrap = false;
     }
 
-    /// Reset the alternate screen to a brand-new, blank state — the single
-    /// definition of "a fresh alternate buffer". Resets **every** piece of the
-    /// alternate's per-screen state so a new session can inherit none of the
-    /// previous one:
+    /// Reset the alternate screen to a fresh, blank buffer:
     /// - cells blanked to the current pen background (BCE),
     /// - scroll region (DECSTBM) back to the full screen,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
     ///
-    /// The wrap latch in particular is *cell-coupled* — it means "a glyph is
-    /// parked at the last column", so blanking the cells must drop it or a later
-    /// print would wrap against an erased glyph. Operates on `self.alternate`
-    /// directly (not the active grid), so it stays correct even when an earlier
-    /// mode in the same DECRST list (e.g. `?47 l`) already switched the active
-    /// screen back to the primary. Called wherever a switch *clears* the
-    /// alternate: `?1049 h` entry (which then re-seeds the cursor position from
-    /// the primary) and the `?1047 l`/`?1049 l` clearing exits. The plain
-    /// `?47`/`?1047` switches never clear, so they never call this — they
-    /// preserve the buffer and a re-entry resumes exactly where it left off.
+    /// Leaves the alternate's [`RenderState`] alone; the screen-switch arm clones
+    /// it from the primary on entry, and DECRC and `RIS` reset it.
+    ///
+    /// Operates on `self.alternate` directly, not the active grid. Called by the
+    /// `?1049 h` entry and the `?1047 l`/`?1049 l` clearing exits.
     fn reset_alternate_buffer(&mut self) {
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         let (rows, cols) = self.alternate.dimensions();
         for row in 0..rows {
             self.alternate.clear_line(row, 0, cols, fill);
@@ -205,17 +240,16 @@ impl TerminalState {
         self.alternate_cursor.saved = None;
     }
 
-    /// DECSC the primary screen's cursor into its own saved slot. Used by the
-    /// `?1049` entry specifically: it must stash the *primary* cursor even when
-    /// an earlier mode in the same DECSET list (e.g. `?47 h`) already switched the
-    /// active screen to the alternate, which would make the active-relative
-    /// `save_cursor` stash the alternate cursor instead.
+    /// DECSC the primary screen's cursor and render state into the primary's
+    /// saved slot, addressing the primary fields directly. Used by the `?1049`
+    /// entry, which must stash the primary regardless of which screen is active
+    /// at that point in the mode list.
     fn save_primary_cursor(&mut self) {
         self.primary_cursor.saved = Some(SavedCursor {
             row: self.primary_cursor.row,
             col: self.primary_cursor.col,
-            style: self.style,
             pending_wrap: self.primary_cursor.pending_wrap,
+            render: self.primary_render,
         });
     }
 
@@ -301,7 +335,7 @@ impl TerminalState {
                 *slot = narrowed;
             }
         }
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         if let Some(slot) = self.active_grid_mut().cell_mut(row, col + 1) {
             *slot = Cell::blank_with(fill);
         }
@@ -356,7 +390,7 @@ impl TerminalState {
             else {
                 return;
             };
-            let fill = self.style.bg_fill();
+            let fill = self.active_render().style.bg_fill();
             if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
                 *slot = Cell::blank_with(fill);
             }
@@ -395,7 +429,7 @@ impl TerminalState {
     /// its left is cleared. The freed half becomes a blank in the current pen
     /// background, matching the erase/scroll fill convention.
     fn clear_wide_at(&mut self, row: u16, col: u16) {
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         match self.active_grid().cell(row, col).map_or(1, Cell::width) {
             // Wide base: clear its continuation half on the right.
             2 => {
@@ -467,7 +501,7 @@ impl TerminalState {
     /// from drawing an erased wide glyph or a stray continuation.
     fn normalize_wide_pairs(&mut self, row: u16) {
         let (_, cols) = self.active_grid().dimensions();
-        let fill = self.style.bg_fill();
+        let fill = self.active_render().style.bg_fill();
         for col in 0..cols {
             let orphan = match self.active_grid().cell(row, col).map_or(1, Cell::width) {
                 // Wide base needs a continuation immediately to its right.
@@ -496,6 +530,12 @@ impl TerminalState {
 
 impl vte::Perform for TerminalState {
     fn print(&mut self, c: char) {
+        // Translate through the active GL charset first (DEC line-drawing, UK),
+        // so the cell stores the resolved glyph and width is computed on it. The
+        // result is always a narrow, non-combining char, so every path below is
+        // unaffected by the remap.
+        let c = self.map_charset(c);
+
         // A continuation (combining mark, ZWJ-joined emoji part, variation
         // selector, skin-tone modifier, flag half) folds onto the current
         // cluster's base instead of taking its own cell.
@@ -537,7 +577,7 @@ impl vte::Perform for TerminalState {
 
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
-        let style = self.style;
+        let style = self.active_render().style;
 
         // A wide glyph needs two columns; when only the last column is free it
         // cannot fit. Blank that lone column and wrap, so the glyph begins the
@@ -610,6 +650,10 @@ impl vte::Perform for TerminalState {
                 self.active_cursor_mut().col = next_tab_stop(col, last_col);
                 self.active_cursor_mut().pending_wrap = false;
             }
+            // SO (shift out): select G1 into the GL range for printing.
+            0x0E => self.active_render_mut().gl = 1,
+            // SI (shift in): select G0 into the GL range for printing.
+            0x0F => self.active_render_mut().gl = 0,
             // BEL: discarded.
             0x07 => {}
             // Any other control byte: trace and ignore, never raw-rendered.
@@ -670,12 +714,14 @@ impl vte::Perform for TerminalState {
             for param in params.iter() {
                 let mode = param.first().copied().unwrap_or(0);
                 match (action, mode) {
-                    // DECSET `?47`/`?1047` — switch to the alternate buffer (no
-                    // clear on entry). The alternate cursor is left untouched:
-                    // these modes leave the buffer intact across a `?47 l`/`?1047 l`
-                    // round-trip, so re-entry must resume where the previous
-                    // alternate session left off, not reseed from the primary.
+                    // DECSET `?47`/`?1047` — switch to the alternate buffer, leaving
+                    // its cells and cursor untouched. Clone the primary's render
+                    // state (pen, charsets, GL slot) into the alternate when
+                    // crossing from the primary, so the alternate inherits it.
                     ('h', 47 | 1047) => {
+                        if self.active == Screen::Primary {
+                            self.alternate_render = self.primary_render;
+                        }
                         self.active = Screen::Alternate;
                     }
                     // DECSET `?1049` — DECSC the primary cursor, reset the alternate
@@ -690,6 +736,8 @@ impl vte::Perform for TerminalState {
                     ('h', 1049) => {
                         if screen_at_start != Screen::Alternate {
                             self.save_primary_cursor();
+                            // Clone the primary's render state into the alternate.
+                            self.alternate_render = self.primary_render;
                             self.reset_alternate_buffer();
                             self.seed_alternate_cursor();
                             self.active = Screen::Alternate;
@@ -884,7 +932,7 @@ impl vte::Perform for TerminalState {
             }
             // ED — erase in display (cursor unmoved; `pending_wrap` untouched).
             'J' => {
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of screen: rest of this row, then every row
@@ -928,7 +976,7 @@ impl vte::Perform for TerminalState {
             }
             // EL — erase in line (cursor unmoved; `pending_wrap` untouched).
             'K' => {
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 match first_param(params).unwrap_or(0) {
                     // Cursor to end of line. With a wrap pending the cursor is
@@ -957,7 +1005,7 @@ impl vte::Perform for TerminalState {
             // neither early-returns on the latch nor clears it).
             'X' => {
                 let n = move_count(params);
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let end = c.saturating_add(n).min(cols);
                 self.active_grid_mut().clear_line(r, c, end, fill);
@@ -965,12 +1013,12 @@ impl vte::Perform for TerminalState {
             }
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
-            'm' => apply_sgr(&mut self.style, params),
+            'm' => apply_sgr(&mut self.active_render_mut().style, params),
             // ICH — insert n blank cells at the cursor, shifting the rest of the
             // line right; cells pushed past the right edge fall off.
             '@' => {
                 let n = move_count(params);
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().insert_cells(r, c, n, fill);
                 self.normalize_wide_pairs(r);
@@ -980,7 +1028,7 @@ impl vte::Perform for TerminalState {
             // left; the right end is refilled with blanks.
             'P' => {
                 let n = move_count(params);
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().delete_cells(r, c, n, fill);
                 self.normalize_wide_pairs(r);
@@ -998,7 +1046,7 @@ impl vte::Perform for TerminalState {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.active_cursor().row) {
                     let n = move_count(params);
-                    let fill = self.style.bg_fill();
+                    let fill = self.active_render().style.bg_fill();
                     let r = self.active_cursor().row;
                     self.active_grid_mut().insert_lines(r, bottom, n, fill);
                 }
@@ -1009,7 +1057,7 @@ impl vte::Perform for TerminalState {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.active_cursor().row) {
                     let n = move_count(params);
-                    let fill = self.style.bg_fill();
+                    let fill = self.active_render().style.bg_fill();
                     let r = self.active_cursor().row;
                     self.delete_lines_into_scrollback(r, bottom, n, fill);
                 }
@@ -1017,7 +1065,7 @@ impl vte::Perform for TerminalState {
             // SU — scroll the region up by n (`CSI Ps S`); the cursor stays put.
             'S' => {
                 let n = move_count(params);
-                let fill = self.style.bg_fill();
+                let fill = self.active_render().style.bg_fill();
                 let (top, bottom) = self.region_bounds();
                 self.delete_lines_into_scrollback(top, bottom, n, fill);
             }
@@ -1028,7 +1076,7 @@ impl vte::Perform for TerminalState {
             'T' | '^' => {
                 if action == '^' || params.len() <= 1 {
                     let n = move_count(params);
-                    let fill = self.style.bg_fill();
+                    let fill = self.active_render().style.bg_fill();
                     let (top, bottom) = self.region_bounds();
                     self.active_grid_mut().insert_lines(top, bottom, n, fill);
                 }
@@ -1068,10 +1116,22 @@ impl vte::Perform for TerminalState {
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         // Any ESC sequence ends a text run, so no following glyph folds into it.
         self.reset_cluster();
-        // A plain ESC sequence carries no intermediate byte; an intermediate
-        // marks a charset designation or other ESC form owned by a later task.
-        if ignore || !intermediates.is_empty() {
+        if ignore {
             return;
+        }
+        // Charset designation: `ESC (`/`)`/`*`/`+` Fc designates G0/G1/G2/G3.
+        // vte collects the `(`/`)`/`*`/`+` into `intermediates`; the final `byte`
+        // names the set. Handled before the plain-ESC match below, which the
+        // intermediate would otherwise skip.
+        match intermediates {
+            b"(" => return self.designate_charset(0, byte),
+            b")" => return self.designate_charset(1, byte),
+            b"*" => return self.designate_charset(2, byte),
+            b"+" => return self.designate_charset(3, byte),
+            // Any other intermediate marks an ESC form owned by a later task.
+            [_, ..] => return,
+            // No intermediate: fall through to the plain-ESC finals below.
+            [] => {}
         }
         match byte {
             // DECSC — save cursor and pen.
@@ -1286,6 +1346,50 @@ fn next_tab_stop(col: u16, last_col: u16) -> u16 {
 /// (itself a stop). A column already on a stop retreats a full 8.
 fn prev_tab_stop(col: u16) -> u16 {
     col.saturating_sub(1) / 8 * 8
+}
+
+/// Map a `char` through the DEC Special Character and Line Drawing set (`ESC (
+/// 0`): the bytes `0x5F`–`0x7E` (`'_'`–`'~'`) become box-drawing and symbol
+/// glyphs, so a TUI's `lqqqk` renders `┌───┐`. Every byte outside that range,
+/// and any unmapped byte within it, passes through unchanged. The table is the
+/// VT100 set as implemented by xterm/alacritty (`StandardCharset::map`); all
+/// outputs are single narrow, non-combining glyphs.
+fn map_dec_line_drawing(c: char) -> char {
+    match c {
+        '_' => ' ',
+        '`' => '◆',
+        'a' => '▒',
+        'b' => '\u{2409}', // ␉ symbol for horizontal tab
+        'c' => '\u{240c}', // ␌ symbol for form feed
+        'd' => '\u{240d}', // ␍ symbol for carriage return
+        'e' => '\u{240a}', // ␊ symbol for line feed
+        'f' => '°',
+        'g' => '±',
+        'h' => '\u{2424}', // ␤ symbol for newline
+        'i' => '\u{240b}', // ␋ symbol for vertical tab
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺', // scan line 1
+        'p' => '⎻', // scan line 3
+        'q' => '─', // scan line 5 (horizontal)
+        'r' => '⎼', // scan line 7
+        's' => '⎽', // scan line 9
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│', // vertical
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        _ => c,
+    }
 }
 
 /// The primary value of the iterator's next CSI parameter, or `None` when the

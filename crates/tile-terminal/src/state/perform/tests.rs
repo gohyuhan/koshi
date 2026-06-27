@@ -49,7 +49,7 @@ fn print_stamps_the_pen_style_with_width_one() {
     state.print('a');
     let cell = state.active_grid().cell(0, 0).expect("in bounds");
     assert_eq!(cell.width(), 1);
-    assert_eq!(cell.style(), state.style);
+    assert_eq!(cell.style(), state.active_render().style);
 }
 
 #[test]
@@ -461,7 +461,7 @@ fn styled(f: impl FnOnce(&mut Style)) -> Style {
 fn sgr_bold_sets_the_bold_attribute() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1m");
-    assert_eq!(state.style, styled(|s| s.set_bold(true)));
+    assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
 }
 
 #[test]
@@ -469,7 +469,7 @@ fn sgr_zero_resets_the_pen() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1;31m"); // bold + red
     advance(&mut state, b"\x1b[0m");
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
@@ -477,7 +477,7 @@ fn sgr_empty_params_reset_like_zero() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1m");
     advance(&mut state, b"\x1b[m"); // bare CSI m is an implicit reset
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn sgr_attribute_off_codes_clear_each_attribute() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1;3;4;7m"); // bold, italic, underline, reverse on
     advance(&mut state, b"\x1b[22;23;24;27m"); // each turned back off
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn sgr_sixteen_color_foreground_and_background() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[31;42m"); // fg red (1), bg green (2)
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_fg(Color::Indexed(1));
             s.set_bg(Color::Indexed(2));
@@ -506,7 +506,7 @@ fn sgr_bright_colors_map_to_indices_eight_through_fifteen() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[91;102m"); // bright red fg (8+1), bright green bg (8+2)
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_fg(Color::Indexed(9));
             s.set_bg(Color::Indexed(10));
@@ -519,42 +519,57 @@ fn sgr_default_color_codes_restore_the_default() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[31;42m");
     advance(&mut state, b"\x1b[39;49m"); // default fg + bg
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_256_color_foreground() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38;5;196m");
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Indexed(196)))
+    );
 }
 
 #[test]
 fn sgr_256_color_background() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[48;5;21m");
-    assert_eq!(state.style, styled(|s| s.set_bg(Color::Indexed(21))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_bg(Color::Indexed(21)))
+    );
 }
 
 #[test]
 fn sgr_truecolor_foreground_semicolon_form() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38;2;255;128;0m");
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Rgb(255, 128, 0)))
+    );
 }
 
 #[test]
 fn sgr_truecolor_background_semicolon_form() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[48;2;10;20;30m");
-    assert_eq!(state.style, styled(|s| s.set_bg(Color::Rgb(10, 20, 30))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_bg(Color::Rgb(10, 20, 30)))
+    );
 }
 
 #[test]
 fn sgr_256_color_colon_form() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5:196m");
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Indexed(196)))
+    );
 }
 
 #[test]
@@ -565,21 +580,30 @@ fn sgr_256_color_colon_form_with_empty_colorspace_id() {
     // colon form above).
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5::196m");
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Indexed(196))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Indexed(196)))
+    );
 }
 
 #[test]
 fn sgr_truecolor_colon_form() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:2:255:128:0m");
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Rgb(255, 128, 0)))
+    );
 }
 
 #[test]
 fn sgr_truecolor_colon_form_with_empty_colorspace_id() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:2::255:128:0m"); // ITU form: empty colorspace slot
-    assert_eq!(state.style, styled(|s| s.set_fg(Color::Rgb(255, 128, 0))));
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Rgb(255, 128, 0)))
+    );
 }
 
 #[test]
@@ -587,7 +611,7 @@ fn sgr_combines_multiple_codes_in_one_sequence() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1;4;38;5;200;48;2;1;2;3m");
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_bold(true);
             s.set_underline(true);
@@ -617,39 +641,39 @@ fn sgr_unknown_code_is_ignored() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[1m"); // bold on
     advance(&mut state, b"\x1b[99m"); // unknown SGR code -> pen unchanged
-    assert_eq!(state.style, styled(|s| s.set_bold(true)));
+    assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
 }
 
 #[test]
 fn sgr_incomplete_extended_color_leaves_the_pen_unchanged() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38;5m"); // 256-color selector with no index
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_incomplete_colon_extended_color_leaves_the_pen_unchanged() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38:5m"); // colon 256-color selector with no index
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_256_color_index_out_of_range_leaves_the_pen_unchanged() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38;5;256m"); // index 256 > 255 — out of range
-    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Indexed(0)
+    assert_eq!(state.active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(0)
     advance(&mut state, b"\x1b[38:5:300m"); // colon form, index 300 > 255
-    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Indexed(44)
+    assert_eq!(state.active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(44)
 }
 
 #[test]
 fn sgr_truecolor_channel_out_of_range_leaves_the_pen_unchanged() {
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[38;2;999;0;0m"); // semicolon form, r = 999 > 255
-    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Rgb(231, 0, 0)
+    assert_eq!(state.active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(231, 0, 0)
     advance(&mut state, b"\x1b[48:2:0:256:0m"); // colon form bg, g = 256 > 255
-    assert_eq!(state.style, Style::default()); // rejected, NOT wrapped to Rgb(0, 0, 0)
+    assert_eq!(state.active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(0, 0, 0)
 }
 
 #[test]
@@ -659,12 +683,12 @@ fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_to_later_codes() {
     // channels and must be CONSUMED, not reinterpreted as standalone SGR codes
     // (fg red / fg green). The pen must end fully unchanged.
     advance(&mut state, b"\x1b[38;2;999;31;32m");
-    assert_eq!(state.style, Style::default()); // no leak
+    assert_eq!(state.active_render().style, Style::default()); // no leak
 
     // Exactly three channels (999, 1, 2) are drained, then a genuine trailing
     // `1` is applied as SGR bold — proving we consume three and no more.
     advance(&mut state, b"\x1b[38;2;999;1;2;1m");
-    assert_eq!(state.style, styled(|s| s.set_bold(true)));
+    assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
 }
 
 #[test]
@@ -717,7 +741,7 @@ fn erase_uses_the_background_only_not_the_full_pen() {
     assert!((0..3).all(|c| state.active_grid().cell(0, c).map(Cell::style) == Some(fill)));
     // The pen itself is unchanged by the erase.
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_bold(true);
             s.set_fg(Color::Indexed(1));
@@ -751,7 +775,7 @@ fn decsc_decrc_restores_the_cursor_and_pen() {
     let cur = state.active_cursor();
     assert_eq!((cur.row, cur.col), (2, 3));
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_bold(true);
             s.set_fg(Color::Indexed(1));
@@ -779,14 +803,14 @@ fn scosc_scorc_save_and_restore_the_cursor_and_pen() {
     let mut state = state(10, 5);
     advance(&mut state, b"\x1b[2;5H"); // (1, 4)
     advance(&mut state, b"\x1b[1;31m"); // bold + fg red
-    let saved_style = state.style;
+    let saved_style = state.active_render().style;
     advance(&mut state, b"\x1b[s"); // SCOSC
     advance(&mut state, b"\x1b[5;5H"); // move away
     advance(&mut state, b"\x1b[0m"); // reset the pen to a different style
     advance(&mut state, b"\x1b[u"); // SCORC
     let cur = state.active_cursor();
     assert_eq!((cur.row, cur.col), (1, 4));
-    assert_eq!(state.style, saved_style); // pen restored too
+    assert_eq!(state.active_render().style, saved_style); // pen restored too
 }
 
 #[test]
@@ -797,7 +821,7 @@ fn decrc_without_a_save_homes_and_resets_the_pen() {
     advance(&mut state, b"\x1b8"); // DECRC with no prior DECSC
     let cur = state.active_cursor();
     assert_eq!((cur.row, cur.col), (0, 0));
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().style, Style::default());
 }
 
 #[test]
@@ -1092,7 +1116,7 @@ fn dec_1048_saves_and_restores_the_cursor_and_pen_without_swapping() {
     assert_eq!((cur.row, cur.col), (2, 3)); // position restored
     assert_eq!(state.active, Screen::Primary);
     assert_eq!(
-        state.style,
+        state.active_render().style,
         styled(|s| {
             s.set_bold(true);
             s.set_fg(Color::Indexed(1));
@@ -3065,4 +3089,424 @@ fn cht_clears_the_pending_wrap_latch() {
     let cur = state.active_cursor();
     assert_eq!(cur.col, 19);
     assert!(!cur.pending_wrap);
+}
+
+// --- Charset designation + DEC line-drawing (G0-G3, SI/SO) ---
+
+#[test]
+fn dec_line_drawing_renders_box_glyphs() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0lqqqk"); // designate G0 = DEC line drawing, then print
+    assert_eq!(glyph(&state, 0, 0), Some('┌'));
+    assert_eq!(glyph(&state, 0, 1), Some('─'));
+    assert_eq!(glyph(&state, 0, 2), Some('─'));
+    assert_eq!(glyph(&state, 0, 3), Some('─'));
+    assert_eq!(glyph(&state, 0, 4), Some('┐'));
+}
+
+#[test]
+fn ascii_designation_returns_to_passthrough() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0l"); // G0 = DEC: 'l' -> box corner
+    assert_eq!(glyph(&state, 0, 0), Some('┌'));
+    advance(&mut state, b"\x1b(Bl"); // G0 = ASCII: 'l' -> literal
+    assert_eq!(glyph(&state, 0, 1), Some('l'));
+}
+
+#[test]
+fn dec_line_drawing_maps_the_full_table() {
+    // The verified VT100 special-graphics table (`StandardCharset::map`): every
+    // byte 0x5F-0x7E and its glyph.
+    let table: &[(char, char)] = &[
+        ('_', ' '),
+        ('`', '◆'),
+        ('a', '▒'),
+        ('b', '\u{2409}'),
+        ('c', '\u{240c}'),
+        ('d', '\u{240d}'),
+        ('e', '\u{240a}'),
+        ('f', '°'),
+        ('g', '±'),
+        ('h', '\u{2424}'),
+        ('i', '\u{240b}'),
+        ('j', '┘'),
+        ('k', '┐'),
+        ('l', '┌'),
+        ('m', '└'),
+        ('n', '┼'),
+        ('o', '⎺'),
+        ('p', '⎻'),
+        ('q', '─'),
+        ('r', '⎼'),
+        ('s', '⎽'),
+        ('t', '├'),
+        ('u', '┤'),
+        ('v', '┴'),
+        ('w', '┬'),
+        ('x', '│'),
+        ('y', '≤'),
+        ('z', '≥'),
+        ('{', 'π'),
+        ('|', '≠'),
+        ('}', '£'),
+        ('~', '·'),
+    ];
+    for &(input, expected) in table {
+        let mut state = state(4, 2);
+        advance(&mut state, b"\x1b(0");
+        state.print(input);
+        assert_eq!(glyph(&state, 0, 0), Some(expected), "input {input:?}");
+    }
+}
+
+#[test]
+fn dec_line_drawing_passes_through_outside_the_mapped_range() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+                                    // 'A' (0x41) and '0' (0x30) are below the 0x5F-0x7E table; unchanged.
+    state.print('A');
+    state.print('0');
+    assert_eq!(glyph(&state, 0, 0), Some('A'));
+    assert_eq!(glyph(&state, 0, 1), Some('0'));
+}
+
+#[test]
+fn line_drawing_glyphs_are_narrow() {
+    let mut state = state(4, 2);
+    advance(&mut state, b"\x1b(0q"); // '─'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.width(), 1);
+}
+
+#[test]
+fn so_selects_g1_and_si_selects_g0() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b)0"); // designate G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> G1 into GL
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x0f"); // SI -> G0 (still ASCII) into GL
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 1), Some('q'));
+}
+
+#[test]
+fn charset_designation_persists_across_line_feeds() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    state.print('q'); // row 0
+    advance(&mut state, b"\r\n"); // CR + LF to the next row
+    state.print('q'); // row 1, charset still in effect
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    assert_eq!(glyph(&state, 1, 0), Some('─'));
+}
+
+#[test]
+fn uk_charset_maps_only_the_hash() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(A"); // G0 = UK
+    state.print('#');
+    state.print('a');
+    assert_eq!(glyph(&state, 0, 0), Some('£'));
+    assert_eq!(glyph(&state, 0, 1), Some('a'));
+}
+
+#[test]
+fn unknown_charset_final_falls_back_to_ascii() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b(>"); // unsupported final -> ASCII passthrough
+    assert_eq!(state.active_render().charsets[0], Charset::Ascii);
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn g2_and_g3_are_designated_but_not_selectable() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b*0"); // designate G2 = DEC line drawing
+    advance(&mut state, b"\x1b+0"); // designate G3 = DEC line drawing
+    assert_eq!(state.active_render().charsets[2], Charset::DecLineDrawing);
+    assert_eq!(state.active_render().charsets[3], Charset::DecLineDrawing);
+    // No LS2/LS3, so GL stays on G0 (ASCII): printing is unaffected.
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn charset_is_carried_into_the_alternate_screen() {
+    // Designations are shared global rendering state (like the pen and GL slot),
+    // so entering the alternate by ANY route keeps them: a child that did
+    // `ESC ( 0` keeps drawing line-drawing glyphs after `?47h`.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?47h"); // switch to the alternate
+    state.print('q'); // shared G0 still DEC -> box glyph, not literal 'q'
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x1b[?47l"); // back to the primary
+    state.print('q'); // still DEC
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn decsc_and_decrc_save_and_restore_the_charset() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b7"); // DECSC: save cursor + charset
+    advance(&mut state, b"\x1b(B"); // G0 = ASCII
+    state.print('q'); // literal 'q' at (0, 0)
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+    advance(&mut state, b"\x1b8"); // DECRC: restore charset (and home the cursor)
+    state.print('q'); // DEC again -> box glyph at (0, 0)
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn decrc_without_a_save_resets_the_charset_to_ascii() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing, never saved
+    advance(&mut state, b"\x1b8"); // DECRC with no prior DECSC -> defaults
+    assert_eq!(state.active_render().charsets[0], Charset::Ascii);
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn dec_1049_entry_inherits_the_primary_charset() {
+    // Charset designations are global rendering state (like the pen): entering
+    // the alternate via `?1049h` inherits the primary's, so an app that did
+    // `ESC ( 0` then entered keeps drawing line-drawing glyphs, not ASCII.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // primary G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?1049h"); // enter alt: inherit the primary's designations
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn dec_1049_entry_does_not_leak_a_prior_alternate_charset() {
+    // Seeding from the *primary* overwrites any designations a previous
+    // alternate session left, so re-entry never resurrects stale charset state.
+    let mut state = state(8, 3);
+    // Primary stays ASCII throughout.
+    advance(&mut state, b"\x1b[?1049h"); // enter alt (inherits ASCII)
+    advance(&mut state, b"\x1b(0"); // this alt session designates G0 = DEC
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x1b[?1049l"); // exit
+    advance(&mut state, b"\x1b[?1049h"); // re-enter: seed from primary (ASCII) wipes the stale DEC
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn an_alternate_designation_does_not_leak_to_the_primary() {
+    // Render state is per-screen: a designation a full-screen app makes on the
+    // alternate must NOT corrupt the user's shell on the primary after it exits.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?1047h"); // enter the alternate (clones primary's ASCII)
+    advance(&mut state, b"\x1b(0"); // alt designates G0 = DEC line drawing
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─')); // alt draws box glyphs
+    advance(&mut state, b"\x1b[?1047l"); // exit to the primary
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q')); // primary UNAFFECTED — no leak
+}
+
+#[test]
+fn dec_1049_exit_restores_the_charset_via_decrc() {
+    // `?1049 l` restores the cursor as in DECRC, which carries the saved charset
+    // back — so a designation made on the alternate is undone on exit, leaving
+    // the primary's set in effect (here ASCII).
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?1049h"); // save primary (ASCII), enter alt
+    advance(&mut state, b"\x1b(0"); // alt designates G0 = DEC
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x1b[?1049l"); // DECRC restore -> charset back to the primary's ASCII
+    advance(&mut state, b"\x1b[?1047h"); // a non-restoring entry observes the restored ASCII
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn the_alternate_render_is_recloned_from_primary_on_each_entry() {
+    // Every alternate entry clones the primary's render state, so a designation
+    // the alternate made in a prior session is discarded on re-entry (the
+    // alternate resumes its BUFFER, but its render is re-inherited from primary).
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?47h"); // enter (clone primary's ASCII)
+    advance(&mut state, b"\x1b(0"); // alt G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?47l"); // exit (primary unaffected)
+    advance(&mut state, b"\x1b[?47h"); // re-enter -> re-clone primary's ASCII
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q')); // alt's prior DEC was discarded
+}
+
+#[test]
+fn decsc_and_decrc_save_and_restore_the_active_gl_slot() {
+    // xterm stores `curgl` in its SavedCursor, so a save/restore must carry
+    // *which* set is invoked into GL, not only the G0-G3 table contents.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b)0"); // designate G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> GL = G1
+    advance(&mut state, b"\x1b7"); // DECSC: save cursor, charsets, AND the GL slot
+    advance(&mut state, b"\x0f"); // SI -> GL = G0 (ASCII)
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q')); // G0 ASCII -> literal
+    advance(&mut state, b"\x1b8"); // DECRC: GL restored to G1 (and cursor home to the saved (0,0))
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─')); // G1 line drawing again
+}
+
+#[test]
+fn scosc_and_scorc_save_and_restore_the_active_gl_slot() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b)0"); // G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> GL = G1
+    advance(&mut state, b"\x1b[s"); // SCOSC: save (ANSI.SYS form of DECSC)
+    advance(&mut state, b"\x0f"); // SI -> GL = G0
+    advance(&mut state, b"\x1b[u"); // SCORC: GL restored to G1
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn decrc_without_a_save_resets_the_gl_slot_to_g0() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x0e"); // SO -> GL = G1
+    advance(&mut state, b"\x1b8"); // DECRC with no prior save -> GL back to G0
+    assert_eq!(state.active_render().gl, 0);
+}
+
+#[test]
+fn the_gl_slot_is_carried_into_the_alternate() {
+    // The GL selection is part of the render state, so a `?47` entry clones the
+    // primary's into the alternate (the alternate inherits GL = G1).
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x0e"); // SO -> GL = G1 on the primary
+    advance(&mut state, b"\x1b[?47h"); // enter the alternate (clones the primary's render)
+    assert_eq!(state.active_render().gl, 1); // alternate inherited GL = G1
+    advance(&mut state, b"\x1b[?47l"); // back to the primary (its GL is its own)
+    assert_eq!(state.active_render().gl, 1);
+}
+
+#[test]
+fn an_alternate_pen_change_does_not_leak_to_the_primary() {
+    // The pen is per-screen render state too: colors set by a full-screen app on
+    // the alternate must not bleed onto the primary shell after it exits — but
+    // the alternate does inherit the primary's pen on entry.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[31m"); // primary pen: red fg
+    advance(&mut state, b"\x1b[?1047h"); // enter the alternate (inherits red)
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Indexed(1)))
+    );
+    advance(&mut state, b"\x1b[32m"); // alt changes pen to green fg
+    advance(&mut state, b"\x1b[?1047l"); // exit to the primary
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_fg(Color::Indexed(1))) // primary still red — green did not leak
+    );
+}
+
+#[test]
+fn a_resize_on_the_alternate_keeps_the_primary_background() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?1047h"); // enter the alternate
+    advance(&mut state, b"\x1b[44m"); // alternate sets a blue background
+    state.resize(PtySize { cols: 4, rows: 2 }); // resize while on the alternate
+    advance(&mut state, b"\x1b[?1047l"); // exit to the primary
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.style(), Style::default()); // primary blanks stayed default, not blue
+}
+
+#[test]
+fn dec_1049_round_trip_restores_the_gl_slot() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b)0"); // primary G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> GL = G1
+    advance(&mut state, b"\x1b[?1049h"); // enter alt: saves the primary cursor incl GL = G1
+    advance(&mut state, b"\x0f"); // change GL = G0 while on the alternate
+    advance(&mut state, b"\x1b[?1049l"); // exit: restores the primary cursor, GL back to G1
+    state.print('q'); // primary G1 line drawing still selected
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn mixed_mode_47_then_1049_keeps_the_charset() {
+    // `CSI ? 47 ; 1049 h`: neither mode touches the shared charset, so the
+    // designation survives the mixed-mode entry regardless of the buffer flips.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?47;1049h"); // ?47h flips active, ?1049h saves/switches/clears cells
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─')); // shared charset intact
+}
+
+#[test]
+fn decsc_decrc_round_trips_the_charset_on_the_alternate_screen() {
+    // The per-screen saved slot carries charsets on the alternate too, not only
+    // the primary.
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?1049h"); // enter alt
+    advance(&mut state, b"\x1b(0"); // alt G0 = DEC
+    advance(&mut state, b"\x1b7"); // DECSC on the alt: saves G0 = DEC
+    advance(&mut state, b"\x1b(B"); // alt G0 = ASCII
+    advance(&mut state, b"\x1b8"); // DECRC on the alt: restores G0 = DEC
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn dec_1048_saves_and_restores_the_charset() {
+    // `?1048` is "save/restore cursor as in DECSC/DECRC" — it must carry charsets.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC
+    advance(&mut state, b"\x1b[?1048h"); // save cursor (incl charsets)
+    advance(&mut state, b"\x1b(B"); // G0 = ASCII
+    advance(&mut state, b"\x1b[?1048l"); // restore -> G0 = DEC
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn dec_line_drawing_survives_a_deferred_wrap() {
+    // The remap runs at the top of `print`, before the wrap/width logic, so a
+    // line-drawing row wraps exactly like an ASCII one (every glyph is narrow).
+    let mut state = state(3, 2);
+    advance(&mut state, b"\x1b(0"); // GL = DEC line drawing
+    advance(&mut state, b"qqq"); // fills row 0 with ───, parks at the last column
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    assert_eq!(glyph(&state, 0, 2), Some('─'));
+    assert!(state.active_cursor().pending_wrap);
+    state.print('q'); // forces the deferred wrap onto row 1
+    assert_eq!(glyph(&state, 1, 0), Some('─'));
+    assert_eq!(state.active_cursor().row, 1);
+}
+
+#[test]
+fn dec_line_drawing_passes_multibyte_utf8_through() {
+    // The table only remaps the ASCII range 0x5F-0x7E; a real Unicode glyph
+    // (vte has already decoded the UTF-8) is printed unchanged.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // GL = DEC line drawing
+    advance(&mut state, "é".as_bytes()); // multibyte, outside the table
+    assert_eq!(glyph(&state, 0, 0), Some('é'));
+}
+
+#[test]
+fn a_combining_mark_folds_onto_a_line_drawing_glyph() {
+    // The remapped glyph anchors the grapheme cluster, so a following combining
+    // mark folds onto it (one cell) rather than taking its own — the remap does
+    // not disturb the cluster machinery.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // GL = DEC line drawing
+    state.print('q'); // '─' base at (0, 0)
+    state.print('\u{0301}'); // combining acute: folds onto the base, no new cell
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), '─');
+    assert_eq!(cell.combining(), &['\u{0301}']);
+    assert_eq!(state.active_cursor().col, 1); // cursor did not advance a 2nd column
 }
