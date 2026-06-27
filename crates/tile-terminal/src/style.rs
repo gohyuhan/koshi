@@ -31,8 +31,8 @@ impl Style {
         self.attrs.italic = italic
     }
 
-    /// Set or clear the underline attribute (SGR `4` / `24`).
-    pub fn set_underline(&mut self, underline: bool) {
+    /// Set the underline style (SGR `4` single / `21` double / `24` none).
+    pub fn set_underline(&mut self, underline: UnderlineStyle) {
         self.attrs.underline = underline
     }
 
@@ -71,11 +71,6 @@ impl Style {
     /// Set or clear the strikethrough attribute (SGR `9` / `29`).
     pub fn set_strike(&mut self, strike: bool) {
         self.attrs.strike = strike
-    }
-
-    /// Set or clear the double-underline attribute (SGR `21` / `24`).
-    pub fn set_double_underline(&mut self, double_underline: bool) {
-        self.attrs.double_underline = double_underline
     }
 
     /// Set or clear the overline attribute (SGR `53` / `55`).
@@ -121,8 +116,9 @@ pub struct AttrFlags {
     bold: bool,
     /// Italic (SGR 3).
     italic: bool,
-    /// Underline (SGR 4).
-    underline: bool,
+    /// Underline style (SGR 4 single / 21 double / 24 none) — one aspect with
+    /// mutually exclusive values, so single and double are never both set.
+    underline: UnderlineStyle,
     /// Reverse video — swap foreground and background (SGR 7).
     reverse: bool,
     /// Faint / decreased intensity (SGR 2).
@@ -133,10 +129,29 @@ pub struct AttrFlags {
     conceal: bool,
     /// Crossed-out / strikethrough (SGR 9).
     strike: bool,
-    /// Double underline (SGR 21).
-    double_underline: bool,
     /// Overline (SGR 53).
     overline: bool,
+}
+
+/// The underline style of a cell — one rendition aspect with mutually exclusive
+/// values, so a cell draws at most one underline and applying a new style
+/// replaces the previous one. Selected by SGR 4 / 21 / 24 and the extended
+/// `4:n` subparameter forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    /// Not underlined (SGR 24 or `4:0`).
+    #[default]
+    None,
+    /// Single underline (SGR 4 or `4:1`).
+    Single,
+    /// Double underline (SGR 21 or `4:2`).
+    Double,
+    /// Curly / wavy underline (`4:3`).
+    Curly,
+    /// Dotted underline (`4:4`).
+    Dotted,
+    /// Dashed underline (`4:5`).
+    Dashed,
 }
 
 #[cfg(test)]

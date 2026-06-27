@@ -14,13 +14,12 @@ fn attr_flags_default_is_all_false() {
         AttrFlags {
             bold: false,
             italic: false,
-            underline: false,
+            underline: UnderlineStyle::None,
             reverse: false,
             faint: false,
             blink: false,
             conceal: false,
             strike: false,
-            double_underline: false,
             overline: false,
         }
     );
@@ -60,19 +59,18 @@ fn set_bg_sets_only_the_background() {
 fn attribute_setters_toggle_their_flag_independently() {
     let mut style = Style::default();
     style.set_bold(true);
-    style.set_underline(true);
+    style.set_underline(UnderlineStyle::Single);
     assert_eq!(
         style.attrs,
         AttrFlags {
             bold: true,
             italic: false,
-            underline: true,
+            underline: UnderlineStyle::Single,
             reverse: false,
             faint: false,
             blink: false,
             conceal: false,
             strike: false,
-            double_underline: false,
             overline: false,
         }
     );
@@ -82,13 +80,12 @@ fn attribute_setters_toggle_their_flag_independently() {
         AttrFlags {
             bold: false,
             italic: false,
-            underline: true,
+            underline: UnderlineStyle::Single,
             reverse: false,
             faint: false,
             blink: false,
             conceal: false,
             strike: false,
-            double_underline: false,
             overline: false,
         }
     );
@@ -104,13 +101,12 @@ fn set_italic_and_set_reverse_set_their_flags() {
         AttrFlags {
             bold: false,
             italic: true,
-            underline: false,
+            underline: UnderlineStyle::None,
             reverse: true,
             faint: false,
             blink: false,
             conceal: false,
             strike: false,
-            double_underline: false,
             overline: false,
         }
     );

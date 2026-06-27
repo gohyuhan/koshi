@@ -26,7 +26,7 @@ use crate::state::{
     Charset, MouseEncoding, MouseTracking, RenderState, ReportedCwd, SavedCursor, Screen,
     TerminalState,
 };
-use crate::style::{Color, Style};
+use crate::style::{Color, Style, UnderlineStyle};
 use percent_encoding::percent_decode;
 use unicode_segmentation::GraphemeCursor;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1347,31 +1347,41 @@ fn apply_sgr(style: &mut Style, params: &vte::Params) {
         // `CSI ;m`) carries no value, so `unwrap_or(0)` makes it code 0 (reset).
         // Each arm's comment names the code so the mapping reads without the spec.
         match p.first().copied().unwrap_or(0) {
-            0 => style.reset(),                     // 0: reset all attributes + colors
-            1 => style.set_bold(true),              // 1: bold (increased intensity)
-            2 => style.set_faint(true),             // 2: faint (decreased intensity)
-            3 => style.set_italic(true),            // 3: italic
-            4 => style.set_underline(true),         // 4: underline
-            5 | 6 => style.set_blink(true),         // 5/6: blink (slow/rapid → one flag)
-            7 => style.set_reverse(true),           // 7: reverse video (swap fg/bg)
-            8 => style.set_conceal(true),           // 8: conceal (hidden)
-            9 => style.set_strike(true),            // 9: crossed-out (strikethrough)
-            21 => style.set_double_underline(true), // 21: doubly underlined
+            0 => style.reset(),          // 0: reset all attributes + colors
+            1 => style.set_bold(true),   // 1: bold (increased intensity)
+            2 => style.set_faint(true),  // 2: faint (decreased intensity)
+            3 => style.set_italic(true), // 3: italic
+            // 4: underline. An optional `4:n` subparameter selects the style and
+            // is grouped into this param slice; bare `4` and `4:1` are single,
+            // `4:0` cancels, `4:2`-`4:5` are double/curly/dotted/dashed, any
+            // other subparameter is single.
+            4 => {
+                let underline = match p.get(1).copied() {
+                    Some(0) => UnderlineStyle::None,
+                    Some(2) => UnderlineStyle::Double,
+                    Some(3) => UnderlineStyle::Curly,
+                    Some(4) => UnderlineStyle::Dotted,
+                    Some(5) => UnderlineStyle::Dashed,
+                    _ => UnderlineStyle::Single,
+                };
+                style.set_underline(underline);
+            }
+            5 | 6 => style.set_blink(true), // 5/6: blink (slow/rapid → one flag)
+            7 => style.set_reverse(true),   // 7: reverse video (swap fg/bg)
+            8 => style.set_conceal(true),   // 8: conceal (hidden)
+            9 => style.set_strike(true),    // 9: crossed-out (strikethrough)
+            21 => style.set_underline(UnderlineStyle::Double), // 21: double underline
             // 22: normal intensity — cancels both bold (1) and faint (2).
             22 => {
                 style.set_bold(false);
                 style.set_faint(false);
             }
             23 => style.set_italic(false), // 23: italic off
-            // 24: not underlined — cancels both single (4) and double (21).
-            24 => {
-                style.set_underline(false);
-                style.set_double_underline(false);
-            }
-            25 => style.set_blink(false),   // 25: blink off
-            27 => style.set_reverse(false), // 27: reverse off
-            28 => style.set_conceal(false), // 28: reveal (conceal off)
-            29 => style.set_strike(false),  // 29: strikethrough off
+            24 => style.set_underline(UnderlineStyle::None), // 24: not underlined (cancels 4 and 21)
+            25 => style.set_blink(false),                    // 25: blink off
+            27 => style.set_reverse(false),                  // 27: reverse off
+            28 => style.set_conceal(false),                  // 28: reveal (conceal off)
+            29 => style.set_strike(false),                   // 29: strikethrough off
             c @ 30..=37 => style.set_fg(Color::Indexed((c - 30) as u8)), // 30-37: fg palette 0-7
             c @ 90..=97 => style.set_fg(Color::Indexed((c - 90 + 8) as u8)), // 90-97: bright fg 8-15
             39 => style.set_fg(Color::Default),                              // 39: default fg
