@@ -1347,21 +1347,39 @@ fn apply_sgr(style: &mut Style, params: &vte::Params) {
         // `CSI ;m`) carries no value, so `unwrap_or(0)` makes it code 0 (reset).
         // Each arm's comment names the code so the mapping reads without the spec.
         match p.first().copied().unwrap_or(0) {
-            0 => style.reset(),               // 0: reset all attributes + colors
-            1 => style.set_bold(true),        // 1: bold
-            3 => style.set_italic(true),      // 3: italic
-            4 => style.set_underline(true),   // 4: underline
-            7 => style.set_reverse(true),     // 7: reverse video (swap fg/bg)
-            22 => style.set_bold(false),      // 22: bold off (normal intensity; no faint attr)
-            23 => style.set_italic(false),    // 23: italic off
-            24 => style.set_underline(false), // 24: underline off
-            27 => style.set_reverse(false),   // 27: reverse off
+            0 => style.reset(),                     // 0: reset all attributes + colors
+            1 => style.set_bold(true),              // 1: bold (increased intensity)
+            2 => style.set_faint(true),             // 2: faint (decreased intensity)
+            3 => style.set_italic(true),            // 3: italic
+            4 => style.set_underline(true),         // 4: underline
+            5 | 6 => style.set_blink(true),         // 5/6: blink (slow/rapid → one flag)
+            7 => style.set_reverse(true),           // 7: reverse video (swap fg/bg)
+            8 => style.set_conceal(true),           // 8: conceal (hidden)
+            9 => style.set_strike(true),            // 9: crossed-out (strikethrough)
+            21 => style.set_double_underline(true), // 21: doubly underlined
+            // 22: normal intensity — cancels both bold (1) and faint (2).
+            22 => {
+                style.set_bold(false);
+                style.set_faint(false);
+            }
+            23 => style.set_italic(false), // 23: italic off
+            // 24: not underlined — cancels both single (4) and double (21).
+            24 => {
+                style.set_underline(false);
+                style.set_double_underline(false);
+            }
+            25 => style.set_blink(false),   // 25: blink off
+            27 => style.set_reverse(false), // 27: reverse off
+            28 => style.set_conceal(false), // 28: reveal (conceal off)
+            29 => style.set_strike(false),  // 29: strikethrough off
             c @ 30..=37 => style.set_fg(Color::Indexed((c - 30) as u8)), // 30-37: fg palette 0-7
             c @ 90..=97 => style.set_fg(Color::Indexed((c - 90 + 8) as u8)), // 90-97: bright fg 8-15
             39 => style.set_fg(Color::Default),                              // 39: default fg
             c @ 40..=47 => style.set_bg(Color::Indexed((c - 40) as u8)), // 40-47: bg palette 0-7
             c @ 100..=107 => style.set_bg(Color::Indexed((c - 100 + 8) as u8)), // 100-107: bright bg 8-15
             49 => style.set_bg(Color::Default),                                 // 49: default bg
+            53 => style.set_overline(true),                                     // 53: overline
+            55 => style.set_overline(false),                                    // 55: overline off
             // 38: extended fg — 256-palette (`38;5;n`) or truecolor (`38;2;r;g;b`).
             38 => {
                 if let Some(col) = extended_color(p, &mut iter) {
@@ -1374,7 +1392,14 @@ fn apply_sgr(style: &mut Style, params: &vte::Params) {
                     style.set_bg(col);
                 }
             }
-            _ => {} // unknown / out-of-scope SGR code: ignore
+            // 58: underline color — same 256-palette / truecolor forms as 38/48.
+            58 => {
+                if let Some(col) = extended_color(p, &mut iter) {
+                    style.set_underline_color(Some(col));
+                }
+            }
+            59 => style.set_underline_color(None), // 59: default underline color
+            _ => {}                                // unknown / out-of-scope SGR code: ignore
         }
     }
 }

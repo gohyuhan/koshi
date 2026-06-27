@@ -726,6 +726,181 @@ fn sgr_truecolor_channel_out_of_range_leaves_the_pen_unchanged() {
 }
 
 #[test]
+fn sgr_faint_sets_the_faint_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[2m");
+    assert_eq!(state.active_render().style, styled(|s| s.set_faint(true)));
+}
+
+#[test]
+fn sgr_blink_slow_and_rapid_both_set_one_flag() {
+    let mut slow = state(5, 2);
+    advance(&mut slow, b"\x1b[5m"); // 5: slow blink
+    assert_eq!(slow.active_render().style, styled(|s| s.set_blink(true)));
+
+    let mut rapid = state(5, 2);
+    advance(&mut rapid, b"\x1b[6m"); // 6: rapid blink — same flag
+    assert_eq!(rapid.active_render().style, styled(|s| s.set_blink(true)));
+}
+
+#[test]
+fn sgr_conceal_sets_the_conceal_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[8m");
+    assert_eq!(state.active_render().style, styled(|s| s.set_conceal(true)));
+}
+
+#[test]
+fn sgr_strike_sets_the_strike_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[9m");
+    assert_eq!(state.active_render().style, styled(|s| s.set_strike(true)));
+}
+
+#[test]
+fn sgr_double_underline_sets_the_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[21m");
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_double_underline(true))
+    );
+}
+
+#[test]
+fn sgr_overline_sets_the_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[53m");
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| s.set_overline(true))
+    );
+}
+
+#[test]
+fn sgr_new_attribute_off_codes_clear_each_attribute() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[5;8;9;53m"); // blink, conceal, strike, overline on
+    advance(&mut state, b"\x1b[25;28;29;55m"); // each turned back off
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn sgr_normal_intensity_clears_both_bold_and_faint() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[1;2m"); // bold AND faint — orthogonal, both held
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_faint(true);
+        })
+    );
+    advance(&mut state, b"\x1b[22m"); // 22 cancels both
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn sgr_not_underlined_clears_both_single_and_double() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[4;21m"); // single AND double underline both held
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| {
+            s.set_underline(true);
+            s.set_double_underline(true);
+        })
+    );
+    advance(&mut state, b"\x1b[24m"); // 24 cancels both
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn sgr_underline_color_256_both_forms() {
+    let mut semicolon = state(5, 2);
+    advance(&mut semicolon, b"\x1b[58;5;208m");
+    assert_eq!(
+        semicolon.active_render().style,
+        styled(|s| s.set_underline_color(Some(Color::Indexed(208))))
+    );
+
+    let mut colon = state(5, 2);
+    advance(&mut colon, b"\x1b[58:5:208m");
+    assert_eq!(
+        colon.active_render().style,
+        styled(|s| s.set_underline_color(Some(Color::Indexed(208))))
+    );
+}
+
+#[test]
+fn sgr_underline_color_truecolor_both_forms() {
+    let mut semicolon = state(5, 2);
+    advance(&mut semicolon, b"\x1b[58;2;10;20;30m");
+    assert_eq!(
+        semicolon.active_render().style,
+        styled(|s| s.set_underline_color(Some(Color::Rgb(10, 20, 30))))
+    );
+
+    let mut colon = state(5, 2);
+    advance(&mut colon, b"\x1b[58:2:10:20:30m");
+    assert_eq!(
+        colon.active_render().style,
+        styled(|s| s.set_underline_color(Some(Color::Rgb(10, 20, 30))))
+    );
+}
+
+#[test]
+fn sgr_default_underline_color_resets_to_none() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[58;5;208m"); // explicit underline color
+    advance(&mut state, b"\x1b[59m"); // 59: back to default (follow fg)
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn sgr_underline_color_out_of_range_leaves_the_pen_unchanged() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[58;5;256m"); // index 256 > 255 — rejected
+    assert_eq!(state.active_render().style, Style::default());
+    advance(&mut state, b"\x1b[58:2:300:0:0m"); // colon channel 300 > 255 — rejected
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn sgr_new_attributes_stamp_onto_printed_glyphs() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[2;9;5;21m"); // faint, strike, blink, double underline
+    state.print('z');
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(
+        cell.style(),
+        styled(|s| {
+            s.set_faint(true);
+            s.set_strike(true);
+            s.set_blink(true);
+            s.set_double_underline(true);
+        })
+    );
+}
+
+#[test]
+fn decsc_restores_the_new_sgr_attributes() {
+    let mut state = state(5, 2);
+    advance(&mut state, b"\x1b[2;58;5;208m"); // faint + underline color
+    advance(&mut state, b"\x1b7"); // DECSC snapshots the whole render state
+    advance(&mut state, b"\x1b[0m"); // wipe the pen
+    assert_eq!(state.active_render().style, Style::default());
+    advance(&mut state, b"\x1b8"); // DECRC restores it
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| {
+            s.set_faint(true);
+            s.set_underline_color(Some(Color::Indexed(208)));
+        })
+    );
+}
+
+#[test]
 fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_to_later_codes() {
     let mut state = state(5, 2);
     // r = 999 is out of range → the color is rejected, but 31 and 32 are its g/b

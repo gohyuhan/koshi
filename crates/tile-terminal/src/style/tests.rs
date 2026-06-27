@@ -16,6 +16,12 @@ fn attr_flags_default_is_all_false() {
             italic: false,
             underline: false,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            double_underline: false,
+            overline: false,
         }
     );
 }
@@ -28,6 +34,7 @@ fn style_default_is_default_colors_and_no_attrs() {
             fg: Color::Default,
             bg: Color::Default,
             attrs: AttrFlags::default(),
+            underline_color: None,
         }
     );
 }
@@ -61,6 +68,12 @@ fn attribute_setters_toggle_their_flag_independently() {
             italic: false,
             underline: true,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            double_underline: false,
+            overline: false,
         }
     );
     style.set_bold(false); // clears bold, leaves underline set
@@ -71,6 +84,12 @@ fn attribute_setters_toggle_their_flag_independently() {
             italic: false,
             underline: true,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            double_underline: false,
+            overline: false,
         }
     );
 }
@@ -87,6 +106,12 @@ fn set_italic_and_set_reverse_set_their_flags() {
             italic: true,
             underline: false,
             reverse: true,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            double_underline: false,
+            overline: false,
         }
     );
 }
@@ -114,6 +139,7 @@ fn bg_fill_keeps_only_the_background() {
             fg: Color::Default,
             bg: Color::Indexed(4),
             attrs: AttrFlags::default(),
+            underline_color: None,
         }
     );
 }
