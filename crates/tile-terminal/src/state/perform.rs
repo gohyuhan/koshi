@@ -566,12 +566,16 @@ impl vte::Perform for TerminalState {
         }
         let glyph_width: u16 = if raw_width >= 2 { 2 } else { 1 };
 
-        // Deferred wrap: a prior print parked on the last column. Wrap to the
-        // next line before placing this glyph, so a row that exactly fills the
-        // width is not scrolled early.
+        // Deferred wrap: a prior print parked on the last column. Under autowrap
+        // (DECAWM `?7`, the default) wrap to the next line before placing this
+        // glyph, so a row that exactly fills the width is not scrolled early. With
+        // autowrap off the cursor stays pinned at the last column and this glyph
+        // overwrites in place; either way the parked latch is cleared.
         if self.active_cursor().pending_wrap {
-            self.linefeed();
-            self.active_cursor_mut().col = 0;
+            if self.modes.autowrap {
+                self.linefeed();
+                self.active_cursor_mut().col = 0;
+            }
             self.active_cursor_mut().pending_wrap = false;
         }
 
@@ -585,6 +589,14 @@ impl vte::Perform for TerminalState {
         // pane (`last_col == 0`), where wrapping cannot help — `place_glyph` then
         // stores the glyph narrow in place instead of thrashing the screen.
         if glyph_width == 2 && self.active_cursor().col == last_col && last_col > 0 {
+            // A 2-cell glyph cannot fit in the lone last column. With autowrap off
+            // there is no next line to move it onto, so drop it. The cursor is at
+            // the right margin, so park the wrap latch — same as a narrow glyph
+            // ending here — so that re-enabling autowrap wraps the next glyph.
+            if !self.modes.autowrap {
+                self.active_cursor_mut().pending_wrap = true;
+                return;
+            }
             let row = self.active_cursor().row;
             // If the last column is the continuation of an existing wide glyph,
             // blanking it alone would orphan that glyph's base one column to the
@@ -834,6 +846,30 @@ impl vte::Perform for TerminalState {
                     // cursor arrow keys on the alternate screen.
                     ('h', 1007) => self.modes.alt_scroll = true,
                     ('l', 1007) => self.modes.alt_scroll = false,
+                    // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
+                    // last column parks there and the next glyph wraps to a new
+                    // line. Off: the cursor stays pinned and further glyphs
+                    // overwrite the last column in place.
+                    ('h', 7) => self.modes.autowrap = true,
+                    ('l', 7) => self.modes.autowrap = false,
+                    // `?1` (DECCKM) — application cursor keys. The input layer reads
+                    // this to pick the arrow-key byte form (`ESC O A` vs `ESC [ A`).
+                    ('h', 1) => self.modes.app_cursor_keys = true,
+                    ('l', 1) => self.modes.app_cursor_keys = false,
+                    // `?5` (DECSCNM) — reverse video. The renderer reads this to
+                    // swap foreground and background across the whole screen.
+                    ('h', 5) => self.modes.reverse_video = true,
+                    ('l', 5) => self.modes.reverse_video = false,
+                    // `?12` (att610) — cursor blink. The renderer reads this to
+                    // blink the cursor cell.
+                    ('h', 12) => self.modes.cursor_blink = true,
+                    ('l', 12) => self.modes.cursor_blink = false,
+                    // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
+                    // keyboard auto-repeat): modes tile does not implement. Trace
+                    // and ignore.
+                    ('h' | 'l', 2 | 3 | 8) => {
+                        tracing::trace!(mode, "unsupported DEC private mode; ignored");
+                    }
                     // Any other DEC private mode is not handled yet.
                     _ => {}
                 }

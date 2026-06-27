@@ -184,11 +184,12 @@ pub enum MouseEncoding {
     Urxvt,
 }
 
-/// Terminal mode flags the renderer and input/mouse layers consult: bracketed
-/// paste (`?2004`), the mouse [tracking][MouseTracking] level and
-/// [encoding][MouseEncoding] (`?9`/`?1000`/`?1002`/`?1003` and
+/// Terminal mode flags the renderer and input/mouse layers consult: autowrap
+/// (`?7`), application cursor keys (`?1`), reverse video (`?5`), cursor blink
+/// (`?12`), bracketed paste (`?2004`), the mouse [tracking][MouseTracking] level
+/// and [encoding][MouseEncoding] (`?9`/`?1000`/`?1002`/`?1003` and
 /// `?1005`/`?1006`/`?1015`), and alternate-scroll (`?1007`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalModes {
     /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
     /// typed input from a paste.
@@ -200,6 +201,32 @@ pub struct TerminalModes {
     /// `?1007` — on the alternate screen, translate wheel motion into cursor
     /// arrow keys instead of emitting a mouse report.
     alt_scroll: bool,
+    /// `?7` (DECAWM) — autowrap. When off, a glyph at the last column overwrites
+    /// in place instead of parking to wrap onto a new line. Default on.
+    autowrap: bool,
+    /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
+    /// rather than `ESC [ A` for the arrow keys.
+    app_cursor_keys: bool,
+    /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
+    /// background across the whole screen.
+    reverse_video: bool,
+    /// `?12` (att610) — cursor blink: the renderer blinks the cursor cell.
+    cursor_blink: bool,
+}
+
+impl Default for TerminalModes {
+    fn default() -> Self {
+        TerminalModes {
+            bracketed_paste: false,
+            mouse_tracking: MouseTracking::Off,
+            mouse_encoding: MouseEncoding::Default,
+            alt_scroll: false,
+            autowrap: true,
+            app_cursor_keys: false,
+            reverse_video: false,
+            cursor_blink: false,
+        }
+    }
 }
 
 /// A working directory reported by the shell via OSC 7: the decoded `path`
@@ -402,6 +429,30 @@ impl TerminalState {
     /// this to translate wheel motion into arrow keys on the alternate screen.
     pub fn alt_scroll(&self) -> bool {
         self.modes.alt_scroll
+    }
+
+    /// Whether autowrap (DECAWM `?7`) is active — `print` reads this to decide
+    /// whether a glyph at the last column wraps onto a new line. Default on.
+    pub fn autowrap(&self) -> bool {
+        self.modes.autowrap
+    }
+
+    /// Whether application-cursor-keys mode (DECCKM `?1`) is active — the input
+    /// layer reads this to pick the arrow-key byte form.
+    pub fn app_cursor_keys(&self) -> bool {
+        self.modes.app_cursor_keys
+    }
+
+    /// Whether reverse-video mode (DECSCNM `?5`) is active — the renderer reads
+    /// this to swap foreground and background across the screen.
+    pub fn reverse_video(&self) -> bool {
+        self.modes.reverse_video
+    }
+
+    /// Whether cursor-blink mode (`?12`) is active — the renderer reads this to
+    /// blink the cursor cell.
+    pub fn cursor_blink(&self) -> bool {
+        self.modes.cursor_blink
     }
 
     /// The pane's scrollback history. The runtime reads its truncation tallies
