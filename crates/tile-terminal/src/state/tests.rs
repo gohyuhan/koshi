@@ -28,9 +28,11 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
         is_visible: true,
         pending_wrap: false,
         saved: None,
+        charsets: [Charset::default(); 4],
     };
     assert_eq!(state.primary_cursor, expected_cursor);
     assert_eq!(state.alternate_cursor, expected_cursor);
+    assert_eq!(state.gl, 0);
     assert_eq!(state.style, Style::default());
     assert_eq!(state.modes, TerminalModes::default());
     assert_eq!(state.title, None);

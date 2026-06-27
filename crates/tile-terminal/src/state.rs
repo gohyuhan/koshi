@@ -26,6 +26,27 @@ pub enum Screen {
     Alternate,
 }
 
+/// A character set a `G0`–`G3` slot can be designated to, selected into the
+/// active GL range by `SI`/`SO` and applied to printed bytes.
+///
+/// Designation is per-cursor (so it is independent per screen and is saved and
+/// restored by DECSC/DECRC, matching xterm/alacritty). Only the three sets real
+/// applications use are modeled; an unrecognized designation final byte falls
+/// back to [`Ascii`](Charset::Ascii) (a passthrough).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Charset {
+    /// US-ASCII (`ESC ( B`): every byte prints as itself. The default.
+    #[default]
+    Ascii,
+    /// DEC Special Character and Line Drawing (`ESC ( 0`): the bytes `0x5F`–
+    /// `0x7E` print as box-drawing and symbol glyphs (`q` → `─`, `x` → `│`, …),
+    /// so a TUI's `lqqqk` renders `┌───┐`.
+    DecLineDrawing,
+    /// United Kingdom (`ESC ( A`): identical to ASCII except `#` (`0x23`) prints
+    /// as `£`.
+    Uk,
+}
+
 /// A cursor position and pen style captured by DECSC, restored by DECRC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SavedCursor {
@@ -38,6 +59,10 @@ pub struct SavedCursor {
     /// The deferred-wrap latch at save time, restored alongside the position so
     /// a glyph parked at the last column still wraps after a save/restore.
     pending_wrap: bool,
+    /// The `G0`–`G3` charset designations at save time. DECSC/DECRC carry the
+    /// charset along with the cursor, so an app that designates a set, saves,
+    /// changes it, then restores gets the original set back.
+    charsets: [Charset; 4],
 }
 
 /// The text cursor: position, visibility, and the deferred-wrap latch.
@@ -60,6 +85,11 @@ pub struct Cursor {
     /// SCOSC/SCORC (ANSI form), kept per screen so each screen buffer has its
     /// own snapshot independent of the other.
     saved: Option<SavedCursor>,
+    /// The `G0`–`G3` charset designations, indexed by the GL/GR slot number.
+    /// Held on the cursor (not the terminal) so each screen has its own and
+    /// DECSC/DECRC save and restore it, matching xterm/alacritty. The active
+    /// slot for printing is chosen by [`TerminalState::gl`].
+    charsets: [Charset; 4],
 }
 
 /// One screen row trimmed to the renderer's inner width, with a flag for a
@@ -198,6 +228,11 @@ pub struct TerminalState {
     /// The cursor for the alternate screen, independent of the primary cursor
     /// so that position and wrap state do not leak across screen switches.
     alternate_cursor: Cursor,
+    /// Which `G0`–`G3` slot of the active cursor's `charsets` is mapped into the
+    /// GL range and applied to printed bytes: `0` after `SI`, `1` after `SO`.
+    /// Terminal-level and shared across screens (not part of the cursor), so
+    /// DECSC/DECRC do not save or restore it, matching xterm's `active_charset`.
+    gl: usize,
     /// The current pen style applied to printed cells.
     style: Style,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
@@ -239,6 +274,7 @@ impl TerminalState {
             is_visible: true,
             pending_wrap: false,
             saved: None,
+            charsets: [Charset::default(); 4],
         };
         TerminalState {
             primary: terminal_size.clone(),
@@ -246,6 +282,7 @@ impl TerminalState {
             active: Screen::Primary,
             primary_cursor: terminal_cursor,
             alternate_cursor: terminal_cursor,
+            gl: 0,
             style: Style::default(),
             modes: TerminalModes::default(),
             title: None,

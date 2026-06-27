@@ -3066,3 +3066,193 @@ fn cht_clears_the_pending_wrap_latch() {
     assert_eq!(cur.col, 19);
     assert!(!cur.pending_wrap);
 }
+
+// --- Charset designation + DEC line-drawing (G0-G3, SI/SO) ---
+
+#[test]
+fn dec_line_drawing_renders_box_glyphs() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0lqqqk"); // designate G0 = DEC line drawing, then print
+    assert_eq!(glyph(&state, 0, 0), Some('┌'));
+    assert_eq!(glyph(&state, 0, 1), Some('─'));
+    assert_eq!(glyph(&state, 0, 2), Some('─'));
+    assert_eq!(glyph(&state, 0, 3), Some('─'));
+    assert_eq!(glyph(&state, 0, 4), Some('┐'));
+}
+
+#[test]
+fn ascii_designation_returns_to_passthrough() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0l"); // G0 = DEC: 'l' -> box corner
+    assert_eq!(glyph(&state, 0, 0), Some('┌'));
+    advance(&mut state, b"\x1b(Bl"); // G0 = ASCII: 'l' -> literal
+    assert_eq!(glyph(&state, 0, 1), Some('l'));
+}
+
+#[test]
+fn dec_line_drawing_maps_the_full_table() {
+    // The verified VT100 special-graphics table (`StandardCharset::map`): every
+    // byte 0x5F-0x7E and its glyph.
+    let table: &[(char, char)] = &[
+        ('_', ' '),
+        ('`', '◆'),
+        ('a', '▒'),
+        ('b', '\u{2409}'),
+        ('c', '\u{240c}'),
+        ('d', '\u{240d}'),
+        ('e', '\u{240a}'),
+        ('f', '°'),
+        ('g', '±'),
+        ('h', '\u{2424}'),
+        ('i', '\u{240b}'),
+        ('j', '┘'),
+        ('k', '┐'),
+        ('l', '┌'),
+        ('m', '└'),
+        ('n', '┼'),
+        ('o', '⎺'),
+        ('p', '⎻'),
+        ('q', '─'),
+        ('r', '⎼'),
+        ('s', '⎽'),
+        ('t', '├'),
+        ('u', '┤'),
+        ('v', '┴'),
+        ('w', '┬'),
+        ('x', '│'),
+        ('y', '≤'),
+        ('z', '≥'),
+        ('{', 'π'),
+        ('|', '≠'),
+        ('}', '£'),
+        ('~', '·'),
+    ];
+    for &(input, expected) in table {
+        let mut state = state(4, 2);
+        advance(&mut state, b"\x1b(0");
+        state.print(input);
+        assert_eq!(glyph(&state, 0, 0), Some(expected), "input {input:?}");
+    }
+}
+
+#[test]
+fn dec_line_drawing_passes_through_outside_the_mapped_range() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+                                    // 'A' (0x41) and '0' (0x30) are below the 0x5F-0x7E table; unchanged.
+    state.print('A');
+    state.print('0');
+    assert_eq!(glyph(&state, 0, 0), Some('A'));
+    assert_eq!(glyph(&state, 0, 1), Some('0'));
+}
+
+#[test]
+fn line_drawing_glyphs_are_narrow() {
+    let mut state = state(4, 2);
+    advance(&mut state, b"\x1b(0q"); // '─'
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.width(), 1);
+}
+
+#[test]
+fn so_selects_g1_and_si_selects_g0() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b)0"); // designate G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> G1 into GL
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x0f"); // SI -> G0 (still ASCII) into GL
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 1), Some('q'));
+}
+
+#[test]
+fn charset_designation_persists_across_line_feeds() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    state.print('q'); // row 0
+    advance(&mut state, b"\r\n"); // CR + LF to the next row
+    state.print('q'); // row 1, charset still in effect
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    assert_eq!(glyph(&state, 1, 0), Some('─'));
+}
+
+#[test]
+fn uk_charset_maps_only_the_hash() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(A"); // G0 = UK
+    state.print('#');
+    state.print('a');
+    assert_eq!(glyph(&state, 0, 0), Some('£'));
+    assert_eq!(glyph(&state, 0, 1), Some('a'));
+}
+
+#[test]
+fn unknown_charset_final_falls_back_to_ascii() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b(>"); // unsupported final -> ASCII passthrough
+    assert_eq!(state.active_cursor().charsets[0], Charset::Ascii);
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn g2_and_g3_are_designated_but_not_selectable() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b*0"); // designate G2 = DEC line drawing
+    advance(&mut state, b"\x1b+0"); // designate G3 = DEC line drawing
+    assert_eq!(state.active_cursor().charsets[2], Charset::DecLineDrawing);
+    assert_eq!(state.active_cursor().charsets[3], Charset::DecLineDrawing);
+    // No LS2/LS3, so GL stays on G0 (ASCII): printing is unaffected.
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn charset_is_independent_per_screen() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b(0"); // primary G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?47h"); // switch to the alternate (no reset)
+    state.print('q'); // alternate G0 is the default ASCII
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+    advance(&mut state, b"\x1b[?47l"); // back to the primary, cursor restored to (0, 0)
+    state.print('q'); // primary G0 still DEC line drawing
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn decsc_and_decrc_save_and_restore_the_charset() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b7"); // DECSC: save cursor + charset
+    advance(&mut state, b"\x1b(B"); // G0 = ASCII
+    state.print('q'); // literal 'q' at (0, 0)
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+    advance(&mut state, b"\x1b8"); // DECRC: restore charset (and home the cursor)
+    state.print('q'); // DEC again -> box glyph at (0, 0)
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn decrc_without_a_save_resets_the_charset_to_ascii() {
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing, never saved
+    advance(&mut state, b"\x1b8"); // DECRC with no prior DECSC -> defaults
+    assert_eq!(state.active_cursor().charsets[0], Charset::Ascii);
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}
+
+#[test]
+fn fresh_alternate_entry_resets_the_charset() {
+    let mut state = state(8, 3);
+    advance(&mut state, b"\x1b[?1049h"); // fresh alternate
+    advance(&mut state, b"\x1b(0"); // alt G0 = DEC line drawing
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    advance(&mut state, b"\x1b[?1049l"); // exit (resets the alternate)
+    advance(&mut state, b"\x1b[?1049h"); // re-enter fresh -> charset back to ASCII
+    state.print('q');
+    assert_eq!(glyph(&state, 0, 0), Some('q'));
+}

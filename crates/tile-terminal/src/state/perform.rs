@@ -2,16 +2,17 @@
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
 //! basic C0 control bytes move the cursor and scroll.
 //!
-//! Implemented so far: `print` (printable glyphs, display-width aware: wide
+//! Implemented so far: `print` (printable glyphs, translated through the active
+//! GL charset — DEC line-drawing, UK — then display-width aware: wide
 //! CJK/emoji span two cells; grapheme continuations — combining marks, ZWJ
 //! emoji sequences, variation selectors, skin-tone modifiers, flags — fold onto
 //! the base cell, with variation-selector width promotion), `execute` (C0 control
-//! bytes), `csi_dispatch` (relative + absolute cursor moves, line-relative
+//! bytes, including the `SI`/`SO` charset shifts), `csi_dispatch` (relative + absolute cursor moves, line-relative
 //! moves, forward/back tab stops, erase in display/line and erase-char, SGR,
 //! insert/delete char & line, scroll up/down, the DECSTBM scroll region, and
 //! the DEC private modes for the alternate screen and cursor visibility),
-//! `esc_dispatch` (cursor save/restore
-//! and reverse index), and `osc_dispatch` (the OSC 0/1/2 window title and the
+//! `esc_dispatch` (cursor save/restore,
+//! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (the OSC 0/1/2 window title and the
 //! OSC 7 working-directory report). The
 //! device-control-string callbacks `hook`/`unhook` clear the in-progress
 //! grapheme cluster (a DCS ends a text run, like any non-printing event); their
@@ -21,7 +22,9 @@
 use std::path::PathBuf;
 
 use crate::grid::state::Cell;
-use crate::state::{MouseEncoding, MouseTracking, ReportedCwd, SavedCursor, Screen, TerminalState};
+use crate::state::{
+    Charset, MouseEncoding, MouseTracking, ReportedCwd, SavedCursor, Screen, TerminalState,
+};
 use crate::style::{Color, Style};
 use percent_encoding::percent_decode;
 use unicode_segmentation::GraphemeCursor;
@@ -42,6 +45,44 @@ impl TerminalState {
             Screen::Primary => self.primary_scroll_region,
             Screen::Alternate => self.alternate_scroll_region,
         }
+    }
+
+    /// The charset currently selected into GL — the active cursor's `G0`–`G3`
+    /// slot named by [`Self::gl`] — used to translate each printed byte.
+    fn active_charset(&self) -> Charset {
+        self.active_cursor().charsets[self.gl]
+    }
+
+    /// Translate a printable `c` through the active GL charset before it is
+    /// placed. ASCII passes everything through; DEC line-drawing remaps the
+    /// `0x5F`–`0x7E` range to box-drawing/symbol glyphs; UK remaps only `#`.
+    /// Every output glyph is a single narrow, non-combining `char`, so the rest
+    /// of `print` (cluster folding, width) is unaffected.
+    fn map_charset(&self, c: char) -> char {
+        match self.active_charset() {
+            Charset::Ascii => c,
+            Charset::DecLineDrawing => map_dec_line_drawing(c),
+            Charset::Uk if c == '#' => '£',
+            Charset::Uk => c,
+        }
+    }
+
+    /// Designate the `G0`–`G3` slot `index` (from the `ESC ( ) * +`
+    /// intermediate) to the charset named by the final `byte`: `0` = DEC line
+    /// drawing, `B` = ASCII, `A` = UK; any other final falls back to ASCII (a
+    /// passthrough) and is traced. Writes the active screen's cursor, so the
+    /// designation is per-screen and is captured by a following DECSC.
+    fn designate_charset(&mut self, index: usize, byte: u8) {
+        let charset = match byte {
+            b'0' => Charset::DecLineDrawing,
+            b'B' => Charset::Ascii,
+            b'A' => Charset::Uk,
+            _ => {
+                tracing::trace!(byte, "unsupported charset designation; treated as ASCII");
+                Charset::Ascii
+            }
+        };
+        self.active_cursor_mut().charsets[index] = charset;
     }
 
     /// Override the alternate cursor's *position* with the primary cursor's, run
@@ -128,11 +169,13 @@ impl TerminalState {
         let row = self.active_cursor().row;
         let col = self.active_cursor().col;
         let pending_wrap = self.active_cursor().pending_wrap;
+        let charsets = self.active_cursor().charsets;
         self.active_cursor_mut().saved = Some(SavedCursor {
             row,
             col,
             style: self.style,
             pending_wrap,
+            charsets,
         });
     }
 
@@ -149,12 +192,14 @@ impl TerminalState {
                 self.active_cursor_mut().col = saved.col.min(last_col);
                 self.style = saved.style;
                 self.active_cursor_mut().pending_wrap = saved.pending_wrap;
+                self.active_cursor_mut().charsets = saved.charsets;
             }
             None => {
                 self.active_cursor_mut().row = 0;
                 self.active_cursor_mut().col = 0;
                 self.style = Style::default();
                 self.active_cursor_mut().pending_wrap = false;
+                self.active_cursor_mut().charsets = [Charset::default(); 4];
             }
         }
     }
@@ -179,7 +224,8 @@ impl TerminalState {
     /// previous one:
     /// - cells blanked to the current pen background (BCE),
     /// - scroll region (DECSTBM) back to the full screen,
-    /// - cursor home, shown, no wrap latch, no DECSC stash.
+    /// - cursor home, shown, no wrap latch, no DECSC stash,
+    /// - `G0`–`G3` charset designations back to ASCII.
     ///
     /// The wrap latch in particular is *cell-coupled* — it means "a glyph is
     /// parked at the last column", so blanking the cells must drop it or a later
@@ -203,6 +249,7 @@ impl TerminalState {
         self.alternate_cursor.is_visible = true;
         self.alternate_cursor.pending_wrap = false;
         self.alternate_cursor.saved = None;
+        self.alternate_cursor.charsets = [Charset::default(); 4];
     }
 
     /// DECSC the primary screen's cursor into its own saved slot. Used by the
@@ -216,6 +263,7 @@ impl TerminalState {
             col: self.primary_cursor.col,
             style: self.style,
             pending_wrap: self.primary_cursor.pending_wrap,
+            charsets: self.primary_cursor.charsets,
         });
     }
 
@@ -496,6 +544,12 @@ impl TerminalState {
 
 impl vte::Perform for TerminalState {
     fn print(&mut self, c: char) {
+        // Translate through the active GL charset first (DEC line-drawing, UK),
+        // so the cell stores the resolved glyph and width is computed on it. The
+        // result is always a narrow, non-combining char, so every path below is
+        // unaffected by the remap.
+        let c = self.map_charset(c);
+
         // A continuation (combining mark, ZWJ-joined emoji part, variation
         // selector, skin-tone modifier, flag half) folds onto the current
         // cluster's base instead of taking its own cell.
@@ -610,6 +664,10 @@ impl vte::Perform for TerminalState {
                 self.active_cursor_mut().col = next_tab_stop(col, last_col);
                 self.active_cursor_mut().pending_wrap = false;
             }
+            // SO (shift out): select G1 into the GL range for printing.
+            0x0E => self.gl = 1,
+            // SI (shift in): select G0 into the GL range for printing.
+            0x0F => self.gl = 0,
             // BEL: discarded.
             0x07 => {}
             // Any other control byte: trace and ignore, never raw-rendered.
@@ -1068,10 +1126,22 @@ impl vte::Perform for TerminalState {
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         // Any ESC sequence ends a text run, so no following glyph folds into it.
         self.reset_cluster();
-        // A plain ESC sequence carries no intermediate byte; an intermediate
-        // marks a charset designation or other ESC form owned by a later task.
-        if ignore || !intermediates.is_empty() {
+        if ignore {
             return;
+        }
+        // Charset designation: `ESC (`/`)`/`*`/`+` Fc designates G0/G1/G2/G3.
+        // vte collects the `(`/`)`/`*`/`+` into `intermediates`; the final `byte`
+        // names the set. Handled before the plain-ESC match below, which the
+        // intermediate would otherwise skip.
+        match intermediates {
+            b"(" => return self.designate_charset(0, byte),
+            b")" => return self.designate_charset(1, byte),
+            b"*" => return self.designate_charset(2, byte),
+            b"+" => return self.designate_charset(3, byte),
+            // Any other intermediate marks an ESC form owned by a later task.
+            [_, ..] => return,
+            // No intermediate: fall through to the plain-ESC finals below.
+            [] => {}
         }
         match byte {
             // DECSC — save cursor and pen.
@@ -1286,6 +1356,50 @@ fn next_tab_stop(col: u16, last_col: u16) -> u16 {
 /// (itself a stop). A column already on a stop retreats a full 8.
 fn prev_tab_stop(col: u16) -> u16 {
     col.saturating_sub(1) / 8 * 8
+}
+
+/// Map a `char` through the DEC Special Character and Line Drawing set (`ESC (
+/// 0`): the bytes `0x5F`–`0x7E` (`'_'`–`'~'`) become box-drawing and symbol
+/// glyphs, so a TUI's `lqqqk` renders `┌───┐`. Every byte outside that range,
+/// and any unmapped byte within it, passes through unchanged. The table is the
+/// VT100 set as implemented by xterm/alacritty (`StandardCharset::map`); all
+/// outputs are single narrow, non-combining glyphs.
+fn map_dec_line_drawing(c: char) -> char {
+    match c {
+        '_' => ' ',
+        '`' => '◆',
+        'a' => '▒',
+        'b' => '\u{2409}', // ␉ symbol for horizontal tab
+        'c' => '\u{240c}', // ␌ symbol for form feed
+        'd' => '\u{240d}', // ␍ symbol for carriage return
+        'e' => '\u{240a}', // ␊ symbol for line feed
+        'f' => '°',
+        'g' => '±',
+        'h' => '\u{2424}', // ␤ symbol for newline
+        'i' => '\u{240b}', // ␋ symbol for vertical tab
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺', // scan line 1
+        'p' => '⎻', // scan line 3
+        'q' => '─', // scan line 5 (horizontal)
+        'r' => '⎼', // scan line 7
+        's' => '⎽', // scan line 9
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│', // vertical
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        _ => c,
+    }
 }
 
 /// The primary value of the iterator's next CSI parameter, or `None` when the
