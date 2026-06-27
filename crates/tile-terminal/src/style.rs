@@ -9,6 +9,9 @@ pub struct Style {
     bg: Color,
     /// Boolean text attributes (bold, italic, …).
     attrs: AttrFlags,
+    /// Underline color (SGR 58). `None` follows the foreground color — the
+    /// default state restored by SGR 59.
+    underline_color: Option<Color>,
 }
 
 impl Style {
@@ -28,8 +31,8 @@ impl Style {
         self.attrs.italic = italic
     }
 
-    /// Set or clear the underline attribute (SGR `4` / `24`).
-    pub fn set_underline(&mut self, underline: bool) {
+    /// Set the underline style (SGR `4` single / `21` double / `24` none).
+    pub fn set_underline(&mut self, underline: UnderlineStyle) {
         self.attrs.underline = underline
     }
 
@@ -50,6 +53,37 @@ impl Style {
         self.fg = fg_color
     }
 
+    /// Set or clear the faint (decreased-intensity) attribute (SGR `2` / `22`).
+    pub fn set_faint(&mut self, faint: bool) {
+        self.attrs.faint = faint
+    }
+
+    /// Set or clear the blink attribute (SGR `5`/`6` / `25`).
+    pub fn set_blink(&mut self, blink: bool) {
+        self.attrs.blink = blink
+    }
+
+    /// Set or clear the conceal (hidden) attribute (SGR `8` / `28`).
+    pub fn set_conceal(&mut self, conceal: bool) {
+        self.attrs.conceal = conceal
+    }
+
+    /// Set or clear the strikethrough attribute (SGR `9` / `29`).
+    pub fn set_strike(&mut self, strike: bool) {
+        self.attrs.strike = strike
+    }
+
+    /// Set or clear the overline attribute (SGR `53` / `55`).
+    pub fn set_overline(&mut self, overline: bool) {
+        self.attrs.overline = overline
+    }
+
+    /// Set the underline color (SGR `58`), or pass `None` for the default that
+    /// follows the foreground color (SGR `59`).
+    pub fn set_underline_color(&mut self, underline_color: Option<Color>) {
+        self.underline_color = underline_color
+    }
+
     /// The background-color-erase fill style: this pen's background only, with
     /// the foreground and all attributes reset to default. Used to fill cells
     /// cleared by erase, scroll, and resize.
@@ -58,6 +92,7 @@ impl Style {
             fg: Color::Default,
             bg: self.bg,
             attrs: AttrFlags::default(),
+            underline_color: None,
         }
     }
 }
@@ -81,10 +116,42 @@ pub struct AttrFlags {
     bold: bool,
     /// Italic (SGR 3).
     italic: bool,
-    /// Underline (SGR 4).
-    underline: bool,
+    /// Underline style (SGR 4 single / 21 double / 24 none) — one aspect with
+    /// mutually exclusive values, so single and double are never both set.
+    underline: UnderlineStyle,
     /// Reverse video — swap foreground and background (SGR 7).
     reverse: bool,
+    /// Faint / decreased intensity (SGR 2).
+    faint: bool,
+    /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
+    blink: bool,
+    /// Conceal — hidden text (SGR 8).
+    conceal: bool,
+    /// Crossed-out / strikethrough (SGR 9).
+    strike: bool,
+    /// Overline (SGR 53).
+    overline: bool,
+}
+
+/// The underline style of a cell — one rendition aspect with mutually exclusive
+/// values, so a cell draws at most one underline and applying a new style
+/// replaces the previous one. Selected by SGR 4 / 21 / 24 and the extended
+/// `4:n` subparameter forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    /// Not underlined (SGR 24 or `4:0`).
+    #[default]
+    None,
+    /// Single underline (SGR 4 or `4:1`).
+    Single,
+    /// Double underline (SGR 21 or `4:2`).
+    Double,
+    /// Curly / wavy underline (`4:3`).
+    Curly,
+    /// Dotted underline (`4:4`).
+    Dotted,
+    /// Dashed underline (`4:5`).
+    Dashed,
 }
 
 #[cfg(test)]

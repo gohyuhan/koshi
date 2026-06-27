@@ -14,8 +14,13 @@ fn attr_flags_default_is_all_false() {
         AttrFlags {
             bold: false,
             italic: false,
-            underline: false,
+            underline: UnderlineStyle::None,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            overline: false,
         }
     );
 }
@@ -28,6 +33,7 @@ fn style_default_is_default_colors_and_no_attrs() {
             fg: Color::Default,
             bg: Color::Default,
             attrs: AttrFlags::default(),
+            underline_color: None,
         }
     );
 }
@@ -53,14 +59,19 @@ fn set_bg_sets_only_the_background() {
 fn attribute_setters_toggle_their_flag_independently() {
     let mut style = Style::default();
     style.set_bold(true);
-    style.set_underline(true);
+    style.set_underline(UnderlineStyle::Single);
     assert_eq!(
         style.attrs,
         AttrFlags {
             bold: true,
             italic: false,
-            underline: true,
+            underline: UnderlineStyle::Single,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            overline: false,
         }
     );
     style.set_bold(false); // clears bold, leaves underline set
@@ -69,8 +80,13 @@ fn attribute_setters_toggle_their_flag_independently() {
         AttrFlags {
             bold: false,
             italic: false,
-            underline: true,
+            underline: UnderlineStyle::Single,
             reverse: false,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            overline: false,
         }
     );
 }
@@ -85,8 +101,13 @@ fn set_italic_and_set_reverse_set_their_flags() {
         AttrFlags {
             bold: false,
             italic: true,
-            underline: false,
+            underline: UnderlineStyle::None,
             reverse: true,
+            faint: false,
+            blink: false,
+            conceal: false,
+            strike: false,
+            overline: false,
         }
     );
 }
@@ -114,6 +135,7 @@ fn bg_fill_keeps_only_the_background() {
             fg: Color::Default,
             bg: Color::Indexed(4),
             attrs: AttrFlags::default(),
+            underline_color: None,
         }
     );
 }
