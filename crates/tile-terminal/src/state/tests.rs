@@ -28,12 +28,13 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
         is_visible: true,
         pending_wrap: false,
         saved: None,
-        charsets: [Charset::default(); 4],
     };
     assert_eq!(state.primary_cursor, expected_cursor);
     assert_eq!(state.alternate_cursor, expected_cursor);
-    assert_eq!(state.gl, 0);
-    assert_eq!(state.style, Style::default());
+    assert_eq!(state.active_render().charsets, [Charset::default(); 4]);
+    assert_eq!(state.active_render().gl, 0);
+    assert_eq!(state.active_render().style, Style::default());
+    assert_eq!(state.primary_render, state.alternate_render);
     assert_eq!(state.modes, TerminalModes::default());
     assert_eq!(state.title, None);
 }
@@ -69,15 +70,21 @@ fn resize_reallocs_both_grids_to_new_size() {
 }
 
 #[test]
-fn resize_fills_the_new_grids_with_the_current_background() {
+fn resize_fills_each_grid_with_its_own_screen_background() {
+    // Each screen blanks with its OWN render background — a resize must not fill
+    // the primary grid with the alternate app's background (which would show on
+    // the shell after exit).
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
-    state.style.set_bg(Color::Indexed(4)); // blue pen active at resize time
+    state.primary_render.style.set_bg(Color::Indexed(4)); // primary: blue
+    state.alternate_render.style.set_bg(Color::Indexed(1)); // alternate: red
     state.resize(PtySize { cols: 4, rows: 2 });
 
     let mut blue_fill = Style::default();
     blue_fill.set_bg(Color::Indexed(4)); // bg-only: fg + attrs stay default
-    assert_eq!(state.primary, Grid::blank(2, 4, blue_fill));
-    assert_eq!(state.alternate, Grid::blank(2, 4, blue_fill));
+    let mut red_fill = Style::default();
+    red_fill.set_bg(Color::Indexed(1));
+    assert_eq!(state.primary, Grid::blank(2, 4, blue_fill)); // primary keeps its own blue
+    assert_eq!(state.alternate, Grid::blank(2, 4, red_fill)); // alternate keeps its own red
 }
 
 #[test]

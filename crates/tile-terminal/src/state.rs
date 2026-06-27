@@ -29,10 +29,9 @@ pub enum Screen {
 /// A character set a `G0`–`G3` slot can be designated to, selected into the
 /// active GL range by `SI`/`SO` and applied to printed bytes.
 ///
-/// Designation is per-cursor (so it is independent per screen and is saved and
-/// restored by DECSC/DECRC, matching xterm/alacritty). Only the three sets real
-/// applications use are modeled; an unrecognized designation final byte falls
-/// back to [`Ascii`](Charset::Ascii) (a passthrough).
+/// Part of the per-screen [`RenderState`]. Only the three sets real applications
+/// use are modeled; an unrecognized designation final byte falls back to
+/// [`Ascii`](Charset::Ascii) (a passthrough).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Charset {
     /// US-ASCII (`ESC ( B`): every byte prints as itself. The default.
@@ -47,22 +46,50 @@ pub enum Charset {
     Uk,
 }
 
-/// A cursor position and pen style captured by DECSC, restored by DECRC.
+/// The rendering state that turns a printed byte into a styled glyph: the pen,
+/// the active GL slot, and the `G0`–`G3` charset designations.
+///
+/// Held per screen — the primary and the alternate each own one. Every
+/// alternate-screen entry (`?47`/`?1047`/`?1049`) clones the primary's render
+/// state into the alternate. DECSC snapshots the active screen's render state
+/// into a [`SavedCursor`]; DECRC restores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderState {
+    /// The pen applied to printed cells (colors + text attributes).
+    style: Style,
+    /// The `G0`–`G3` charset designations (`ESC ( ) * +`), indexed by slot.
+    charsets: [Charset; 4],
+    /// Which `G0`–`G3` slot is invoked into the GL range for printing: `0` after
+    /// `SI`, `1` after `SO`.
+    gl: usize,
+}
+
+impl RenderState {
+    /// A fresh render state: default pen, all four slots ASCII, GL on `G0`.
+    fn fresh() -> Self {
+        RenderState {
+            style: Style::default(),
+            charsets: [Charset::Ascii; 4],
+            gl: 0,
+        }
+    }
+}
+
+/// A cursor position and the render state captured by DECSC, restored by DECRC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SavedCursor {
     /// Saved zero-based row within the grid.
     row: u16,
     /// Saved zero-based column within the grid.
     col: u16,
-    /// The pen style in effect when the cursor was saved.
-    style: Style,
     /// The deferred-wrap latch at save time, restored alongside the position so
     /// a glyph parked at the last column still wraps after a save/restore.
     pending_wrap: bool,
-    /// The `G0`–`G3` charset designations at save time. DECSC/DECRC carry the
-    /// charset along with the cursor, so an app that designates a set, saves,
-    /// changes it, then restores gets the original set back.
-    charsets: [Charset; 4],
+    /// Snapshot of the active screen's [`RenderState`] (pen, charsets, GL slot)
+    /// at save time. DECSC/DECRC carry the whole render state with the cursor, so
+    /// an app that changes the pen or a designation, saves, changes it again,
+    /// then restores gets the original back.
+    render: RenderState,
 }
 
 /// The text cursor: position, visibility, and the deferred-wrap latch.
@@ -85,11 +112,6 @@ pub struct Cursor {
     /// SCOSC/SCORC (ANSI form), kept per screen so each screen buffer has its
     /// own snapshot independent of the other.
     saved: Option<SavedCursor>,
-    /// The `G0`–`G3` charset designations, indexed by the GL/GR slot number.
-    /// Held on the cursor (not the terminal) so each screen has its own and
-    /// DECSC/DECRC save and restore it, matching xterm/alacritty. The active
-    /// slot for printing is chosen by [`TerminalState::gl`].
-    charsets: [Charset; 4],
 }
 
 /// One screen row trimmed to the renderer's inner width, with a flag for a
@@ -228,13 +250,11 @@ pub struct TerminalState {
     /// The cursor for the alternate screen, independent of the primary cursor
     /// so that position and wrap state do not leak across screen switches.
     alternate_cursor: Cursor,
-    /// Which `G0`–`G3` slot of the active cursor's `charsets` is mapped into the
-    /// GL range and applied to printed bytes: `0` after `SI`, `1` after `SO`.
-    /// Terminal-level and shared across screens (not part of the cursor), so
-    /// DECSC/DECRC do not save or restore it, matching xterm's `active_charset`.
-    gl: usize,
-    /// The current pen style applied to printed cells.
-    style: Style,
+    /// The primary screen's [`RenderState`] (pen, charsets, GL slot).
+    primary_render: RenderState,
+    /// The alternate screen's [`RenderState`], cloned from `primary_render` on
+    /// each alternate-screen entry.
+    alternate_render: RenderState,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
@@ -274,7 +294,6 @@ impl TerminalState {
             is_visible: true,
             pending_wrap: false,
             saved: None,
-            charsets: [Charset::default(); 4],
         };
         TerminalState {
             primary: terminal_size.clone(),
@@ -282,8 +301,8 @@ impl TerminalState {
             active: Screen::Primary,
             primary_cursor: terminal_cursor,
             alternate_cursor: terminal_cursor,
-            gl: 0,
-            style: Style::default(),
+            primary_render: RenderState::fresh(),
+            alternate_render: RenderState::fresh(),
             modes: TerminalModes::default(),
             title: None,
             reported_cwd: None,
@@ -298,10 +317,11 @@ impl TerminalState {
     /// Resize both screen buffers to `size` and clamp the cursor into the new
     /// bounds. Existing cell contents are discarded — reflow is not done here.
     pub fn resize(&mut self, size: PtySize) {
-        let fill = self.style.bg_fill();
-        let resized_terminal_size = Grid::blank(size.rows, size.cols, fill);
-        self.primary = resized_terminal_size.clone();
-        self.alternate = resized_terminal_size.clone();
+        // Blank each screen with its own render background.
+        let primary_fill = self.primary_render.style.bg_fill();
+        let alternate_fill = self.alternate_render.style.bg_fill();
+        self.primary = Grid::blank(size.rows, size.cols, primary_fill);
+        self.alternate = Grid::blank(size.rows, size.cols, alternate_fill);
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
@@ -418,6 +438,22 @@ impl TerminalState {
         match self.active {
             Screen::Primary => &mut self.primary_cursor,
             Screen::Alternate => &mut self.alternate_cursor,
+        }
+    }
+
+    /// The render state (pen, charsets, GL slot) for the active screen.
+    fn active_render(&self) -> &RenderState {
+        match self.active {
+            Screen::Primary => &self.primary_render,
+            Screen::Alternate => &self.alternate_render,
+        }
+    }
+
+    /// Mutable access to the render state for the active screen.
+    fn active_render_mut(&mut self) -> &mut RenderState {
+        match self.active {
+            Screen::Primary => &mut self.primary_render,
+            Screen::Alternate => &mut self.alternate_render,
         }
     }
 
