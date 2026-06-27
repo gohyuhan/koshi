@@ -3727,6 +3727,108 @@ fn mixed_mode_47_then_1049_keeps_the_charset() {
     assert_eq!(glyph(&state, 0, 0), Some('─')); // shared charset intact
 }
 
+// --- Cross-subsystem render-state integration (the render state vs other features) ---
+
+#[test]
+fn decsc_decrc_round_trip_the_whole_render_state_together() {
+    // DECSC snapshots the pen, the charset designations, AND the GL slot as one
+    // unit; DECRC restores all three together, not just one at a time.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b)0"); // designate G1 = DEC line drawing
+    advance(&mut state, b"\x0e"); // SO -> GL = G1
+    advance(&mut state, b"\x1b[1;31m"); // pen: bold + red fg
+    advance(&mut state, b"\x1b7"); // DECSC: snapshot pen + charsets + GL
+    advance(&mut state, b"\x0f"); // SI -> GL = G0
+    advance(&mut state, b"\x1b[0m"); // pen reset
+    advance(&mut state, b"\x1b8"); // DECRC: restore all three
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+        })
+    );
+    assert_eq!(state.active_render().gl, 1);
+    state.print('q'); // GL = G1 (DEC) -> box glyph
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn charset_applies_with_autowrap_off() {
+    // The charset designation is independent of autowrap: with DECAWM off, the
+    // overwrite-in-place glyph at the last column is still charset-mapped.
+    let mut state = state(3, 8); // 3 columns
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?7l"); // autowrap off
+    advance(&mut state, b"qqqqq"); // 5 'q's: extras overwrite the last column in place
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+    assert_eq!(glyph(&state, 0, 1), Some('─'));
+    assert_eq!(glyph(&state, 0, 2), Some('─')); // overwritten in place, still DEC-mapped
+    assert_eq!(glyph(&state, 1, 0), Some(' ')); // never wrapped to row 1
+}
+
+#[test]
+fn erase_preserves_the_active_charset() {
+    // EL and ED clear cells but leave the charset designation alone.
+    let mut el = state(8, 2);
+    advance(&mut el, b"\x1b(0\x1b[2K"); // G0 = DEC, then EL 2 (erase line)
+    el.print('q');
+    assert_eq!(glyph(&el, 0, 0), Some('─'));
+
+    let mut ed = state(8, 2);
+    advance(&mut ed, b"\x1b(0\x1b[2J"); // G0 = DEC, then ED 2 (erase display)
+    ed.print('q');
+    assert_eq!(glyph(&ed, 0, 0), Some('─'));
+}
+
+#[test]
+fn resize_preserves_per_screen_charsets() {
+    // Render state is per-screen and untouched by resize: the primary keeps its
+    // designation and the alternate keeps its own, independently.
+    let mut state = state(8, 4);
+    advance(&mut state, b"\x1b(0"); // primary G0 = DEC line drawing
+    advance(&mut state, b"\x1b[?47h"); // enter alt (clones primary's DEC)
+    advance(&mut state, b"\x1b(A"); // alt G0 = UK ('#' -> '£')
+    state.resize(PtySize { cols: 4, rows: 2 });
+    state.print('#'); // alt UK survived the resize
+    assert_eq!(glyph(&state, 0, 0), Some('£'));
+    advance(&mut state, b"\x1b[?47l"); // back to the primary
+    state.print('q'); // primary DEC survived the resize, independent of the alt
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn setting_mouse_modes_does_not_touch_the_render_state() {
+    // Mode toggles (mouse tracking/encoding, alt-scroll, bracketed paste) are
+    // orthogonal to the pen and charset — enabling them changes neither.
+    let mut state = state(8, 2);
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b[1;31m"); // pen: bold + red
+    advance(&mut state, b"\x1b[?1000;1006;1007h"); // mouse tracking + SGR encoding + alt-scroll
+    advance(&mut state, b"\x1b[?2004h"); // bracketed paste
+    assert_eq!(
+        state.active_render().style,
+        styled(|s| {
+            s.set_bold(true);
+            s.set_fg(Color::Indexed(1));
+        })
+    );
+    state.print('q'); // charset still DEC
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
+#[test]
+fn charset_survives_a_region_scroll() {
+    // Scrolling a region is a grid operation; the charset lives in render state
+    // and is unaffected, so glyphs printed after a scroll are still mapped.
+    let mut state = state(8, 4);
+    advance(&mut state, b"\x1b[1;3r"); // DECSTBM: region rows 1-3 (1-based)
+    advance(&mut state, b"\x1b(0"); // G0 = DEC line drawing
+    advance(&mut state, b"\x1b[2S"); // SU: scroll the region up 2 lines
+    state.print('q'); // charset unaffected by the scroll
+    assert_eq!(glyph(&state, 0, 0), Some('─'));
+}
+
 #[test]
 fn decsc_decrc_round_trips_the_charset_on_the_alternate_screen() {
     // The per-screen saved slot carries charsets on the alternate too, not only
