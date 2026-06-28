@@ -2138,6 +2138,32 @@ fn cursor_visibility_is_independent_per_screen() {
     assert!(!state.cursor_visible()); // primary still hidden
 }
 
+// --- Renderer-facing read accessors: cursor position + active screen ---
+
+#[test]
+fn active_cursor_position_reports_cursor_moves() {
+    let mut state = state(5, 5);
+    assert_eq!(state.active_cursor_position(), (0, 0)); // home at start
+    advance(&mut state, b"\x1b[3;4H"); // CUP row 3 col 4 (1-based) -> (2, 3) 0-based
+    assert_eq!(state.active_cursor_position(), (2, 3));
+    advance(&mut state, b"\x1b[2;2H"); // move to (1, 1)
+    assert_eq!(state.active_cursor_position(), (1, 1));
+}
+
+#[test]
+fn active_screen_flips_on_alternate_switch() {
+    let mut state = state(5, 5);
+    assert_eq!(state.active_screen(), Screen::Primary);
+    advance(&mut state, b"\x1b[?1049h"); // enter the alternate screen
+    assert_eq!(state.active_screen(), Screen::Alternate);
+    advance(&mut state, b"\x1b[?1049l"); // back to the primary
+    assert_eq!(state.active_screen(), Screen::Primary);
+    advance(&mut state, b"\x1b[?47h"); // also flips via ?47
+    assert_eq!(state.active_screen(), Screen::Alternate);
+    advance(&mut state, b"\x1b[?47l");
+    assert_eq!(state.active_screen(), Screen::Primary);
+}
+
 // --- Unicode display-width: wide glyphs, combining marks, ambiguous width ---
 
 #[test]
