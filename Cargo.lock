@@ -950,6 +950,12 @@ name = "tile-runtime"
 version = "0.1.0"
 dependencies = [
  "tile-core",
+ "tile-observability",
+ "tile-pane",
+ "tile-pty",
+ "tile-session",
+ "tile-terminal",
+ "tile-test-support",
 ]
 
 [[package]]
