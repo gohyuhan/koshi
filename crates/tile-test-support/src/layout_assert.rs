@@ -10,9 +10,9 @@
 //!
 //! Each assertion is single-purpose so a test can check exactly one invariant.
 //! "Exact tiling" is the conjunction of three of them:
-//! [`assert_all_space_occupied`] (area is fully accounted for),
-//! [`assert_no_overlap`] (no cell is double-counted), and
-//! [`assert_no_outside`] (no cell lies beyond the tab). Area equality alone does
+//! [`layout_assert::assert_all_space_occupied`] (area is fully accounted for),
+//! [`layout_assert::assert_no_overlap`] (no cell is double-counted), and
+//! [`layout_assert::assert_no_outside`] (no cell lies beyond the tab). Area equality alone does
 //! not prove a gap-free cover; pair it with the other two.
 //!
 //! ## Suppressed panes
@@ -29,7 +29,7 @@
 //! ## Live-pane reference checking
 //!
 //! Layout normalization also requires that every layout-tree leaf references a
-//! live pane. [`assert_live_pane_refs`] checks this while staying decoupled
+//! live pane. [`layout_assert::assert_live_pane_refs`] checks this while staying decoupled
 //! from the concrete tree and pane-registry types: it takes already-extracted
 //! leaf pane ids and the set of live pane ids. The layout crate's tests pass
 //! `tree.leaf_panes()` and their live set straight in, and this crate keeps
@@ -239,13 +239,17 @@ pub fn assert_live_pane_refs(
 
 #[cfg(test)]
 mod tests {
+    //! Tests for layout assertion helpers.
+
     use super::*;
     use tile_core::geometry::Point;
 
+    /// Create a [`Rect`] at origin (x, y) with size (cols, rows).
     fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
         Rect::new(Point { x, y }, Size { cols, rows })
     }
 
+    /// Create a standard 80×24 cell tab rectangle.
     fn tab() -> Rect {
         rect(0, 0, 80, 24)
     }

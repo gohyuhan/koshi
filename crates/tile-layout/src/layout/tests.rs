@@ -1,1 +1,1 @@
-//! Module tests. Placeholder per standard source layout.
+//! Tests for layout state and operations.

@@ -1,3 +1,9 @@
+//! Tests for the tracing subscriber bootstrap and redaction machinery.
+//!
+//! Coverage includes format parsing, environment-variable option mapping, filter validation,
+//! subscriber installation (global and thread-local), log file creation and
+//! rotation, and environment variable redaction.
+
 use super::*;
 
 // A sample event must carry the canonical join fields, and any env-derived value

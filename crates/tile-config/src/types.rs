@@ -1,1 +1,1 @@
-//! Shared types. Placeholder per standard source layout.
+//! Configuration types. Placeholder per standard source layout.

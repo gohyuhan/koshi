@@ -5,14 +5,17 @@ use tile_core::geometry::{Point, Rect, Size};
 use super::*;
 use crate::solver::solve;
 
+/// Wraps a pane ID in a leaf node child wrapper.
 fn leaf(pane: PaneId) -> LayoutChild {
     LayoutChild::new(LayoutNode::Pane(pane))
 }
 
+/// Converts a pane ID slice into the set of live panes.
 fn live(panes: &[PaneId]) -> HashSet<PaneId> {
     panes.iter().copied().collect()
 }
 
+/// Returns a standard 80×24 tab rectangle for test layouts.
 fn tab() -> Rect {
     Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
 }
@@ -84,7 +87,7 @@ fn merge_is_skipped_when_a_resize_offset_is_present() {
     let LayoutNode::Split(outer) = &normalized else {
         panic!("expected a split");
     };
-    // The nested split survives: merging it would lose the resize offset.
+    // The presence of resize_delta prevents merging; the nested split survives with its offset.
     assert_eq!(outer.children.len(), 2);
     assert!(matches!(outer.children[1].node, LayoutNode::Split(_)));
 }

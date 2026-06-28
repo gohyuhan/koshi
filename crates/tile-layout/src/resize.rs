@@ -110,8 +110,9 @@ pub fn resize(
 
     let mut result = tree.clone();
     let split = result.split_at_mut(&path[..depth]);
-    // A deserialized split may carry fewer weights than children; pad with
-    // the default share (normalization's repair) before indexing into them.
+    // A deserialized split may carry fewer weights than children (stale format);
+    // pad each missing weight with the default share — the normalization repair
+    // that realigns weights with children — before indexing into them.
     if split.weights.len() < split.children.len() {
         split
             .weights

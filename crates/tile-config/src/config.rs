@@ -1,4 +1,4 @@
-//! `config` domain — skeleton per standard source layout.
+//! Configuration. Placeholder per standard source layout.
 
 pub mod state;
 

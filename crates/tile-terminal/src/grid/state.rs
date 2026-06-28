@@ -18,7 +18,7 @@ pub struct Cell {
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
     width: u8,
-    /// The cell's visual style.
+    /// The cell's visual style (color, bold, italic, etc.).
     style: Style,
 }
 
@@ -158,6 +158,10 @@ impl Grid {
         }
     }
 
+    /// Insert `n` blank cells at column `col` of `row`, shifting existing cells
+    /// to the right; cells pushed past the right edge are dropped. If `row` or
+    /// `col` are out of bounds, this is a no-op. The inserted cells are blanks
+    /// in `fill` style (background-color erase).
     pub fn insert_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if row >= rows || col >= cols {
@@ -171,6 +175,10 @@ impl Grid {
         r.truncate(cols as usize);
     }
 
+    /// Delete `n` cells starting at column `col` of `row`, shifting existing
+    /// cells to the left; the freed space on the right is filled with blank cells
+    /// in `fill` style (background-color erase). If `row` or `col` are out of
+    /// bounds, this is a no-op.
     pub fn delete_cells(&mut self, row: u16, col: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if row >= rows || col >= cols {
@@ -185,6 +193,10 @@ impl Grid {
         r.extend(blanks);
     }
 
+    /// Delete `n` lines from the band `[first, last]` (both inclusive), shifting
+    /// lines below the band upward; blank lines are inserted at the bottom of the
+    /// band to preserve the band's height. Cells are filled in `fill` style
+    /// (background-color erase). Coordinates outside the grid are no-ops.
     pub fn delete_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if first >= rows || last >= rows || first > last {
@@ -201,6 +213,10 @@ impl Grid {
         }
     }
 
+    /// Insert `n` blank lines within the band `[first, last]` (both inclusive),
+    /// shifting lines downward; lines pushed below the band are dropped. Blank
+    /// lines are filled in `fill` style (background-color erase). Coordinates
+    /// outside the grid are no-ops.
     pub fn insert_lines(&mut self, first: u16, last: u16, n: u16, fill: Style) {
         let (rows, cols) = self.dimensions();
         if first >= rows || last >= rows || first > last {

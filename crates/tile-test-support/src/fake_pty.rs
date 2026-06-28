@@ -3,12 +3,12 @@
 //! Layout, session, and runtime tests need to exercise pane spawning, writing,
 //! resizing, and child-exit handling without launching real shells: real
 //! processes make tests slow, platform-dependent, and non-deterministic.
-//! [`FakePtyBackend`] satisfies the full [`PtyBackend`] surface entirely in
+//! [`fake_pty::FakePtyBackend`] satisfies the full [`tile_pty::backend::state::PtyBackend`] surface entirely in
 //! memory, capturing every call so a test can assert on it and driving output
 //! and child-exit on demand.
 //!
 //! It implements the canonical [`tile_pty`] trait, so a test can drive it
-//! through the same interface the real backend exposes. [`FakePtyBackend`] is
+//! through the same interface the real backend exposes. [`fake_pty::FakePtyBackend`] is
 //! the permanent test double: its capture/drive surface — `push_output`,
 //! `trigger_child_exit`, and the `*s` query methods — is what tests assert on.
 
@@ -129,6 +129,12 @@ impl FakePtyBackend {
 }
 
 impl PtyBackend for FakePtyBackend {
+    /// Record a pane spawn and return a handle.
+    ///
+    /// Stores the spawn spec and initial size in the pane's record, and
+    /// appends the pane ID to the spawn order. The returned handle can be
+    /// used to receive output and exit status driven by the test via
+    /// [`push_output`](Self::push_output) and [`trigger_child_exit`](Self::trigger_child_exit).
     fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle> {
         let pane_id = PaneId::new();
         let (handle, output_tx, exit_tx) = PtyHandle::new(pane_id);
@@ -150,6 +156,10 @@ impl PtyBackend for FakePtyBackend {
         Ok(handle)
     }
 
+    /// Record a resize operation on a pane.
+    ///
+    /// Appends the new size to the pane's resize history. The initial size
+    /// from spawn is already recorded; subsequent resizes are added in order.
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state
@@ -160,6 +170,10 @@ impl PtyBackend for FakePtyBackend {
         Ok(())
     }
 
+    /// Record bytes written to a pane.
+    ///
+    /// Appends the byte slice to the pane's write history. Calls are
+    /// captured in order; a test asserts on them via [`writes`](Self::writes).
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state
@@ -170,6 +184,10 @@ impl PtyBackend for FakePtyBackend {
         Ok(())
     }
 
+    /// Record a kill request for a pane.
+    ///
+    /// Appends the kill policy to the pane's kill history. Calls are
+    /// captured in order; a test asserts on them via [`kills`](Self::kills).
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state

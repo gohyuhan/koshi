@@ -37,6 +37,10 @@ pub enum PaneLifecycle {
 }
 
 impl PaneLifecycle {
+    /// Advance the pane's lifecycle state by applying `event`, or reject the move if
+    /// it is illegal from the current state. Returns the new state, or
+    /// [`InvalidTransition`] if the event cannot occur here. The `kind` parameter is
+    /// used only in the error, to provide context for why the transition was rejected.
     pub fn transition(
         self,
         event: PaneLifecycleEvent,

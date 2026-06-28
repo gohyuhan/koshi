@@ -8,14 +8,17 @@ use tile_test_support::layout_assert::{
 use super::*;
 use crate::tree::LayoutChild;
 
+/// Construct a rectangle with the given origin (x, y) and size (cols, rows).
 fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
     Rect::new(Point { x, y }, Size { cols, rows })
 }
 
+/// Wrap a pane ID in a leaf node.
 fn leaf(pane: PaneId) -> LayoutChild {
     LayoutChild::new(LayoutNode::Pane(pane))
 }
 
+/// Create a split node in the given direction with equal-weight children for each pane.
 fn split(direction: SplitDirection, panes: &[PaneId]) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         direction,
@@ -33,6 +36,7 @@ fn split_with(direction: SplitDirection, children: Vec<(PaneId, SizeWeight)>) ->
     LayoutNode::Split(node)
 }
 
+/// Verify that the solved panes fill the tab completely with no gaps, overlaps, or spillage.
 fn assert_tiles_exactly(result: &SolveResult, tab: Rect) {
     assert_all_space_occupied(&result.panes, tab).unwrap();
     assert_no_overlap(&result.panes).unwrap();
@@ -176,9 +180,8 @@ fn missing_weights_fall_back_to_the_default_share() {
 #[test]
 fn an_out_of_range_percent_caps_at_the_whole_axis() {
     // Hand-built: validation rejects Percent above 100, but a raw tree can
-    // carry one. It must behave as 100 — on a wide axis the oversized
-    // product would otherwise truncate through the cast into a garbage
-    // share.
+    // carry one (via serde). Out-of-range values are capped at 100 to
+    // prevent truncation when casting on wide axes.
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = split_with(
         SplitDirection::Horizontal,

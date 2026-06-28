@@ -17,9 +17,9 @@
 //! host and config layers); these types exist now so the command and event
 //! vocabularies can already reference actions by value.
 //!
-//! There is intentionally no closed `Action` enum: a fixed enum would make
-//! plugins second-class on the keyboard surface, which is the single biggest
-//! reason editor plugin ecosystems fragment.
+//! Actions are not a fixed enum: the open design ensures plugins are
+//! first-class citizens on the keyboard surface, not locked out of the
+//! primary user-binding interface.
 
 use crate::command::CommandKind;
 use crate::ids::PluginId;

@@ -1,12 +1,20 @@
+//! Tests for panic-safe cleanup-hook isolation and ordering in `TerminalCleanupGuard`.
+//!
+//! Verifies that hooks registered on the guard run in insertion order on drop, that a panic
+//! triggers cleanup via the installed panic hook exactly once, and that a panicking cleanup
+//! hook never aborts the process or prevents later hooks from running.
+
 use super::*;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-// Both panic-hook tests mutate the process-global panic hook, so they must not
-// run concurrently — Rust runs tests in parallel by default. Serialize them on a
-// shared lock so one test's `set_hook` cannot land between another's install and
-// its `catch_unwind`.
+/// Returns a shared lock for serializing panic-hook tests.
+///
+/// Both panic-hook tests mutate the process-global panic hook. Rust runs tests in parallel by
+/// default, so multiple tests setting/restoring hooks concurrently would cause one test's
+/// `set_hook` call to land between another test's install and `catch_unwind`, breaking the
+/// isolation. This lock ensures only one panic-hook test runs at a time.
 fn panic_hook_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

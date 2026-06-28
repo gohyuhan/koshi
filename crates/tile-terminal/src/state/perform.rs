@@ -548,6 +548,12 @@ impl TerminalState {
 }
 
 impl vte::Perform for TerminalState {
+    /// Print a displayable character to the active grid. Translates the
+    /// character through the active GL charset (DEC line-drawing, UK, or
+    /// passthrough), folds continuations (combining marks, ZWJ emoji parts,
+    /// variation selectors) onto the preceding base, handles display width
+    /// (narrow single-column or wide CJK/emoji two-column), and respects
+    /// autowrap at the line end.
     fn print(&mut self, c: char) {
         // Translate through the active GL charset first (DEC line-drawing, UK),
         // so the cell stores the resolved glyph and width is computed on it. The
@@ -655,6 +661,10 @@ impl vte::Perform for TerminalState {
         }
     }
 
+    /// Handle a C0 control byte: line feed (`LF`/`VT`/`FF`), carriage
+    /// return (`CR`), backspace (`BS`), tab (`HT`), charset shift
+    /// (`SO`/`SI`), or bell (`BEL`). Most move the cursor, and all end
+    /// the current grapheme cluster.
     fn execute(&mut self, byte: u8) {
         // A control byte ends any text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -695,6 +705,12 @@ impl vte::Perform for TerminalState {
         }
     }
 
+    /// Handle a CSI sequence: cursor movement (CUU/CUD/CUF/CUB/CUP/HVP/HPA/VPA/
+    /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), graphics
+    /// rendition (SGR), cell/line operations (ICH/DCH/IL/DL), scroll (SU/SD),
+    /// scroll region setup (DECSTBM), and DEC private modes including alternate
+    /// screen (`?47`/`?1047`/`?1049`), cursor visibility (`?25`/DECTCEM), mouse
+    /// tracking/encoding, bracketed paste, autowrap (`?7`/DECAWM), and others.
     fn csi_dispatch(
         &mut self,
         params: &vte::Params,
@@ -1183,6 +1199,9 @@ impl vte::Perform for TerminalState {
         }
     }
 
+    /// Handle an ESC sequence: charset designation (ESC `(` / `)` / `*` / `+` Fc
+    /// → G0/G1/G2/G3 with DEC line-drawing/ASCII/UK), cursor save/restore
+    /// (DECSC/DECRC: ESC `7` / `8`), or reverse index (RI: ESC `M`).
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         // Any ESC sequence ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -1215,6 +1234,8 @@ impl vte::Perform for TerminalState {
         }
     }
 
+    /// Handle an Operating System Command (OSC) sequence: window/icon title
+    /// (OSC 0/1/2) or working-directory report (OSC 7, `file://` URI).
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -1243,6 +1264,9 @@ impl vte::Perform for TerminalState {
         }
     }
 
+    /// Begin a device control string (DCS, `ESC P … ST`): clear any
+    /// in-progress grapheme cluster since a non-printing control sequence ends
+    /// the text run. DCS payload handling is deferred.
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
         // A device control string (DCS, `ESC P … ST`) is a non-printing control
         // sequence, so it ends a text run: a combining mark or variation selector
@@ -1253,6 +1277,10 @@ impl vte::Perform for TerminalState {
         self.reset_cluster();
     }
 
+    /// End a device control string (DCS) and clear any in-progress grapheme
+    /// cluster. Redundant with `hook` for well-formed strings, but necessary
+    /// for DCS closed by the 8-bit C1 ST (`0x9C`), which calls only this
+    /// method.
     fn unhook(&mut self) {
         // DCS termination. Redundant with `hook` for a well-formed string, but it
         // also covers a DCS closed by the 8-bit C1 ST (`0x9C`), whose only `Perform`

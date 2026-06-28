@@ -18,7 +18,7 @@ use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::error::PtyError;
 use tile_pty::portable::PortablePtyBackend;
 
-/// Standard test window size.
+/// Standard test window size: 80 columns × 24 rows.
 const SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
 /// Serializes PTY creation across the parallel test threads. macOS `openpty(3)`

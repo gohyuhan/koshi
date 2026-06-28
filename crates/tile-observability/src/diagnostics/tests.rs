@@ -1,13 +1,18 @@
+//! Test suite: verify that diagnostic messages clearly report what failed,
+//! where it failed, and how to fix it.
+
 use super::*;
 use miette::Diagnostic;
 
 // Snapshot each diagnostic variant by its message, stable code, and help line —
 // the three parts a user reads: what/where failed and how to fix it.
 
+/// Extract a diagnostic's stable error code, or an empty string if absent.
 fn code_of(d: &impl Diagnostic) -> String {
     d.code().map(|c| c.to_string()).unwrap_or_default()
 }
 
+/// Extract a diagnostic's help message, or an empty string if absent.
 fn help_of(d: &impl Diagnostic) -> String {
     d.help().map(|h| h.to_string()).unwrap_or_default()
 }

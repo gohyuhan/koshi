@@ -134,8 +134,7 @@ pub fn remove_pane_cascade(
                             }));
                         }
                     }
-                    // The tab still has a leaf here, so the no-pane verdict
-                    // cannot occur.
+                    // The tab remains nonempty here, making this verdict unreachable.
                     FocusRepairResult::EmptyTab(_) => {}
                 }
             }
@@ -145,10 +144,9 @@ pub fn remove_pane_cascade(
             EmptyTabPolicy::CloseTab => {
                 events.extend(close_and_refocus_tab(session, tab_id));
             }
-            // Respawn a fresh shell into the now-empty tab instead of closing
-            // it. Spawning a replacement pane is the runtime's job and needs a
-            // command/spawn path that does not exist in this layer yet, so this
-            // arm is intentionally inert until that lands.
+            // Respawn a fresh shell into the now-empty tab instead of closing it.
+            // Spawning a replacement pane is the runtime's job; the session layer
+            // has no command/spawn path for it yet, so this arm is inert.
             EmptyTabPolicy::RespawnShell => {}
         },
     }

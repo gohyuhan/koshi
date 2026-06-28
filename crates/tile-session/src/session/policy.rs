@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 /// What happens to a tab when its last pane is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EmptyTabPolicy {
-    /// Spawn a fresh shell in the tab in place of the gone pane.
+    /// Spawn a new pane with a shell in the tab, replacing the exited one.
     RespawnShell,
-    /// Close the tab; if it was the last tab, the session quits.
+    /// Close the tab immediately; if it was the only tab, the session ends.
     #[default]
     CloseTab,
 }

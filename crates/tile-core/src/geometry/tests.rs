@@ -1,7 +1,11 @@
-//! Tests for terminal-cell geometry.
+//! Unit tests for rectangular geometry operations and layout enums.
+//!
+//! Tests `Rect` containment, intersection, insetting, and serde round-trips;
+//! `Axis`, `Direction`, and `SplitDirection` enum serialization.
 
 use super::*;
 
+/// Constructs a [`Rect`] from origin (x, y) and size (cols, rows).
 fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
     Rect::new(Point { x, y }, Size { cols, rows })
 }

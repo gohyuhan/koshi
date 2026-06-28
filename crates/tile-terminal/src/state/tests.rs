@@ -71,9 +71,8 @@ fn resize_reallocs_both_grids_to_new_size() {
 
 #[test]
 fn resize_fills_each_grid_with_its_own_screen_background() {
-    // Each screen blanks with its OWN render background — a resize must not fill
-    // the primary grid with the alternate app's background (which would show on
-    // the shell after exit).
+    // Each screen's grid is filled with that screen's own render background color,
+    // not the other screen's background.
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
     state.primary_render.style.set_bg(Color::Indexed(4)); // primary: blue
     state.alternate_render.style.set_bg(Color::Indexed(1)); // alternate: red

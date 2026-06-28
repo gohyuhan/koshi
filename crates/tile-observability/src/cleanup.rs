@@ -2,10 +2,10 @@
 //!
 //! Tile puts the terminal into raw mode and the alternate screen while it runs.
 //! If the process exits without undoing that — including an unwinding panic — the
-//! user is left with a corrupted shell. [`TerminalCleanupGuard`] guarantees the
+//! user is left with a corrupted shell. [`cleanup::TerminalCleanupGuard`] guarantees the
 //! undo: callers register cleanup hooks, and the hooks run exactly once on
 //! whichever comes first — the guard being dropped, or a panic, if
-//! [`install_panic_hook`] armed one.
+//! [`cleanup::install_panic_hook`] armed one.
 //!
 //! This module ships only the mechanism. The concrete hooks — disabling raw mode
 //! and leaving the alternate screen via `crossterm` — are registered by the

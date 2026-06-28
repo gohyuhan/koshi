@@ -19,11 +19,14 @@ pub struct PaneRegistry {
 }
 
 impl PaneRegistry {
+    /// Creates a new empty pane registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Inserts a pane record, keyed by its id. Returns an error if the id is
+    /// already registered; the existing record is untouched.
     pub fn insert(&mut self, pane_record: PaneRecord) -> Result<(), PaneRegistryError> {
         if self.records.contains_key(&pane_record.id()) {
             return Err(PaneRegistryError::DuplicateId {
@@ -35,11 +38,13 @@ impl PaneRegistry {
         Ok(())
     }
 
+    /// Returns a reference to the record for a pane id, if it is registered.
     #[must_use]
     pub fn get(&self, pane_id: PaneId) -> Option<&PaneRecord> {
         self.records.get(&pane_id)
     }
 
+    /// Removes and returns the record for a pane id if it is registered.
     pub fn remove(&mut self, pane_id: PaneId) -> Option<PaneRecord> {
         self.records.remove(&pane_id)
     }
@@ -55,15 +60,18 @@ impl PaneRegistry {
         self.records.get_mut(&pane_id)
     }
 
+    /// Returns an iterator over all registered pane records.
     pub fn list(&self) -> impl Iterator<Item = &PaneRecord> {
         self.records.values()
     }
 
+    /// Returns the count of registered pane records.
     #[must_use]
     pub fn len(&self) -> usize {
         self.records.len()
     }
 
+    /// Returns true if the registry contains no pane records.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()

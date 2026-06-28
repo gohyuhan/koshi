@@ -1,1 +1,1 @@
-//! Events. Placeholder per standard source layout.
+//! Plugin events. Placeholder per standard source layout.

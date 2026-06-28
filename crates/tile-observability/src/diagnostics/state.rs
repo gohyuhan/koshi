@@ -1,1 +1,1 @@
-//! State model. Placeholder per standard source layout.
+//! Diagnostic state. Placeholder per standard source layout.

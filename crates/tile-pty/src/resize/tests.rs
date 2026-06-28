@@ -1,4 +1,8 @@
-//! Tests for [`compute_pty_size`] and [`resize_for_layout_change`].
+//! Tests for PTY resizing: size clamping, batch application, and error handling.
+//!
+//! [`compute_pty_size`] floors layout dimensions to PTY minima (2 cols, 1 row).
+//! [`resize_for_layout_change`] applies PTY resizes in order, aborts on backend error, and tracks
+//! which panes kept their last valid size (for invisible/hidden panes).
 
 use std::sync::Mutex;
 
@@ -21,6 +25,7 @@ struct RecordingBackend {
 }
 
 impl RecordingBackend {
+    /// Create a backend that records resize calls without errors.
     fn new() -> Self {
         Self {
             resizes: Mutex::new(Vec::new()),
@@ -28,6 +33,7 @@ impl RecordingBackend {
         }
     }
 
+    /// Create a backend that rejects resize calls for a specific pane with `UnknownPane` error.
     fn failing_on(pane: PaneId) -> Self {
         Self {
             resizes: Mutex::new(Vec::new()),
@@ -35,6 +41,7 @@ impl RecordingBackend {
         }
     }
 
+    /// Return a copy of all resize calls recorded on this backend in order.
     fn calls(&self) -> Vec<(PaneId, PtySize)> {
         self.resizes.lock().expect("resize log lock").clone()
     }

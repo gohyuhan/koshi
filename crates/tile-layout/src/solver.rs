@@ -538,7 +538,7 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
     }
 
     // Percentages are shares of the whole axis, floored to cells. Clamped
-    // to 100: validation rejects more, but a raw tree can carry it, and an
+    // to 100 for robustness: a raw tree may bypass validation, and an
     // unclamped product can truncate through the cast.
     for (index, weight) in weights.iter().enumerate() {
         if let SizeConstraint::Percent(percent) = weight.primary {

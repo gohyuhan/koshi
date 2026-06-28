@@ -181,9 +181,7 @@ impl ClientRegistry {
     ///
     /// The client exposes its `id`, but **mutating `id` through this handle does
     /// not move the map entry** — the client would stay keyed under its old id,
-    /// desyncing the key from `client.id`. Re-keying is deliberately not handled
-    /// here: a client never changes id in place; an identity change is a detach
-    /// of the old id followed by an attach of the new one.
+    /// desyncing the key from `client.id`. Identity changes happen via detach + attach.
     pub fn get_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
         self.records.get_mut(&client_id)
     }

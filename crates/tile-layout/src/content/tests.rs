@@ -5,10 +5,12 @@ use tile_core::geometry::{Point, Size};
 use super::*;
 use crate::solver::StackHeader;
 
+/// Constructs a test `Rect` at position (x, y) with the given dimensions.
 fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
     Rect::new(Point { x, y }, Size { cols, rows })
 }
 
+/// Constructs a test `SolveResult` with the given panes, suppression list, and stack headers.
 fn solve_result(
     panes: Vec<(PaneId, Rect)>,
     suppressed: Vec<PaneId>,
@@ -22,8 +24,8 @@ fn solve_result(
     }
 }
 
-/// A collapsed-stack-member header strip for `pane` (the rect is irrelevant to
-/// `content_rects`; only membership matters).
+/// Constructs a test stack header for `pane`. The rect value is arbitrary;
+/// `content_rects` only examines membership in the list.
 fn header(pane: PaneId) -> StackHeader {
     StackHeader {
         pane,
@@ -43,8 +45,8 @@ fn a_visible_pane_is_inset_by_one_cell() {
 
 #[test]
 fn a_suppressed_pane_yields_none_even_with_a_nonempty_rect() {
-    // Suppression is decided by the list, not by the rect — prove the list
-    // branch independently of the zero-area branch.
+    // Suppression status is determined by the suppression list, not the rect.
+    // This test isolates the list branch from the zero-area branch.
     let pane = PaneId::new();
     let solve = solve_result(vec![(pane, rect(0, 0, 10, 10))], vec![pane], vec![]);
 
@@ -61,8 +63,8 @@ fn a_hidden_zero_area_pane_yields_none() {
 
 #[test]
 fn a_collapsed_stack_member_yields_none_despite_a_nonempty_strip() {
-    // The member's rect is its header strip (non-empty); it must still be None
-    // because the strip is Tile chrome, not content.
+    // A collapsed stack member's rect is the header strip (non-empty), but
+    // it yields None because the header is layout furniture, not pane content.
     let pane = PaneId::new();
     let solve = solve_result(vec![(pane, rect(0, 0, 10, 1))], vec![], vec![header(pane)]);
 
@@ -71,8 +73,9 @@ fn a_collapsed_stack_member_yields_none_despite_a_nonempty_strip() {
 
 #[test]
 fn a_tiny_visible_pane_stays_some_with_a_zero_area_content_rect() {
-    // Visible but smaller than the border: insets to zero area, yet remains
-    // Some — distinct from a not-shown pane's None. The PTY layer floors it.
+    // A visible pane that is too small for the border insets to zero area but
+    // still yields Some, signaling that the pane is shown. (Readers that care
+    // about minimum content area handle the zero case themselves.)
     let pane = PaneId::new();
     let solve = solve_result(vec![(pane, rect(5, 5, 1, 1))], vec![], vec![]);
 

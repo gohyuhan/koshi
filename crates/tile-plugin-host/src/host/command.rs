@@ -1,1 +1,1 @@
-//! Commands. Placeholder per standard source layout.
+//! Command dispatch. Placeholder per standard source layout.

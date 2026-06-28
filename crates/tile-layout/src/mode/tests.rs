@@ -14,7 +14,7 @@ fn tab() -> Rect {
     Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
 }
 
-/// a beside (b over c).
+/// Builds a test layout: horizontal split with `a` on the left and two vertically-stacked panes (`b` over `c`) on the right.
 fn nested(a: PaneId, b: PaneId, c: PaneId) -> LayoutNode {
     let column = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
@@ -36,8 +36,8 @@ fn fullscreen_promotes_the_focused_pane_and_hides_the_rest() {
         result.panes,
         [(a, Rect::zero()), (b, tab()), (c, Rect::zero())]
     );
-    // Hidden panes are not suppressed: they come back on toggle, and no
-    // terminal-too-small overlay belongs over a working fullscreen pane.
+    // Hidden panes are not suppressed; they can be toggled back. An overlay
+    // should not be drawn over a pane that fits on screen.
     assert!(result.suppressed.is_empty());
     assert!(!result.all_suppressed);
 }
@@ -48,8 +48,8 @@ fn leaving_fullscreen_restores_the_exact_prior_layout() {
     let tree = nested(a, b, c);
     let before = solve_with_mode(&tree, LayoutMode::Tiled, tab());
 
-    // Entering and leaving fullscreen never rewrites the tree, so the tiled
-    // solve afterwards is identical — including the tree itself.
+    // Entering and leaving fullscreen does not modify the tree. The tiled
+    // solve after toggling fullscreen must match the original solve.
     let snapshot = tree.clone();
     let _ = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: c }, tab());
     assert_eq!(tree, snapshot);
@@ -86,8 +86,8 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     ));
     let snapshot = tree.clone();
 
-    // c is collapsed; fullscreen still promotes it to the whole tab while
-    // the stack and every sibling hide.
+    // Fullscreen promotes a collapsed stack member (`c`) to fill the entire
+    // tab, while the stack and all siblings are hidden.
     let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: c }, tab());
     assert_eq!(
         result.panes,
@@ -96,8 +96,8 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     assert!(result.stack_headers.is_empty());
     assert!(result.suppressed.is_empty());
 
-    // The stack was never rewritten: same membership, same active member,
-    // same collapsed flags — so restoring shows b expanded again.
+    // Entering fullscreen does not modify the stack structure, so exiting
+    // fullscreen restores all prior collapse state.
     assert_eq!(tree, snapshot);
     let restored = solve_with_mode(&tree, LayoutMode::Tiled, tab());
     let LayoutNode::Split(outer) = &tree else {
@@ -140,10 +140,10 @@ fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
 
 #[test]
 fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
-    // The focused pane clears the bare (2,1) content floor in a 3x2 tab but not
-    // the border-inclusive (4,3). Fullscreen must suppress it — matching the
-    // tiled solve — instead of drawing it under an overlapping border. At
-    // exactly (4,3) it becomes visible, insetting to the (2,1) content minimum.
+    // Pane content requires (2,1) space minimum; borders add (1,1) on each
+    // side. In a 3x2 tab, content fits but a border (4x3 total) does not.
+    // Fullscreen suppresses the pane to avoid drawing borders that overflow.
+    // At exactly (4,3), the border fits, so the pane shows with 1-cell inset.
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,

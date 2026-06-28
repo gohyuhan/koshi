@@ -1,1 +1,1 @@
-//! State model. Placeholder per standard source layout.
+//! Instance state. Placeholder per standard source layout.

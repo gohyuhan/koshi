@@ -42,6 +42,8 @@ pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<Layo
     normalize_node(tree, live_panes)
 }
 
+/// Recursively normalize the given node against live panes, dropping dead children
+/// and collapsing unneeded structures. Returns `None` if no live children survive.
 fn normalize_node(node: &LayoutNode, live: &HashSet<PaneId>) -> Option<LayoutNode> {
     let split = match node {
         LayoutNode::Pane(id) => {
@@ -69,8 +71,8 @@ fn normalize_node(node: &LayoutNode, live: &HashSet<PaneId>) -> Option<LayoutNod
         return None;
     }
 
-    // A stack's active child must survive reseating before any merging —
-    // though merging never applies to stacks, keeping the order explicit.
+    // For stacks, recompute the active child index to account for removed children.
+    // This index determines which child is expanded when the split is rebuilt.
     let stacked = split.direction == SplitDirection::Stacked;
     let active = if stacked {
         entries
@@ -135,9 +137,8 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     if factors.iter().all(|&factor| factor == 1) {
         return entries;
     }
-    // The rescaling factor product can overflow only on absurdly deep
-    // hostile trees, but a nested split is valid — so refuse the merge
-    // rather than wrap.
+    // Overflow occurs only on absurdly deep hostile trees. Nested splits are
+    // valid even unmerged, so we skip the merge rather than wrapping the product.
     let product = factors
         .iter()
         .try_fold(1u128, |acc, &factor| acc.checked_mul(factor));

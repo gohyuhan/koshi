@@ -1,7 +1,7 @@
 //! Windows Job-Object backend integration tests.
 //!
-//! Compile-checked on every build for the Windows target; executed when a
-//! Windows CI runner lands (CI-003). Unix builds skip this file entirely.
+//! Compile-checked on every build for the Windows target; executed by Windows
+//! test runners. Unix builds skip this file entirely.
 //!
 //! The expected exit code is `137` by construction: `force` calls
 //! `TerminateProcess(handle, 137)` and `tree` calls `TerminateJobObject(job, 137)`,

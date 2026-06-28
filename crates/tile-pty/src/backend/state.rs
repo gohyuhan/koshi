@@ -1,4 +1,4 @@
-//! The [`PtyBackend`] trait and the [`PtyHandle`] a spawned pane is driven through.
+//! The `PtyBackend` trait and the `PtyHandle` struct that a spawned pane is driven through.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
