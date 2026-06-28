@@ -2138,6 +2138,37 @@ fn cursor_visibility_is_independent_per_screen() {
     assert!(!state.cursor_visible()); // primary still hidden
 }
 
+#[test]
+fn dec_47_round_trip_leaves_the_primary_cursor_untouched() {
+    // `?47`/`?1047` neither save nor restore the cursor, so the primary cursor
+    // returning to its pre-switch spot proves the live cursor is per-screen
+    // (a shared cursor would carry the alternate's motion back).
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[3;3H"); // primary cursor at (2, 2)
+    advance(&mut state, b"\x1b[?47h"); // enter the alternate (no save, no seed)
+    advance(&mut state, b"\x1b[5;5H"); // move the alternate cursor to (4, 4)
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (4, 4)
+    );
+    advance(&mut state, b"\x1b[?47l"); // exit (no restore)
+    assert_eq!(
+        (state.active_cursor().row, state.active_cursor().col),
+        (2, 2)
+    ); // primary cursor never touched by the alternate's motion
+}
+
+#[test]
+fn cursor_visibility_is_independent_across_a_dec_47_round_trip() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?25l"); // hide the cursor on primary
+    assert!(!state.cursor_visible());
+    advance(&mut state, b"\x1b[?47h"); // enter the alternate — its own visibility
+    assert!(state.cursor_visible()); // alternate is shown, independent of primary
+    advance(&mut state, b"\x1b[?47l"); // back to primary
+    assert!(!state.cursor_visible()); // primary still hidden
+}
+
 // --- Renderer-facing read accessors: cursor position + active screen ---
 
 #[test]
