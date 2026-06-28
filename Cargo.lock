@@ -948,6 +948,9 @@ version = "0.1.0"
 [[package]]
 name = "tile-runtime"
 version = "0.1.0"
+dependencies = [
+ "tile-core",
+]
 
 [[package]]
 name = "tile-session"
