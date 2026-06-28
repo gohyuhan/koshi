@@ -2,6 +2,6 @@
 //! runtime shutdown, and cross-crate wiring.
 
 pub mod error;
-pub mod types;
-
+pub mod placeholder;
 pub mod runtime;
+pub mod types;
