@@ -370,6 +370,10 @@ impl TerminalState {
         self.cluster_base = None;
     }
 
+    pub fn active_screen(&self) -> Screen {
+        self.active
+    }
+
     /// The screen buffer currently displayed and written to — `primary` or
     /// `alternate`, per the active screen.
     pub fn active_grid(&self) -> &Grid {
@@ -474,6 +478,11 @@ impl TerminalState {
             Screen::Primary => &mut self.primary_scroll_region,
             Screen::Alternate => &mut self.alternate_scroll_region,
         }
+    }
+
+    pub fn active_cursor_position(&self) -> (u16, u16) {
+        let cursor_position = (self.active_cursor().row, self.active_cursor().col);
+        cursor_position
     }
 
     /// The cursor for the active screen.
