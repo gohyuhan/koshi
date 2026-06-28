@@ -1,3 +1,11 @@
+//! Tests for tab operations: creation, deletion, renaming, focus, and reordering.
+//!
+//! This module provides fixtures (helper functions) to construct test sessions,
+//! tabs, clients, and panes, and exercises the tab operation functions
+//! ([`new_tab`], [`close_tab`], [`rename_tab`], [`focus_tab`], [`move_tab`])
+//! with various state configurations to verify correct event emission and
+//! state transitions.
+
 use std::time::SystemTime;
 
 use tile_core::event::Event;
@@ -32,8 +40,7 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId, index: usize) -> Tab
 }
 
 /// A client of `session_id` viewing `tab_id`, no per-tab focus recorded yet.
-/// Carrying the session's own id keeps an attached client a state
-/// [`Session::validate`] accepts.
+/// The client's session_id matches the session's own id, ensuring it passes [`Session::validate`] when attached.
 fn client_on(session_id: SessionId, tab_id: TabId) -> Client {
     Client::new(
         ClientId::new(),

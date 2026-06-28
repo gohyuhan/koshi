@@ -355,8 +355,8 @@ fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
     // The cursor is a concrete grid column: filling the last column parks the
     // cursor there with a wrap pending. EL 0 (cursor-to-end) erases from that
     // concrete column — clearing the parked glyph — and clears the wrap latch,
-    // since the cell that armed the wrap is gone. The next print then overwrites
-    // at the last column rather than wrapping.
+    // since the cell that armed the wrap is gone. The next print overwrites
+    // at the last column.
     let mut state = state(5, 2);
     print_str(&mut state, "abcde"); // 'e' lands at col 4 with the wrap pending
     assert!(state.active_cursor().pending_wrap);
@@ -370,9 +370,8 @@ fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
 
 #[test]
 fn el_0_erases_the_last_column_when_autowrap_is_off() {
-    // With autowrap off there is no deferred wrap: the cursor sits concretely on
-    // the last column, so EL 0 erases from it (including that column) rather than
-    // treating the parked latch as "past the line end".
+    // With autowrap off, the cursor sits concretely on the last column. EL 0
+    // erases from that column (including it), since the cursor occupies that cell.
     let mut state = state(5, 2);
     advance(&mut state, b"\x1b[?7l"); // autowrap off
     print_str(&mut state, "abcde"); // fills the row; cursor parked on col 4
@@ -382,8 +381,8 @@ fn el_0_erases_the_last_column_when_autowrap_is_off() {
 
 #[test]
 fn el_1_and_el_2_clear_the_wrap_latch_when_parked() {
-    // EL 1 and EL 2 both wipe the parked cursor's cell, un-filling the line, so
-    // the wrap latch clears (next print overwrites rather than wraps).
+    // EL 1 and EL 2 both wipe the parked cursor's cell, clearing the line.
+    // This clears the wrap latch; the next print overwrites in place.
     for seq in [&b"\x1b[1K"[..], &b"\x1b[2K"[..]] {
         let mut state = state(5, 2);
         print_str(&mut state, "abcde"); // parks at col 4 with the latch
@@ -2042,7 +2041,7 @@ fn a_clearing_exit_resets_the_alternate_cursor_to_home() {
     advance(&mut state, b"\x1b[?1047l"); // a clearing exit ends the session -> reset to a fresh buffer
     advance(&mut state, b"\x1b[?47h"); // non-clearing re-entry sees the fresh cursor
     let cur = state.active_cursor();
-    assert_eq!((cur.row, cur.col), (0, 0)); // home, not the dead session's (2, 3)
+    assert_eq!((cur.row, cur.col), (0, 0)); // home — the clearing exit reset the cursor before re-entry
 }
 
 // --- Per-screen cursor independence ---
@@ -3018,8 +3017,7 @@ fn a_later_mouse_tracking_mode_replaces_the_earlier_one() {
 #[test]
 fn disabling_a_non_active_tracking_mode_leaves_the_active_one() {
     // A reset turns reporting off only when it names the active level. Resetting
-    // a mode that is not the active one is a no-op, matching alacritty (whose
-    // unset clears only that mode's own bit, leaving the active mode set).
+    // a mode that is not the active one is a no-op; the active mode stays set.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1003h"); // AnyMotion
     advance(&mut state, b"\x1b[?1000l"); // resets a different mode number
@@ -3052,9 +3050,8 @@ fn each_mouse_encoding_mode_sets_its_form_and_resets_to_default() {
 
 #[test]
 fn disabling_a_non_active_encoding_leaves_the_active_one() {
-    // A reset returns to the default only when it names the active encoding;
-    // resetting a different encoding is a no-op, matching alacritty (its unset
-    // clears only that encoding's own bit, leaving the active one set).
+    // A reset returns to the default only when it names the active encoding.
+    // Resetting a different encoding is a no-op; the active one stays set.
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1005h"); // Utf8 active
     advance(&mut state, b"\x1b[?1006l"); // reset a non-active encoding
@@ -3350,8 +3347,8 @@ fn ech_fills_with_the_current_background_only() {
 #[test]
 fn ech_erases_the_parked_glyph_and_clears_the_wrap_latch() {
     // ECH erases from the concrete cursor column, clearing the parked last-column
-    // glyph AND the wrap latch (the cell that armed the wrap is gone), so the next
-    // print overwrites in place rather than wrapping.
+    // glyph and the wrap latch — the latch is tied to that cell, so erasing the
+    // cell erases the latch. The next print overwrites in place.
     let mut state = state(3, 2);
     print_str(&mut state, "abc"); // parks at column 2 with the latch
     assert!(state.active_cursor().pending_wrap);
@@ -3939,9 +3936,8 @@ fn dec_line_drawing_passes_multibyte_utf8_through() {
 
 #[test]
 fn a_combining_mark_folds_onto_a_line_drawing_glyph() {
-    // The remapped glyph anchors the grapheme cluster, so a following combining
-    // mark folds onto it (one cell) rather than taking its own — the remap does
-    // not disturb the cluster machinery.
+    // The remapped glyph anchors the grapheme cluster. A following combining
+    // mark folds onto it as a single-cell cluster.
     let mut state = state(8, 2);
     advance(&mut state, b"\x1b(0"); // GL = DEC line drawing
     state.print('q'); // '─' base at (0, 0)

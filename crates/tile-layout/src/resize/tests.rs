@@ -24,6 +24,7 @@ fn pair(direction: SplitDirection, a: PaneId, b: PaneId) -> LayoutNode {
     ))
 }
 
+/// Solves the layout and returns the allocated size for the given pane.
 fn solved_size(tree: &LayoutNode, tab: Rect, pane: PaneId) -> Size {
     solve(tree, tab)
         .panes
@@ -34,6 +35,8 @@ fn solved_size(tree: &LayoutNode, tab: Rect, pane: PaneId) -> Size {
         .size
 }
 
+/// Verifies that the layout tiles the tab correctly: all cells are occupied,
+/// panes don't overlap, and none extend outside the tab bounds.
 fn assert_tiles(tree: &LayoutNode, tab: Rect) {
     let result = solve(tree, tab);
     assert_all_space_occupied(&result.panes, tab).unwrap();
@@ -130,10 +133,9 @@ fn pane_inside_a_stack_resizes_the_stack_as_a_unit() {
 
 #[test]
 fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
-    // Hand-built: a stack whose active member is a vertical pair — the
-    // edits never create this, but the solver supports it, so the resize
-    // preflight must measure the donor inside the header-carved active
-    // rect, not the whole stack rect.
+    // Hand-built: a stack whose active member is a vertical pair. The
+    // resize preflight measures the donor inside the header-carved active
+    // rect, accounting for the invisible header row.
     let (a, upper, lower) = (PaneId::new(), PaneId::new(), PaneId::new());
     let mut stack = SplitNode::stack(vec![a, upper], 1);
     stack.children[1].node = pair(SplitDirection::Vertical, upper, lower);
@@ -160,9 +162,8 @@ fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
 #[test]
 fn resize_inside_a_collapsed_member_moves_the_stack_border() {
     // Hand-built: a collapsed member that is itself a split. Its inner
-    // borders are invisible, so resizing one of its panes must bubble to
-    // the stack's outer border — the stack resizes as a unit — instead of
-    // measuring a zero-area donor and refusing.
+    // borders are invisible; resizing one of its panes bubbles to the
+    // stack's outer border, resizing it as a unit.
     let (a, x, u, v) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
     let mut stack = SplitNode::stack(vec![x, u], 0);
     stack.children[1].node = pair(SplitDirection::Horizontal, u, v);

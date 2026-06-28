@@ -1,4 +1,8 @@
-//! Tests for structural edits: split, stack, replace, and remove.
+//! Tests for structural edits: split (directional pane splits), stack (tabbed pane groups),
+//! replace (swap pane identity), and remove (delete pane from tree).
+//!
+//! Tests verify that edits produce correct tree structure, maintain tiling (no gaps/overlaps),
+//! update cursor position in stacks, and handle edge cases (removing last pane, missing targets).
 
 use tile_core::geometry::{Point, Rect, Size};
 use tile_test_support::layout_assert::{
@@ -9,10 +13,12 @@ use super::*;
 use crate::size::SizeWeight;
 use crate::solver::solve;
 
+/// Wraps a single pane ID as a leaf node ready to insert into a tree.
 fn leaf(pane: PaneId) -> LayoutChild {
     LayoutChild::new(LayoutNode::Pane(pane))
 }
 
+/// Creates a split node with two equally-weighted pane children in the given direction.
 fn pair(direction: SplitDirection, a: PaneId, b: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::with_equal_weights(
         direction,
@@ -127,10 +133,12 @@ fn split_result_still_tiles_the_tab() {
     assert_no_outside(&result.panes, tab).unwrap();
 }
 
+/// Returns a standard test tab size: 80 columns × 24 rows at origin (0, 0).
 fn tab() -> Rect {
     Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
 }
 
+/// Verifies that a solved layout completely tiles the tab with no gaps, overlaps, or panes outside bounds.
 fn assert_tiles(tree: &LayoutNode, tab: Rect) {
     let result = solve(tree, tab);
     assert_all_space_occupied(&result.panes, tab).unwrap();

@@ -1,7 +1,7 @@
 //! Real OS-PTY backend built on the `portable-pty` crate.
 //!
 //! A spawned pane gets a kernel PTY and three helper threads (reader, writer,
-//! watcher), all owned through the [`PortablePtyBackend`] pane map. The
+//! watcher), all owned through the [`crate::portable::PortablePtyBackend`] pane map. The
 //! implementation handles child output streaming, input queuing, process
 //! termination (with cross-platform kill policies), and exit status tracking.
 
@@ -95,12 +95,10 @@ pub struct PaneEntry {
     exited: Arc<AtomicBool>,
     /// Reader thread: drains the master's read half into the output channel.
     ///
-    /// Retained but deliberately never joined: a child can `setsid` into a new
-    /// process group while still holding the slave fd, so even `KillPolicy::Tree`
-    /// cannot guarantee the reader reaches EOF — joining it could block forever
-    /// (the `*_does_not_hang_*` tests pin this). Teardown therefore detaches the
-    /// handle rather than joining it; the thread exits on its own once the fd
-    /// finally closes. Retained only so the struct owns it.
+    /// Not joined on teardown: the slave fd may outlive the child (e.g., when the
+    /// child `setsid`s into a new process group), so the thread could block forever
+    /// if joined. It exits on its own once the fd closes. Retained so the struct
+    /// owns the handle.
     #[expect(dead_code)]
     reader: JoinHandle<()>,
     /// Watcher thread: blocks on the child, records exit status, flips `exited`.
@@ -115,6 +113,7 @@ pub struct PortablePtyBackend {
 }
 
 impl PortablePtyBackend {
+    /// Creates a new, empty PTY backend with no active panes.
     pub fn new() -> Self {
         PortablePtyBackend {
             panes: Mutex::new(HashMap::new()),
@@ -131,7 +130,7 @@ impl Default for PortablePtyBackend {
 impl PtyBackend for PortablePtyBackend {
     /// Open a fresh PTY, launch `spec` as a child inside it, and wire up its I/O.
     ///
-    /// Returns a [`PtyHandle`] the caller polls for output and exit status. The
+    /// Returns a [`crate::backend::state::PtyHandle`] the caller polls for output and exit status. The
     /// child runs detached on three background threads owned by the backend: a
     /// **reader** (master output → output channel), a **writer** (input channel →
     /// master, so writes never block the dispatcher), and a **watcher**

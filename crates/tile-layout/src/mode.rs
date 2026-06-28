@@ -7,9 +7,8 @@
 //! fullscreen restores the exact prior layout by construction. There is
 //! nothing to put back and nothing that can drift.
 //!
-//! In-place content replacement is deliberately *not* a mode: swapping what
-//! a leaf shows is a one-shot tree edit with unchanged geometry, so it lives
-//! with the other edits.
+//! Content replacement (swapping what a leaf shows) is a one-shot tree edit
+//! with unchanged geometry, handled with the other edits.
 
 use serde::{Deserialize, Serialize};
 use tile_core::ids::PaneId;

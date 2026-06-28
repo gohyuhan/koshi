@@ -1,10 +1,9 @@
 //! Process lifecycle and spawn types.
 //!
 //! These types live in `tile-core` so the PTY layer, pane layer, and session
-//! close policy all share one definition instead of redefining them per crate
-//! (which would invert the dependency layering). They are deliberately
-//! cell-agnostic and OS-agnostic: how a [`KillPolicy`] maps to actual signals
-//! or Win32 calls is the PTY layer's concern, not this module's.
+//! close policy all share one definition. They are intentionally cell-agnostic
+//! and OS-agnostic: how a [`KillPolicy`] maps to actual signals or Win32 calls
+//! is the PTY layer's concern, not this module's.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -107,6 +106,7 @@ pub mod duration_secs {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
+    /// Serialize a [`Duration`] to a whole number of seconds, discarding sub-second precision.
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -114,6 +114,7 @@ pub mod duration_secs {
         serializer.serialize_u64(duration.as_secs())
     }
 
+    /// Deserialize a [`Duration`] from a whole number of seconds.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
         D: Deserializer<'de>,

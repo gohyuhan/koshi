@@ -8,8 +8,8 @@ fn default_grid(rows: u16, cols: u16) -> Grid {
     Grid::blank(rows, cols, Style::default())
 }
 
-/// The default pen carrying `color` as its background — a non-default fill for
-/// the background-color-erase cases.
+/// A text rendering style (pen) with the given background color — used to test
+/// background-color-erase (BCE) operations that fill erased cells with the pen's color.
 fn bg(color: Color) -> Style {
     let mut style = Style::default();
     style.set_bg(color);

@@ -1,3 +1,8 @@
+//! Tests for the pane lifecycle state machine, covering all valid and invalid
+//! transitions between states (Spawning, Running, Exited, Closing, Removed) and
+//! the events that drive them (ProcessStarted, ProcessExited, CloseRequested,
+//! Cleaned, Respawn).
+
 use std::time::SystemTime;
 
 use tile_core::error::{DomainCategory, DomainError, Severity};
@@ -7,8 +12,9 @@ use super::{PaneLifecycle, PaneLifecycleEvent};
 use crate::error::InvalidTransition;
 use crate::pane::state::PaneKind;
 
-/// Every lifecycle state, with a fixed payload where one is carried, so a test
-/// can sweep the whole state space.
+/// Returns one instance of each lifecycle state, with concrete payloads fixed
+/// (exit code 0, times set to UNIX_EPOCH) so tests can exhaustively check all
+/// state × event combinations.
 fn all_states() -> [PaneLifecycle; 5] {
     [
         PaneLifecycle::Spawning,
@@ -24,7 +30,9 @@ fn all_states() -> [PaneLifecycle; 5] {
     ]
 }
 
-/// Every driving event, with fixed payloads, for the same exhaustive sweep.
+/// Returns one instance of each lifecycle event, with concrete payloads fixed
+/// (exit code 0, times set to UNIX_EPOCH) to pair with `all_states()` for
+/// exhaustive state × event coverage.
 fn all_events() -> [PaneLifecycleEvent; 5] {
     [
         PaneLifecycleEvent::ProcessStarted,
@@ -40,8 +48,9 @@ fn all_events() -> [PaneLifecycleEvent; 5] {
     ]
 }
 
-/// The transitions the spec permits. Mirrors the `transition` match so the
-/// sweep can assert nothing outside this set is ever accepted.
+/// Checks whether a state × event combination is a valid transition according
+/// to the spec. Used by exhaustive tests to verify the `transition` method
+/// accepts exactly this set and rejects all others.
 fn is_allowed(from: PaneLifecycle, event: PaneLifecycleEvent) -> bool {
     matches!(
         (from, event),
@@ -84,8 +93,7 @@ fn a_spawning_pane_can_be_closed_before_it_runs() {
         PaneKind::Terminal,
     );
 
-    // A close can arrive before the child reports started; honour it rather
-    // than forcing the pane to run first.
+    // A close can arrive before the child reports started and is processed immediately.
     assert_eq!(next, Ok(PaneLifecycle::Closing { since }));
 }
 
@@ -149,8 +157,8 @@ fn a_dead_pane_respawns_back_to_spawning() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // RespawnShell loops a dead pane back into Spawning to recreate its PTY and
-    // child, dropping the prior exit payload.
+    // Respawn moves an exited pane back to Spawning, ready to spawn a new PTY
+    // and child process, with the prior exit payload discarded.
     assert_eq!(
         exited.transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal),
         Ok(PaneLifecycle::Spawning)
@@ -164,7 +172,7 @@ fn a_respawned_pane_runs_through_the_normal_start_path() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Respawn reuses the ordinary Spawning -> Running edge; no shortcut to Running.
+    // Respawn follows the ordinary Spawning -> Running edge; it does not jump directly to Running.
     let spawning = exited
         .transition(PaneLifecycleEvent::Respawn, PaneKind::Terminal)
         .unwrap();
@@ -175,11 +183,10 @@ fn a_respawned_pane_runs_through_the_normal_start_path() {
 
 #[test]
 fn a_close_during_spawn_wins_over_a_late_child_exit() {
-    // Race: the pane is closed while still Spawning (close is askable before the
-    // child runs), then the child that was coming up exits anyway. The close
-    // moves it to Closing; the late exit is not a legal edge from Closing, so it
-    // is rejected and the state is unchanged — a late exit can neither revive
-    // the pane nor corrupt the teardown.
+    // Race: the pane is closed while Spawning, then the child that was starting
+    // exits anyway. The close moves it to Closing; ProcessExited is not a legal
+    // transition from Closing, so the late exit is rejected and the state remains
+    // unchanged.
     let since = SystemTime::UNIX_EPOCH;
     let closing = PaneLifecycle::Spawning
         .transition(
@@ -246,8 +253,8 @@ fn an_exited_pane_cannot_skip_the_close_transaction() {
         code: Some(0),
         at: SystemTime::UNIX_EPOCH,
     };
-    // `Cleaned` is what drives Closing -> Removed; from Exited it is illegal,
-    // so a dead pane can never reach Removed without first Closing.
+    // `Cleaned` transitions Closing to Removed; from Exited it does not apply,
+    // so removal requires closing first.
     let event = PaneLifecycleEvent::Cleaned;
 
     assert_eq!(
@@ -267,8 +274,8 @@ fn an_exited_pane_is_never_silently_removed() {
         at: SystemTime::UNIX_EPOCH,
     };
 
-    // Acceptance signal: Exited is a retained state — no event takes it
-    // straight to Removed; only an explicit close, then cleanup, does.
+    // Verify Exited is a retained state: no single event transitions it directly
+    // to Removed; the path is Exited -> (CloseRequested) -> Closing -> (Cleaned) -> Removed.
     for event in all_events() {
         assert_ne!(
             from.transition(event, PaneKind::Terminal),

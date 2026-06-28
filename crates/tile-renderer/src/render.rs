@@ -1,4 +1,4 @@
-//! `render` domain — skeleton per standard source layout.
+//! Core rendering. Placeholder per standard source layout.
 
 pub mod state;
 

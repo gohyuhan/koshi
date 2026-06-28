@@ -2,6 +2,7 @@
 
 use super::*;
 
+// Convert an array of key-value pairs into a String-keyed map (mimics environment variables).
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
         .iter()

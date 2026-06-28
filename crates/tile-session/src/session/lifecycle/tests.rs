@@ -1,3 +1,10 @@
+//! Tests for the session lifecycle state machine.
+//!
+//! Verifies that [`SessionLifecycle::transition`] accepts exactly seven
+//! valid transitions and rejects all others. Tests enumerate the full
+//! state × event matrix and confirm that serialization round-trips
+//! preserve lifecycle states and events.
+
 use tile_core::error::{DomainCategory, DomainError, Severity};
 
 use super::{SessionLifecycle, SessionLifecycleEvent};

@@ -1,4 +1,4 @@
-//! PTY domain error. Classifies into [`DomainCategory::Pty`].
+//! PTY domain error. Classifies into [`tile_core::error::DomainCategory::Pty`].
 
 use thiserror::Error;
 use tile_core::{

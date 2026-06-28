@@ -1,3 +1,9 @@
+//! Environment variable overlay for spawned child processes.
+//!
+//! Builds the universal terminal identity (`TERM=xterm-256color`, `COLORTERM=truecolor`)
+//! and applies shell-specific bootstrap variables, with the caller's overrides on top.
+//! This is an overlay only — applied over the inherited parent environment.
+
 use std::collections::BTreeMap;
 
 use tile_core::process::{ShellKind, SpawnSpec};
@@ -15,9 +21,8 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
     // Universal terminal identity. `xterm-256color` is a *compatibility
-    // bootstrap*, not a permanent identity: claiming xterm-like behaviour is
-    // safe today, whereas `TERM=tile` would break many apps because no `tile`
-    // terminfo entry is shipped. Only revisit once a terminfo is published.
+    // bootstrap*: safe today because no terminfo entry for `tile` is shipped yet.
+    // Only revisit once a terminfo is published.
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 
@@ -25,9 +30,8 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     // shell that does not need it. Only zsh needs one today: an empty
     // `PROMPT_EOL_MARK` suppresses the inverse `%` zsh prints — via the
     // on-by-default `PROMPT_CR`/`PROMPT_SP` options — for output that lacks a
-    // trailing newline. The match is exhaustive so adding a `ShellKind` forces
-    // a deliberate decision about its bootstrap rather than silently inheriting
-    // none.
+    // trailing newline. The match is exhaustive: adding a `ShellKind` requires
+    // an explicit bootstrap decision.
     match specs.shell_kind {
         ShellKind::Zsh => {
             env.insert("PROMPT_EOL_MARK".to_string(), String::new());

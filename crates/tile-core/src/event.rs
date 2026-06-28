@@ -686,8 +686,10 @@ pub struct CopyModeExited {
     pub pane_id: PaneId,
 }
 
-/// An active selection. Mouse drag and keyboard selection share this one shape;
-/// there is no parallel representation per input source.
+/// An active selection.
+///
+/// Mouse drag and keyboard selection use the same representation; selection
+/// shape and navigation are input-source-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     /// Selection shape.

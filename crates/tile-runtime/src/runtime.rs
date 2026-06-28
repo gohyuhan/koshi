@@ -1,4 +1,6 @@
-//! `runtime` domain — skeleton per standard source layout.
+//! Core runtime components: command dispatch, event handling, and runtime state.
+//!
+//! Placeholder structure — the submodules are scaffolding pending implementation.
 
 pub mod command;
 pub mod event;

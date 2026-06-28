@@ -1,3 +1,8 @@
+//! Client and ClientRegistry unit tests.
+//!
+//! Tests verify client state tracking (focus, viewport, lock mode, drag state) and
+//! registry operations (attach, detach, lookup, mutation).
+
 use std::time::SystemTime;
 
 use tile_core::geometry::Size;
@@ -6,6 +11,7 @@ use tile_core::lock::LockMode;
 
 use super::{Client, ClientRegistry, MouseState, ResizeDragState};
 
+/// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
     Client::new(
         id,
@@ -16,6 +22,7 @@ fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
     )
 }
 
+/// Creates a test client with a fresh ID and the given active tab.
 fn a_client(active_tab: TabId) -> Client {
     a_client_with(ClientId::new(), active_tab)
 }

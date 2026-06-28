@@ -93,6 +93,8 @@ fn center_distance(a: Rect, b: Rect) -> u64 {
     (dx * dx + dy * dy) as u64
 }
 
+/// Returns the center of `rect` in doubled coordinates (each component ×2).
+/// Doubling avoids fractional coordinates when the rect has odd dimensions.
 fn doubled_center(rect: Rect) -> (u32, u32) {
     (
         2 * u32::from(rect.origin.x) + u32::from(rect.size.cols),
@@ -100,6 +102,7 @@ fn doubled_center(rect: Rect) -> (u32, u32) {
     )
 }
 
+/// Total cell count in the rect (cols × rows).
 fn cell_area(rect: Rect) -> u64 {
     u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
@@ -149,8 +152,8 @@ pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusC
     Some(set_active(stack, target))
 }
 
-/// The pane focus lands on when a client enters this stack from outside:
-/// its active member.
+/// The pane to focus when a client enters this stack from outside.
+/// Returns the first pane in the member that occupies the active slot.
 #[must_use]
 pub fn stack_entry_target(stack: &SplitNode) -> Option<PaneId> {
     let child = stack.children.get(current_active(stack))?;
@@ -180,7 +183,8 @@ fn current_active(stack: &SplitNode) -> usize {
     stack.active.min(stack.children.len().saturating_sub(1))
 }
 
-/// Point the stack at `target`: expand it, collapse everyone else.
+/// Set the stack's active member to `target`: give it full height, hide the
+/// others as collapsed headers.
 fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
     let deactivated = stack
         .children

@@ -370,6 +370,7 @@ impl TerminalState {
         self.cluster_base = None;
     }
 
+    /// Which screen (primary or alternate) is currently displayed and written to.
     pub fn active_screen(&self) -> Screen {
         self.active
     }
@@ -466,6 +467,9 @@ impl TerminalState {
         &self.scrollback
     }
 
+    /// The scroll region (top and bottom margins) for the active screen, or
+    /// `None` if scrolling uses the full height. Margins are zero-based and
+    /// inclusive.
     pub fn scroll_region(&self) -> Option<(u16, u16)> {
         match self.active {
             Screen::Primary => self.primary_scroll_region,
@@ -473,6 +477,7 @@ impl TerminalState {
         }
     }
 
+    /// Mutable access to the scroll region for the active screen.
     pub fn scroll_region_mut(&mut self) -> &mut Option<(u16, u16)> {
         match self.active {
             Screen::Primary => &mut self.primary_scroll_region,
@@ -480,6 +485,7 @@ impl TerminalState {
         }
     }
 
+    /// The cursor position `(row, col)` on the active screen, both zero-based.
     pub fn active_cursor_position(&self) -> (u16, u16) {
         let cursor_position = (self.active_cursor().row, self.active_cursor().col);
         cursor_position

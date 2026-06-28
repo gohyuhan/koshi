@@ -54,6 +54,8 @@ enum Op {
     Normalize,
 }
 
+/// Returns a strategy that generates one random public edit operation.
+/// Each operation targets a leaf pane by index (wraps modulo leaf count to stay applicable as the tree changes).
 fn op_strategy() -> BoxedStrategy<Op> {
     Union::new(vec![
         (0..16usize, 0..4u8)
@@ -75,6 +77,8 @@ fn op_strategy() -> BoxedStrategy<Op> {
     .boxed()
 }
 
+/// Maps a u8 code to a [`Direction`] by taking the code modulo 4.
+/// 0 → Left, 1 → Right, 2 → Up, 3 → Down.
 fn direction(code: u8) -> Direction {
     match code % 4 {
         0 => Direction::Left,
@@ -105,6 +109,10 @@ fn random_edit_sequences_uphold_the_layout_invariants() {
         .unwrap();
 }
 
+/// Runs a sequence of random edits on a test tree and verifies that all layout invariants hold after each step.
+/// Starts with a single pane in a tab of the given dimensions, applies each operation, and checks
+/// that no panes overlap, no panes leave the tab, minimum sizes are met, space is fully occupied
+/// when the tree fits, all referenced panes are still live, and solving is deterministic.
 fn check_sequence(ops: &[Op], cols: u16, rows: u16) {
     let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols, rows });
     let first = PaneId::new();
@@ -118,9 +126,9 @@ fn check_sequence(ops: &[Op], cols: u16, rows: u16) {
     }
 }
 
-/// Apply one op through the public API. A rejected edit (no border to
-/// resize, last pane, …) leaves the tree as it was — that is itself part
-/// of the contract under test.
+/// Applies one operation through the public edit API. If the operation is rejected by the API
+/// (e.g., no border to resize, attempting to remove the last pane), the tree remains unchanged.
+/// This no-op behavior on invalid edits is part of the API contract and is verified by the test.
 fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) {
     let leaves = tree.leaf_panes();
     let pick = |target: usize| leaves[target % leaves.len()];
@@ -166,6 +174,10 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
     }
 }
 
+/// Verifies the layout invariants after an edit.
+/// Checks that: panes do not overlap, panes stay within the tab bounds, all visible panes meet minimum size,
+/// when the tree fits at minimum size the panes exactly tile the tab with no gaps, all layout leaf references
+/// point to live panes, and solving the same tree twice produces identical results.
 fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
     let result = solve(tree, tab);
     assert_no_overlap(&result.panes).unwrap();
@@ -175,6 +187,6 @@ fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
         assert_all_space_occupied(&result.panes, tab).unwrap();
     }
     assert_live_pane_refs(&tree.leaf_panes(), live).unwrap();
-    // Same tree, same rect, same placement — no flicker between solves.
+    // Solving is deterministic: solving the same tree and rect twice must produce the same placements.
     assert_eq!(solve(tree, tab), result);
 }

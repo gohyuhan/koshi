@@ -67,14 +67,14 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
 
     // new tab
     let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
-    // The first tab drives `Starting -> Running`; a later tab is a domain no-op.
-    // This is a pure state op: admission — refusing tabs once the session is
-    // winding down — is the runtime/command layer's job (it pre-checks
-    // `session.lifecycle()` before routing the command here), not this layer's.
+    // The first tab transitions the session from Starting to Running; subsequent
+    // tabs are a no-op at this layer. The runtime pre-checks admission
+    // (`session.lifecycle()`) before routing commands here, so this layer handles
+    // state transitions only.
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
     }
-    // record the tab into the session available tab
+    // Record the new tab in the session's registry.
     session.tabs.insert(new_tab_id, new_tab);
 
     events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
@@ -206,7 +206,7 @@ pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<E
     // Clamp to a valid slot; len >= 1 since the target exists (no underflow).
     let new_index = new_index.min(session.tabs.len() - 1);
 
-    // nothing happen if the new and old index are identical
+    // No action needed if the new and old indices are identical.
     if new_index == old_index {
         return Vec::new();
     }

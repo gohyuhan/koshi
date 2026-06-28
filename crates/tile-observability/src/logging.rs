@@ -1,7 +1,7 @@
 //! `logging` domain — structured logging bootstrap.
 //!
-//! [`init_tracing`] installs a process-wide subscriber that emits structured
-//! logs, formatted as JSON or human-readable text per [`TracingOptions`]. Logs
+//! [`logging::init_tracing`] installs a process-wide subscriber that emits structured
+//! logs, formatted as JSON or human-readable text per [`logging::TracingOptions`]. Logs
 //! carry a fixed set of [canonical fields](self#canonical-fields) so a session
 //! can be followed across panes, commands, and plugins.
 //!
@@ -17,19 +17,19 @@
 //! This keeps the file small over a long session and free of user data.
 //!
 //! Logs never go to stdout: that is Tile's render surface, and writing to it
-//! would corrupt the terminal UI. The default [`LogDestination`] is a file under
+//! would corrupt the terminal UI. The default [`logging::LogDestination`] is a file under
 //! the user's state directory (the sink behind `tile debug tail-log`); [stderr]
 //! is offered for non-UI contexts such as early startup or a foreground daemon.
 //!
-//! [stderr]: LogDestination::Stderr
+//! [stderr]: logging::LogDestination::Stderr
 //!
 //! Redaction is not optional: anything derived from the environment must pass
-//! through [`redacted_env_field`] before it becomes a log value, so a secret
+//! through [`logging::redacted_env_field`] before it becomes a log value, so a secret
 //! such as `TILE_CONTEXT_TOKEN` can never reach the output even if it is handed
 //! to the logger by mistake. The scrubbing itself lives in [`tile_core::redact`];
 //! this module only routes env maps through it on the way to a log line.
 //!
-//! Environment variables read by [`TracingOptions::from_env`]:
+//! Environment variables read by [`logging::TracingOptions::from_env`]:
 //! - `TILE_LOG_FORMAT` — `json` or `pretty` (default: `pretty`).
 //! - `TILE_LOG` — tracing filter directive, e.g. `info` or `tile=debug`
 //!   (default: `info`).

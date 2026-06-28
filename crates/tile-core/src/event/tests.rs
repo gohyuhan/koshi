@@ -1,4 +1,9 @@
-//! Tests for the canonical event vocabulary.
+//! Serialization roundtrip tests and invariant assertions for events.
+//!
+//! Verifies that all [`Event`] and [`PluginEvent`] variants:
+//! - survive JSON serialization and deserialization unchanged (canonical serde mapping),
+//! - have stable, canonical variant names (renames or additions break the test),
+//! - maintain privacy tier invariants (sensitive data is structurally unavoidable).
 
 use super::*;
 use crate::geometry::{Point, Size};
@@ -251,9 +256,12 @@ fn payload_tier_accessors_map_to_privacy_tier() {
     );
 }
 
-/// The variant name from a value's Debug repr: everything before the first `(`
-/// (data variants) or the whole string (unit variants). Anchors a name snapshot
-/// to the real enum — a rename changes the Debug output and fails the assert.
+/// Extract the variant name from a value's Debug output.
+///
+/// For data variants like `PaneCreated(...)`, returns everything before the first `(`.
+/// For unit variants like `Quit`, returns the whole string.
+/// Used to verify variant names are stable: any enum rename changes the Debug output
+/// and breaks the matching assertions in the test.
 fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
     let repr = format!("{value:?}");
     repr.split('(').next().unwrap_or(&repr).to_string()

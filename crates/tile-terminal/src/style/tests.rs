@@ -1,4 +1,4 @@
-//! Unit tests for cell styling.
+//! Unit tests for `Style`, `Color`, `AttrFlags`, and `UnderlineStyle`.
 
 use super::*;
 

@@ -1,3 +1,5 @@
+//! Tests for empty-tab and last-tab policy enums: serialization and defaults.
+
 use super::{EmptyTabPolicy, LastTabPolicy};
 
 #[test]

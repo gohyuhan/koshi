@@ -1,3 +1,10 @@
+//! Tests for focus repair: choosing which pane gets keyboard focus after a layout change.
+//!
+//! Verifies that `repair_focus` walks the recovery hierarchy in order: focus history (MRU),
+//! spatial neighbor, absorbed pane, and finally the first visible pane in layout order.
+//! Also validates that every pane except those in the `Removed` state is eligible for focus
+//! (live, dead, and closing panes all qualify), and that suppressed (hidden) panes are skipped.
+
 use std::time::SystemTime;
 
 use tile_core::geometry::SplitDirection;
@@ -78,8 +85,8 @@ fn registry_with(records: Vec<PaneRecord>) -> PaneRegistry {
     registry
 }
 
-/// Focus candidates with the given spatial neighbor, absorbed pane, and
-/// visible layout order.
+/// Construct a [`FocusCandidates`] struct from the given spatial neighbor, absorbed pane,
+/// and visible layout order.
 fn candidates(
     spatial_neighbor: Option<PaneId>,
     absorbed_space: Option<PaneId>,

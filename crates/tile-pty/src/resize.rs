@@ -4,7 +4,7 @@
 //! which panes show content, handing out `(PaneId, Option<Rect>)` content
 //! rects (`None` ⇔ no content shown). This module is the thin, border-agnostic
 //! executor: it floors each visible rect to a PTY-legal size and calls
-//! [`PtyBackend::resize`], reporting per pane what it did. It does **no**
+//! [`crate::backend::state::PtyBackend::resize`], reporting per pane what it did. It does **no**
 //! border math and does not depend on `tile-layout` (the two are siblings).
 
 use std::cmp::max;
@@ -51,12 +51,12 @@ pub struct ResizeResult {
 /// crate's `content_rects`) in order. A `None` rect means the pane shows no
 /// content: it is skipped with `kept_last_valid` set and no backend call. A
 /// `Some` rect is floored via [`compute_pty_size`] and applied through
-/// [`PtyBackend::resize`]. The first backend error aborts the batch; panes
+/// [`crate::backend::state::PtyBackend::resize`]. The first backend error aborts the batch; panes
 /// already resized stay resized on the OS.
 ///
 /// # Errors
 ///
-/// Returns the first [`PtyError`] a [`PtyBackend::resize`] call reports.
+/// Returns the first [`PtyError`] a [`crate::backend::state::PtyBackend::resize`] call reports.
 pub fn resize_for_layout_change(
     backend: &dyn PtyBackend,
     pane_items: impl IntoIterator<Item = (PaneId, Option<Rect>)>,

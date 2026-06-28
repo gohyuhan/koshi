@@ -1,3 +1,10 @@
+//! Tests for session and tab state, lifecycle, and consistency validation.
+//!
+//! Covers session creation and lifecycle transitions, tab construction and
+//! mutations, client attachment/detachment effects, and invariant validation
+//! via `validate()` to catch structural inconsistencies in pane registries,
+//! layout trees, client focus records, and lifecycle states.
+
 use std::time::SystemTime;
 
 use tile_core::constant::MAX_TAB_FOCUS_MRU;

@@ -1,4 +1,4 @@
-//! Plugin domain error. Classifies into [`DomainCategory::Plugin`].
+//! Plugin domain error. Classifies into [`tile_core::error::DomainCategory::Plugin`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};
@@ -16,10 +16,12 @@ pub enum PluginError {
 }
 
 impl DomainError for PluginError {
+    /// Returns the error domain category: plugin failures are classified under [`tile_core::error::DomainCategory::Plugin`].
     fn category(&self) -> DomainCategory {
         DomainCategory::Plugin
     }
 
+    /// Returns the error severity: plugin failures are recoverable, allowing the session to continue.
     fn severity(&self) -> Severity {
         Severity::Recoverable
     }

@@ -1,3 +1,11 @@
+//! Tests for pane lifecycle cascades: removal, focus repair, and tab closure.
+//!
+//! These tests verify that pane removal (via exit or user action) correctly
+//! cascades: focus is repaired on all clients, sibling panes inherit focus,
+//! empty tabs close, and the session quits when no tabs remain. Also tests
+//! the inverse: on child process exit, exit policies (e.g. close on exit,
+//! respawn shell) determine whether a pane is removed or restarted.
+
 use std::time::SystemTime;
 
 use tile_core::event::Event;
@@ -13,17 +21,20 @@ use crate::client::{Client, ClientRegistry};
 use crate::session::policy::EmptyTabPolicy;
 use crate::session::state::{Session, Tab};
 
+/// Standard terminal size (80×24) used across all test fixtures.
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
-/// A viewport-sized rect for solving a tab's layout.
+/// Returns a rect covering the full viewport (80×24), used as the layout bounds when solving tab geometry.
 fn rect() -> Rect {
     Rect::new(Point { x: 0, y: 0 }, VIEWPORT)
 }
 
-/// A terminal-pane record in `lifecycle` with the given exit policy.
-/// Timestamps use `UNIX_EPOCH` so tests stay deterministic. `lifecycle` is set
-/// only through events, so the fresh `Spawning` record is walked to the
-/// requested state along a legal transition path.
+/// Creates a pane record with the specified lifecycle state and exit policy.
+///
+/// The record starts as a fresh `Spawning` state and is transitioned to the
+/// requested lifecycle through legal event sequences (since lifecycle state
+/// can only change via explicit `update_lifecycle` calls). Timestamps use
+/// `UNIX_EPOCH` to keep tests deterministic. Close policy defaults to `Force`.
 fn record(id: PaneId, lifecycle: PaneLifecycle, exit_policy: PaneExitPolicy) -> PaneRecord {
     let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
     record.close_policy = PaneClosePolicy::Force;
@@ -32,7 +43,8 @@ fn record(id: PaneId, lifecycle: PaneLifecycle, exit_policy: PaneExitPolicy) -> 
     record
 }
 
-/// Walk a fresh `Spawning` record to `target` through legal lifecycle events.
+/// Transitions a pane record from its current state to the target lifecycle state
+/// by emitting the legal sequence of intermediate events.
 fn walk_lifecycle(record: &mut PaneRecord, target: PaneLifecycle) {
     match target {
         PaneLifecycle::Spawning => {}
@@ -73,19 +85,19 @@ fn walk_lifecycle(record: &mut PaneRecord, target: PaneLifecycle) {
     }
 }
 
-/// A tab whose single leaf is `pane`.
+/// Creates a tab containing a single pane.
 fn single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
     Tab::new(tab_id, "code".to_owned(), 0, pane)
 }
 
-/// A single-pane tab at display position `index`.
+/// Creates a single-pane tab at the given display position (tab index).
 fn tab_with_index(tab_id: TabId, pane: PaneId, index: usize) -> Tab {
     let mut tab = single_pane_tab(tab_id, pane);
     tab.update_index(index);
     tab
 }
 
-/// A tab split left/right between `left` and `right`.
+/// Creates a tab split horizontally (left/right) between two panes with equal widths.
 fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     let mut tab = Tab::new(tab_id, "code".to_owned(), 0, left);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
@@ -98,8 +110,9 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
     tab
 }
 
-/// A client viewing `tab_id` with `pane` focused there, carrying `session_id`
-/// so attaching it leaves the session a state [`Session::validate`] accepts.
+/// Creates a client viewing the given tab with the given pane focused.
+/// The client carries the provided session id so it can be attached to the session
+/// without validation errors (see [`Session::validate`]).
 fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client {
     let mut client = Client::new(
         ClientId::new(),
@@ -112,9 +125,9 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
     client
 }
 
-/// A session holding the given tabs and pane records, with no clients attached
-/// yet. Attach clients afterward with [`Session::attach_client`] so each carries
-/// the session's own id — a fixture the session would actually accept.
+/// Creates a session with the given tabs and pane records, but no attached clients.
+/// Clients can be attached afterward with [`Session::attach_client`], using the
+/// session's own id to keep the fixture valid.
 fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
     let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
     for tab in tabs {

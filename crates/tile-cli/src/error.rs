@@ -1,4 +1,4 @@
-//! CLI domain error. Classifies into [`DomainCategory::Cli`].
+//! CLI domain error. Classifies into [`tile_core::error::DomainCategory::Cli`].
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

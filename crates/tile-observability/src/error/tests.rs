@@ -1,7 +1,11 @@
-use super::*;
+//! Tests for error display, classification, and severity across all domain error types.
+//!
+//! Each domain error (Config, Cli, Ipc, Pty, Terminal, Layout, Plugin, Storage) is verified
+//! to display correctly and be assigned the correct category and severity. The aggregate
+//! `TileError` wrapper is also tested to ensure it transparently delegates these operations
+//! without losing information.
 
-// Display snapshots + severity assignments for every domain error, exercised
-// both directly and after wrapping into the aggregate.
+use super::*;
 
 #[test]
 fn config_error_classifies_and_displays() {

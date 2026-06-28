@@ -150,7 +150,7 @@ impl Command {
 /// geometry, `stacked` adds the new pane to the source's stack (creating
 /// one if needed), and otherwise the source leaf splits directionally.
 /// The flags are mutually exclusive in intent; `in_place` wins if both are
-/// set, since it is the most conservative (no geometry change).
+/// set (content replacement takes precedence over layout changes).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
@@ -355,12 +355,14 @@ pub enum SelectionKind {
     Block,
 }
 
-/// A scrollback-relative grid position (combined scrollback + visible grid).
+/// A grid position that spans both the scrollback history and the currently
+/// visible grid (row 0 is the oldest visible line in scrollback or the top of
+/// the visible grid if scrollback is empty).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridPos {
-    /// Scrollback-relative row.
+    /// Row number: 0 is the top of scrollback/visible area, increasing downward.
     pub row: u64,
-    /// Column in cells.
+    /// Column in cells, 0-indexed from the left.
     pub col: u16,
 }
 

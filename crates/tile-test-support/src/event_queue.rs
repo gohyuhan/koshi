@@ -1,25 +1,21 @@
 //! Deterministic event-sequence recorder for command-transaction tests.
 //!
-//! A command applied to the runtime produces an ordered burst of [`Event`]s.
+//! A command applied to the runtime produces an ordered burst of [`tile_core::event::Event`]s.
 //! Tests want to assert that burst *exactly* — same events, same order, nothing
-//! extra. [`RecordedEvents`] is a tiny in-memory log with consuming assertions
-//! ([`assert_prefix`](RecordedEvents::assert_prefix),
-//! [`assert_exact`](RecordedEvents::assert_exact),
-//! [`assert_no_more`](RecordedEvents::assert_no_more)) that pretty-print an
+//! extra. [`event_queue::RecordedEvents`] is a tiny in-memory log with consuming assertions
+//! ([`assert_prefix`](event_queue::RecordedEvents::assert_prefix),
+//! [`assert_exact`](event_queue::RecordedEvents::assert_exact),
+//! [`assert_no_more`](event_queue::RecordedEvents::assert_no_more)) that pretty-print an
 //! index-aligned diff when the sequence does not match, so a failing test points
 //! straight at the first divergence.
 //!
-//! ## Why the drain helper is channel-agnostic
+//! ## Channel-agnostic drain helper
 //!
-//! The event bus delivers over a bounded channel, and a natural source for a
-//! recorder is "drain whatever the bus mock has queued." The bus-mock crate and
-//! its concrete channel type have not landed yet, and the architecture commits
-//! only to "bounded channel" without pinning the exact type.
-//! Rather than hard-code one channel type here, [`drain_from`](RecordedEvents::drain_from)
-//! takes a `FnMut() -> Option<Event>` puller. That composes with any channel: a
-//! `std::sync::mpsc` receiver (`|| rx.try_recv().ok()`), crossbeam, or the future
-//! bus mock, with no dependency edge. When the bus mock lands, a thin typed
-//! wrapper over its receiver can be added without changing this core.
+//! The runtime's event bus delivers events over a bounded channel. The drain
+//! helper ([`drain_from`](event_queue::RecordedEvents::drain_from)) is channel-agnostic: it
+//! takes a `FnMut() -> Option<tile_core::event::Event>` puller, so tests compose it with any
+//! bounded channel — `std::sync::mpsc` (`|| rx.try_recv().ok()`), crossbeam, or
+//! a future type — without depending on the concrete channel crate here.
 
 use tile_core::event::Event;
 
@@ -185,6 +181,7 @@ mod tests {
         })
     }
 
+    /// Extract the string panic message from a caught panic.
     fn message(result: std::thread::Result<()>) -> String {
         let payload = result.expect_err("expected a panic");
         payload

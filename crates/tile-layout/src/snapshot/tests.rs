@@ -34,9 +34,8 @@ fn snapshot_survives_serde() {
 
 #[test]
 fn capture_keeps_the_active_member_when_an_empty_member_is_dropped() {
-    // Hand-built: a member with no pane at all is dropped from the
-    // snapshot. The active index must follow its member through that
-    // filtering, not keep pointing at the old position.
+    // Hand-built: a member with no pane is dropped from the snapshot,
+    // and the active index is adjusted to follow its member through filtering.
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let empty = LayoutNode::Split(SplitNode::with_equal_weights(
         tile_core::geometry::SplitDirection::Vertical,

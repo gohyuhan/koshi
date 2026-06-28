@@ -1,4 +1,12 @@
 //! Tests for focus candidate ranking and stack activation.
+//!
+//! **Focus candidates** are candidate panes to receive keyboard focus when the currently-focused
+//! pane is closed. Tests verify that candidates are ranked by: spatial proximity (nearest center
+//! distance), absorption of the removed pane's area, and layout order as a tiebreaker.
+//!
+//! **Stack activation** tests verify that focus can cycle forward/backward through a stack's
+//! members (collapsing the prior and expanding the new), and that the deepest stack containing
+//! a pane can be located and then activated by ID.
 
 use tile_core::geometry::{Point, Size};
 

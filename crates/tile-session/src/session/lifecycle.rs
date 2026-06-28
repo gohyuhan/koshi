@@ -22,7 +22,7 @@ pub enum TabLifecycle {
     Creating,
     /// The tab is visible and its panes are interactive.
     Active,
-    /// The tab exists but is not currently visible.
+    /// The tab exists in the background while the client displays a different tab.
     Inactive,
     /// The tab is shutting down; panes are being closed.
     Closing,

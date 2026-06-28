@@ -1,3 +1,6 @@
+//! Tests for pane close and exit policies: defaults, policy-to-kill-policy
+//! mapping, and serialization round-trips.
+
 use std::time::Duration;
 
 use tile_core::process::KillPolicy;

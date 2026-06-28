@@ -1,4 +1,4 @@
-//! `manager` domain — skeleton per standard source layout.
+//! Plugin manager domain. Placeholder per standard source layout.
 
 pub mod command;
 pub mod event;

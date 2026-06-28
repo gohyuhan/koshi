@@ -1,4 +1,7 @@
-//! Tests for the canonical command vocabulary.
+//! Tests for command serialization, variant canonicality, and validation.
+//!
+//! Covers roundtripping commands through JSON, verifying variant names and
+//! discriminants are stable, and ensuring command envelopes validate client IDs.
 
 use super::*;
 use crate::event::RejectReason;
@@ -476,7 +479,7 @@ fn command_source_variant_names_are_canonical() {
 
 #[test]
 fn deserialize_rejects_client_id_mismatch() {
-    // `Internal` names no client, but a hostile peer claims one on the wire.
+    // Envelope has `Internal` source (which names no client) but claims one on the wire.
     let forged = CommandEnvelope {
         id: CommandId::new(),
         source: CommandSource::Internal,

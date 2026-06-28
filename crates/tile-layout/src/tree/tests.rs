@@ -5,6 +5,7 @@ use tile_core::ids::PaneId;
 
 use super::*;
 
+/// Helper to create a layout child wrapping a single pane.
 fn leaf(pane: PaneId) -> LayoutChild {
     LayoutChild::new(LayoutNode::Pane(pane))
 }

@@ -1,8 +1,8 @@
 //! OS-specific child termination, kept behind one cross-platform type.
 //!
-//! [`PtyChildKillControl`] exposes the same three operations on every platform —
-//! [`force`](PtyChildKillControl::force), [`tree`](PtyChildKillControl::tree),
-//! and [`request_stop`](PtyChildKillControl::request_stop) — so the backend's
+//! [`crate::kill::PtyChildKillControl`] exposes the same three operations on every platform —
+//! [`force`](crate::kill::PtyChildKillControl::force), [`tree`](crate::kill::PtyChildKillControl::tree),
+//! and [`request_stop`](crate::kill::PtyChildKillControl::request_stop) — so the backend's
 //! `kill` path stays platform-agnostic. The signal/Job-Object names that make
 //! them work are confined to this module.
 //!
@@ -37,6 +37,7 @@ pub struct PtyChildKillControl {
 
 #[cfg(unix)]
 impl PtyChildKillControl {
+    /// Create a kill control struct for the child process identified by PID.
     pub fn new(pid: u32) -> Self {
         PtyChildKillControl { pid }
     }
@@ -70,9 +71,9 @@ impl PtyChildKillControl {
 /// Owns a Windows Job Object handle and closes it on drop.
 ///
 /// The job groups the child and its descendants so [`tree`] can terminate them
-/// together. It is deliberately *not* created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`:
-/// closing the handle must not kill members, so that [`force`] (child only) and
-/// [`tree`] (whole group) stay distinct — matching the Unix `kill`/`killpg` split.
+/// together. It is created without `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing
+/// the handle does not kill members; this keeps [`force`] (child only) and [`tree`]
+/// (whole group) distinct — matching the Unix `kill`/`killpg` split.
 ///
 /// [`force`]: PtyChildKillControl::force
 /// [`tree`]: PtyChildKillControl::tree

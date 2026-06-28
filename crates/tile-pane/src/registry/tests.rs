@@ -1,3 +1,8 @@
+//! Tests for `PaneRegistry`: pane insertion, lookup, removal, mutation, and serialization.
+//!
+//! These tests verify that the registry correctly maintains records by id, rejects duplicate
+//! insertions, and preserves pane state through serialization round-trips.
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -12,8 +17,10 @@ use crate::pane::lifecycle::PaneLifecycleEvent;
 use crate::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 use crate::pane::state::{PaneKind, PaneRecord};
 
-/// A minimal terminal-pane record. Timestamps use `UNIX_EPOCH` so tests stay
-/// deterministic; per-test fields are tweaked by the caller.
+/// Creates a minimal terminal-pane record for testing.
+///
+/// The creation timestamp is set to `UNIX_EPOCH` to ensure deterministic tests.
+/// Individual tests may override fields as needed.
 fn terminal_record(id: PaneId) -> PaneRecord {
     let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
     record.close_policy = PaneClosePolicy::Force;

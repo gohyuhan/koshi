@@ -1,1 +1,1 @@
-//! State model. Placeholder per standard source layout.
+//! Connection state. Placeholder per standard source layout.

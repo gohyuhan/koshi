@@ -3,7 +3,11 @@
 //! status UI. Sole owner of the `wasmtime` dependency. Executes plugins but does
 //! not own install/uninstall state.
 
+/// Error types for plugin loading and execution failures.
 pub mod error;
+
+/// Shared types used across the plugin host subsystem.
 pub mod types;
 
+/// Host domain: plugin instance lifecycle, event handling, and state management.
 pub mod host;

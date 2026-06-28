@@ -15,6 +15,7 @@ use thiserror::Error;
 use tile_core::event::RejectReason;
 use tile_core::geometry::Direction;
 
+/// Diagnostics related to application state.
 pub mod state;
 
 /// A configuration value the user must correct, naming the file and key.

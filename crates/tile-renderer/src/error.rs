@@ -1,1 +1,1 @@
-//! Error categories. Placeholder per standard source layout.
+//! Error types. Placeholder per standard source layout.

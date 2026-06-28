@@ -41,6 +41,7 @@ impl LayoutNode {
         panes
     }
 
+    /// Recursively appends leaf pane IDs to `out`, visiting depth-first in layout order.
     fn collect_leaf_panes(&self, out: &mut Vec<PaneId>) {
         match self {
             Self::Pane(id) => out.push(*id),
