@@ -5,260 +5,36 @@
 //! buffers. The runtime owns the `PaneId → TerminalState` map, so the state
 //! itself carries no identity. The VTE performer (see the `perform` submodule)
 //! mutates this model as PTY output arrives.
+//!
+//! The state's component types live in sibling submodules — the active
+//! [`Screen`], the per-screen [`RenderState`] and its [`Charset`] slots, the
+//! [`Cursor`] and its [`SavedCursor`] snapshot, the [`TerminalModes`] flags with
+//! their [`MouseTracking`]/[`MouseEncoding`] levels, the [`ReportedCwd`], and the
+//! [`ClippedRow`] render view — and are re-exported here so the whole model is
+//! reachable as `tile_terminal::state::*`.
 
 use std::cmp::min;
-use std::path::{Path, PathBuf};
 
 use tile_core::process::PtySize;
 
-use crate::grid::state::{Cell, Grid};
+use crate::grid::state::Grid;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::style::Style;
+
+mod clipped_row;
+mod cursor;
+mod cwd;
+mod modes;
 mod perform;
+mod render;
+mod screen;
 
-/// Which of the two screen buffers is currently active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Screen {
-    /// The normal, scrolling screen.
-    #[default]
-    Primary,
-    /// The alternate screen used by full-screen apps (e.g. vim, htop).
-    Alternate,
-}
-
-/// A character set a `G0`–`G3` slot can be designated to, selected into the
-/// active GL range by `SI`/`SO` and applied to printed bytes.
-///
-/// Part of the per-screen [`RenderState`]. Only the three sets real applications
-/// use are modeled; an unrecognized designation final byte falls back to
-/// [`Ascii`](Charset::Ascii) (a passthrough).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Charset {
-    /// US-ASCII (`ESC ( B`): every byte prints as itself. The default.
-    #[default]
-    Ascii,
-    /// DEC Special Character and Line Drawing (`ESC ( 0`): the bytes `0x5F`–
-    /// `0x7E` print as box-drawing and symbol glyphs (`q` → `─`, `x` → `│`, …),
-    /// so a TUI's `lqqqk` renders `┌───┐`.
-    DecLineDrawing,
-    /// United Kingdom (`ESC ( A`): identical to ASCII except `#` (`0x23`) prints
-    /// as `£`.
-    Uk,
-}
-
-/// The rendering state that turns a printed byte into a styled glyph: the pen,
-/// the active GL slot, and the `G0`–`G3` charset designations.
-///
-/// Held per screen — the primary and the alternate each own one. Every
-/// alternate-screen entry (`?47`/`?1047`/`?1049`) clones the primary's render
-/// state into the alternate. DECSC snapshots the active screen's render state
-/// into a [`SavedCursor`]; DECRC restores it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RenderState {
-    /// The pen applied to printed cells (colors + text attributes).
-    style: Style,
-    /// The `G0`–`G3` charset designations (`ESC ( ) * +`), indexed by slot.
-    charsets: [Charset; 4],
-    /// Which `G0`–`G3` slot is invoked into the GL range for printing: `0` after
-    /// `SI`, `1` after `SO`.
-    gl: usize,
-}
-
-impl RenderState {
-    /// A fresh render state: default pen, all four slots ASCII, GL on `G0`.
-    fn fresh() -> Self {
-        RenderState {
-            style: Style::default(),
-            charsets: [Charset::Ascii; 4],
-            gl: 0,
-        }
-    }
-}
-
-/// A cursor position and the render state captured by DECSC, restored by DECRC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SavedCursor {
-    /// Saved zero-based row within the grid.
-    row: u16,
-    /// Saved zero-based column within the grid.
-    col: u16,
-    /// The deferred-wrap latch at save time, restored alongside the position so
-    /// a glyph parked at the last column still wraps after a save/restore.
-    pending_wrap: bool,
-    /// Snapshot of the active screen's [`RenderState`] (pen, charsets, GL slot)
-    /// at save time. DECSC/DECRC carry the whole render state with the cursor, so
-    /// an app that changes the pen or a designation, saves, changes it again,
-    /// then restores gets the original back.
-    render: RenderState,
-}
-
-/// The text cursor: position, visibility, and the deferred-wrap latch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cursor {
-    /// Zero-based row within the active grid (internally 0-based despite
-    /// 1-based ANSI addressing).
-    row: u16,
-    /// Zero-based column within the active grid.
-    col: u16,
-    /// Whether the cursor is currently shown (toggled by DEC mode `?25`).
-    is_visible: bool,
-    /// Deferred-wrap latch (xterm-style): set when a glyph is printed into the
-    /// last column, leaving the cursor parked there instead of advancing. The
-    /// next printable glyph first wraps to the following line, so a row that
-    /// exactly fills the width does not scroll early. Any cursor-moving
-    /// operation clears it.
-    pending_wrap: bool,
-    /// Saved cursor position and style from DECSC/DECRC (xterm form) or
-    /// SCOSC/SCORC (ANSI form), kept per screen so each screen buffer has its
-    /// own snapshot independent of the other.
-    saved: Option<SavedCursor>,
-}
-
-/// One screen row trimmed to the renderer's inner width, with a flag for a
-/// wide glyph clipped at the right edge.
-///
-/// Produced by [`TerminalState::clip_row`]. Borrows the live grid row, so it
-/// lives only as long as that borrow. A wide glyph (CJK, emoji) occupies two
-/// columns; when the inner rect ends between its halves, drawing only the left
-/// half would show a broken glyph. `clip_row` instead drops that base from
-/// `cells` and sets `right_pad`, telling the renderer to fill the freed column
-/// with a blank.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClippedRow<'a> {
-    /// The visible cells, left to right. When `right_pad` is set this stops one
-    /// column short of the inner width — the clipped wide base is excluded.
-    cells: &'a [Cell],
-    /// `true` when the last visible column would have shown only the left half
-    /// of a wide glyph; the renderer draws one blank pad cell there instead.
-    right_pad: bool,
-}
-
-impl<'a> ClippedRow<'a> {
-    /// The visible cells, left to right. The renderer draws these, then one
-    /// blank pad cell when `right_pad` is set. The slice borrows the underlying
-    /// grid row, so it outlives this `ClippedRow`.
-    pub fn cells(&self) -> &'a [Cell] {
-        self.cells
-    }
-
-    /// Whether the renderer should draw one blank pad cell after `cells` to
-    /// fill the column a clipped wide glyph would have half-occupied.
-    pub fn right_pad(&self) -> bool {
-        self.right_pad
-    }
-}
-
-/// Which mouse events the running app has asked to be reported, set via the DEC
-/// private modes `?9`/`?1000`/`?1002`/`?1003`. The levels form a ladder (each
-/// reports strictly more than the one above); an app enables exactly one, and
-/// the last enabling sequence wins. Independent of [`MouseEncoding`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MouseTracking {
-    /// No mouse reporting (default).
-    #[default]
-    Off,
-    /// `?9` X10 compatibility — button presses only, no releases.
-    X10,
-    /// `?1000` normal tracking — button presses and releases.
-    Normal,
-    /// `?1002` button-event tracking — presses, releases, and motion while a
-    /// button is held (drag).
-    ButtonMotion,
-    /// `?1003` any-event tracking — all motion, whether or not a button is held.
-    AnyMotion,
-}
-
-/// How a mouse report's coordinate bytes are encoded, set via the DEC private
-/// modes `?1005`/`?1006`/`?1015`. Orthogonal to [`MouseTracking`]: an app sets a
-/// tracking level and an encoding independently (e.g. `?1000h` then `?1006h`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MouseEncoding {
-    /// Legacy X10 single-byte coordinates (default).
-    #[default]
-    Default,
-    /// `?1005` UTF-8 extended coordinates.
-    Utf8,
-    /// `?1006` SGR form (`CSI < … M`/`m`) — the encoding modern apps use.
-    Sgr,
-    /// `?1015` urxvt decimal form.
-    Urxvt,
-}
-
-/// Terminal mode flags the renderer and input/mouse layers consult: autowrap
-/// (`?7`), application cursor keys (`?1`), reverse video (`?5`), cursor blink
-/// (`?12`), bracketed paste (`?2004`), the mouse [tracking][MouseTracking] level
-/// and [encoding][MouseEncoding] (`?9`/`?1000`/`?1002`/`?1003` and
-/// `?1005`/`?1006`/`?1015`), and alternate-scroll (`?1007`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalModes {
-    /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
-    /// typed input from a paste.
-    pub bracketed_paste: bool,
-    /// Which mouse events are reported; see [`MouseTracking`].
-    mouse_tracking: MouseTracking,
-    /// How mouse reports are encoded; see [`MouseEncoding`].
-    mouse_encoding: MouseEncoding,
-    /// `?1007` — on the alternate screen, translate wheel motion into cursor
-    /// arrow keys instead of emitting a mouse report.
-    alt_scroll: bool,
-    /// `?7` (DECAWM) — autowrap. When off, a glyph at the last column overwrites
-    /// in place instead of parking to wrap onto a new line. Default on.
-    autowrap: bool,
-    /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
-    /// rather than `ESC [ A` for the arrow keys.
-    app_cursor_keys: bool,
-    /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
-    /// background across the whole screen.
-    reverse_video: bool,
-    /// `?12` (att610) — cursor blink: the renderer blinks the cursor cell.
-    cursor_blink: bool,
-}
-
-impl Default for TerminalModes {
-    fn default() -> Self {
-        TerminalModes {
-            bracketed_paste: false,
-            mouse_tracking: MouseTracking::Off,
-            mouse_encoding: MouseEncoding::Default,
-            alt_scroll: false,
-            autowrap: true,
-            app_cursor_keys: false,
-            reverse_video: false,
-            cursor_blink: false,
-        }
-    }
-}
-
-/// A working directory reported by the shell via OSC 7: the decoded `path`
-/// together with the `host` the shell named in the URI authority.
-///
-/// The host is kept rather than discarded so the pane-spawn layer can compare
-/// it to the local machine and refuse to inherit a directory reported from a
-/// *remote* host — e.g. a shell running over SSH reports `file://remote/…`, and
-/// opening that path on the local machine would land in the wrong place. The
-/// parser stores the report verbatim and makes no local/remote decision; that
-/// admission check belongs at the spawn layer that owns the new pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReportedCwd {
-    /// The URI authority (the part between `//` and the path), or `None` when
-    /// it was empty (`file:///path`). `localhost` and the local machine's own
-    /// hostname both denote the local machine.
-    host: Option<String>,
-    /// The decoded working-directory path.
-    path: PathBuf,
-}
-
-impl ReportedCwd {
-    /// The host the shell named, or `None` for an empty authority.
-    pub fn host(&self) -> Option<&str> {
-        self.host.as_deref()
-    }
-
-    /// The decoded working-directory path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
+pub use clipped_row::ClippedRow;
+pub use cursor::{Cursor, SavedCursor};
+pub use cwd::ReportedCwd;
+pub use modes::{MouseEncoding, MouseTracking, TerminalModes};
+pub use render::{Charset, RenderState};
+pub use screen::Screen;
 
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq)]

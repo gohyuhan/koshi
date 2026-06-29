@@ -2,7 +2,10 @@
 //! combining marks, ambiguous width), deferred wrap, scrolling, and the C0
 //! control bytes.
 
+use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
+use crate::state::Charset;
+use crate::style::{Color, Style, UnderlineStyle};
 use std::path::{Path, PathBuf};
 use tile_core::process::PtySize;
 use vte::Perform;
