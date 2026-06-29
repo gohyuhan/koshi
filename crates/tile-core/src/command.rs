@@ -155,7 +155,7 @@ impl Command {
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
-    /// Split direction; `None` lets the layout decide.
+    /// Split direction; `None` defaults to a rightward split.
     pub direction: Option<Direction>,
     /// Stack the new pane onto the source instead of splitting space.
     pub stacked: bool,
