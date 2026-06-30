@@ -5,6 +5,7 @@
 pub mod command;
 pub mod event;
 pub mod state;
+pub mod transaction;
 
 #[cfg(test)]
 mod tests;
