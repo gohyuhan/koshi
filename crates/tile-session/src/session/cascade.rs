@@ -17,7 +17,8 @@
 use std::time::SystemTime;
 
 use tile_core::event::{
-    Event, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, TerminalTooSmallEntered,
+    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
+    TerminalTooSmallEntered,
 };
 use tile_core::geometry::Rect;
 use tile_core::ids::{ClientId, PaneId, TabId};
@@ -91,6 +92,10 @@ pub fn remove_pane_cascade(
         // The tab still has panes: repair focus for every client that was
         // looking at the removed pane.
         Some(info) => {
+            // The layout collapsed a leaf, so the tab's geometry changed —
+            // announce it before focus moves.
+            events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
+
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
                 let solved = solve_with_mode(tab.layout(), tab.layout_mode(), tab_rect);

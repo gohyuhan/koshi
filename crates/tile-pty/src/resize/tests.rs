@@ -1,8 +1,9 @@
 //! Tests for PTY resizing: size clamping, batch application, and error handling.
 //!
 //! [`compute_pty_size`] floors layout dimensions to PTY minima (2 cols, 1 row).
-//! [`resize_for_layout_change`] applies PTY resizes in order, aborts on backend error, and tracks
-//! which panes kept their last valid size (for invisible/hidden panes).
+//! [`resize_for_layout_change`] applies PTY resizes in order best-effort (a
+//! backend error on one pane never stops the rest) and tracks which panes kept
+//! their last valid size (for invisible/hidden panes).
 
 use std::sync::Mutex;
 
@@ -11,6 +12,7 @@ use tile_core::process::{KillPolicy, SpawnSpec};
 
 use super::*;
 use crate::backend::state::PtyHandle;
+use crate::error::PtyError;
 
 /// A content rect at the origin — only the size matters to resize.
 fn rect(cols: u16, rows: u16) -> Rect {
@@ -100,8 +102,7 @@ fn a_none_pane_is_skipped_without_a_backend_call() {
     let backend = RecordingBackend::new();
     let pane = PaneId::new();
 
-    let results =
-        resize_for_layout_change(&backend, vec![(pane, None)]).expect("no backend call, no error");
+    let results = resize_for_layout_change(&backend, vec![(pane, None)]);
 
     assert_eq!(
         results,
@@ -119,8 +120,7 @@ fn a_visible_pane_resizes_to_its_floored_size() {
     let backend = RecordingBackend::new();
     let pane = PaneId::new();
 
-    let results = resize_for_layout_change(&backend, vec![(pane, Some(rect(10, 5)))])
-        .expect("resize succeeds");
+    let results = resize_for_layout_change(&backend, vec![(pane, Some(rect(10, 5)))]);
 
     assert_eq!(
         results,
@@ -138,8 +138,7 @@ fn a_tiny_visible_pane_is_floored_before_resizing() {
     let backend = RecordingBackend::new();
     let pane = PaneId::new();
 
-    let results = resize_for_layout_change(&backend, vec![(pane, Some(rect(0, 0)))])
-        .expect("resize succeeds");
+    let results = resize_for_layout_change(&backend, vec![(pane, Some(rect(0, 0)))]);
 
     assert_eq!(results[0].applied, Some(PtySize { cols: 2, rows: 1 }));
     assert_eq!(backend.calls(), vec![(pane, PtySize { cols: 2, rows: 1 })]);
@@ -159,8 +158,7 @@ fn a_mixed_batch_preserves_order_and_skips_none_panes() {
             (skipped, None),
             (last, Some(rect(20, 8))),
         ],
-    )
-    .expect("resize succeeds");
+    );
 
     assert_eq!(
         results,
@@ -193,26 +191,49 @@ fn a_mixed_batch_preserves_order_and_skips_none_panes() {
 }
 
 #[test]
-fn the_batch_aborts_on_the_first_backend_error() {
+fn a_backend_error_on_one_pane_does_not_stop_the_rest() {
     let first = PaneId::new();
     let failing = PaneId::new();
-    let never = PaneId::new();
+    let after = PaneId::new();
     let backend = RecordingBackend::failing_on(failing);
 
-    let error = resize_for_layout_change(
+    let results = resize_for_layout_change(
         &backend,
         vec![
             (first, Some(rect(10, 5))),
             (failing, Some(rect(10, 5))),
-            (never, Some(rect(10, 5))),
+            (after, Some(rect(20, 8))),
         ],
-    )
-    .expect_err("the failing pane aborts the batch");
+    );
 
-    assert_eq!(error, PtyError::UnknownPane { pane: failing });
-    // The pane before the error was applied; the pane after was never attempted.
+    // The failing pane is recorded with no applied size (and is not a no-content
+    // skip); the panes before and after it are both resized.
+    assert_eq!(
+        results,
+        vec![
+            ResizeResult {
+                pane_id: first,
+                applied: Some(PtySize { cols: 10, rows: 5 }),
+                kept_last_valid: false,
+            },
+            ResizeResult {
+                pane_id: failing,
+                applied: None,
+                kept_last_valid: false,
+            },
+            ResizeResult {
+                pane_id: after,
+                applied: Some(PtySize { cols: 20, rows: 8 }),
+                kept_last_valid: false,
+            },
+        ]
+    );
+    // Both non-failing panes reached the backend, in order.
     assert_eq!(
         backend.calls(),
-        vec![(first, PtySize { cols: 10, rows: 5 })]
+        vec![
+            (first, PtySize { cols: 10, rows: 5 }),
+            (after, PtySize { cols: 20, rows: 8 }),
+        ]
     );
 }

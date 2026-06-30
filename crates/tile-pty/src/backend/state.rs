@@ -19,6 +19,11 @@ pub trait PtyBackend: Send + Sync {
     /// handle (addressed by that same id) that streams its output and exit
     /// status. The caller owns the pane identity; the backend keys its records
     /// by `pane_id` so later `resize`/`write`/`kill` address the same pane.
+    ///
+    /// `pane_id` must not already be live in the backend: spawning over a live id
+    /// would orphan the previous child's PTY and I/O threads. A caller re-running
+    /// a command in an existing pane (respawn) must [`kill`](PtyBackend::kill) it
+    /// first. Implementations assert this in debug builds.
     fn spawn(&self, pane_id: PaneId, spec: SpawnSpec, size: PtySize)
         -> Result<PtyHandle, PtyError>;
     /// Resize an existing pane's PTY.

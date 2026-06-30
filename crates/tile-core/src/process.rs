@@ -90,15 +90,16 @@ impl SpawnSpec {
     /// Build a spec that launches the platform default interactive shell.
     ///
     /// The program is read from `$SHELL` on Unix and `%COMSPEC%` on Windows,
-    /// falling back to `/bin/sh` and `cmd.exe` respectively. `cwd` and `env`
-    /// pass straight through; `args` is empty.
+    /// falling back to `/bin/sh` and `cmd.exe` respectively. A variable that is
+    /// set but empty (`SHELL=`) is treated as unset and takes the fallback, so
+    /// the program is never an empty path. `cwd` and `env` pass straight through;
+    /// `args` is empty.
     #[must_use]
     pub fn default_shell(cwd: Option<PathBuf>, env: BTreeMap<String, String>) -> SpawnSpec {
         #[cfg(windows)]
-        let program =
-            PathBuf::from(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+        let program = shell_program(std::env::var_os("COMSPEC"), "cmd.exe");
         #[cfg(not(windows))]
-        let program = PathBuf::from(std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()));
+        let program = shell_program(std::env::var_os("SHELL"), "/bin/sh");
 
         let shell_kind = ShellKind::from_program(&program);
         SpawnSpec {
@@ -109,6 +110,19 @@ impl SpawnSpec {
             shell_kind,
         }
     }
+}
+
+/// Pick the shell program path from an environment variable's value: the value
+/// when present and non-empty, else `fallback`. A set-but-empty variable
+/// (`SHELL=`) is treated as unset, so the returned path is never empty. Split out
+/// from [`SpawnSpec::default_shell`] so the fallback logic is testable without
+/// mutating the process environment.
+fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathBuf {
+    PathBuf::from(
+        env_value
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fallback.into()),
+    )
 }
 
 /// A PTY window size in cells.

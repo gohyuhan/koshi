@@ -29,6 +29,7 @@ fn pane_commands_roundtrip() {
     roundtrip(&Command::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
         name: Some("logs".to_string()),
+        client: Some(ClientId::new()),
         ..NewPaneArgs::default()
     }));
     roundtrip(&Command::ClosePane(ClosePaneArgs {

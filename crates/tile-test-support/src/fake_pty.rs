@@ -40,6 +40,10 @@ struct State {
     /// When set, every [`spawn`](FakePtyBackend::spawn) fails with this error
     /// instead of registering a pane — drives the spawn-failure path.
     spawn_error: Option<PtyError>,
+    /// When set, [`resize`](FakePtyBackend::resize) fails for this pane with this
+    /// error instead of recording — drives the best-effort partial-failure reflow
+    /// path (one sibling's resize failing must not drop the others').
+    resize_error: Option<(PaneId, PtyError)>,
 }
 
 /// An in-memory [`PtyBackend`] that records every call and lets the test drive
@@ -60,6 +64,13 @@ impl FakePtyBackend {
     /// registering a pane, so a test can drive the spawn-failure path.
     pub fn fail_spawns_with(&self, error: PtyError) {
         self.state.lock().unwrap().spawn_error = Some(error);
+    }
+
+    /// Make [`resize`](Self::resize) fail for `pane` with `error` instead of
+    /// recording, so a test can drive the best-effort partial-failure reflow path
+    /// (one sibling failing to resize must not drop the others').
+    pub fn fail_resizes_on(&self, pane: PaneId, error: PtyError) {
+        self.state.lock().unwrap().resize_error = Some((pane, error));
     }
 
     /// Deliver `bytes` as a chunk of child output on `pane`'s handle.
@@ -151,6 +162,10 @@ impl PtyBackend for FakePtyBackend {
             return Err(error.clone());
         }
 
+        debug_assert!(
+            !state.panes.contains_key(&pane_id),
+            "spawn into an already-live pane id {pane_id}; kill it before respawning"
+        );
         let (handle, output_tx, exit_tx) = PtyHandle::new(pane_id);
         state.panes.insert(
             pane_id,
@@ -174,6 +189,11 @@ impl PtyBackend for FakePtyBackend {
     /// from spawn is already recorded; subsequent resizes are added in order.
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if let Some((failing, error)) = &state.resize_error {
+            if *failing == pane {
+                return Err(error.clone());
+            }
+        }
         let record = state
             .panes
             .get_mut(&pane)
@@ -242,6 +262,18 @@ mod tests {
         assert_eq!(pty.spawned_panes(), vec![pane]);
         assert_eq!(pty.spawn_spec(pane).unwrap(), spec());
         assert_eq!(pty.resizes(pane).unwrap(), vec![size(80, 24)]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "already-live pane id")]
+    fn spawning_into_a_live_pane_id_panics() {
+        let pty = FakePtyBackend::new();
+        let pane = PaneId::new();
+        pty.spawn(pane, spec(), size(80, 24)).unwrap();
+        // Reusing a live id (a caller bug: respawn without kill first) trips the
+        // debug-build precondition.
+        let _ = pty.spawn(pane, spec(), size(80, 24));
     }
 
     #[test]

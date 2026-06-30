@@ -11,6 +11,7 @@
 //! variant cannot be added without giving it an arm here, and each handler
 //! replaces its arm in place as it ships.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -21,22 +22,21 @@ use tile_core::{
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     process::{PtySize, SpawnSpec},
 };
-use tile_layout::{content::content_rects, solver::solve_with_mode};
-use tile_pane::pane::lifecycle::PaneLifecycleEvent;
+use tile_layout::{
+    content::content_rects,
+    edit::split_leaf,
+    solver::{fits, solve_with_mode, MIN_PANE_SIZE},
+    tree::LayoutNode,
+};
+use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
 use tile_session::session::{
-    cascade::on_child_exit,
     lifecycle::SessionLifecycle,
-    pane_ops::{self, NewPaneError, NewPaneSpec},
-    policy::EmptyTabPolicy,
+    pane_ops::{self, NewPaneSpec},
     state::Session,
 };
 
 use crate::runtime::{state::Runtime, transaction::TransactionScope};
-
-/// PTY size used when a new pane has no attached client to derive a viewport
-/// from; a later resize corrects it once a client attaches.
-const DEFAULT_PTY_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
 /// A validation failure: the reason a command was rejected, plus an optional
 /// human-facing hint. The `Err` half of [`Runtime::validate`].
@@ -132,12 +132,22 @@ impl Runtime {
         }
     }
 
-    /// Handle [`Command::NewPane`]: split the source pane's tab and register a
-    /// `Spawning` pane (the state half), then spawn its child PTY, size it to
-    /// the solved content rect, advance it to `Running`, resize the sibling
-    /// PTYs, and park the handle so its reader thread keeps feeding output. On
-    /// spawn failure the committed state is forward-compensated with a synthetic
-    /// exit run through SES-008 policy. All events seal in one transaction.
+    /// Handle [`Command::NewPane`]: split the source pane's tab and spawn a new
+    /// pane, in launch-then-commit order — no session state changes until the
+    /// child process is live.
+    ///
+    /// The candidate split tree is built and its fit preflighted, the child PTY
+    /// is spawned, and only on success is the pane registered (`Running`), the
+    /// tree swapped in, the sibling PTYs reflowed, and the handle parked. A launch
+    /// failure commits nothing and rejects, so a pane never exists without its
+    /// process. A client is designated to view and focus the new pane — an
+    /// explicit `--client` target (which wins even over the issuer, and rejects
+    /// outright if not attached), else the in-session issuer, else (an external
+    /// source, tab unviewed) the session's sole client; a session with several
+    /// attached clients and no named target is rejected as ambiguous, and one with
+    /// no attached client at all is rejected. The designated client is switched
+    /// onto the tab (if not already there) and the tab it left is reflowed. All
+    /// events seal in one transaction.
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -166,146 +176,146 @@ impl Runtime {
 
         let direction = args.direction.unwrap_or(Direction::Right);
 
-        // Clone the shared backend before borrowing a session mutably: spawn and
-        // resize then need no `&self` borrow, so they coexist with `&mut Session`.
+        // Clone the shared backend before borrowing a session: spawn and resize
+        // then need no `&self` borrow, so they coexist with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
 
         let Some(session) = self.sessions.get_mut(&target.session_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
 
-        let spec = NewPaneSpec {
-            name: args.name.clone(),
-            cwd: args.cwd.clone(),
-            command: args.command.clone(),
-        };
-
-        // State half: registers the pane `Spawning`, swaps the tree, and drafts
-        // PaneCreated / LayoutChanged / (PaneFocused).
-        let mut events = match pane_ops::new_pane(
-            session,
-            target.source_pane,
-            target.tab_id,
-            direction,
-            target.focus_client,
-            spec,
-            issued_at,
-        ) {
-            Ok(events) => events,
-            Err(NewPaneError::SourceNotFound) => {
-                return CommandResult::Rejected {
-                    command_id,
-                    reason: RejectReason::TargetNotFound,
-                    help: None,
-                };
-            }
-            Err(NewPaneError::WontFit) => {
-                return CommandResult::Rejected {
-                    command_id,
-                    reason: RejectReason::MinSize,
-                    help: Some("not enough space to split".to_string()),
-                };
-            }
-        };
-
-        // The pane id minted inside `pane_ops`, recovered from the PaneCreated
-        // it drafted.
-        let Some(new_pane_id) = events.iter().find_map(|event| match event {
-            Event::PaneCreated(created) => Some(created.pane_id),
-            _ => None,
-        }) else {
+        // Build the post-split tree without mutating anything. A source pane that
+        // is not a live leaf of the tab rejects here, before any state changes.
+        let Some(tab) = session.tabs.get(&target.tab_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
-
-        // Spawn spec: the recorded command, else a default shell carrying the
-        // record's cwd and env.
-        let spawn_spec = match session.panes.get(new_pane_id) {
-            Some(record) => match &record.command {
-                Some(command) => command.clone(),
-                None => SpawnSpec::default_shell(record.cwd.clone(), record.env.clone()),
-            },
-            None => {
+        let layout_mode = tab.layout_mode();
+        let new_pane_id = PaneId::new();
+        let candidate = match split_leaf(tab.layout(), target.source_pane, new_pane_id, direction) {
+            Ok(candidate) => candidate,
+            Err(_) => {
                 return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
             }
         };
 
-        // Geometry: solve the live post-split layout against the focus client's
-        // viewport. With no attached client there is no viewport, so spawn at the
-        // default size and skip the sibling resize batch.
-        let fallback_rect = Rect::new(
-            Point { x: 0, y: 0 },
-            Size {
-                cols: DEFAULT_PTY_SIZE.cols,
-                rows: DEFAULT_PTY_SIZE.rows,
-            },
-        );
-        let viewport_rect = target
-            .focus_client
-            .and_then(|client_id| session.clients.get(client_id))
-            .map(|client| Rect::new(Point { x: 0, y: 0 }, client.viewport()));
-
-        let (spawn_size, rects, tab_rect) = match viewport_rect {
-            Some(rect) => match session.tabs.get(&target.tab_id) {
-                Some(tab) => {
-                    let solve = solve_with_mode(tab.layout(), tab.layout_mode(), rect);
-                    let rects = content_rects(&solve);
-                    let size = rects
-                        .iter()
-                        .find(|(pane_id, _)| *pane_id == new_pane_id)
-                        .and_then(|(_, content)| *content)
-                        .map_or(DEFAULT_PTY_SIZE, compute_pty_size);
-                    (size, Some(rects), rect)
-                }
-                None => (DEFAULT_PTY_SIZE, None, fallback_rect),
-            },
-            None => (DEFAULT_PTY_SIZE, None, fallback_rect),
+        // Choose the viewport the split is sized against, and the client (if any)
+        // designated to view the tab and focus the new pane. Fit is judged against
+        // the candidate, so a split too large for the chosen viewport is rejected
+        // before anything mutates.
+        let (viewport, designated) = match Self::resolve_new_pane_viewport(
+            session,
+            target.tab_id,
+            &candidate,
+            target.focus_client,
+            args.client,
+        ) {
+            Ok(resolved) => resolved,
+            Err(rejection) => return Self::rejected(command_id, rejection),
         };
 
-        // Side effect: launch the child under the pane's own id, so a later
-        // resize / write / kill addresses it. The I/O threads start in `spawn`.
-        match backend.spawn(new_pane_id, spawn_spec, spawn_size) {
-            Ok(handle) => {
-                // Spawning -> Running. The pane was just registered Spawning, so
-                // the transition is always legal.
-                if let Some(record) = session.panes.get_mut(new_pane_id) {
-                    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+        // Solve the candidate against that viewport to size the new pane and its
+        // siblings. Fit passed above, so in a tiled layout the new pane has a real
+        // content rect; a hiding layout mode that gives it no area rejects
+        // cleanly, still before any mutation.
+        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let rects = content_rects(&solve_with_mode(&candidate, layout_mode, tab_rect));
+        let Some(new_rect) = rects
+            .iter()
+            .find(|(pane_id, _)| *pane_id == new_pane_id)
+            .and_then(|(_, content)| *content)
+        else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::InvalidState));
+        };
+        let spawn_size = compute_pty_size(new_rect);
+
+        // The spawn request: the requested command (its cwd falling back to
+        // `--cwd` when unset, so `--cwd` reaches an explicit command), else the
+        // default shell carrying `--cwd`. A new pane's env starts empty, matching
+        // the record `commit_new_pane` writes.
+        let spawn_spec = match &args.command {
+            Some(command) => {
+                let mut spec = command.clone();
+                if spec.cwd.is_none() {
+                    spec.cwd = args.cwd.clone();
                 }
-                // Park the handle so its receivers keep feeding output and the
-                // pane counts as a live PTY for the resize below.
-                self.pty_handles.insert(new_pane_id, handle);
-                // Resize every pane that has a live PTY to the new geometry and
-                // emit PtyResized for each. Panes without a PTY (e.g. a
-                // not-yet-spawned root) are skipped, so one of them cannot abort
-                // the batch and starve its live siblings of a resize.
-                if let Some(rects) = rects {
-                    let live: Vec<(PaneId, Option<Rect>)> = rects
-                        .into_iter()
-                        .filter(|(pane_id, _)| self.pty_handles.contains_key(pane_id))
-                        .collect();
-                    if let Ok(results) = resize_for_layout_change(backend.as_ref(), live) {
-                        for result in results {
-                            if let Some(size) = result.applied {
-                                events.push(Event::PtyResized(PtyResized {
-                                    pane_id: result.pane_id,
-                                    size,
-                                }));
-                            }
-                        }
-                    }
-                }
+                spec
             }
+            None => SpawnSpec::default_shell(args.cwd.clone(), BTreeMap::new()),
+        };
+        // What the pane records: the directory it actually launches in (an
+        // explicit command's own cwd wins over `--cwd`), and the resolved spawn
+        // request itself when a command was given, so the record can't disagree
+        // with the process about where or what it started.
+        let launch_cwd = spawn_spec.cwd.clone();
+        let recorded_command = args.command.as_ref().map(|_| spawn_spec.clone());
+
+        // Launch the child BEFORE committing any state. On failure nothing was
+        // registered and no view moved, so the command rejects as if it never ran.
+        let handle = match backend.spawn(new_pane_id, spawn_spec, spawn_size) {
+            Ok(handle) => handle,
             Err(_) => {
-                // Forward-compensation: the state is committed, so surface a
-                // synthetic exit and let SES-008 policy remove the pane.
-                events.extend(on_child_exit(
-                    session,
-                    target.tab_id,
-                    new_pane_id,
-                    Some(-1),
-                    issued_at,
-                    tab_rect,
-                    EmptyTabPolicy::default(),
-                ));
+                return CommandResult::Rejected {
+                    command_id,
+                    reason: RejectReason::InvalidState,
+                    help: Some("failed to launch the pane's process".to_string()),
+                };
+            }
+        };
+
+        // The child is live — commit all session state through the pure op: it
+        // switches the designated client onto the tab (if not already there),
+        // registers the pane `Running`, swaps in the split, and focuses it. It
+        // returns the previous tab of any client it moved, for the reflow below.
+        let spec = NewPaneSpec {
+            name: args.name.clone(),
+            cwd: launch_cwd,
+            command: recorded_command,
+        };
+        let (prev_tab, mut events) = pane_ops::commit_new_pane(
+            session,
+            new_pane_id,
+            target.tab_id,
+            candidate,
+            designated,
+            spec,
+            issued_at,
+        );
+
+        // Park the handle and record its size so its receivers keep feeding output
+        // and the reflows below can tell whether a later resize is a real change.
+        self.pty_handles.insert(new_pane_id, handle);
+        self.pty_sizes.insert(new_pane_id, spawn_size);
+        // Announce the new pane's size — PaneCreated carries none.
+        events.push(Event::PtyResized(PtyResized {
+            pane_id: new_pane_id,
+            size: spawn_size,
+        }));
+
+        // Reflow the target tab's other live panes to the new geometry (excluding
+        // the pane just spawned, already sized above).
+        Self::reflow_changed(
+            backend.as_ref(),
+            &self.pty_handles,
+            &mut self.pty_sizes,
+            rects,
+            Some(new_pane_id),
+            &mut events,
+        );
+
+        // Adoption moved a client off its previous tab; if that tab still has a
+        // viewer, reflow its live panes to the viewport it now sizes against. A
+        // tab left with no viewer has no viewport and keeps its sizes.
+        if let Some(prev_tab) = prev_tab {
+            if let Some(viewport) = session.tab_viewport(prev_tab) {
+                let prev_rects = Self::tab_content_rects(session, prev_tab, viewport);
+                Self::reflow_changed(
+                    backend.as_ref(),
+                    &self.pty_handles,
+                    &mut self.pty_sizes,
+                    prev_rects,
+                    None,
+                    &mut events,
+                );
             }
         }
 
@@ -314,6 +324,168 @@ impl Runtime {
             scope.emit(event);
         }
         scope.commit(command_id)
+    }
+
+    /// Choose the viewport a new split is sized against, and the *designated*
+    /// client — the one that will view the tab and focus the new pane, `None`
+    /// when the tab is already viewed and no client was named.
+    ///
+    /// A designated client is an explicit `target_client` (the command's named
+    /// `--client`, which wins even over an in-session issuer) or, when none is
+    /// named, the issuing client (`focus_client`). When one is designated, the
+    /// split is sized to the smallest of the tab's current viewers *and* that
+    /// client, so it fits everyone who will see it; the caller switches the client
+    /// onto the tab if it is not already there.
+    ///
+    /// With no designated client (an external/plugin source that names no target):
+    /// an already-viewed tab sizes to its current viewers and designates no one
+    /// (the pane just appears, no view moves); an unviewed tab defaults to the
+    /// session's sole client, and a session with several attached clients is
+    /// [`RejectReason::TargetAmbiguous`] (a bystander is never switched to satisfy
+    /// a command that named no client).
+    ///
+    /// `candidate` is the post-split tree fit is judged against. Fails
+    /// [`RejectReason::MinSize`] when the split cannot fit the chosen viewport,
+    /// [`RejectReason::TargetNotFound`] when the designated client (a named
+    /// `target_client`, or the issuer) is not attached here — a wrong explicit
+    /// target is rejected outright, never falling back — and
+    /// [`RejectReason::InvalidState`] when the tab has no viewer and the session
+    /// has no attached client at all.
+    fn resolve_new_pane_viewport(
+        session: &Session,
+        tab_id: TabId,
+        candidate: &LayoutNode,
+        focus_client: Option<ClientId>,
+        target_client: Option<ClientId>,
+    ) -> Result<(Size, Option<ClientId>), Rejection> {
+        let fits_viewport = |viewport: Size| {
+            fits(
+                candidate,
+                Rect::new(Point { x: 0, y: 0 }, viewport),
+                MIN_PANE_SIZE,
+            )
+        };
+        let wont_fit = || Rejection::new(RejectReason::MinSize, "not enough space to split");
+        let existing = session.tab_viewport(tab_id);
+
+        // An explicit `--client` target wins over the issuing client — a caller
+        // that names a client is honored even in-session — and must be valid: a
+        // wrong target is rejected outright, never falling back to the issuer. With
+        // no explicit target, the in-session issuer is used.
+        if let Some(client_id) = target_client.or(focus_client) {
+            let client = session.clients.get(client_id).ok_or_else(|| {
+                Rejection::new(
+                    RejectReason::TargetNotFound,
+                    "target client not attached to the session",
+                )
+            })?;
+            // Size to the smallest of the current viewers and the designated
+            // client, so the pane fits every client that will view the tab.
+            let viewport = match existing {
+                Some(existing) => Size {
+                    cols: existing.cols.min(client.viewport().cols),
+                    rows: existing.rows.min(client.viewport().rows),
+                },
+                None => client.viewport(),
+            };
+            return if fits_viewport(viewport) {
+                Ok((viewport, Some(client_id)))
+            } else {
+                Err(wont_fit())
+            };
+        }
+
+        // No designated client: an already-viewed tab needs no adoption.
+        if let Some(viewport) = existing {
+            return if fits_viewport(viewport) {
+                Ok((viewport, None))
+            } else {
+                Err(wont_fit())
+            };
+        }
+
+        // Unviewed and no designated client: default to the session's sole
+        // client; reject when there are several (name one) or none.
+        let mut attached = session.clients.list_attached();
+        match (attached.next(), attached.next()) {
+            (None, _) => Err(Rejection::new(
+                RejectReason::InvalidState,
+                "no attached client to view the new pane's tab",
+            )),
+            (Some(only), None) => {
+                let viewport = only.viewport();
+                if fits_viewport(viewport) {
+                    Ok((viewport, Some(only.id())))
+                } else {
+                    Err(wont_fit())
+                }
+            }
+            (Some(_), Some(_)) => Err(Rejection::new(
+                RejectReason::TargetAmbiguous,
+                "multiple clients; name a target client for the new pane",
+            )),
+        }
+    }
+
+    /// The per-pane content rects of `tab_id`'s current layout solved against
+    /// `viewport`, or an empty vec when the tab is gone. Used to compare a tab's
+    /// geometry before and after a change so only panes whose rect actually
+    /// moved are resized.
+    fn tab_content_rects(
+        session: &Session,
+        tab_id: TabId,
+        viewport: Size,
+    ) -> Vec<(PaneId, Option<Rect>)> {
+        session
+            .tabs
+            .get(&tab_id)
+            .map(|tab| {
+                content_rects(&solve_with_mode(
+                    tab.layout(),
+                    tab.layout_mode(),
+                    Rect::new(Point { x: 0, y: 0 }, viewport),
+                ))
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resize the live PTYs in `rects` whose size actually changed, routing the
+    /// batch through the shared [`resize_for_layout_change`] executor and pushing
+    /// one [`Event::PtyResized`] per pane it resized.
+    ///
+    /// A pane is passed to the executor only when it has a live handle, is not
+    /// `skip` (the freshly-spawned pane is sized separately), and its new
+    /// [`compute_pty_size`] differs from `pty_sizes` — so an unchanged pane is
+    /// left alone. The executor is stateless; this owns the last-set-size cache,
+    /// updating it for every pane it resizes.
+    fn reflow_changed(
+        backend: &dyn PtyBackend,
+        pty_handles: &HashMap<PaneId, PtyHandle>,
+        pty_sizes: &mut HashMap<PaneId, PtySize>,
+        rects: Vec<(PaneId, Option<Rect>)>,
+        skip: Option<PaneId>,
+        events: &mut Vec<Event>,
+    ) {
+        let items: Vec<(PaneId, Option<Rect>)> = rects
+            .into_iter()
+            .filter(|(pane_id, content)| {
+                Some(*pane_id) != skip
+                    && pty_handles.contains_key(pane_id)
+                    && match content {
+                        Some(rect) => pty_sizes.get(pane_id) != Some(&compute_pty_size(*rect)),
+                        None => false,
+                    }
+            })
+            .collect();
+        for result in resize_for_layout_change(backend, items) {
+            if let Some(size) = result.applied {
+                pty_sizes.insert(result.pane_id, size);
+                events.push(Event::PtyResized(PtyResized {
+                    pane_id: result.pane_id,
+                    size,
+                }));
+            }
+        }
     }
 
     /// Check a command against live state before it reaches a handler. Runs the
@@ -428,6 +600,10 @@ impl Runtime {
             Command::ResizePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::WriteToPane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::RenamePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
+            // The stacked / in-place variants are routed to a not-yet-implemented
+            // handler arm; skip target resolution so that pending rejection wins
+            // over a target error, rather than depending on which fires first.
+            Command::NewPane(args) if args.stacked || args.in_place => Ok(()),
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
