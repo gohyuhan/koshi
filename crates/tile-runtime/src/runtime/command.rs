@@ -11,14 +11,21 @@
 //! variant cannot be added without giving it an arm here, and each handler
 //! replaces its arm in place as it ships.
 
-use tile_core::{
-    command::{Command, CommandEnvelope, CommandResult, CommandSource, TabTarget},
-    event::RejectReason,
-    ids::{ClientId, CommandId, PaneId, TabId},
-};
-use tile_session::session::{lifecycle::SessionLifecycle, state::Session};
+use std::time::SystemTime;
 
-use crate::runtime::state::Runtime;
+use tile_core::{
+    command::{Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, TabTarget},
+    event::RejectReason,
+    geometry::Direction,
+    ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+};
+use tile_session::session::{
+    lifecycle::SessionLifecycle,
+    pane_ops::{self, NewPaneError, NewPaneSpec},
+    state::Session,
+};
+
+use crate::runtime::{state::Runtime, transaction::TransactionScope};
 
 /// A validation failure: the reason a command was rejected, plus an optional
 /// human-facing hint. The `Err` half of [`Runtime::validate`].
@@ -42,6 +49,17 @@ impl Rejection {
     }
 }
 
+/// The resolved concrete target of a [`Command::NewPane`]: the session and tab
+/// the new pane joins, the source pane it splits from, and the client to
+/// auto-focus it for (when one applies). All fields are `Copy`, so resolving
+/// holds no borrow into the session map.
+struct NewPaneTarget {
+    session_id: SessionId,
+    source_pane: PaneId,
+    tab_id: TabId,
+    focus_client: Option<ClientId>,
+}
+
 impl Runtime {
     /// Dispatch one command and report its outcome.
     ///
@@ -59,7 +77,9 @@ impl Runtime {
             };
         }
         match envelope.command {
-            Command::NewPane(_) => self.reject(envelope.id, "new pane"),
+            Command::NewPane(args) => {
+                self.handle_new_pane(envelope.id, &envelope.source, &args, envelope.issued_at)
+            }
             Command::ClosePane(_) => self.reject(envelope.id, "close pane"),
             Command::ResizePane(_) => self.reject(envelope.id, "resize pane"),
             Command::FocusPane(_) => self.reject(envelope.id, "focus pane"),
@@ -88,6 +108,84 @@ impl Runtime {
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!("{label} not yet implemented")),
+        }
+    }
+
+    /// Turn a [`Rejection`] into a [`CommandResult::Rejected`] keyed to
+    /// `command_id`.
+    fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
+        CommandResult::Rejected {
+            command_id,
+            reason: rejection.reason,
+            help: rejection.help,
+        }
+    }
+
+    /// Handle [`Command::NewPane`]: split the source pane's tab, register a
+    /// `Spawning` pane, auto-focus it, and seal the resulting events. PTY spawn
+    /// is a later task; this is the pure state transaction.
+    fn handle_new_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &NewPaneArgs,
+        issued_at: SystemTime,
+    ) -> CommandResult {
+        // The stacked / in-place variants are a separate task; route them
+        // explicitly until it lands rather than splitting directionally.
+        if args.stacked || args.in_place {
+            return CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some("stacked/in-place new-pane pending".to_string()),
+            };
+        }
+
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_new_pane_source(args, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+
+        let direction = args.direction.unwrap_or(Direction::Right);
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        let spec = NewPaneSpec {
+            name: args.name.clone(),
+            cwd: args.cwd.clone(),
+            command: args.command.clone(),
+        };
+        match pane_ops::new_pane(
+            session,
+            target.source_pane,
+            target.tab_id,
+            direction,
+            target.focus_client,
+            spec,
+            issued_at,
+        ) {
+            Ok(events) => {
+                let mut scope = TransactionScope::new();
+                for event in events {
+                    scope.emit(event);
+                }
+                scope.commit(command_id)
+            }
+            Err(NewPaneError::SourceNotFound) => CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: None,
+            },
+            Err(NewPaneError::WontFit) => CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::MinSize,
+                help: Some("not enough space to split".to_string()),
+            },
         }
     }
 
@@ -203,7 +301,9 @@ impl Runtime {
             Command::ResizePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::WriteToPane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::RenamePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
-            Command::NewPane(args) => self.resolve_pane_or_focused(args.source, source, session),
+            Command::NewPane(args) => self
+                .resolve_new_pane_source(args, source, session)
+                .map(drop),
             Command::ToggleLockMode
             | Command::SetLockMode(_)
             | Command::TogglePaneFullscreen
@@ -218,6 +318,104 @@ impl Runtime {
             }
             Command::Plugin(_) => Ok(()),
         }
+    }
+
+    /// Resolve a [`Command::NewPane`] to its concrete target: the session and
+    /// tab the new pane joins, the source pane it splits from, and the client to
+    /// auto-focus it for. Shared by [`Self::validate`] (which drops the value)
+    /// and [`Self::handle_new_pane`], so both agree on one resolution.
+    ///
+    /// An explicit `--pane` is global: the new pane joins whatever session owns
+    /// that pane, focused for the acting client only when that client is
+    /// attached there. With no `--pane`, the source defaults within the acting
+    /// session — an in-session CLI's captured pane, or any other client's
+    /// focused pane.
+    fn resolve_new_pane_source(
+        &self,
+        args: &NewPaneArgs,
+        source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<NewPaneTarget, Rejection> {
+        match args.source {
+            Some(source_pane) => {
+                let owner = self
+                    .sessions()
+                    .values()
+                    .find(|session| session.panes.get(source_pane).is_some())
+                    .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+                if Self::is_winding_down(owner) {
+                    return Err(Rejection::new(
+                        RejectReason::InvalidState,
+                        "session is stopping",
+                    ));
+                }
+                let tab_id = Self::tab_of_pane(owner, source_pane)?;
+                let focus_client = source
+                    .client_id()
+                    .filter(|client_id| owner.clients.get(*client_id).is_some());
+                Ok(NewPaneTarget {
+                    session_id: owner.id,
+                    source_pane,
+                    tab_id,
+                    focus_client,
+                })
+            }
+            None => {
+                let session = Self::require_session(session)?;
+                match source {
+                    CommandSource::InSessionCli {
+                        pane_id, client_id, ..
+                    } => {
+                        // The captured pane defines its own tab; confirm it is
+                        // still a live, registered leaf before splitting it.
+                        Self::resolve_pane_in_session(session, *pane_id)?;
+                        let tab_id = Self::tab_of_pane(session, *pane_id)?;
+                        Ok(NewPaneTarget {
+                            session_id: session.id,
+                            source_pane: *pane_id,
+                            tab_id,
+                            focus_client: Some(*client_id),
+                        })
+                    }
+                    _ => {
+                        let client_id = source.client_id().ok_or_else(|| {
+                            Rejection::new(
+                                RejectReason::TargetNotFound,
+                                "no target and no focused pane to default to",
+                            )
+                        })?;
+                        let client = session
+                            .clients
+                            .get(client_id)
+                            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+                        let tab_id = client.active_tab();
+                        let pane = client.focused_pane(tab_id).ok_or_else(|| {
+                            Rejection::new(RejectReason::TargetNotFound, "no focused pane")
+                        })?;
+                        // The focused pane must be a live leaf of the active
+                        // tab — a stale focus entry is rejected, never split.
+                        Self::require_pane_in_active_tab(session, client_id, pane)?;
+                        Ok(NewPaneTarget {
+                            session_id: session.id,
+                            source_pane: pane,
+                            tab_id,
+                            focus_client: Some(client_id),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// The id of the tab in `session` whose layout holds `pane` as a leaf, or
+    /// [`RejectReason::TargetNotFound`] when no tab does.
+    fn tab_of_pane(session: &Session, pane: PaneId) -> Result<TabId, Rejection> {
+        session
+            .tabs
+            .values()
+            .find(|tab| tab.layout().contains_pane(pane))
+            .map(|tab| tab.id())
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))
     }
 
     /// Resolve an explicit pane target, or the default pane when none is given.
