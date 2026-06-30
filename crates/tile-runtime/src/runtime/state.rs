@@ -23,7 +23,7 @@ use crate::{
 pub struct Runtime {
     /// Every session in this process, keyed by id. Each session owns its tabs,
     /// layout trees, pane registry, and clients.
-    sessions: HashMap<SessionId, Session>,
+    pub(crate) sessions: HashMap<SessionId, Session>,
     /// Shared backend that spawns, resizes, writes to, and kills child PTYs.
     pty_backend: Arc<dyn PtyBackend>,
     /// Per-pane terminal emulator state, keyed by pane id.
