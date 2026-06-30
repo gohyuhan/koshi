@@ -20,10 +20,12 @@ use tile_core::command::{
 };
 use tile_core::geometry::Size;
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
-use tile_core::process::{ShellKind, SpawnSpec};
+use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_observability::cleanup::TerminalCleanupGuard;
+use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
 use tile_pty::backend::state::PtyBackend;
+use tile_pty::error::PtyError;
 use tile_session::client::{Client, ClientRegistry};
 use tile_session::session::state::{Session, Tab};
 use tile_session::session::tab_ops;
@@ -55,6 +57,38 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
         TerminalCleanupGuard::new(),
     );
     (runtime, tx)
+}
+
+/// Like [`new_runtime`], but also hands back the concrete fake backend so a test
+/// can drive spawn failures and assert on spawned panes, specs, and resizes.
+/// Both the runtime and the returned handle share one backend.
+fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+    let fake = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let (tx, inbox_rx) = mpsc::channel();
+    let runtime = Runtime::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        TerminalCleanupGuard::new(),
+    );
+    (runtime, fake, tx)
+}
+
+/// The id of the single pane in `session` that is not `source` — the freshly
+/// split pane. Panics unless exactly one other pane exists.
+fn other_pane(rt: &Runtime, session: SessionId, source: PaneId) -> PaneId {
+    let mut others = rt.sessions[&session]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .filter(|id| *id != source);
+    let pane = others.next().expect("a second pane exists");
+    assert!(others.next().is_none(), "exactly one other pane");
+    pane
 }
 
 /// A minimal valid spawn request for the command-carrying variants.
@@ -431,7 +465,9 @@ fn new_pane_defaults_to_the_focused_pane() {
     rt.sessions.insert(session_id, session);
 
     // No explicit source: the focused pane anchors the split, and the new pane
-    // auto-focuses — PaneCreated + LayoutChanged + PaneFocused.
+    // auto-focuses, spawns its PTY, and is resized into the new geometry —
+    // PaneCreated + LayoutChanged + PaneFocused + PtyResized(new pane). The root
+    // has no PTY, so it contributes no PtyResized.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
@@ -443,7 +479,7 @@ fn new_pane_defaults_to_the_focused_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(emitted_events.len(), 4);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -1166,4 +1202,197 @@ fn in_session_cli_tab_default_with_removed_source_pane_is_not_found() {
             help: None,
         }
     );
+}
+
+#[test]
+fn new_pane_spawns_and_runs_the_child() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    let result = rt.dispatch(env);
+
+    let new_pane = other_pane(&rt, sid, root);
+    assert!(matches!(result, CommandResult::Ok { command_id: id, .. } if id == command_id));
+    // The child was spawned under the pane's own id and advanced to Running.
+    assert_eq!(fake.spawned_panes(), vec![new_pane]);
+    assert_eq!(
+        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
+        PaneLifecycle::Running
+    );
+    // Its handle is parked so the reader thread keeps feeding output.
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    // The root has no PTY yet, so it is neither spawned nor parked.
+    assert!(!rt.pty_handles.contains_key(&root));
+}
+
+#[test]
+fn new_pane_without_command_spawns_the_default_shell() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+
+    // command: None resolves to the platform default shell, cwd/env inherited.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap(),
+        SpawnSpec::default_shell(None, BTreeMap::new())
+    );
+}
+
+#[test]
+fn new_pane_with_command_spawns_that_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            command: Some(spawn_spec()),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // An explicit command is spawned verbatim.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), spawn_spec());
+}
+
+#[test]
+fn new_pane_spawn_failure_removes_the_pane_but_succeeds() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "boom".to_string(),
+    });
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    let result = rt.dispatch(env);
+
+    // Forward-compensation: the command still succeeds...
+    assert!(matches!(result, CommandResult::Ok { command_id: id, .. } if id == command_id));
+    // ...but the pane that could not spawn is cascaded away, leaving the root.
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert!(rt.sessions[&sid].panes.get(root).is_some());
+    // No handle was parked, and nothing reached the backend's pane registry.
+    assert!(rt.pty_handles.is_empty());
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_pane_without_a_client_spawns_at_the_default_size() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+
+    // Session A holds the acting client; session B owns the target pane and has
+    // no client, so there is no viewport to solve against.
+    let client_id = ClientId::new();
+    let id_a = SessionId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session_a = bare_session(id_a);
+    add_pane(&mut session_a, pane_a);
+    add_tab(&mut session_a, tab_a, pane_a);
+    add_client(&mut session_a, client_id, tab_a, Some(pane_a));
+    rt.sessions.insert(id_a, session_a);
+
+    let id_b = SessionId::new();
+    let tab_b = TabId::new();
+    let pane_b = PaneId::new();
+    let mut session_b = bare_session(id_b);
+    add_pane(&mut session_b, pane_b);
+    add_tab(&mut session_b, tab_b, pane_b);
+    rt.sessions.insert(id_b, session_b);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_b),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // No viewport → spawn at the 80x24 default and skip the resize batch, so the
+    // only recorded size is that default.
+    let new_pane = other_pane(&rt, id_b, pane_b);
+    assert_eq!(
+        fake.resizes(new_pane).unwrap(),
+        vec![PtySize { cols: 80, rows: 24 }]
+    );
+}
+
+#[test]
+fn new_pane_reflows_existing_sibling_ptys() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // First split creates pane A and spawns its PTY (the root has none yet).
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_a = other_pane(&rt, sid, root);
+    let a_resizes_before = fake.resizes(pane_a).unwrap().len();
+
+    // Second split creates B off the now-focused A. A must reflow even though the
+    // PTY-less root is in the layout — it must not abort the resize batch.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+
+    assert!(fake.resizes(pane_a).unwrap().len() > a_resizes_before);
+    // The root, having no PTY, was never resized — confirming it was skipped.
+    assert!(fake.resizes(root).is_err());
 }

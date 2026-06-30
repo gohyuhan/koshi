@@ -139,11 +139,15 @@ impl PtyBackend for PortablePtyBackend {
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
     /// be launched, or the master's reader/writer can't be taken.
-    fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle, PtyError> {
-        // 1. Mint the pane id and a channel-backed handle. `output_sender` /
-        //    `exit_sender` are the producing ends the threads below feed; the
-        //    caller keeps the consuming ends inside `handle`.
-        let pane_id = PaneId::new();
+    fn spawn(
+        &self,
+        pane_id: PaneId,
+        spec: SpawnSpec,
+        size: PtySize,
+    ) -> Result<PtyHandle, PtyError> {
+        // 1. Build a channel-backed handle for the caller's pane id.
+        //    `output_sender` / `exit_sender` are the producing ends the threads
+        //    below feed; the caller keeps the consuming ends inside `handle`.
         let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
 
         // 2. Open the PTY pair sized to the pane. The pair is two linked ends:

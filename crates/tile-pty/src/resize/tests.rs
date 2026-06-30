@@ -48,7 +48,12 @@ impl RecordingBackend {
 }
 
 impl PtyBackend for RecordingBackend {
-    fn spawn(&self, _spec: SpawnSpec, _size: PtySize) -> Result<PtyHandle, PtyError> {
+    fn spawn(
+        &self,
+        _pane_id: PaneId,
+        _spec: SpawnSpec,
+        _size: PtySize,
+    ) -> Result<PtyHandle, PtyError> {
         unreachable!("resize tests never spawn")
     }
 

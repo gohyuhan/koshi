@@ -8,7 +8,7 @@ use std::{
 
 use tile_core::ids::{PaneId, SessionId};
 use tile_observability::cleanup::TerminalCleanupGuard;
-use tile_pty::backend::state::PtyBackend;
+use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_session::session::state::Session;
 use tile_terminal::state::TerminalState;
 
@@ -28,6 +28,9 @@ pub struct Runtime {
     pty_backend: Arc<dyn PtyBackend>,
     /// Per-pane terminal emulator state, keyed by pane id.
     terminal_engines: HashMap<PaneId, TerminalState>,
+    /// The read side of every spawned pane's PTY, keyed by pane id. Holding the
+    /// handle keeps its reader thread feeding output; the event loop polls these.
+    pub(crate) pty_handles: HashMap<PaneId, PtyHandle>,
     /// Event fan-out hub for subscribers.
     event_bus: EventBus,
     /// Source of render snapshots for attach and overflow resync.
@@ -56,6 +59,7 @@ impl Runtime {
             sessions: HashMap::new(),
             pty_backend,
             terminal_engines: HashMap::new(),
+            pty_handles: HashMap::new(),
             event_bus: EventBus,
             snapshot_provider,
             storage,

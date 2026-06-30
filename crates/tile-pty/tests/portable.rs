@@ -41,7 +41,9 @@ fn spec(program: &str, args: &[&str]) -> SpawnSpec {
 /// Spawn a pane through [`PTY_GATE`], panicking on failure.
 fn spawn_pane(backend: &PortablePtyBackend, spec: SpawnSpec) -> PtyHandle {
     let _gate = PTY_GATE.lock().expect("pty gate");
-    backend.spawn(spec, SIZE).expect("spawn child")
+    backend
+        .spawn(tile_core::ids::PaneId::new(), spec, SIZE)
+        .expect("spawn child")
 }
 
 /// Poll the handle's output channel until `needle` appears or `timeout` elapses,

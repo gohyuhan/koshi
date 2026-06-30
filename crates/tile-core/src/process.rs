@@ -86,6 +86,31 @@ pub struct SpawnSpec {
     pub shell_kind: ShellKind,
 }
 
+impl SpawnSpec {
+    /// Build a spec that launches the platform default interactive shell.
+    ///
+    /// The program is read from `$SHELL` on Unix and `%COMSPEC%` on Windows,
+    /// falling back to `/bin/sh` and `cmd.exe` respectively. `cwd` and `env`
+    /// pass straight through; `args` is empty.
+    #[must_use]
+    pub fn default_shell(cwd: Option<PathBuf>, env: BTreeMap<String, String>) -> SpawnSpec {
+        #[cfg(windows)]
+        let program =
+            PathBuf::from(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+        #[cfg(not(windows))]
+        let program = PathBuf::from(std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()));
+
+        let shell_kind = ShellKind::from_program(&program);
+        SpawnSpec {
+            program,
+            args: Vec::new(),
+            cwd,
+            env,
+            shell_kind,
+        }
+    }
+}
+
 /// A PTY window size in cells.
 ///
 /// Mirrors the cell semantics of `geometry::Size` but is a distinct type so the

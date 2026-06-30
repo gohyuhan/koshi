@@ -15,9 +15,12 @@ use crate::error::PtyError;
 /// and the runtime. Implementors own the child processes, keyed by [`PaneId`];
 /// the [`PtyHandle`] returned from [`spawn`](PtyBackend::spawn) is the read side.
 pub trait PtyBackend: Send + Sync {
-    /// Spawn a child in a new PTY of the given size, returning a handle that
-    /// streams its output and exit status.
-    fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle, PtyError>;
+    /// Spawn a child in a new PTY of the given size for `pane_id`, returning a
+    /// handle (addressed by that same id) that streams its output and exit
+    /// status. The caller owns the pane identity; the backend keys its records
+    /// by `pane_id` so later `resize`/`write`/`kill` address the same pane.
+    fn spawn(&self, pane_id: PaneId, spec: SpawnSpec, size: PtySize)
+        -> Result<PtyHandle, PtyError>;
     /// Resize an existing pane's PTY.
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError>;
     /// Write bytes to a pane's child stdin.

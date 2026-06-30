@@ -11,21 +11,32 @@
 //! variant cannot be added without giving it an arm here, and each handler
 //! replaces its arm in place as it ships.
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use tile_core::{
     command::{Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, TabTarget},
-    event::RejectReason,
-    geometry::Direction,
+    event::{Event, PtyResized, RejectReason},
+    geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+    process::{PtySize, SpawnSpec},
 };
+use tile_layout::{content::content_rects, solver::solve_with_mode};
+use tile_pane::pane::lifecycle::PaneLifecycleEvent;
+use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
 use tile_session::session::{
+    cascade::on_child_exit,
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneError, NewPaneSpec},
+    policy::EmptyTabPolicy,
     state::Session,
 };
 
 use crate::runtime::{state::Runtime, transaction::TransactionScope};
+
+/// PTY size used when a new pane has no attached client to derive a viewport
+/// from; a later resize corrects it once a client attaches.
+const DEFAULT_PTY_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
 /// A validation failure: the reason a command was rejected, plus an optional
 /// human-facing hint. The `Err` half of [`Runtime::validate`].
@@ -121,9 +132,12 @@ impl Runtime {
         }
     }
 
-    /// Handle [`Command::NewPane`]: split the source pane's tab, register a
-    /// `Spawning` pane, auto-focus it, and seal the resulting events. PTY spawn
-    /// is a later task; this is the pure state transaction.
+    /// Handle [`Command::NewPane`]: split the source pane's tab and register a
+    /// `Spawning` pane (the state half), then spawn its child PTY, size it to
+    /// the solved content rect, advance it to `Running`, resize the sibling
+    /// PTYs, and park the handle so its reader thread keeps feeding output. On
+    /// spawn failure the committed state is forward-compensated with a synthetic
+    /// exit run through SES-008 policy. All events seal in one transaction.
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -151,6 +165,11 @@ impl Runtime {
         };
 
         let direction = args.direction.unwrap_or(Direction::Right);
+
+        // Clone the shared backend before borrowing a session mutably: spawn and
+        // resize then need no `&self` borrow, so they coexist with `&mut Session`.
+        let backend = Arc::clone(self.pty_backend());
+
         let Some(session) = self.sessions.get_mut(&target.session_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
@@ -160,7 +179,10 @@ impl Runtime {
             cwd: args.cwd.clone(),
             command: args.command.clone(),
         };
-        match pane_ops::new_pane(
+
+        // State half: registers the pane `Spawning`, swaps the tree, and drafts
+        // PaneCreated / LayoutChanged / (PaneFocused).
+        let mut events = match pane_ops::new_pane(
             session,
             target.source_pane,
             target.tab_id,
@@ -169,24 +191,129 @@ impl Runtime {
             spec,
             issued_at,
         ) {
-            Ok(events) => {
-                let mut scope = TransactionScope::new();
-                for event in events {
-                    scope.emit(event);
-                }
-                scope.commit(command_id)
+            Ok(events) => events,
+            Err(NewPaneError::SourceNotFound) => {
+                return CommandResult::Rejected {
+                    command_id,
+                    reason: RejectReason::TargetNotFound,
+                    help: None,
+                };
             }
-            Err(NewPaneError::SourceNotFound) => CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::TargetNotFound,
-                help: None,
+            Err(NewPaneError::WontFit) => {
+                return CommandResult::Rejected {
+                    command_id,
+                    reason: RejectReason::MinSize,
+                    help: Some("not enough space to split".to_string()),
+                };
+            }
+        };
+
+        // The pane id minted inside `pane_ops`, recovered from the PaneCreated
+        // it drafted.
+        let Some(new_pane_id) = events.iter().find_map(|event| match event {
+            Event::PaneCreated(created) => Some(created.pane_id),
+            _ => None,
+        }) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        // Spawn spec: the recorded command, else a default shell carrying the
+        // record's cwd and env.
+        let spawn_spec = match session.panes.get(new_pane_id) {
+            Some(record) => match &record.command {
+                Some(command) => command.clone(),
+                None => SpawnSpec::default_shell(record.cwd.clone(), record.env.clone()),
             },
-            Err(NewPaneError::WontFit) => CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::MinSize,
-                help: Some("not enough space to split".to_string()),
+            None => {
+                return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+            }
+        };
+
+        // Geometry: solve the live post-split layout against the focus client's
+        // viewport. With no attached client there is no viewport, so spawn at the
+        // default size and skip the sibling resize batch.
+        let fallback_rect = Rect::new(
+            Point { x: 0, y: 0 },
+            Size {
+                cols: DEFAULT_PTY_SIZE.cols,
+                rows: DEFAULT_PTY_SIZE.rows,
             },
+        );
+        let viewport_rect = target
+            .focus_client
+            .and_then(|client_id| session.clients.get(client_id))
+            .map(|client| Rect::new(Point { x: 0, y: 0 }, client.viewport()));
+
+        let (spawn_size, rects, tab_rect) = match viewport_rect {
+            Some(rect) => match session.tabs.get(&target.tab_id) {
+                Some(tab) => {
+                    let solve = solve_with_mode(tab.layout(), tab.layout_mode(), rect);
+                    let rects = content_rects(&solve);
+                    let size = rects
+                        .iter()
+                        .find(|(pane_id, _)| *pane_id == new_pane_id)
+                        .and_then(|(_, content)| *content)
+                        .map_or(DEFAULT_PTY_SIZE, compute_pty_size);
+                    (size, Some(rects), rect)
+                }
+                None => (DEFAULT_PTY_SIZE, None, fallback_rect),
+            },
+            None => (DEFAULT_PTY_SIZE, None, fallback_rect),
+        };
+
+        // Side effect: launch the child under the pane's own id, so a later
+        // resize / write / kill addresses it. The I/O threads start in `spawn`.
+        match backend.spawn(new_pane_id, spawn_spec, spawn_size) {
+            Ok(handle) => {
+                // Spawning -> Running. The pane was just registered Spawning, so
+                // the transition is always legal.
+                if let Some(record) = session.panes.get_mut(new_pane_id) {
+                    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+                }
+                // Park the handle so its receivers keep feeding output and the
+                // pane counts as a live PTY for the resize below.
+                self.pty_handles.insert(new_pane_id, handle);
+                // Resize every pane that has a live PTY to the new geometry and
+                // emit PtyResized for each. Panes without a PTY (e.g. a
+                // not-yet-spawned root) are skipped, so one of them cannot abort
+                // the batch and starve its live siblings of a resize.
+                if let Some(rects) = rects {
+                    let live: Vec<(PaneId, Option<Rect>)> = rects
+                        .into_iter()
+                        .filter(|(pane_id, _)| self.pty_handles.contains_key(pane_id))
+                        .collect();
+                    if let Ok(results) = resize_for_layout_change(backend.as_ref(), live) {
+                        for result in results {
+                            if let Some(size) = result.applied {
+                                events.push(Event::PtyResized(PtyResized {
+                                    pane_id: result.pane_id,
+                                    size,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Forward-compensation: the state is committed, so surface a
+                // synthetic exit and let SES-008 policy remove the pane.
+                events.extend(on_child_exit(
+                    session,
+                    target.tab_id,
+                    new_pane_id,
+                    Some(-1),
+                    issued_at,
+                    tab_rect,
+                    EmptyTabPolicy::default(),
+                ));
+            }
         }
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
     }
 
     /// Check a command against live state before it reaches a handler. Runs the
