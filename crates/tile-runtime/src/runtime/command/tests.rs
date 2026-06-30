@@ -427,9 +427,82 @@ fn new_pane_defaults_to_the_focused_pane() {
     add_pane(&mut session, pane);
     add_tab(&mut session, tab, pane);
     add_client(&mut session, client_id, tab, Some(pane));
+    let session_id = session.id;
+    rt.sessions.insert(session_id, session);
+
+    // No explicit source: the focused pane anchors the split, and the new pane
+    // auto-focuses — PaneCreated + LayoutChanged + PaneFocused.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    // The split registered a second pane in the tab.
+    assert_eq!(rt.sessions[&session_id].panes.len(), 2);
+}
+
+#[test]
+fn new_pane_stacked_is_pending() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
     rt.sessions.insert(session.id, session);
 
-    // No explicit source: the focused pane anchors the split, so it resolves.
+    // The stacked variant is a later task; it routes to a clean pending reject.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("stacked/in-place new-pane pending".to_string()),
+        }
+    );
+}
+
+#[test]
+fn new_pane_with_no_space_is_min_size() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    // A 2x1 viewport cannot hold a split at minimum size.
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 2, rows: 1 },
+        tab,
+    );
+    client.update_focused_pane(tab, pane);
+    session.attach_client(client);
+    rt.sessions.insert(session.id, session);
+
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
@@ -439,8 +512,90 @@ fn new_pane_defaults_to_the_focused_pane() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("new pane not yet implemented".to_string()),
+            reason: RejectReason::MinSize,
+            help: Some("not enough space to split".to_string()),
+        }
+    );
+}
+
+#[test]
+fn new_pane_explicit_pane_in_other_session_creates_without_focus() {
+    let (mut rt, _tx) = new_runtime();
+
+    // Session A holds the acting client.
+    let client_id = ClientId::new();
+    let id_a = SessionId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session_a = bare_session(id_a);
+    add_pane(&mut session_a, pane_a);
+    add_tab(&mut session_a, tab_a, pane_a);
+    add_client(&mut session_a, client_id, tab_a, Some(pane_a));
+    rt.sessions.insert(id_a, session_a);
+
+    // Session B owns the explicit `--pane` target; no client of A is attached.
+    let id_b = SessionId::new();
+    let tab_b = TabId::new();
+    let pane_b = PaneId::new();
+    let mut session_b = bare_session(id_b);
+    add_pane(&mut session_b, pane_b);
+    add_tab(&mut session_b, tab_b, pane_b);
+    rt.sessions.insert(id_b, session_b);
+
+    // A global `--pane` lands the new pane in B; the acting client cannot focus
+    // a pane in a session it is not attached to, so no PaneFocused is emitted.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_b),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    // The split grew session B, not session A.
+    assert_eq!(rt.sessions[&id_b].panes.len(), 2);
+    assert_eq!(rt.sessions[&id_a].panes.len(), 1);
+}
+
+#[test]
+fn new_pane_with_stale_focus_outside_active_tab_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let leaf = PaneId::new();
+    let ghost = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, leaf);
+    // `ghost` is registered but never placed in the tab's layout.
+    add_pane(&mut session, ghost);
+    add_tab(&mut session, tab, leaf);
+    // The client's active-tab focus points at `ghost` — a stale entry that is
+    // not a leaf of the active tab.
+    add_client(&mut session, client_id, tab, Some(ghost));
+    rt.sessions.insert(session.id, session);
+
+    // The default source is the stale focus; it must reject, never split a tab.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("pane not in the client's active tab".to_string()),
         }
     );
 }
