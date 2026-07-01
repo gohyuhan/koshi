@@ -64,11 +64,12 @@ fn size() -> PtySize {
     PtySize { cols: 80, rows: 24 }
 }
 
-/// Spawn a child on the backend, returning the pane id it minted and the live
-/// handle that streams its output and exit. The session pane built for this
-/// child reuses the same id, so the two refer to one pane.
+/// Spawn a child on the backend, returning the pane id it was spawned under and
+/// the live handle that streams its output and exit. The session pane built for
+/// this child reuses the same id, so the two refer to one pane.
 fn spawn_child(pty: &FakePtyBackend) -> (PaneId, PtyHandle) {
-    let handle = pty.spawn(spec(), size()).expect("spawn succeeds");
+    let pane_id = PaneId::new();
+    let handle = pty.spawn(pane_id, spec(), size()).expect("spawn succeeds");
     (handle.pane_id(), handle)
 }
 

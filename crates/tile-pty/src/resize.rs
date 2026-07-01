@@ -11,7 +11,7 @@ use std::cmp::max;
 
 use tile_core::{geometry::Rect, ids::PaneId, process::PtySize};
 
-use crate::{backend::state::PtyBackend, error::PtyError};
+use crate::backend::state::PtyBackend;
 
 /// Smallest PTY a child is ever sized to: 2 columns by 1 row.
 ///
@@ -45,44 +45,57 @@ pub struct ResizeResult {
     pub kept_last_valid: bool,
 }
 
-/// Resize every pane's PTY to match a freshly solved layout.
+/// Resize every pane's PTY to match a freshly solved layout, best-effort.
 ///
 /// Walks `pane_items` (the `(PaneId, Option<Rect>)` output of the layout
 /// crate's `content_rects`) in order. A `None` rect means the pane shows no
 /// content: it is skipped with `kept_last_valid` set and no backend call. A
 /// `Some` rect is floored via [`compute_pty_size`] and applied through
-/// [`crate::backend::state::PtyBackend::resize`]. The first backend error aborts the batch; panes
-/// already resized stay resized on the OS.
+/// [`crate::backend::state::PtyBackend::resize`].
 ///
-/// # Errors
+/// Each pane is independent: a backend error on one pane records that pane with
+/// `applied: None` (and `kept_last_valid: false`, distinguishing it from a
+/// no-content skip) and does not stop the rest, so one failing pane never drops
+/// the others' resizes. Callers that need to know a pane's new size (to update
+/// their own size cache or emit an event) read `applied`. The caller decides
+/// *which* panes to pass — e.g. only those whose size actually changed — so this
+/// executor holds no per-pane size state of its own.
 ///
-/// Returns the first [`PtyError`] a [`crate::backend::state::PtyBackend::resize`] call reports.
+/// Returns one [`ResizeResult`] per input pane, in order.
+#[must_use]
 pub fn resize_for_layout_change(
     backend: &dyn PtyBackend,
     pane_items: impl IntoIterator<Item = (PaneId, Option<Rect>)>,
-) -> Result<Vec<ResizeResult>, PtyError> {
+) -> Vec<ResizeResult> {
     let mut updated_pane_result = Vec::new();
 
     for (pane_id, pane_size) in pane_items {
-        match pane_size {
-            None => updated_pane_result.push(ResizeResult {
+        let result = match pane_size {
+            None => ResizeResult {
                 pane_id,
                 applied: None,
                 kept_last_valid: true,
-            }),
+            },
             Some(rect) => {
                 let computed = compute_pty_size(rect);
-                backend.resize(pane_id, computed)?;
-                updated_pane_result.push(ResizeResult {
-                    pane_id,
-                    applied: Some(computed),
-                    kept_last_valid: false,
-                });
+                match backend.resize(pane_id, computed) {
+                    Ok(()) => ResizeResult {
+                        pane_id,
+                        applied: Some(computed),
+                        kept_last_valid: false,
+                    },
+                    Err(_) => ResizeResult {
+                        pane_id,
+                        applied: None,
+                        kept_last_valid: false,
+                    },
+                }
             }
-        }
+        };
+        updated_pane_result.push(result);
     }
 
-    Ok(updated_pane_result)
+    updated_pane_result
 }
 
 #[cfg(test)]

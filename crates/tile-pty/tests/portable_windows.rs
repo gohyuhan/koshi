@@ -47,7 +47,11 @@ fn force_terminates_a_running_child() {
     let backend = PortablePtyBackend::new();
     // `ping -n 100` blocks ~100s, so only the kill ends it.
     let handle = backend
-        .spawn(spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]), SIZE)
+        .spawn(
+            tile_core::ids::PaneId::new(),
+            spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]),
+            SIZE,
+        )
         .expect("spawn cmd");
     backend
         .kill(handle.pane_id(), KillPolicy::Force)
@@ -62,7 +66,11 @@ fn force_terminates_a_running_child() {
 fn tree_terminates_the_job() {
     let backend = PortablePtyBackend::new();
     let handle = backend
-        .spawn(spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]), SIZE)
+        .spawn(
+            tile_core::ids::PaneId::new(),
+            spec("cmd.exe", &["/C", "ping -n 100 127.0.0.1 >NUL"]),
+            SIZE,
+        )
         .expect("spawn cmd");
     backend
         .kill(handle.pane_id(), KillPolicy::Tree)

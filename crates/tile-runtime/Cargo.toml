@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tile-core = { version = "0.1.0", path = "../tile-core" }
+tile-layout = { version = "0.1.0", path = "../tile-layout" }
 tile-observability = { version = "0.1.0", path = "../tile-observability" }
 tile-pty = { version = "0.1.0", path = "../tile-pty" }
 tile-session = { version = "0.1.0", path = "../tile-session" }

@@ -1,34 +1,34 @@
-//! Tests for the NewPane state transaction.
+//! Tests for the NewPane state commit.
 //!
-//! Each test builds a one-pane session (a tab, its leaf, and an attached
-//! client) and runs [`new_pane`] against it, asserting the emitted events, the
-//! post-split layout tree, the registered pane, and the client's focus — plus
-//! the rejection paths (no space, unknown source) that must leave the session
-//! untouched.
+//! Each test builds a one-pane session, prepares a split candidate with
+//! [`split_leaf`] (as the runtime does), and applies it with [`commit_new_pane`],
+//! asserting the emitted events, the post-split layout tree, the registered pane,
+//! and the client's focus. Fit preflight and source resolution belong to the
+//! runtime (which builds the candidate and spawns before committing), so they are
+//! covered by the runtime's tests, not here.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused};
+use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use tile_core::geometry::{Direction, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_core::process::{ShellKind, SpawnSpec};
+use tile_layout::edit::split_leaf;
 use tile_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
 
-use super::{new_pane, NewPaneError, NewPaneSpec};
+use super::{commit_new_pane, NewPaneSpec};
 use crate::client::{Client, ClientRegistry};
 use crate::session::state::{Session, Tab};
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
-const TINY: Size = Size { cols: 2, rows: 1 };
 
-/// A session with one tab holding a single leaf `pane`, plus one attached
-/// client of `viewport` viewing that tab with `pane` focused. Returns the
-/// session and the ids needed to drive [`new_pane`].
-fn session_one_pane(viewport: Size) -> (Session, TabId, PaneId, ClientId) {
+/// A session with one tab holding a single leaf `pane`, plus one attached client
+/// viewing that tab with `pane` focused. Returns the session and the ids.
+fn session_one_pane() -> (Session, TabId, PaneId, ClientId) {
     let tab_id = TabId::new();
     let pane = PaneId::new();
     let client_id = ClientId::new();
@@ -45,7 +45,7 @@ fn session_one_pane(viewport: Size) -> (Session, TabId, PaneId, ClientId) {
         client_id,
         session.id,
         SystemTime::UNIX_EPOCH,
-        viewport,
+        VIEWPORT,
         tab_id,
     );
     client.update_focused_pane(tab_id, pane);
@@ -54,46 +54,39 @@ fn session_one_pane(viewport: Size) -> (Session, TabId, PaneId, ClientId) {
     (session, tab_id, pane, client_id)
 }
 
-/// The pane id minted by the op, read from its first event.
-fn created_pane(events: &[Event]) -> PaneId {
-    match events.first() {
-        Some(Event::PaneCreated(created)) => created.pane_id,
-        other => panic!("expected PaneCreated first, got {other:?}"),
-    }
-}
-
-/// The two leaf ids of a tab whose layout is a single split, in child order.
-fn split_panes(session: &Session, tab: TabId) -> (SplitDirection, Vec<PaneId>) {
-    let LayoutNode::Split(split) = session.tabs.get(&tab).expect("tab").layout() else {
-        panic!("expected a split layout");
-    };
-    let panes = split
-        .children
-        .iter()
-        .map(|child| match child.node {
-            LayoutNode::Pane(id) => id,
-            _ => panic!("expected leaf children"),
-        })
-        .collect();
-    (split.direction, panes)
+/// Mint the new pane's id and build the candidate tree for splitting `source` in
+/// `tab`, exactly as the runtime does before committing.
+fn prepared(
+    session: &Session,
+    tab: TabId,
+    source: PaneId,
+    direction: Direction,
+) -> (PaneId, LayoutNode) {
+    let new_id = PaneId::new();
+    let candidate = split_leaf(
+        session.tabs.get(&tab).expect("tab").layout(),
+        source,
+        new_id,
+        direction,
+    )
+    .expect("source is a leaf");
+    (new_id, candidate)
 }
 
 #[test]
-fn split_right_emits_three_events_and_focuses_the_new_pane() {
-    let (mut session, tab, source, client) = session_one_pane(VIEWPORT);
+fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
 
-    let events = new_pane(
+    let (_previous, events) = commit_new_pane(
         &mut session,
-        source,
+        new_id,
         tab,
-        Direction::Right,
+        candidate,
         Some(client),
         NewPaneSpec::default(),
         SystemTime::UNIX_EPOCH,
-    )
-    .expect("fits the viewport");
-    let new_id = created_pane(&events);
-
+    );
     assert_eq!(
         events,
         vec![
@@ -109,7 +102,7 @@ fn split_right_emits_three_events_and_focuses_the_new_pane() {
         ]
     );
 
-    // Tree is a horizontal split with the source first, the new pane after.
+    // The candidate tree was swapped in: a horizontal split, source first.
     assert_eq!(
         session.tabs.get(&tab).expect("tab").layout(),
         &LayoutNode::Split(SplitNode::with_equal_weights(
@@ -121,11 +114,12 @@ fn split_right_emits_three_events_and_focuses_the_new_pane() {
         ))
     );
 
-    // The new pane is registered, `Spawning`, and focused.
+    // The new pane is registered `Running` (its process is already live),
+    // focused, and at the front of MRU.
     assert_eq!(session.panes.len(), 2);
     assert_eq!(
         *session.panes.get(new_id).expect("record").lifecycle(),
-        PaneLifecycle::Spawning,
+        PaneLifecycle::Running,
     );
     assert_eq!(
         session
@@ -142,90 +136,102 @@ fn split_right_emits_three_events_and_focuses_the_new_pane() {
 }
 
 #[test]
-fn direction_sets_axis_and_new_pane_position() {
-    // (direction, split axis, index the new pane takes among the children)
-    let cases = [
-        (Direction::Right, SplitDirection::Horizontal, 1usize),
-        (Direction::Left, SplitDirection::Horizontal, 0),
-        (Direction::Down, SplitDirection::Vertical, 1),
-        (Direction::Up, SplitDirection::Vertical, 0),
-    ];
+fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
+    // Two tabs; the client is viewing tab A but the split lands in tab B.
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let client_id = ClientId::new();
+    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    session
+        .tabs
+        .insert(tab_a, Tab::new(tab_a, "a".to_owned(), 0, pane_a));
+    session
+        .tabs
+        .insert(tab_b, Tab::new(tab_b, "b".to_owned(), 1, pane_b));
+    let _ = session
+        .panes
+        .insert(PaneRecord::new(pane_a, SystemTime::UNIX_EPOCH));
+    let _ = session
+        .panes
+        .insert(PaneRecord::new(pane_b, SystemTime::UNIX_EPOCH));
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        VIEWPORT,
+        tab_a,
+    );
+    client.update_focused_pane(tab_a, pane_a);
+    session.attach_client(client);
 
-    for (direction, axis, new_index) in cases {
-        let (mut session, tab, source, client) = session_one_pane(VIEWPORT);
-        let events = new_pane(
-            &mut session,
-            source,
-            tab,
-            direction,
-            Some(client),
-            NewPaneSpec::default(),
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("fits the viewport");
-        let new_id = created_pane(&events);
-
-        let (got_axis, panes) = split_panes(&session, tab);
-        assert_eq!(got_axis, axis, "axis for {direction:?}");
-        assert_eq!(
-            panes[new_index], new_id,
-            "new pane position for {direction:?}"
-        );
-        assert_eq!(
-            panes[1 - new_index],
-            source,
-            "source position for {direction:?}",
-        );
-    }
-}
-
-#[test]
-fn no_space_rejects_and_leaves_the_session_untouched() {
-    let (mut session, tab, source, client) = session_one_pane(TINY);
-    let before = session.tabs.get(&tab).expect("tab").layout().clone();
-
-    let result = new_pane(
-        &mut session,
-        source,
-        tab,
+    let new_id = PaneId::new();
+    let candidate = split_leaf(
+        session.tabs.get(&tab_b).expect("tab b").layout(),
+        pane_b,
+        new_id,
         Direction::Right,
-        Some(client),
+    )
+    .expect("source is a leaf");
+
+    let (previous, events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab_b,
+        candidate,
+        Some(client_id),
         NewPaneSpec::default(),
         SystemTime::UNIX_EPOCH,
     );
 
-    assert_eq!(result, Err(NewPaneError::WontFit));
-    assert_eq!(session.tabs.get(&tab).expect("tab").layout(), &before);
-    assert_eq!(session.panes.len(), 1);
-    // Focus is unchanged — still the source pane, never moved to a new one.
+    // The client wasn't viewing tab B, so it is switched there (its old tab A is
+    // reported for the caller to reflow) and focuses the new pane; TabFocused is
+    // emitted first, before the pane appears.
+    assert_eq!(previous, Some(tab_a));
+    assert_eq!(
+        session.clients.get(client_id).expect("client").active_tab(),
+        tab_b
+    );
     assert_eq!(
         session
             .clients
-            .get(client)
+            .get(client_id)
             .expect("client")
-            .focused_pane(tab),
-        Some(source),
+            .focused_pane(tab_b),
+        Some(new_id),
+    );
+    assert_eq!(
+        events,
+        vec![
+            Event::TabFocused(TabFocused { tab_id: tab_b }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: new_id,
+                tab_id: tab_b,
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id: tab_b }),
+            Event::PaneFocused(PaneFocused {
+                pane_id: new_id,
+                tab_id: tab_b,
+            }),
+        ]
     );
 }
 
 #[test]
-fn no_focus_client_creates_pane_without_focus_and_skips_preflight() {
-    // A tiny viewport would fail the fit check, but without a focus client there
-    // is no rect to judge against, so the split proceeds.
-    let (mut session, tab, source, _client) = session_one_pane(TINY);
+fn commit_without_a_focus_client_emits_no_focus_event() {
+    let (mut session, tab, source, _client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
 
-    let events = new_pane(
+    let (_previous, events) = commit_new_pane(
         &mut session,
-        source,
+        new_id,
         tab,
-        Direction::Right,
+        candidate,
         None,
         NewPaneSpec::default(),
         SystemTime::UNIX_EPOCH,
-    )
-    .expect("no preflight without a focus client");
-    let new_id = created_pane(&events);
-
+    );
     assert_eq!(
         events,
         vec![
@@ -236,38 +242,15 @@ fn no_focus_client_creates_pane_without_focus_and_skips_preflight() {
             Event::LayoutChanged(LayoutChanged { tab_id: tab }),
         ]
     );
+    // No focus was claimed, so nothing entered the tab's focus history.
     assert_eq!(session.panes.len(), 2);
     assert!(session.tabs.get(&tab).expect("tab").focus_mru().is_empty());
 }
 
 #[test]
-fn name_sets_the_new_pane_title() {
-    let (mut session, tab, source, client) = session_one_pane(VIEWPORT);
-
-    let events = new_pane(
-        &mut session,
-        source,
-        tab,
-        Direction::Right,
-        Some(client),
-        NewPaneSpec {
-            name: Some("logs".to_owned()),
-            ..NewPaneSpec::default()
-        },
-        SystemTime::UNIX_EPOCH,
-    )
-    .expect("fits the viewport");
-    let new_id = created_pane(&events);
-
-    assert_eq!(
-        session.panes.get(new_id).expect("record").title.as_deref(),
-        Some("logs"),
-    );
-}
-
-#[test]
-fn cwd_and_command_are_recorded_on_the_new_pane() {
-    let (mut session, tab, source, client) = session_one_pane(VIEWPORT);
+fn commit_records_name_cwd_and_command_on_the_new_pane() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
     let cwd = PathBuf::from("/work");
     let command = SpawnSpec {
         program: PathBuf::from("/usr/bin/htop"),
@@ -277,64 +260,42 @@ fn cwd_and_command_are_recorded_on_the_new_pane() {
         shell_kind: ShellKind::Other("htop".to_owned()),
     };
 
-    let events = new_pane(
+    let _ = commit_new_pane(
         &mut session,
-        source,
+        new_id,
         tab,
-        Direction::Right,
+        candidate,
         Some(client),
         NewPaneSpec {
+            name: Some("logs".to_owned()),
             cwd: Some(cwd.clone()),
             command: Some(command.clone()),
-            ..NewPaneSpec::default()
         },
         SystemTime::UNIX_EPOCH,
-    )
-    .expect("fits the viewport");
-    let new_id = created_pane(&events);
-
+    );
     let record = session.panes.get(new_id).expect("record");
+    assert_eq!(record.title.as_deref(), Some("logs"));
     assert_eq!(record.cwd.as_deref(), Some(cwd.as_path()));
     assert_eq!(record.command.as_ref(), Some(&command));
 }
 
 #[test]
-fn unknown_source_pane_is_rejected() {
-    let (mut session, tab, _source, client) = session_one_pane(VIEWPORT);
-    let ghost = PaneId::new();
-
-    let result = new_pane(
-        &mut session,
-        ghost,
-        tab,
-        Direction::Right,
-        Some(client),
-        NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
-    );
-
-    assert_eq!(result, Err(NewPaneError::SourceNotFound));
-    assert_eq!(session.panes.len(), 1);
-}
-
-#[test]
-fn stale_focus_client_creates_pane_without_claiming_focus() {
-    let (mut session, tab, source, _client) = session_one_pane(VIEWPORT);
+fn commit_with_a_stale_focus_client_claims_no_focus() {
+    let (mut session, tab, source, _client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
     let stale = ClientId::new(); // never attached to this session
 
-    let events = new_pane(
+    let (_previous, events) = commit_new_pane(
         &mut session,
-        source,
+        new_id,
         tab,
-        Direction::Right,
+        candidate,
         Some(stale),
         NewPaneSpec::default(),
         SystemTime::UNIX_EPOCH,
-    )
-    .expect("the split succeeds; a stale client simply focuses nothing");
-    let new_id = created_pane(&events);
-
-    // No PaneFocused — the named client is not attached, so nothing is focused.
+    );
+    // The named client is not attached, so nothing is focused: no PaneFocused,
+    // and no focus-MRU entry claims a focus that never happened.
     assert_eq!(
         events,
         vec![
@@ -345,7 +306,6 @@ fn stale_focus_client_creates_pane_without_claiming_focus() {
             Event::LayoutChanged(LayoutChanged { tab_id: tab }),
         ]
     );
-    // The pane exists, but no focus MRU entry claims a focus that never happened.
     assert_eq!(session.panes.len(), 2);
     assert!(session.tabs.get(&tab).expect("tab").focus_mru().is_empty());
 }

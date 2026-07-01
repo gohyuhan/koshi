@@ -167,6 +167,13 @@ pub struct NewPaneArgs {
     pub cwd: Option<PathBuf>,
     /// Command to run; `None` launches the default shell.
     pub command: Option<SpawnSpec>,
+    /// Client to show the new pane on. When set, that client is targeted and takes
+    /// priority even over an in-session issuer; a client not attached to the target
+    /// session is rejected outright (no fallback). `None` targets the issuing
+    /// client (for an in-session source) or, for a source with no client, the
+    /// session's sole client — a session with several attached clients and no named
+    /// target is rejected rather than switching an arbitrary one.
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::ClosePane`].

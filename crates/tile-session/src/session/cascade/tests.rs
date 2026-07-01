@@ -217,6 +217,27 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
 }
 
 #[test]
+fn collapsing_a_multi_pane_tab_emits_layout_changed() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+
+    let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+
+    // The survivor's geometry changed when the leaf collapsed, so the cascade
+    // announces it — a subscriber re-solves on LayoutChanged.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::LayoutChanged(changed) if changed.tab_id == tab_id)));
+}
+
+#[test]
 fn focus_repair_runs_for_every_client_on_the_removed_pane() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
@@ -321,6 +342,9 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
         .iter()
         .any(|e| matches!(e, Event::TabClosed(t) if t.tab_id == tab_id)));
     assert!(events.iter().any(|e| matches!(e, Event::Quit)));
+    // The tab is gone, so this is a tab-close, not a within-tab layout change:
+    // no LayoutChanged is emitted for a tab that no longer exists.
+    assert!(!events.iter().any(|e| matches!(e, Event::LayoutChanged(_))));
 }
 
 #[test]

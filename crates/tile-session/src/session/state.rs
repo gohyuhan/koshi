@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use tile_core::{
     constant::MAX_TAB_FOCUS_MRU,
+    geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
 };
 use tile_layout::{mode::LayoutMode, tree::LayoutNode};
@@ -227,6 +228,32 @@ impl Session {
         }
     }
 
+    /// The viewport to size tab `tab_id` against: the per-axis minimum of the
+    /// viewports of the clients viewing it (`cols` = the smallest width, `rows`
+    /// = the smallest height, taken independently), or `None` when no client is.
+    ///
+    /// A single pane is one PTY of one cell grid, so every client viewing it
+    /// shares its dimensions. The per-axis minimum is the largest grid that
+    /// fits inside *every* viewer on *both* axes; larger viewers letterbox the
+    /// unused margin. It is independent of which client (if any) issued the
+    /// command.
+    ///
+    /// This fixes reconciliation to *smallest-wins* — the interim policy for the
+    /// current single-client-per-command paths. A configurable multi-client
+    /// reconciliation policy (smallest / largest / latest / manual), re-run when
+    /// clients attach and detach, generalizes this later.
+    #[must_use]
+    pub fn tab_viewport(&self, tab_id: TabId) -> Option<Size> {
+        self.clients
+            .list_attached()
+            .filter(|client| client.active_tab() == tab_id)
+            .map(Client::viewport)
+            .reduce(|a, b| Size {
+                cols: a.cols.min(b.cols),
+                rows: a.rows.min(b.rows),
+            })
+    }
+
     /// Request shutdown: move a `Running` or `Detaching` session to `Stopping`.
     /// State is retained — stopping destroys no tabs or panes — so a stopped
     /// session can be persisted and restored later.
@@ -383,3 +410,6 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

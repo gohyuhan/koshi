@@ -1,7 +1,29 @@
 //! Tests for process lifecycle and spawn types.
 
 use super::*;
+use std::ffi::OsString;
 use std::path::Path;
+
+#[test]
+fn shell_program_uses_a_set_nonempty_value() {
+    assert_eq!(
+        shell_program(Some(OsString::from("/usr/bin/fish")), "/bin/sh"),
+        PathBuf::from("/usr/bin/fish"),
+    );
+}
+
+#[test]
+fn shell_program_falls_back_when_unset() {
+    assert_eq!(shell_program(None, "/bin/sh"), PathBuf::from("/bin/sh"));
+}
+
+#[test]
+fn shell_program_treats_a_set_but_empty_value_as_unset() {
+    assert_eq!(
+        shell_program(Some(OsString::new()), "/bin/sh"),
+        PathBuf::from("/bin/sh"),
+    );
+}
 
 #[test]
 fn kill_policy_serializes_timeout_as_seconds() {

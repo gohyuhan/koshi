@@ -20,10 +20,13 @@ use tile_core::command::{
 };
 use tile_core::geometry::Size;
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
-use tile_core::process::{ShellKind, SpawnSpec};
+use tile_core::process::{PtySize, ShellKind, SpawnSpec};
+use tile_layout::mode::LayoutMode;
 use tile_observability::cleanup::TerminalCleanupGuard;
+use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
 use tile_pty::backend::state::PtyBackend;
+use tile_pty::error::PtyError;
 use tile_session::client::{Client, ClientRegistry};
 use tile_session::session::state::{Session, Tab};
 use tile_session::session::tab_ops;
@@ -55,6 +58,38 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
         TerminalCleanupGuard::new(),
     );
     (runtime, tx)
+}
+
+/// Like [`new_runtime`], but also hands back the concrete fake backend so a test
+/// can drive spawn failures and assert on spawned panes, specs, and resizes.
+/// Both the runtime and the returned handle share one backend.
+fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+    let fake = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let (tx, inbox_rx) = mpsc::channel();
+    let runtime = Runtime::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        TerminalCleanupGuard::new(),
+    );
+    (runtime, fake, tx)
+}
+
+/// The id of the single pane in `session` that is not `source` — the freshly
+/// split pane. Panics unless exactly one other pane exists.
+fn other_pane(rt: &Runtime, session: SessionId, source: PaneId) -> PaneId {
+    let mut others = rt.sessions[&session]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .filter(|id| *id != source);
+    let pane = others.next().expect("a second pane exists");
+    assert!(others.next().is_none(), "exactly one other pane");
+    pane
 }
 
 /// A minimal valid spawn request for the command-carrying variants.
@@ -385,20 +420,14 @@ fn new_pane_explicit_source_absent_is_not_found() {
 fn new_pane_without_an_anchor_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
-    // Every new-pane shape splits a source leaf (`source: None` = the focused
-    // pane); an internal source has no focused pane to anchor on, in any mode.
+    // A directional new-pane splits a source leaf (`source: None` = the focused
+    // pane); an internal source has no focused pane to anchor on. (The stacked /
+    // in-place shapes reject as pending before anchor resolution, covered
+    // separately.)
     let cases = vec![
         NewPaneArgs::default(),
         NewPaneArgs {
             direction: Some(tile_core::geometry::Direction::Right),
-            ..NewPaneArgs::default()
-        },
-        NewPaneArgs {
-            stacked: true,
-            ..NewPaneArgs::default()
-        },
-        NewPaneArgs {
-            in_place: true,
             ..NewPaneArgs::default()
         },
     ];
@@ -431,7 +460,9 @@ fn new_pane_defaults_to_the_focused_pane() {
     rt.sessions.insert(session_id, session);
 
     // No explicit source: the focused pane anchors the split, and the new pane
-    // auto-focuses — PaneCreated + LayoutChanged + PaneFocused.
+    // auto-focuses, spawns its PTY, and is resized into the new geometry —
+    // PaneCreated + LayoutChanged + PaneFocused + PtyResized(new pane). The root
+    // has no PTY, so it contributes no PtyResized.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
@@ -443,7 +474,7 @@ fn new_pane_defaults_to_the_focused_pane() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(emitted_events.len(), 4);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -468,6 +499,40 @@ fn new_pane_stacked_is_pending() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("stacked/in-place new-pane pending".to_string()),
+        }
+    );
+}
+
+#[test]
+fn new_pane_stacked_with_invalid_source_still_pending() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // A stacked request naming a pane that does not exist: the pending reject
+    // wins over target resolution, so the reason is the feature-pending one, not
+    // `TargetNotFound`.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            source: Some(PaneId::new()),
             ..NewPaneArgs::default()
         }),
     );
@@ -519,7 +584,7 @@ fn new_pane_with_no_space_is_min_size() {
 }
 
 #[test]
-fn new_pane_explicit_pane_in_other_session_creates_without_focus() {
+fn new_pane_explicit_pane_in_session_without_clients_is_rejected() {
     let (mut rt, _tx) = new_runtime();
 
     // Session A holds the acting client.
@@ -533,7 +598,8 @@ fn new_pane_explicit_pane_in_other_session_creates_without_focus() {
     add_client(&mut session_a, client_id, tab_a, Some(pane_a));
     rt.sessions.insert(id_a, session_a);
 
-    // Session B owns the explicit `--pane` target; no client of A is attached.
+    // Session B owns the explicit `--pane` target and has no client at all, so
+    // nothing can view the new pane's tab.
     let id_b = SessionId::new();
     let tab_b = TabId::new();
     let pane_b = PaneId::new();
@@ -542,8 +608,8 @@ fn new_pane_explicit_pane_in_other_session_creates_without_focus() {
     add_tab(&mut session_b, tab_b, pane_b);
     rt.sessions.insert(id_b, session_b);
 
-    // A global `--pane` lands the new pane in B; the acting client cannot focus
-    // a pane in a session it is not attached to, so no PaneFocused is emitted.
+    // A global `--pane` targets B, but B has no client to adopt onto the tab, so
+    // the pane could never be sized or shown: reject rather than strand it.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
@@ -552,18 +618,16 @@ fn new_pane_explicit_pane_in_other_session_creates_without_focus() {
         }),
     );
     let command_id = env.id;
-    match rt.dispatch(env) {
-        CommandResult::Ok {
-            command_id: ok_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 2);
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no attached client to view the new pane's tab".to_string()),
         }
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    // The split grew session B, not session A.
-    assert_eq!(rt.sessions[&id_b].panes.len(), 2);
+    );
+    // Rejected before mutating: neither session grew a pane.
+    assert_eq!(rt.sessions[&id_b].panes.len(), 1);
     assert_eq!(rt.sessions[&id_a].panes.len(), 1);
 }
 
@@ -1166,4 +1230,1241 @@ fn in_session_cli_tab_default_with_removed_source_pane_is_not_found() {
             help: None,
         }
     );
+}
+
+#[test]
+fn new_pane_spawns_and_runs_the_child() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    let result = rt.dispatch(env);
+
+    let new_pane = other_pane(&rt, sid, root);
+    assert!(matches!(result, CommandResult::Ok { command_id: id, .. } if id == command_id));
+    // The child was spawned under the pane's own id and advanced to Running.
+    assert_eq!(fake.spawned_panes(), vec![new_pane]);
+    assert_eq!(
+        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
+        PaneLifecycle::Running
+    );
+    // Its handle is parked so the reader thread keeps feeding output.
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    // The root has no PTY yet, so it is neither spawned nor parked.
+    assert!(!rt.pty_handles.contains_key(&root));
+}
+
+#[test]
+fn new_pane_without_command_spawns_the_default_shell() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+
+    // command: None resolves to the platform default shell, cwd/env inherited.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap(),
+        SpawnSpec::default_shell(None, BTreeMap::new())
+    );
+}
+
+#[test]
+fn new_pane_with_command_spawns_that_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            command: Some(spawn_spec()),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // An explicit command is spawned verbatim.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), spawn_spec());
+}
+
+#[test]
+fn new_pane_spawn_failure_leaves_no_trace() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "boom".to_string(),
+    });
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let before_layout = rt.sessions[&sid].tabs[&tab].layout().clone();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+
+    // The child cannot launch, so the command rejects and nothing is committed.
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("failed to launch the pane's process".to_string()),
+        }
+    );
+    // No new pane, the layout is untouched, no handle was parked, and the
+    // client's focus never moved to a pane that never existed.
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert!(rt.sessions[&sid].panes.get(root).is_some());
+    assert_eq!(rt.sessions[&sid].tabs[&tab].layout(), &before_layout);
+    assert!(rt.pty_handles.is_empty());
+    assert!(fake.spawned_panes().is_empty());
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
+    );
+}
+
+#[test]
+fn new_pane_adoption_spawn_failure_leaves_no_trace() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "boom".to_string(),
+    });
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, client_id, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let before_layout = rt.sessions[&sid].tabs[&tab_back].layout().clone();
+
+    // The split would adopt the client onto the background tab, but the spawn
+    // happens first and fails — so the adoption never occurs: the client stays on
+    // the front tab and no pane appears.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("failed to launch the pane's process".to_string()),
+        }
+    );
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.clients.get(client_id).unwrap().active_tab(),
+        tab_front
+    );
+    assert_eq!(session.panes.len(), 2);
+    assert_eq!(session.tabs[&tab_back].layout(), &before_layout);
+    assert!(rt.pty_handles.is_empty());
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_pane_on_a_background_tab_adopts_a_viewer() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+
+    // One session, one client viewing the front tab. A second, background tab
+    // holds `pane_back` and has no viewer, so it has no viewport of its own.
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, client_id, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // No client was viewing the background tab, so the sole client is adopted
+    // onto it: it switches to view that tab, the split spawns like any in-view
+    // one, and the adopted client focuses the new pane. Events: TabFocused,
+    // PaneCreated, LayoutChanged, PaneFocused, PtyResized (the PTY-less
+    // `pane_back` sibling is skipped by the reflow).
+    let new_pane = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the freshly split pane");
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 5),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.clients.get(client_id).unwrap().active_tab(),
+        tab_back
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab_back),
+        Some(new_pane)
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    assert!(fake.spawned_panes().contains(&new_pane));
+    assert_eq!(
+        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
+        PaneLifecycle::Running
+    );
+}
+
+#[test]
+fn new_pane_on_a_background_tab_adopts_the_issuing_client() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+
+    // Two clients in one session, both on the front tab. The issuer is chosen as
+    // the *higher*-id client, so the earliest-id fallback (`.min()`) would pick
+    // the other one — proving adoption prefers the issuer, not the lowest id.
+    let c1 = ClientId::new();
+    let c2 = ClientId::new();
+    let (issuer, bystander) = if c1 < c2 { (c2, c1) } else { (c1, c2) };
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, bystander, tab_front, Some(pane_front));
+    add_client(&mut session, issuer, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The issuer splits the background tab; it — not the lower-id bystander — is
+    // pulled onto the tab and focuses the new pane.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    // TabFocused, PaneCreated, LayoutChanged, PaneFocused, PtyResized.
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 5),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let new_pane = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the freshly split pane");
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.clients.get(issuer).unwrap().active_tab(), tab_back);
+    assert_eq!(
+        session.clients.get(issuer).unwrap().focused_pane(tab_back),
+        Some(new_pane)
+    );
+    // The bystander was left exactly where it was.
+    assert_eq!(
+        session.clients.get(bystander).unwrap().active_tab(),
+        tab_front
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(bystander)
+            .unwrap()
+            .focused_pane(tab_back),
+        None
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+}
+
+#[test]
+fn new_pane_external_multiple_clients_is_ambiguous() {
+    let (mut rt, _tx) = new_runtime();
+
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let c1 = ClientId::new();
+    let c2 = ClientId::new();
+    add_client(&mut session, c1, tab_front, Some(pane_front));
+    add_client(&mut session, c2, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No issuing client (external) and the background tab has no viewer, but the
+    // session has two attached clients — adopting either would hijack a bystander,
+    // so it rejects and asks for a named target, changing nothing.
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("multiple clients; name a target client for the new pane".to_string()),
+        }
+    );
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.panes.len(), 2);
+    assert_eq!(session.clients.get(c1).unwrap().active_tab(), tab_front);
+    assert_eq!(session.clients.get(c2).unwrap().active_tab(), tab_front);
+}
+
+#[test]
+fn new_pane_external_targets_a_named_client() {
+    let (mut rt, _tx) = new_runtime();
+
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let bystander = ClientId::new();
+    let target = ClientId::new();
+    add_client(&mut session, bystander, tab_front, Some(pane_front));
+    add_client(&mut session, target, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // External CLI names `target`: it is adopted onto the background tab and
+    // focuses the new pane; the bystander is left untouched.
+    rt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            client: Some(target),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let new_pane = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the freshly split pane");
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.clients.get(target).unwrap().active_tab(), tab_back);
+    assert_eq!(
+        session.clients.get(target).unwrap().focused_pane(tab_back),
+        Some(new_pane)
+    );
+    assert_eq!(
+        session.clients.get(bystander).unwrap().active_tab(),
+        tab_front
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+}
+
+#[test]
+fn new_pane_external_unattached_target_client_is_not_found() {
+    let (mut rt, _tx) = new_runtime();
+
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let client_id = ClientId::new();
+    add_client(&mut session, client_id, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The named client is not attached to the session: reject before mutating.
+    let ghost = ClientId::new();
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            client: Some(ghost),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 2);
+}
+
+#[test]
+fn new_pane_explicit_client_wins_over_the_in_session_issuer() {
+    let (mut rt, _tx) = new_runtime();
+    let issuer = ClientId::new();
+    let other = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, issuer, tab, Some(root));
+    add_client(&mut session, other, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The issuer runs the command but names `other` as the target client: the
+    // explicit `--client` wins even in-session, so `other` focuses the new pane
+    // and the issuer's focus is left untouched.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::NewPane(NewPaneArgs {
+            client: Some(other),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let new_pane = other_pane(&rt, sid, root);
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.clients.get(other).unwrap().focused_pane(tab),
+        Some(new_pane)
+    );
+    assert_eq!(
+        session.clients.get(issuer).unwrap().focused_pane(tab),
+        Some(root)
+    );
+}
+
+#[test]
+fn new_pane_explicit_unattached_client_is_rejected_even_with_an_issuer() {
+    let (mut rt, _tx) = new_runtime();
+    let issuer = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, issuer, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // A wrong `--client` (not attached) rejects outright — no fallback to the
+    // issuing client, even though one is present.
+    let ghost = ClientId::new();
+    let env = envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::NewPane(NewPaneArgs {
+            client: Some(ghost),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(issuer)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
+    );
+}
+
+#[test]
+fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+
+    // One client viewing the front tab at a 2x1 viewport too small to split.
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 2, rows: 1 },
+        tab_front,
+    );
+    client.update_focused_pane(tab_front, pane_front);
+    session.attach_client(client);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The split would size against the 2x1 viewport of the client that would be
+    // adopted, but fit is checked before anything mutates: it cannot fit, so the
+    // command rejects and nothing changes — the client is never moved.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space to split".to_string()),
+        }
+    );
+    let session = &rt.sessions[&sid];
+    // The client never left its tab, nothing spawned, no pane added.
+    assert_eq!(
+        session.clients.get(client_id).unwrap().active_tab(),
+        tab_front
+    );
+    assert_eq!(session.panes.len(), 2);
+    assert!(fake.spawned_panes().is_empty());
+    assert!(rt.pty_handles.is_empty());
+}
+
+#[test]
+fn new_pane_adoption_reflows_the_vacated_tab() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+
+    // Client A (the issuer) is the smaller, size-constraining viewer of the front
+    // tab; client B is the larger 80-wide viewer. Both view the front tab.
+    let client_a = ClientId::new();
+    let mut a = Client::new(
+        client_a,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_front,
+    );
+    a.update_focused_pane(tab_front, pane_front);
+    session.attach_client(a);
+    let client_b = ClientId::new();
+    add_client(&mut session, client_b, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split the front tab (from B) so it holds a live PTY sized to A's 40-wide
+    // constraint.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_b),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the front-tab split pane");
+    let before = fake.resizes(pane_x).unwrap();
+
+    // A issues a split against the background tab: A is adopted onto it and leaves
+    // the front tab, whose viewport now grows to B's 80 wide. The front tab's
+    // live PTY is reflowed exactly once, larger than before.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let after = fake.resizes(pane_x).unwrap();
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(after.last().unwrap().cols > before.last().unwrap().cols);
+}
+
+#[test]
+fn new_pane_adoption_vacated_tab_with_no_viewer_keeps_sizes() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, client_id, tab_front, Some(pane_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Give the front tab a live PTY pane by splitting it while viewed.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the front-tab split pane");
+    let before = fake.resizes(pane_x).unwrap().len();
+
+    // The sole viewer is adopted onto the background tab, leaving the front tab
+    // with no viewer: its live PTY keeps its size — not resized at all.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_back
+    );
+    assert_eq!(fake.resizes(pane_x).unwrap().len(), before);
+}
+
+#[test]
+fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_back = TabId::new();
+    let tab_front = TabId::new();
+    let pane_back = PaneId::new();
+    let pane_front = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_back);
+    add_pane(&mut session, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    // Client A (40 wide) views the back tab; client B (100 wide) views the front.
+    let client_a = ClientId::new();
+    let mut a = Client::new(
+        client_a,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_back,
+    );
+    a.update_focused_pane(tab_back, pane_back);
+    session.attach_client(a);
+    let client_b = ClientId::new();
+    let mut b = Client::new(
+        client_b,
+        session.id,
+        SystemTime::now(),
+        Size {
+            cols: 100,
+            rows: 50,
+        },
+        tab_front,
+    );
+    b.update_focused_pane(tab_front, pane_front);
+    session.attach_client(b);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // A splits the back tab while it's the only (40-wide) viewer: the sibling's
+    // PTY is sized to 40 wide.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_back && *id != pane_front)
+        .expect("the back-tab split pane");
+    let small = *fake.resizes(pane_x).unwrap().last().unwrap();
+
+    // A leaves the back tab (now unviewed); its PTYs keep the stale 40-wide size.
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .clients
+        .get_mut(client_a)
+        .unwrap()
+        .update_active_tab(tab_front);
+
+    // B splits `pane_back` on the now-background tab: B is adopted at 100 wide. The
+    // untouched sibling `pane_x` must be reflowed to the larger geometry, not left
+    // at its stale 40-wide size.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_b),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let large = *fake.resizes(pane_x).unwrap().last().unwrap();
+    assert!(
+        large.cols > small.cols,
+        "stale background sibling was reflowed to the larger viewport (was {small:?}, now {large:?})"
+    );
+}
+
+#[test]
+fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
+    let (mut rt, _tx) = new_runtime();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    // The session's sole client is too small (2x1) to hold a split.
+    let client_id = ClientId::new();
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 2, rows: 1 },
+        tab_front,
+    );
+    client.update_focused_pane(tab_front, pane_front);
+    session.attach_client(client);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // An external CLI (no issuer) targets the unviewed background tab: the sole
+    // client is the unambiguous default, but its viewport cannot hold the split,
+    // so it rejects MinSize — before any mutation.
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space to split".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 2);
+}
+
+#[test]
+fn new_pane_leaves_an_unchanged_sibling_pty_alone() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split 1: root -> (root | A), focus A. Split 2: A -> (root | (A | B)), focus B.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let a = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root)
+        .expect("pane A");
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != a)
+        .expect("pane B");
+    let a_before = fake.resizes(a).unwrap().len();
+    let b_before = fake.resizes(b).unwrap().len();
+
+    // Split 3: B -> (root | (A | (B | C))). B shrinks and is reflowed; A's rect is
+    // unchanged (its subtree is untouched), so A's PTY is left alone entirely.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    assert_eq!(fake.resizes(a).unwrap().len(), a_before);
+    assert!(fake.resizes(b).unwrap().len() > b_before);
+}
+
+#[test]
+fn new_pane_sibling_resize_failure_does_not_abort_the_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // First split spawns A with a live PTY.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let a = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root)
+        .expect("pane A");
+    let a_before = fake.resizes(a).unwrap().len();
+    // A's next resize will error.
+    fake.fail_resizes_on(a, PtyError::UnknownPane { pane: a });
+
+    // Second split reflows A (its resize errors), but best-effort means the
+    // command still succeeds and the new pane B spawns; A's failed resize records
+    // nothing.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let command_id = env.id;
+    let result = rt.dispatch(env);
+    assert!(matches!(result, CommandResult::Ok { command_id: id, .. } if id == command_id));
+    let b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != a)
+        .expect("pane B");
+    assert!(rt.pty_handles.contains_key(&b));
+    assert_eq!(fake.resizes(a).unwrap().len(), a_before);
+}
+
+#[test]
+fn new_pane_records_the_resolved_launch_cwd_on_the_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // `--cwd /work` with an explicit command whose own cwd is None: the command's
+    // cwd resolves to /work at spawn.
+    let mut command = spawn_spec();
+    command.cwd = None;
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            cwd: Some(PathBuf::from("/work")),
+            command: Some(command),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // The record's cwd, its command's own cwd, and the actual spawn cwd all agree
+    // on the resolved launch directory — the record can't disagree with itself.
+    let new_pane = other_pane(&rt, sid, root);
+    let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
+    assert_eq!(record.cwd, Some(PathBuf::from("/work")));
+    assert_eq!(
+        record.command.as_ref().unwrap().cwd,
+        Some(PathBuf::from("/work"))
+    );
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/work"))
+    );
+}
+
+#[test]
+fn new_pane_records_an_explicit_commands_own_cwd() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The command carries its own cwd (/cmd); `--cwd /work` must NOT override it.
+    let mut command = spawn_spec();
+    command.cwd = Some(PathBuf::from("/cmd"));
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            cwd: Some(PathBuf::from("/work")),
+            command: Some(command),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // Record and spawn both use the command's own /cmd — the record can't disagree
+    // with what the process actually launched with.
+    let new_pane = other_pane(&rt, sid, root);
+    let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
+    assert_eq!(record.cwd, Some(PathBuf::from("/cmd")));
+    assert_eq!(
+        record.command.as_ref().unwrap().cwd,
+        Some(PathBuf::from("/cmd"))
+    );
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/cmd"))
+    );
+}
+
+#[test]
+fn new_pane_default_shell_records_the_cwd_and_no_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No command, `--cwd /work`: the default shell launches in /work; the record
+    // stores that cwd and no command (the request named none).
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            cwd: Some(PathBuf::from("/work")),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    let new_pane = other_pane(&rt, sid, root);
+    let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
+    assert_eq!(record.cwd, Some(PathBuf::from("/work")));
+    assert_eq!(record.command, None);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/work"))
+    );
+}
+
+#[test]
+fn new_pane_external_into_a_viewed_tab_adopts_no_one() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // External CLI (no issuer, no --client) targeting a tab the client is already
+    // viewing: the pane is created and sized to that viewer, but no one is
+    // switched or focused — the client's focus stays on the root it was on.
+    rt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(root),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let new_pane = other_pane(&rt, sid, root);
+    let session = &rt.sessions[&sid];
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), tab);
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab),
+        Some(root)
+    );
+}
+
+#[test]
+fn new_pane_reflows_existing_sibling_ptys() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // First split creates pane A and spawns its PTY (the root has none yet).
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_a = other_pane(&rt, sid, root);
+    let a_resizes_before = fake.resizes(pane_a).unwrap().len();
+
+    // Second split creates B off the now-focused A. A must reflow even though the
+    // PTY-less root is in the layout — it must not abort the resize batch.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+
+    // The second split reflows A exactly once more (spawn size + this reflow).
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), a_resizes_before + 1);
+    // The root, having no PTY, was never resized — confirming it was skipped.
+    assert!(fake.resizes(root).is_err());
+}
+
+#[test]
+fn new_pane_explicit_command_inherits_the_pane_cwd() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // `--cwd /work` with an explicit command whose own cwd is None.
+    let mut command = spawn_spec();
+    command.cwd = None;
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            cwd: Some(PathBuf::from("/work")),
+            command: Some(command),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    // The command spawns in the pane cwd, not the inherited directory.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/work"))
+    );
+}
+
+#[test]
+fn new_pane_explicit_command_cwd_wins_over_the_pane_cwd() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The command sets its own cwd, so the pane cwd does not override it.
+    let mut command = spawn_spec();
+    command.cwd = Some(PathBuf::from("/cmd"));
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            cwd: Some(PathBuf::from("/work")),
+            command: Some(command),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/cmd"))
+    );
+}
+
+#[test]
+fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+
+    // Session A holds the acting client.
+    let client_a = ClientId::new();
+    let id_a = SessionId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session_a = bare_session(id_a);
+    add_pane(&mut session_a, pane_a);
+    add_tab(&mut session_a, tab_a, pane_a);
+    add_client(&mut session_a, client_a, tab_a, Some(pane_a));
+    rt.sessions.insert(id_a, session_a);
+
+    // Session B owns the target pane and has its own client viewing B's tab with
+    // a viewport distinct from the no-client default.
+    let client_b = ClientId::new();
+    let id_b = SessionId::new();
+    let tab_b = TabId::new();
+    let pane_b = PaneId::new();
+    let mut session_b = bare_session(id_b);
+    add_pane(&mut session_b, pane_b);
+    add_tab(&mut session_b, tab_b, pane_b);
+    let mut viewer = Client::new(
+        client_b,
+        id_b,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_b,
+    );
+    viewer.update_focused_pane(tab_b, pane_b);
+    session_b.attach_client(viewer);
+    rt.sessions.insert(id_b, session_b);
+
+    // Cross-session --pane from A's client: no focus client in B, but B has a
+    // viewer, so the new pane sizes to B's viewport, not the 80x24 default.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_b),
+            ..NewPaneArgs::default()
+        }),
+    ));
+
+    let new_pane = other_pane(&rt, id_b, pane_b);
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    // Exactly the size the production pipeline yields for a rightward split of
+    // `pane_b` at B's 40x10 viewport — pins the target-viewer sizing and the
+    // default split direction, not a loose bound (a vertical split would satisfy
+    // any cols<=40/rows<=10 bound but produce a different exact size).
+    let expected = {
+        let probe = PaneId::new();
+        let candidate =
+            split_leaf(&LayoutNode::Pane(pane_b), pane_b, probe, Direction::Right).unwrap();
+        let rects = content_rects(&solve_with_mode(
+            &candidate,
+            LayoutMode::Tiled,
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 10 }),
+        ));
+        let rect = rects
+            .iter()
+            .find(|(id, _)| *id == probe)
+            .and_then(|(_, r)| *r)
+            .expect("new pane has a content rect");
+        compute_pty_size(rect)
+    };
+    assert_eq!(fake.resizes(new_pane).unwrap()[0], expected);
+    assert_ne!(expected, PtySize { cols: 80, rows: 24 });
 }

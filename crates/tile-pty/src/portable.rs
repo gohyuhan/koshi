@@ -139,11 +139,15 @@ impl PtyBackend for PortablePtyBackend {
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
     /// be launched, or the master's reader/writer can't be taken.
-    fn spawn(&self, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle, PtyError> {
-        // 1. Mint the pane id and a channel-backed handle. `output_sender` /
-        //    `exit_sender` are the producing ends the threads below feed; the
-        //    caller keeps the consuming ends inside `handle`.
-        let pane_id = PaneId::new();
+    fn spawn(
+        &self,
+        pane_id: PaneId,
+        spec: SpawnSpec,
+        size: PtySize,
+    ) -> Result<PtyHandle, PtyError> {
+        // 1. Build a channel-backed handle for the caller's pane id.
+        //    `output_sender` / `exit_sender` are the producing ends the threads
+        //    below feed; the caller keeps the consuming ends inside `handle`.
         let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
 
         // 2. Open the PTY pair sized to the pane. The pair is two linked ends:
@@ -293,8 +297,15 @@ impl PtyBackend for PortablePtyBackend {
         });
 
         // 10. Retain the master, writer, killer, flag and both thread handles
-        //    under the pane id, then hand the caller its polling handle.
-        self.panes.lock().unwrap().insert(
+        //    under the pane id, then hand the caller its polling handle. The
+        //    caller owns the id and must not reuse a live one — spawning over a
+        //    live entry would drop its master fd and I/O threads on the floor.
+        let mut panes = self.panes.lock().unwrap();
+        debug_assert!(
+            !panes.contains_key(&pane_id),
+            "spawn into an already-live pane id {pane_id}; kill it before respawning"
+        );
+        panes.insert(
             pane_id,
             PaneEntry {
                 master: pair.master,
@@ -305,6 +316,7 @@ impl PtyBackend for PortablePtyBackend {
                 watcher: w_handle,
             },
         );
+        drop(panes);
         Ok(handle)
     }
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError> {

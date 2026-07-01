@@ -41,7 +41,9 @@ fn spec(program: &str, args: &[&str]) -> SpawnSpec {
 /// Spawn a pane through [`PTY_GATE`], panicking on failure.
 fn spawn_pane(backend: &PortablePtyBackend, spec: SpawnSpec) -> PtyHandle {
     let _gate = PTY_GATE.lock().expect("pty gate");
-    backend.spawn(spec, SIZE).expect("spawn child")
+    backend
+        .spawn(tile_core::ids::PaneId::new(), spec, SIZE)
+        .expect("spawn child")
 }
 
 /// Poll the handle's output channel until `needle` appears or `timeout` elapses,
@@ -108,11 +110,15 @@ fn spawn_reports_clean_exit() {
 }
 
 #[test]
-fn spawn_mints_unique_pane_ids() {
+fn spawn_addresses_the_handle_by_the_callers_pane_id() {
     let backend = PortablePtyBackend::new();
-    let a = spawn_pane(&backend, spec("/bin/echo", &["a"]));
-    let b = spawn_pane(&backend, spec("/bin/echo", &["b"]));
-    assert_ne!(a.pane_id(), b.pane_id());
+    let _gate = PTY_GATE.lock().expect("pty gate");
+    // The caller owns pane identity; the handle comes back keyed by that id.
+    let pane = PaneId::new();
+    let handle = backend
+        .spawn(pane, spec("/bin/echo", &["a"]), SIZE)
+        .expect("spawn child");
+    assert_eq!(handle.pane_id(), pane);
 }
 
 #[test]
