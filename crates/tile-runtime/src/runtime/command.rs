@@ -13,14 +13,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::thread;
 use std::time::SystemTime;
 
 use tile_core::{
-    command::{Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, TabTarget},
+    command::{
+        ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs,
+        TabTarget,
+    },
     event::{Event, PtyResized, RejectReason},
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
-    process::{PtySize, SpawnSpec},
+    process::{KillPolicy, PtySize, SpawnSpec},
 };
 use tile_layout::{
     content::content_rects,
@@ -28,11 +32,14 @@ use tile_layout::{
     solver::{fits, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
 };
+use tile_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy};
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
 use tile_session::session::{
+    cascade::remove_pane_cascade,
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
+    policy::EmptyTabPolicy,
     state::Session,
 };
 
@@ -71,6 +78,15 @@ struct NewPaneTarget {
     focus_client: Option<ClientId>,
 }
 
+/// The resolved concrete target of a [`Command::ClosePane`]: the owning
+/// session, the tab whose layout holds the pane, and the pane itself. All
+/// fields are `Copy`, so resolving holds no borrow into the session map.
+struct ClosePaneTarget {
+    session_id: SessionId,
+    tab_id: TabId,
+    pane_id: PaneId,
+}
+
 impl Runtime {
     /// Dispatch one command and report its outcome.
     ///
@@ -91,7 +107,9 @@ impl Runtime {
             Command::NewPane(args) => {
                 self.handle_new_pane(envelope.id, &envelope.source, &args, envelope.issued_at)
             }
-            Command::ClosePane(_) => self.reject(envelope.id, "close pane"),
+            Command::ClosePane(args) => {
+                self.handle_close_pane(envelope.id, &envelope.source, &args)
+            }
             Command::ResizePane(_) => self.reject(envelope.id, "resize pane"),
             Command::FocusPane(_) => self.reject(envelope.id, "focus pane"),
             Command::NewTab(_) => self.reject(envelope.id, "new tab"),
@@ -323,6 +341,107 @@ impl Runtime {
         scope.commit(command_id)
     }
 
+    /// Handle [`Command::ClosePane`]: tear the pane out of its session and
+    /// kill its child, in commit-then-kill order — the state removal is
+    /// authoritative and immediate, the process kill is best-effort and
+    /// off-thread.
+    ///
+    /// The pane's close policy picks how the child dies: `--force` overrides
+    /// it with an immediate force-kill, `Graceful` requests a stop and
+    /// escalates after its grace window, and `ConfirmIfBusy` proceeds only for
+    /// a pane whose child already exited, rejecting otherwise with a hint at
+    /// `--force`. The removal itself is the shared cascade behind shell-exit
+    /// and user close: registry drop, layout collapse, per-client focus
+    /// repair, and — when the last pane of the last tab goes — tab close and
+    /// session quit. The kill runs on a detached thread because a graceful
+    /// kill sleeps out its grace window, and the dispatcher thread must never
+    /// stall. Surviving PTYs keep their last-set sizes.
+    fn handle_close_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &ClosePaneArgs,
+    ) -> CommandResult {
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_close_pane_target(args, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+
+        // Clone the shared backend before borrowing a session: the kill thread
+        // takes its own handle, so no `&self` borrow crosses the commit.
+        let backend = Arc::clone(self.pty_backend());
+
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(record) = session.panes.get(target.pane_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        // Pick how the child dies. `--force` overrides the pane's own policy;
+        // `ConfirmIfBusy` closes only a pane whose child provably ended
+        // (`Exited`) and otherwise rejects, pointing at `--force`.
+        let kill_policy = if args.force {
+            KillPolicy::Force
+        } else {
+            match record.close_policy {
+                PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
+                    PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
+                    _ => {
+                        return CommandResult::Rejected {
+                            command_id,
+                            reason: RejectReason::InvalidState,
+                            help: Some(
+                                "pane may be busy; pass --force to close anyway".to_string(),
+                            ),
+                        };
+                    }
+                },
+                policy => policy.kill_policy(),
+            }
+        };
+
+        // Solve the tab against a deterministic viewport so focus candidates
+        // rank geometrically even when no client currently views the tab.
+        let tab_rect = Rect::new(
+            Point { x: 0, y: 0 },
+            Self::close_viewport(session, target.tab_id),
+        );
+
+        // Commit the state removal: registry drop, layout collapse, per-client
+        // focus repair, empty-tab close, last-tab quit — one shared cascade.
+        let events = remove_pane_cascade(
+            session,
+            target.tab_id,
+            target.pane_id,
+            tab_rect,
+            EmptyTabPolicy::default(),
+        );
+
+        // The pane is gone from state; drop its runtime PTY bookkeeping too.
+        self.pty_handles.remove(&target.pane_id);
+        self.pty_sizes.remove(&target.pane_id);
+
+        // Kill the child off-thread: a graceful kill sleeps out its grace
+        // window, and the dispatcher must keep draining. The kill also purges
+        // the backend's own entry for the pane, even when the child already
+        // exited.
+        let pane_id = target.pane_id;
+        let _ = thread::spawn(move || {
+            let _ = backend.kill(pane_id, kill_policy);
+        });
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
     /// Choose the viewport a new split is sized against, and the *designated*
     /// client — the one that will view the tab and focus the new pane, `None`
     /// when the tab is already viewed and no client was named.
@@ -444,6 +563,27 @@ impl Runtime {
                 ))
             })
             .unwrap_or_default()
+    }
+
+    /// The viewport `tab_id` is solved against when a pane closes: the tab's
+    /// own viewport when attached clients view it, else the smallest viewport
+    /// among all attached clients, else a nominal 80x24. Focus-candidate
+    /// ranking needs a deterministic rect, and a tab nobody currently views
+    /// can still hold per-client focus entries that need repair.
+    fn close_viewport(session: &Session, tab_id: TabId) -> Size {
+        session
+            .tab_viewport(tab_id)
+            .or_else(|| {
+                session
+                    .clients
+                    .list_attached()
+                    .map(|client| client.viewport())
+                    .reduce(|a, b| Size {
+                        cols: a.cols.min(b.cols),
+                        rows: a.rows.min(b.rows),
+                    })
+            })
+            .unwrap_or(Size { cols: 80, rows: 24 })
     }
 
     /// Resize the live PTYs in `rects` whose size actually changed, routing the
@@ -696,6 +836,84 @@ impl Runtime {
                             source_pane: pane,
                             tab_id,
                             focus_client: Some(client_id),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve the pane a [`Command::ClosePane`] removes, and the session and
+    /// tab that own it.
+    ///
+    /// An explicit pane target is global: its owning session is found by
+    /// registry membership, and a winding-down owner rejects. Without one, the
+    /// in-session CLI closes the pane it was issued from, and any other source
+    /// closes the issuing client's focused pane in its active tab — resolved
+    /// through the shared defensive helpers, so a stale focus entry is
+    /// rejected, never closed.
+    fn resolve_close_pane_target(
+        &self,
+        args: &ClosePaneArgs,
+        source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<ClosePaneTarget, Rejection> {
+        match args.pane {
+            Some(pane_id) => {
+                let owner = self
+                    .sessions()
+                    .values()
+                    .find(|session| session.panes.get(pane_id).is_some())
+                    .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+                if Self::is_winding_down(owner) {
+                    return Err(Rejection::new(
+                        RejectReason::InvalidState,
+                        "session is stopping",
+                    ));
+                }
+                let tab_id = Self::tab_of_pane(owner, pane_id)?;
+                Ok(ClosePaneTarget {
+                    session_id: owner.id,
+                    tab_id,
+                    pane_id,
+                })
+            }
+            None => {
+                let session = Self::require_session(session)?;
+                match source {
+                    CommandSource::InSessionCli { pane_id, .. } => {
+                        // The captured pane defines its own tab; confirm it is
+                        // still a live, registered leaf before closing it.
+                        Self::resolve_pane_in_session(session, *pane_id)?;
+                        let tab_id = Self::tab_of_pane(session, *pane_id)?;
+                        Ok(ClosePaneTarget {
+                            session_id: session.id,
+                            tab_id,
+                            pane_id: *pane_id,
+                        })
+                    }
+                    _ => {
+                        let client_id = source.client_id().ok_or_else(|| {
+                            Rejection::new(
+                                RejectReason::TargetNotFound,
+                                "no target and no focused pane to default to",
+                            )
+                        })?;
+                        let client = session
+                            .clients
+                            .get(client_id)
+                            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+                        let tab_id = client.active_tab();
+                        let pane_id = client.focused_pane(tab_id).ok_or_else(|| {
+                            Rejection::new(RejectReason::TargetNotFound, "no focused pane")
+                        })?;
+                        // The focused pane must be a live leaf of the active
+                        // tab — a stale focus entry is rejected, never closed.
+                        Self::require_pane_in_active_tab(session, client_id, pane_id)?;
+                        Ok(ClosePaneTarget {
+                            session_id: session.id,
+                            tab_id,
+                            pane_id,
                         })
                     }
                 }

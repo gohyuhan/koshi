@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use tile_core::command::{
     ClosePaneArgs, CloseTabArgs, CommandSource, CopyModeCommand, EnablePluginArgs, FocusPaneArgs,
@@ -18,13 +18,14 @@ use tile_core::command::{
     RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs,
     TabTarget, WriteToPaneArgs,
 };
+use tile_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use tile_core::geometry::Size;
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_layout::mode::LayoutMode;
 use tile_layout::tree::SplitNode;
 use tile_observability::cleanup::TerminalCleanupGuard;
-use tile_pane::pane::lifecycle::PaneLifecycle;
+use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use tile_pane::pane::state::PaneRecord;
 use tile_pty::backend::state::PtyBackend;
 use tile_pty::error::PtyError;
@@ -159,6 +160,21 @@ fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: O
     session.attach_client(client);
 }
 
+/// Poll the fake backend until `pane` records a kill, then return the history.
+/// The close handler kills on a detached thread, so the recorded policy is
+/// awaited rather than read immediately; panics if none arrives within 5s.
+fn wait_for_kill(fake: &FakePtyBackend, pane: PaneId) -> Vec<KillPolicy> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let kills = fake.kills(pane).expect("pane spawned in the fake");
+        if !kills.is_empty() {
+            return kills;
+        }
+        assert!(Instant::now() < deadline, "no kill arrived within 5s");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn passing_validation_reaches_the_unimplemented_reject() {
     let (mut rt, _tx) = new_runtime();
@@ -237,6 +253,7 @@ fn explicit_pane_target_absent_is_not_found() {
 
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(PaneId::new()),
+        force: false,
     }));
     let command_id = env.id;
 
@@ -903,23 +920,31 @@ fn rejection_keys_back_to_the_originating_command_id() {
 }
 
 #[test]
-fn explicit_pane_in_live_session_passes_to_unimplemented() {
+fn close_pane_registered_but_in_no_tab_is_not_found() {
     let (mut rt, _tx) = new_runtime();
     let pane = PaneId::new();
     let mut session = bare_session(SessionId::new());
     add_pane(&mut session, pane);
-    rt.sessions.insert(session.id, session);
+    let session_id = session.id;
+    rt.sessions.insert(session_id, session);
 
-    let env = envelope(Command::ClosePane(ClosePaneArgs { pane: Some(pane) }));
+    // The pane exists in the registry but no tab's layout holds it: validation
+    // (registry membership) passes, and the handler's own tab lookup rejects
+    // before anything mutates.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane),
+        force: false,
+    }));
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("close pane not yet implemented".to_string()),
+            reason: RejectReason::TargetNotFound,
+            help: None,
         }
     );
+    assert_eq!(rt.sessions[&session_id].panes.len(), 1);
 }
 
 #[test]
@@ -932,7 +957,10 @@ fn explicit_pane_in_stopping_session_is_invalid_state() {
 
     // An internal source has no acting session, so admission is reached only
     // via the pane's owning session — which is stopping.
-    let env = envelope(Command::ClosePane(ClosePaneArgs { pane: Some(pane) }));
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane),
+        force: false,
+    }));
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
@@ -945,28 +973,58 @@ fn explicit_pane_in_stopping_session_is_invalid_state() {
 }
 
 #[test]
-fn in_session_cli_defaults_to_its_source_pane() {
+fn in_session_cli_close_defaults_to_its_source_pane() {
     let (mut rt, _tx) = new_runtime();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let pane = PaneId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
     let mut session = bare_session(session_id);
-    add_pane(&mut session, pane);
-    add_client(&mut session, client_id, TabId::new(), None);
-    rt.sessions.insert(session.id, session);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    rt.sessions.insert(session_id, session);
 
-    // No explicit pane: an in-session CLI targets the pane it was issued from.
-    let source = CommandSource::in_session_cli(session_id, client_id, pane, PathBuf::from("/sock"));
+    // Grow a second pane; the split focuses it and parks its handle.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, session_id, root);
+
+    // No explicit pane: an in-session CLI closes the pane it was issued from.
+    // The captured pane is the split one, so the root survives and inherits
+    // focus — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused.
+    let source =
+        CommandSource::in_session_cli(session_id, client_id, new_pane, PathBuf::from("/sock"));
     let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("close pane not yet implemented".to_string()),
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
         }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&session_id].panes.get(new_pane).is_none());
+    assert_eq!(
+        rt.sessions[&session_id].tabs[&tab].layout(),
+        &LayoutNode::Pane(root)
     );
+    assert_eq!(
+        rt.sessions[&session_id]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
+    );
+    assert!(!rt.pty_handles.contains_key(&new_pane));
 }
 
 #[test]
@@ -2680,4 +2738,815 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
     };
     assert_eq!(fake.resizes(new_pane).unwrap()[0], expected);
     assert_ne!(expected, PtySize { cols: 80, rows: 24 });
+}
+
+#[test]
+fn close_pane_defaults_to_the_focused_pane_and_kills_gracefully() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // No explicit pane: the focused (split) pane closes. The root survives and
+    // inherits focus — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(root)
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
+    );
+    assert!(!rt.pty_handles.contains_key(&new_pane));
+    assert!(!rt.pty_sizes.contains_key(&new_pane));
+    // The default close policy is a graceful kill with the standard window.
+    assert_eq!(
+        wait_for_kill(&fake, new_pane),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+#[test]
+fn close_pane_explicit_non_focused_target_keeps_focus() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // Close the non-focused root explicitly: nobody's focus needs repair, so
+    // only PaneClosing + PaneRemoved + LayoutChanged are emitted and the
+    // client stays on the split pane.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(root),
+        force: false,
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].panes.get(root).is_none());
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(new_pane)
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(new_pane)
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+}
+
+#[test]
+fn close_pane_force_overrides_the_close_policy() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(new_pane)
+        .unwrap()
+        .close_policy = PaneClosePolicy::ConfirmIfBusy;
+
+    // `--force` wins over the pane's own policy: the close applies and the
+    // child is force-killed, no busy question asked.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(new_pane),
+        force: true,
+    }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(wait_for_kill(&fake, new_pane), vec![KillPolicy::Force]);
+}
+
+#[test]
+fn close_pane_confirm_if_busy_running_rejects_and_mutates_nothing() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(new_pane)
+        .unwrap()
+        .close_policy = PaneClosePolicy::ConfirmIfBusy;
+
+    // The pane's child is `Running`, so busy cannot be ruled out: the close
+    // rejects and neither state nor process is touched.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane may be busy; pass --force to close anyway".to_string()),
+        }
+    );
+
+    assert_eq!(rt.sessions[&sid].panes.len(), 2);
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout().leaf_panes(),
+        vec![root, new_pane]
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    assert!(fake.kills(new_pane).unwrap().is_empty());
+}
+
+#[test]
+fn close_pane_confirm_if_busy_exited_closes_gracefully() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+    {
+        let record = rt
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .panes
+            .get_mut(new_pane)
+            .unwrap();
+        record.close_policy = PaneClosePolicy::ConfirmIfBusy;
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+                code: Some(0),
+                at: SystemTime::now(),
+            })
+            .unwrap();
+    }
+
+    // An `Exited` child is provably not busy: the close proceeds gracefully.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(
+        wait_for_kill(&fake, new_pane),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+#[test]
+fn close_pane_confirm_if_busy_spawning_rejects() {
+    let (mut rt, _tx) = new_runtime();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(pane)
+        .unwrap()
+        .close_policy = PaneClosePolicy::ConfirmIfBusy;
+
+    // A `Spawning` pane's child has not started, so busy cannot be ruled out
+    // either: same rejection as `Running`.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane),
+        force: false,
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane may be busy; pass --force to close anyway".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+}
+
+#[test]
+fn close_pane_last_pane_closes_the_tab_and_quits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Closing the only pane empties the tab, which closes; that was the last
+    // tab, so the session winds down — PaneClosing + PaneRemoved + TabClosed +
+    // Quit.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane),
+        force: false,
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].tabs.is_empty());
+    assert_eq!(rt.sessions[&sid].panes.len(), 0);
+    assert_eq!(*rt.sessions[&sid].lifecycle(), SessionLifecycle::Stopping);
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        None
+    );
+}
+
+#[test]
+fn close_pane_last_pane_of_a_tab_moves_viewers_to_the_nearest_tab() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Emptying tab B closes it and moves its viewer to the surviving tab —
+    // PaneClosing + PaneRemoved + TabClosed + TabFocused. The session keeps
+    // running: another tab remains.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane_b),
+        force: false,
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert!(rt.sessions[&sid].tabs.contains_key(&tab_a));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_a
+    );
+    // Unchanged from the setup: the session is not winding down.
+    assert_eq!(*rt.sessions[&sid].lifecycle(), SessionLifecycle::Starting);
+}
+
+#[test]
+fn close_pane_unviewed_tab_repairs_stored_focus() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let pane_c = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_pane(&mut session, pane_c);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    // Tab B holds a two-member stack with `pane_c` expanded; the client views
+    // tab A but remembers `pane_c` as its focus in tab B.
+    session
+        .tabs
+        .get_mut(&tab_b)
+        .unwrap()
+        .update_layout(LayoutNode::Split(SplitNode::stack(vec![pane_b, pane_c], 1)));
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    // A second client with a smaller terminal, also viewing tab A: the
+    // fallback viewport reduces across BOTH attached clients.
+    let second_client = ClientId::new();
+    let mut second = Client::new(
+        second_client,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 60, rows: 20 },
+        tab_a,
+    );
+    second.update_focused_pane(tab_a, pane_a);
+    session.attach_client(second);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .clients
+        .get_mut(client_id)
+        .unwrap()
+        .update_focused_pane(tab_b, pane_c);
+
+    // Nobody views tab B, so its viewport falls back to the attached clients'
+    // smallest; the stored focus entry still gets repaired onto the surviving
+    // member — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane_c),
+        force: false,
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab_b].layout(),
+        &LayoutNode::Pane(pane_b)
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab_b),
+        Some(pane_b)
+    );
+    // The client's view never moved.
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_a
+    );
+}
+
+#[test]
+fn close_pane_keeps_surviving_pty_sizes() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Two splits: pane A, then pane B (focused last).
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_a = other_pane(&rt, sid, root);
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != pane_a)
+        .expect("a third pane exists");
+
+    // Closing B frees its space, but the surviving sibling's PTY keeps its
+    // last size: this transaction does not reflow survivors.
+    let resizes_before = fake.resizes(pane_a).unwrap().len();
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
+    assert!(rt.pty_handles.contains_key(&pane_a));
+    assert!(rt.pty_sizes.contains_key(&pane_a));
+    assert!(!rt.pty_sizes.contains_key(&pane_b));
+}
+
+#[test]
+fn close_pane_repairs_focus_for_every_client_focused_on_it() {
+    let (mut rt, _tx) = new_runtime();
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_a, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // A second client also focuses the split pane.
+    let mut second = Client::new(
+        client_b,
+        sid,
+        SystemTime::now(),
+        Size { cols: 80, rows: 24 },
+        tab,
+    );
+    second.update_focused_pane(tab, new_pane);
+    rt.sessions.get_mut(&sid).unwrap().attach_client(second);
+
+    // Both clients focused the closed pane, so each gets its own repair —
+    // PaneClosing + PaneRemoved + LayoutChanged + PaneFocused per client.
+    let env = envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 5);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    for client_id in [client_a, client_b] {
+        assert_eq!(
+            rt.sessions[&sid]
+                .clients
+                .get(client_id)
+                .unwrap()
+                .focused_pane(tab),
+            Some(root)
+        );
+    }
+}
+
+#[test]
+fn close_pane_stacked_member_collapses_the_stack() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // Closing the expanded stack member collapses the two-member stack back to
+    // a plain leaf, and focus repairs onto the survivor.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(root)
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
+    );
+}
+
+#[test]
+fn close_pane_with_no_attached_clients_succeeds() {
+    let (mut rt, _tx) = new_runtime();
+    let tab = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab, pane_a);
+    session
+        .tabs
+        .get_mut(&tab)
+        .unwrap()
+        .update_layout(LayoutNode::Split(SplitNode::stack(vec![pane_a, pane_b], 1)));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No client is attached anywhere, so the tab solves against the nominal
+    // 80x24 viewport; with nobody's focus to repair, only PaneClosing +
+    // PaneRemoved + LayoutChanged are emitted.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(pane_b),
+        force: false,
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid].panes.get(pane_b).is_none());
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(pane_a)
+    );
+}
+
+#[test]
+fn close_pane_honors_the_panes_own_force_policy() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(new_pane)
+        .unwrap()
+        .close_policy = PaneClosePolicy::Force;
+
+    // Without `--force`, the pane's own configured policy decides: a `Force`
+    // record force-kills the child.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(new_pane),
+        force: false,
+    }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(wait_for_kill(&fake, new_pane), vec![KillPolicy::Force]);
+}
+
+#[test]
+fn close_pane_explicit_target_in_another_session_closes_there() {
+    let (mut rt, _tx) = new_runtime();
+    let client_a = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b1 = PaneId::new();
+    let pane_b2 = PaneId::new();
+
+    let mut session_a = bare_session(SessionId::new());
+    add_pane(&mut session_a, pane_a);
+    add_tab(&mut session_a, tab_a, pane_a);
+    add_client(&mut session_a, client_a, tab_a, Some(pane_a));
+    let sid_a = session_a.id;
+    rt.sessions.insert(sid_a, session_a);
+
+    let mut session_b = bare_session(SessionId::new());
+    add_pane(&mut session_b, pane_b1);
+    add_pane(&mut session_b, pane_b2);
+    add_tab(&mut session_b, tab_b, pane_b1);
+    session_b
+        .tabs
+        .get_mut(&tab_b)
+        .unwrap()
+        .update_layout(LayoutNode::Split(SplitNode::stack(
+            vec![pane_b1, pane_b2],
+            1,
+        )));
+    let sid_b = session_b.id;
+    rt.sessions.insert(sid_b, session_b);
+
+    // An explicit pane target is global: issued by session A's client, it
+    // closes the pane in its owning session B and leaves A untouched.
+    let env = envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(pane_b2),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert!(rt.sessions[&sid_b].panes.get(pane_b2).is_none());
+    assert_eq!(
+        rt.sessions[&sid_b].tabs[&tab_b].layout(),
+        &LayoutNode::Pane(pane_b1)
+    );
+    assert_eq!(rt.sessions[&sid_a].panes.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid_a].tabs[&tab_a].layout(),
+        &LayoutNode::Pane(pane_a)
+    );
+    assert_eq!(
+        rt.sessions[&sid_a]
+            .clients
+            .get(client_a)
+            .unwrap()
+            .focused_pane(tab_a),
+        Some(pane_a)
+    );
 }
