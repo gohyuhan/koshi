@@ -145,22 +145,18 @@ impl Command {
 
 /// Arguments for [`Command::NewPane`].
 ///
-/// One command, three structural outcomes — the dispatcher routes on the
-/// flags: `in_place` swaps the source leaf's content with unchanged
-/// geometry, `stacked` adds the new pane to the source's stack (creating
-/// one if needed), and otherwise the source leaf splits directionally.
-/// The flags are mutually exclusive in intent; `in_place` wins if both are
-/// set (content replacement takes precedence over layout changes).
+/// One command, two structural outcomes — the dispatcher routes on the
+/// flag: `stacked` adds the new pane to the source's stack (creating one
+/// if needed), and otherwise the source leaf splits directionally.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
-    /// Split direction; `None` defaults to a rightward split.
+    /// Split direction; `None` defaults to a rightward split. Unused when
+    /// `stacked` is set — a stack has no direction.
     pub direction: Option<Direction>,
     /// Stack the new pane onto the source instead of splitting space.
     pub stacked: bool,
-    /// Replace the source pane in place rather than splitting.
-    pub in_place: bool,
     /// Optional display name.
     pub name: Option<String>,
     /// Working directory; `None` inherits.

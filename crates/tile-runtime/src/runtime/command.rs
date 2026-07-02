@@ -24,7 +24,7 @@ use tile_core::{
 };
 use tile_layout::{
     content::content_rects,
-    edit::split_leaf,
+    edit::{add_to_stack, split_leaf},
     solver::{fits, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
 };
@@ -132,11 +132,12 @@ impl Runtime {
         }
     }
 
-    /// Handle [`Command::NewPane`]: split the source pane's tab and spawn a new
-    /// pane, in launch-then-commit order — no session state changes until the
-    /// child process is live.
+    /// Handle [`Command::NewPane`]: grow the source pane's tab by one pane —
+    /// stacked onto the source or split from it — and spawn it, in
+    /// launch-then-commit order — no session state changes until the child
+    /// process is live.
     ///
-    /// The candidate split tree is built and its fit preflighted, the child PTY
+    /// The candidate tree is built and its fit preflighted, the child PTY
     /// is spawned, and only on success is the pane registered (`Running`), the
     /// tree swapped in, the sibling PTYs reflowed, and the handle parked. A launch
     /// failure commits nothing and rejects, so a pane never exists without its
@@ -155,16 +156,6 @@ impl Runtime {
         args: &NewPaneArgs,
         issued_at: SystemTime,
     ) -> CommandResult {
-        // The stacked / in-place variants are a separate task; route them
-        // explicitly until it lands rather than splitting directionally.
-        if args.stacked || args.in_place {
-            return CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::InvalidState,
-                help: Some("stacked/in-place new-pane pending".to_string()),
-            };
-        }
-
         let acting = match self.acting_session(source) {
             Ok(acting) => acting,
             Err(rejection) => return Self::rejected(command_id, rejection),
@@ -174,8 +165,6 @@ impl Runtime {
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
 
-        let direction = args.direction.unwrap_or(Direction::Right);
-
         // Clone the shared backend before borrowing a session: spawn and resize
         // then need no `&self` borrow, so they coexist with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
@@ -184,14 +173,22 @@ impl Runtime {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
 
-        // Build the post-split tree without mutating anything. A source pane that
-        // is not a live leaf of the tab rejects here, before any state changes.
+        // Build the post-edit tree without mutating anything: `--stacked` joins
+        // the source's stack (creating one when the source is a plain leaf),
+        // otherwise the source leaf splits directionally. A source pane that is
+        // not a live leaf of the tab rejects here, before any state changes.
         let Some(tab) = session.tabs.get(&target.tab_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
         let layout_mode = tab.layout_mode();
         let new_pane_id = PaneId::new();
-        let candidate = match split_leaf(tab.layout(), target.source_pane, new_pane_id, direction) {
+        let edited = if args.stacked {
+            add_to_stack(tab.layout(), target.source_pane, new_pane_id)
+        } else {
+            let direction = args.direction.unwrap_or(Direction::Right);
+            split_leaf(tab.layout(), target.source_pane, new_pane_id, direction)
+        };
+        let candidate = match edited {
             Ok(candidate) => candidate,
             Err(_) => {
                 return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
@@ -365,7 +362,7 @@ impl Runtime {
                 MIN_PANE_SIZE,
             )
         };
-        let wont_fit = || Rejection::new(RejectReason::MinSize, "not enough space to split");
+        let wont_fit = || Rejection::new(RejectReason::MinSize, "not enough space for a new pane");
         let existing = session.tab_viewport(tab_id);
 
         // An explicit `--client` target wins over the issuing client — a caller
@@ -600,10 +597,6 @@ impl Runtime {
             Command::ResizePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::WriteToPane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::RenamePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
-            // The stacked / in-place variants are routed to a not-yet-implemented
-            // handler arm; skip target resolution so that pending rejection wins
-            // over a target error, rather than depending on which fires first.
-            Command::NewPane(args) if args.stacked || args.in_place => Ok(()),
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),

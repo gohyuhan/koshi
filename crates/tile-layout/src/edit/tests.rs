@@ -1,5 +1,5 @@
 //! Tests for structural edits: split (directional pane splits), stack (tabbed pane groups),
-//! replace (swap pane identity), and remove (delete pane from tree).
+//! and remove (delete pane from tree).
 //!
 //! Tests verify that edits produce correct tree structure, maintain tiling (no gaps/overlaps),
 //! update cursor position in stacks, and handle edge cases (removing last pane, missing targets).
@@ -494,77 +494,6 @@ fn a_directional_split_before_a_stack_places_the_new_pane_first() {
     assert_eq!(row.direction, SplitDirection::Horizontal);
     assert_eq!(row.children[0].node, LayoutNode::Pane(n));
     assert_eq!(row.children[1].node, stack);
-}
-
-#[test]
-fn in_place_replacement_changes_no_geometry() {
-    let (a, b, c, n) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    let column = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Vertical,
-        vec![leaf(b), leaf(c)],
-    ));
-    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![leaf(a), LayoutChild::new(column)],
-    ));
-    let before = solve(&tree, tab());
-
-    let (replaced, prior) = replace_leaf(&tree, b, n).unwrap();
-    assert_eq!(prior, b);
-
-    let after = solve(&replaced, tab());
-    // Same rects in the same order; only b's slot now names n.
-    let before_rects: Vec<Rect> = before.panes.iter().map(|&(_, rect)| rect).collect();
-    let after_rects: Vec<Rect> = after.panes.iter().map(|&(_, rect)| rect).collect();
-    assert_eq!(before_rects, after_rects);
-    assert_eq!(replaced.leaf_panes(), [a, n, c]);
-}
-
-#[test]
-fn in_place_replacement_inside_a_stack_keeps_stack_state() {
-    let (a, b, c, n) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
-
-    // Replace a collapsed member: it stays collapsed, the active member
-    // stays active.
-    let (replaced, _) = replace_leaf(&tree, c, n).unwrap();
-    let LayoutNode::Split(stack) = &replaced else {
-        panic!("stack must survive");
-    };
-    assert_eq!(stack.active, 1);
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
-    assert_eq!(collapsed, [true, false, true]);
-    assert_eq!(replaced.leaf_panes(), [a, b, n]);
-}
-
-#[test]
-fn in_place_replacement_of_the_active_stack_member_keeps_it_active() {
-    let (a, b, c, n) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
-
-    // Replace the *active* member (b, index 1): the active index is unchanged
-    // and the replacement stays the one expanded member.
-    let (replaced, prior) = replace_leaf(&tree, b, n).unwrap();
-    assert_eq!(prior, b);
-    let LayoutNode::Split(stack) = &replaced else {
-        panic!("stack must survive");
-    };
-    assert_eq!(stack.active, 1);
-    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
-    assert_eq!(collapsed, [true, false, true]);
-    assert_eq!(replaced.leaf_panes(), [a, n, c]);
-}
-
-#[test]
-fn replacing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
-    let (a, b) = (PaneId::new(), PaneId::new());
-    let tree = pair(SplitDirection::Horizontal, a, b);
-    let snapshot = tree.clone();
-
-    let missing = PaneId::new();
-    let err = replace_leaf(&tree, missing, PaneId::new()).unwrap_err();
-    assert_eq!(err, ReplaceError::PaneNotFound { target: missing });
-    assert_eq!(tree, snapshot);
 }
 
 #[test]
