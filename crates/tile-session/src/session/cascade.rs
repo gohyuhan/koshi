@@ -14,6 +14,7 @@
 //! the events describing what it did, for the caller to emit; neither touches
 //! the terminal or spawns a process.
 
+use std::collections::HashSet;
 use std::time::SystemTime;
 
 use tile_core::event::{
@@ -24,6 +25,7 @@ use tile_core::geometry::Rect;
 use tile_core::ids::{ClientId, PaneId, TabId};
 use tile_layout::edit::{remove_pane, RemoveError};
 use tile_layout::focus::focus_candidates;
+use tile_layout::normalize::normalize;
 use tile_layout::solver::solve_with_mode;
 use tile_pane::pane::lifecycle::PaneLifecycleEvent;
 use tile_pane::pane::policy::PaneExitPolicy;
@@ -75,10 +77,15 @@ pub fn remove_pane_cascade(
 
     // Collapse the layout *before* repairing focus, so the tree never
     // references the removed pane while candidates are computed. Removing the
-    // only pane yields `LastPane` — the signal that the tab is now empty.
+    // only pane yields `LastPane` — the signal that the tab is now empty. The
+    // removal edit leaves canonicalization to `normalize`, which collapses the
+    // unary split the removed leaf leaves behind; every surviving leaf is
+    // live, so the pass canonicalizes shape only and drops nothing.
     let removal = match remove_pane(tab.layout(), tab_rect, pane_id) {
         Ok((new_tree, info)) => {
-            tab.update_layout(new_tree);
+            let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
+            let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
+            tab.update_layout(canonical);
             Some(info)
         }
         Err(RemoveError::LastPane { .. }) => None,

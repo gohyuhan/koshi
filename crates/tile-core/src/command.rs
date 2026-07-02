@@ -177,6 +177,8 @@ pub struct NewPaneArgs {
 pub struct ClosePaneArgs {
     /// Pane to close; `None` closes the focused pane.
     pub pane: Option<PaneId>,
+    /// Kill the pane's child immediately, overriding its close policy.
+    pub force: bool,
 }
 
 /// Arguments for [`Command::ResizePane`].
