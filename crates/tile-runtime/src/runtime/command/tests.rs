@@ -19,11 +19,11 @@ use tile_core::command::{
     TabTarget, WriteToPaneArgs,
 };
 use tile_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use tile_core::geometry::Size;
+use tile_core::geometry::{Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_layout::mode::LayoutMode;
-use tile_layout::tree::SplitNode;
+use tile_layout::tree::{LayoutChild, SplitNode};
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use tile_pane::pane::state::PaneRecord;
@@ -3884,5 +3884,397 @@ fn close_pane_explicit_target_in_another_session_closes_there() {
             .unwrap()
             .focused_pane(tab_a),
         Some(pane_a)
+    );
+}
+
+/// A horizontal two-pane split with equal weights, for building a tab's
+/// layout directly.
+fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
+    LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(left)),
+            LayoutChild::new(LayoutNode::Pane(right)),
+        ],
+    ))
+}
+
+/// A session with one viewed tab whose pane was split once through dispatch,
+/// so the new pane has a live PTY. Returns the runtime, fake backend, inbox
+/// sender, ids, and the new pane's spawn-time PTY size.
+fn resize_fixture() -> (
+    Runtime,
+    Arc<FakePtyBackend>,
+    mpsc::Sender<RuntimeEvent>,
+    SessionId,
+    ClientId,
+    PaneId,
+    PaneId,
+    PtySize,
+) {
+    let (mut rt, fake, tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_a = other_pane(&rt, sid, root);
+    let size_a = rt.pty_sizes[&pane_a];
+    (rt, fake, tx, sid, client_id, root, pane_a, size_a)
+}
+
+#[test]
+fn resize_pane_grows_the_focused_pane_and_reflows_its_pty() {
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    // The client focuses A (the fresh split). Growing A's left border by 5
+    // takes 5 columns from root; root has no PTY, so exactly one PtyResized
+    // accompanies the LayoutChanged.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            amount: 5,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let expected = PtySize {
+        cols: size_a.cols + 5,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+    assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), expected);
+}
+
+#[test]
+fn resize_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, size_a) = resize_fixture();
+
+    // Issued from inside root's pane with no explicit target: root grows
+    // right by 3, so its neighbor A donates 3 columns.
+    let source = CommandSource::in_session_cli(sid, client_id, root, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Right,
+            amount: 3,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let expected = PtySize {
+        cols: size_a.cols - 3,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+}
+
+#[test]
+fn resize_pane_explicit_target_resolves_its_owning_session() {
+    let (mut rt, _fake, _tx, _sid, _client_id, _root, pane_a, size_a) = resize_fixture();
+
+    // An internal source carries no session or client context; the explicit
+    // pane target alone finds the owning session.
+    let env = envelope(Command::ResizePane(ResizePaneArgs {
+        pane: Some(pane_a),
+        direction: Direction::Left,
+        amount: 2,
+    }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let expected = PtySize {
+        cols: size_a.cols + 2,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+}
+
+#[test]
+fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
+    let (mut rt, fake, _tx, sid, client_id, _root, pane_a, size_a) = resize_fixture();
+    let viewport = Size { cols: 80, rows: 24 };
+    let rects_before = Runtime::tab_content_rects(
+        &rt.sessions[&sid],
+        rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
+        viewport,
+    );
+    let resizes_before = fake.resizes(pane_a).unwrap().len();
+
+    // At 80 columns the donor root holds 40; its border-inclusive floor is 4
+    // (the 2-column content minimum plus the 1-cell border on each side), so
+    // it can give exactly 36. Asking for 100 rejects and leaves everything
+    // untouched.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            amount: 100,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("neighbor has only 36 spare cells to give".to_string()),
+        }
+    );
+
+    let rects_after = Runtime::tab_content_rects(
+        &rt.sessions[&sid],
+        rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
+        viewport,
+    );
+    assert_eq!(rects_after, rects_before);
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+}
+
+#[test]
+fn resize_pane_without_a_border_on_that_side_is_rejected() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size_a) = resize_fixture();
+
+    // A touches the tab's right edge, and the split has no vertical level at
+    // all — both directions find no border to move.
+    for direction in [Direction::Right, Direction::Up] {
+        let env = envelope_from(
+            CommandSource::key_binding(client_id),
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction,
+                amount: 1,
+            }),
+        );
+        let command_id = env.id;
+        assert_eq!(
+            rt.dispatch(env),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some("pane has no neighbor on that side".to_string()),
+            }
+        );
+    }
+}
+
+#[test]
+fn resize_pane_amount_zero_is_rejected() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            amount: 0,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("resize amount must be at least 1".to_string()),
+        }
+    );
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+}
+
+#[test]
+fn resize_pane_with_no_attached_client_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let tab = TabId::new();
+    let pane_left = PaneId::new();
+    let pane_right = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_left);
+    add_pane(&mut session, pane_right);
+    add_tab(&mut session, tab, pane_left);
+    session
+        .tabs
+        .get_mut(&tab)
+        .unwrap()
+        .update_layout(side_by_side(pane_left, pane_right));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let viewport = Size { cols: 80, rows: 24 };
+    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport);
+
+    // No client is attached anywhere, so no terminal size exists to measure
+    // the donor's spare cells against.
+    let env = envelope(Command::ResizePane(ResizePaneArgs {
+        pane: Some(pane_left),
+        direction: Direction::Right,
+        amount: 1,
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no attached client to size against".to_string()),
+        }
+    );
+    assert_eq!(
+        Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport),
+        rects_before
+    );
+}
+
+#[test]
+fn resize_pane_in_an_unviewed_tab_sizes_to_attached_clients() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let root_front = PaneId::new();
+    let pane_left = PaneId::new();
+    let pane_right = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_front);
+    add_pane(&mut session, pane_left);
+    add_pane(&mut session, pane_right);
+    add_tab(&mut session, tab_front, root_front);
+    add_tab(&mut session, tab_back, pane_left);
+    session
+        .tabs
+        .get_mut(&tab_back)
+        .unwrap()
+        .update_layout(side_by_side(pane_left, pane_right));
+    add_client(&mut session, client_id, tab_front, Some(root_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let viewport = Size { cols: 80, rows: 24 };
+    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport);
+
+    // Nobody views the back tab, but the attached client's terminal size
+    // bounds the solve: the border moves and only LayoutChanged is emitted
+    // (neither pane has a live PTY).
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: Some(pane_left),
+            direction: Direction::Right,
+            amount: 4,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let rects_after = Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport);
+    let width = |rects: &[(PaneId, Option<Rect>)], pane: PaneId| {
+        rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .and_then(|(_, rect)| *rect)
+            .expect("pane has a content rect")
+            .size
+            .cols
+    };
+    assert_eq!(
+        width(&rects_after, pane_left),
+        width(&rects_before, pane_left) + 4
+    );
+    assert_eq!(
+        width(&rects_after, pane_right),
+        width(&rects_before, pane_right) - 4
+    );
+}
+
+#[test]
+fn resize_pane_in_a_nested_split_moves_the_enclosing_border() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = resize_fixture();
+
+    // Split root again: [[root | B] | A]. B touches the inner split's right
+    // edge, so growing B rightward moves the OUTER border — the whole inner
+    // split takes 4 columns from A, and B's own share grows by 2.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(root),
+            ..NewPaneArgs::default()
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != pane_a)
+        .expect("a third pane exists");
+    let size_a = rt.pty_sizes[&pane_a];
+    let size_b = rt.pty_sizes[&pane_b];
+
+    // The client's focus followed the fresh split to B.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Right,
+            amount: 4,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // LayoutChanged + PtyResized for A and B (root has no PTY).
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(
+        rt.pty_sizes[&pane_a],
+        PtySize {
+            cols: size_a.cols - 4,
+            rows: size_a.rows,
+        }
+    );
+    assert_eq!(
+        rt.pty_sizes[&pane_b],
+        PtySize {
+            cols: size_b.cols + 2,
+            rows: size_b.rows,
+        }
     );
 }

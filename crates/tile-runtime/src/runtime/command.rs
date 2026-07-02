@@ -4,12 +4,11 @@
 //! [`Runtime::dispatch`] validates one [`CommandEnvelope`] against live state,
 //! then routes it via an exhaustive `match` on [`Command`] — one arm per
 //! variant. Validation runs first: a command whose source may not issue it, or
-//! whose target does not resolve, is rejected before any handler runs. Handlers
-//! do not exist yet (they land in later command tasks), so a command that
-//! *passes* validation still rejects cleanly with [`RejectReason::InvalidState`]
-//! and a diagnostic hint. The exhaustive match is the point: a new `Command`
-//! variant cannot be added without giving it an arm here, and each handler
-//! replaces its arm in place as it ships.
+//! whose target does not resolve, is rejected before any handler runs. A
+//! command whose handler has not landed yet still rejects cleanly with
+//! [`RejectReason::InvalidState`] and a diagnostic hint. The exhaustive match
+//! is the point: a new `Command` variant cannot be added without giving it an
+//! arm here, and each handler replaces its arm in place as it ships.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -19,9 +18,9 @@ use std::time::SystemTime;
 use tile_core::{
     command::{
         ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs,
-        TabTarget,
+        ResizePaneArgs, TabTarget,
     },
-    event::{Event, PtyResized, RejectReason},
+    event::{Event, LayoutChanged, PtyResized, RejectReason},
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     process::{KillPolicy, PtySize, SpawnSpec},
@@ -29,6 +28,7 @@ use tile_core::{
 use tile_layout::{
     content::content_rects,
     edit::{add_to_stack, split_leaf},
+    resize::{resize, ResizeError},
     solver::{fits, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
 };
@@ -78,10 +78,11 @@ struct NewPaneTarget {
     focus_client: Option<ClientId>,
 }
 
-/// The resolved concrete target of a [`Command::ClosePane`]: the owning
-/// session, the tab whose layout holds the pane, and the pane itself. All
-/// fields are `Copy`, so resolving holds no borrow into the session map.
-struct ClosePaneTarget {
+/// The resolved concrete target of a pane-addressed command
+/// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
+/// tab whose layout holds the pane, and the pane itself. All fields are
+/// `Copy`, so resolving holds no borrow into the session map.
+struct PaneTarget {
     session_id: SessionId,
     tab_id: TabId,
     pane_id: PaneId,
@@ -110,7 +111,9 @@ impl Runtime {
             Command::ClosePane(args) => {
                 self.handle_close_pane(envelope.id, &envelope.source, &args)
             }
-            Command::ResizePane(_) => self.reject(envelope.id, "resize pane"),
+            Command::ResizePane(args) => {
+                self.handle_resize_pane(envelope.id, &envelope.source, &args)
+            }
             Command::FocusPane(_) => self.reject(envelope.id, "focus pane"),
             Command::NewTab(_) => self.reject(envelope.id, "new tab"),
             Command::CloseTab(_) => self.reject(envelope.id, "close tab"),
@@ -373,7 +376,7 @@ impl Runtime {
             Ok(acting) => acting,
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
-        let target = match self.resolve_close_pane_target(args, source, acting) {
+        let target = match self.resolve_pane_target(args.pane, source, acting) {
             Ok(target) => target,
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
@@ -475,6 +478,114 @@ impl Runtime {
             scope.emit(event);
         }
         scope.commit(command_id)
+    }
+
+    /// Move one border of a pane by an exact cell count, then resize the
+    /// affected PTYs.
+    ///
+    /// The border that moves is resolved by the layout crate's resize
+    /// transaction: the pane grows toward `args.direction`, and the adjacent
+    /// sibling on that side donates the cells. The tab is solved against the
+    /// smallest real terminal viewport ([`Self::attached_viewport`]); a
+    /// session with no attached client rejects, since the donor's spare cells
+    /// can only be measured against an actual terminal size. On success the
+    /// tab's tree is swapped in, [`Event::LayoutChanged`] is emitted, and
+    /// every live PTY whose solved size changed is resized through the shared
+    /// reflow path, one [`Event::PtyResized`] each.
+    fn handle_resize_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &ResizePaneArgs,
+    ) -> CommandResult {
+        if args.amount == 0 {
+            return CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some("resize amount must be at least 1".to_string()),
+            };
+        }
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_pane_target(args.pane, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+
+        let backend = Arc::clone(self.pty_backend());
+
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(viewport) = Self::attached_viewport(session, target.tab_id) else {
+            return Self::rejected(
+                command_id,
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "no attached client to size against",
+                ),
+            );
+        };
+        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let Some(tab) = session.tabs.get_mut(&target.tab_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        // The resize transaction returns a new tree and leaves the tab's
+        // untouched on rejection, so a failed resize mutates nothing.
+        let resized = match resize(
+            tab.layout(),
+            tab_rect,
+            target.pane_id,
+            args.direction,
+            args.amount,
+        ) {
+            Ok(resized) => resized,
+            Err(error) => return Self::rejected(command_id, Self::resize_rejection(&error)),
+        };
+        tab.update_layout(resized);
+
+        // The border moved: re-solve the tab and resize each live PTY whose
+        // size changed.
+        let mut events = vec![Event::LayoutChanged(LayoutChanged {
+            tab_id: target.tab_id,
+        })];
+        let rects = Self::tab_content_rects(session, target.tab_id, viewport);
+        Self::reflow_changed(
+            backend.as_ref(),
+            &self.pty_handles,
+            &mut self.pty_sizes,
+            rects,
+            None,
+            &mut events,
+        );
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
+    /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
+    /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
+    /// neighbor on the requested side is [`RejectReason::InvalidState`], and
+    /// a donor below its floor is [`RejectReason::MinSize`] with the spare
+    /// cell count in the hint.
+    fn resize_rejection(error: &ResizeError) -> Rejection {
+        match error {
+            ResizeError::PaneNotFound { .. } => Rejection::bare(RejectReason::TargetNotFound),
+            ResizeError::NoAdjacentBorder { .. } => Rejection::new(
+                RejectReason::InvalidState,
+                "pane has no neighbor on that side",
+            ),
+            ResizeError::MinSize { spare, .. } => Rejection::new(
+                RejectReason::MinSize,
+                &format!("neighbor has only {spare} spare cells to give"),
+            ),
+        }
     }
 
     /// Choose the viewport a new split is sized against, and the *designated*
@@ -600,25 +711,36 @@ impl Runtime {
             .unwrap_or_default()
     }
 
-    /// The viewport `tab_id` is solved against when a pane closes: the tab's
+    /// The smallest real terminal viewport applicable to `tab_id`: the tab's
     /// own viewport when attached clients view it, else the smallest viewport
-    /// among all attached clients, else a nominal 80x24. Focus-candidate
-    /// ranking needs a deterministic rect, and a tab nobody currently views
-    /// can still hold per-client focus entries that need repair.
+    /// among all attached clients. `None` when the session has no attached
+    /// client — every `Some` this returns is the size of an actual terminal.
+    fn attached_viewport(session: &Session, tab_id: TabId) -> Option<Size> {
+        session.tab_viewport(tab_id).or_else(|| {
+            session
+                .clients
+                .list_attached()
+                .map(|client| client.viewport())
+                .reduce(|a, b| Size {
+                    cols: a.cols.min(b.cols),
+                    rows: a.rows.min(b.rows),
+                })
+        })
+    }
+
+    /// The viewport `tab_id` is solved against when a pane closes: the real
+    /// terminal viewport from [`Self::attached_viewport`], else a nominal
+    /// 80x24.
+    ///
+    /// The 80x24 leg is reached only when the session has no attached client
+    /// at all — a headless close issued through the CLI, where no terminal
+    /// size exists anywhere. Focus repair still needs a concrete rect to rank
+    /// the surviving panes geometrically, and that ranking is this value's
+    /// sole consumer: no PTY is spawned or resized from it (a tab with no
+    /// viewer keeps its PTY sizes), and the next attach re-solves the tab
+    /// against the client's real terminal.
     fn close_viewport(session: &Session, tab_id: TabId) -> Size {
-        session
-            .tab_viewport(tab_id)
-            .or_else(|| {
-                session
-                    .clients
-                    .list_attached()
-                    .map(|client| client.viewport())
-                    .reduce(|a, b| Size {
-                        cols: a.cols.min(b.cols),
-                        rows: a.rows.min(b.rows),
-                    })
-            })
-            .unwrap_or(Size { cols: 80, rows: 24 })
+        Self::attached_viewport(session, tab_id).unwrap_or(Size { cols: 80, rows: 24 })
     }
 
     /// Resize the live PTYs in `rects` whose size actually changed, routing the
@@ -878,22 +1000,22 @@ impl Runtime {
         }
     }
 
-    /// Resolve the pane a [`Command::ClosePane`] removes, and the session and
+    /// Resolve the pane a pane-addressed command acts on, and the session and
     /// tab that own it.
     ///
     /// An explicit pane target is global: its owning session is found by
     /// registry membership, and a winding-down owner rejects. Without one, the
-    /// in-session CLI closes the pane it was issued from, and any other source
-    /// closes the issuing client's focused pane in its active tab — resolved
-    /// through the shared defensive helpers, so a stale focus entry is
-    /// rejected, never closed.
-    fn resolve_close_pane_target(
+    /// in-session CLI targets the pane it was issued from, and any other
+    /// source targets the issuing client's focused pane in its active tab —
+    /// resolved through the shared defensive helpers, so a stale focus entry
+    /// is rejected, never acted on.
+    fn resolve_pane_target(
         &self,
-        args: &ClosePaneArgs,
+        pane: Option<PaneId>,
         source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<ClosePaneTarget, Rejection> {
-        match args.pane {
+    ) -> Result<PaneTarget, Rejection> {
+        match pane {
             Some(pane_id) => {
                 let owner = self
                     .sessions()
@@ -907,7 +1029,7 @@ impl Runtime {
                     ));
                 }
                 let tab_id = Self::tab_of_pane(owner, pane_id)?;
-                Ok(ClosePaneTarget {
+                Ok(PaneTarget {
                     session_id: owner.id,
                     tab_id,
                     pane_id,
@@ -918,10 +1040,10 @@ impl Runtime {
                 match source {
                     CommandSource::InSessionCli { pane_id, .. } => {
                         // The captured pane defines its own tab; confirm it is
-                        // still a live, registered leaf before closing it.
+                        // still a live, registered leaf before acting on it.
                         Self::resolve_pane_in_session(session, *pane_id)?;
                         let tab_id = Self::tab_of_pane(session, *pane_id)?;
-                        Ok(ClosePaneTarget {
+                        Ok(PaneTarget {
                             session_id: session.id,
                             tab_id,
                             pane_id: *pane_id,
@@ -943,9 +1065,10 @@ impl Runtime {
                             Rejection::new(RejectReason::TargetNotFound, "no focused pane")
                         })?;
                         // The focused pane must be a live leaf of the active
-                        // tab — a stale focus entry is rejected, never closed.
+                        // tab — a stale focus entry is rejected, never acted
+                        // on.
                         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
-                        Ok(ClosePaneTarget {
+                        Ok(PaneTarget {
                             session_id: session.id,
                             tab_id,
                             pane_id,
