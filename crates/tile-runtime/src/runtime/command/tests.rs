@@ -2824,8 +2824,9 @@ fn close_pane_explicit_non_focused_target_keeps_focus() {
     let new_pane = other_pane(&rt, sid, root);
 
     // Close the non-focused root explicitly: nobody's focus needs repair, so
-    // only PaneClosing + PaneRemoved + LayoutChanged are emitted and the
-    // client stays on the split pane.
+    // PaneClosing + PaneRemoved + LayoutChanged + PtyResized(the surviving
+    // split pane, now full-tab) are emitted and the client stays on the split
+    // pane.
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(root),
         force: false,
@@ -2837,7 +2838,7 @@ fn close_pane_explicit_non_focused_target_keeps_focus() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 3);
+            assert_eq!(emitted_events.len(), 4);
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -3230,7 +3231,7 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
 }
 
 #[test]
-fn close_pane_keeps_surviving_pty_sizes() {
+fn close_pane_reflows_surviving_pty_sizes() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -3242,13 +3243,14 @@ fn close_pane_keeps_surviving_pty_sizes() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    // Two splits: pane A, then pane B (focused last).
+    // Two splits: pane A (half width), then pane B splitting A (quarters).
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_a = other_pane(&rt, sid, root);
+    let size_at_half = rt.pty_sizes[&pane_a];
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
@@ -3260,20 +3262,354 @@ fn close_pane_keeps_surviving_pty_sizes() {
         .map(PaneRecord::id)
         .find(|id| *id != root && *id != pane_a)
         .expect("a third pane exists");
+    assert_ne!(rt.pty_sizes[&pane_a], size_at_half);
 
-    // Closing B frees its space, but the surviving sibling's PTY keeps its
-    // last size: this transaction does not reflow survivors.
+    // Closing B collapses the split back to [root | A]: A reclaims exactly the
+    // half-width geometry it had before B existed, and its PTY is resized to
+    // it — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused +
+    // PtyResized(A).
     let resizes_before = fake.resizes(pane_a).unwrap().len();
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::ClosePane(ClosePaneArgs::default()),
     );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 5);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before + 1);
+    assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), size_at_half);
+    assert_eq!(rt.pty_sizes[&pane_a], size_at_half);
+    assert!(rt.pty_handles.contains_key(&pane_a));
+    assert!(!rt.pty_sizes.contains_key(&pane_b));
+}
+
+#[test]
+fn close_pane_reflow_skips_a_survivor_whose_rect_is_unchanged() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // [root | A], then split root itself: [[root | B] | A]. A's right-half
+    // rect is identical before and after B exists.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_a = other_pane(&rt, sid, root);
+    let size_a = rt.pty_sizes[&pane_a];
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(root),
+            ..NewPaneArgs::default()
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+    let resizes_a = fake.resizes(pane_a).unwrap().len();
+
+    // Closing B restores [root | A]. A's rect never changed, so the reflow
+    // leaves its PTY alone: PaneClosing + PaneRemoved + LayoutChanged +
+    // PaneFocused only — no PtyResized at all (root has no PTY).
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_a);
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+}
+
+#[test]
+fn close_pane_in_a_tab_with_no_viewer_keeps_pty_sizes() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let root_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, root_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, client_id, tab_front, Some(root_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split the front tab while viewed so it holds a live PTY, then adopt the
+    // sole viewer onto the back tab: the front tab is left with no viewer.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root_front && *id != pane_back)
+        .expect("the front-tab split pane");
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_back
+    );
+    let resizes_x = fake.resizes(pane_x).unwrap().len();
+    let size_x = rt.pty_sizes[&pane_x];
+
+    // Closing the unviewed front tab's other pane frees space, but a tab with
+    // no viewer has no viewport: the surviving PTY keeps its last size.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(root_front),
+            force: false,
+        }),
+    );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
-    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
-    assert!(rt.pty_handles.contains_key(&pane_a));
-    assert!(rt.pty_sizes.contains_key(&pane_a));
-    assert!(!rt.pty_sizes.contains_key(&pane_b));
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab_front].layout(),
+        &LayoutNode::Pane(pane_x)
+    );
+    assert_eq!(fake.resizes(pane_x).unwrap().len(), resizes_x);
+    assert_eq!(rt.pty_sizes[&pane_x], size_x);
+}
+
+#[test]
+fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_main = TabId::new();
+    let tab_solo = TabId::new();
+    let root_main = PaneId::new();
+    let pane_solo = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_main);
+    add_pane(&mut session, pane_solo);
+    add_tab(&mut session, tab_main, root_main);
+    add_tab(&mut session, tab_solo, pane_solo);
+    // Client A (40x10) views the solo tab; client B (80x24) views the main tab.
+    let client_a = ClientId::new();
+    let mut a = Client::new(
+        client_a,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_solo,
+    );
+    a.update_focused_pane(tab_solo, pane_solo);
+    session.attach_client(a);
+    let client_b = ClientId::new();
+    add_client(&mut session, client_b, tab_main, Some(root_main));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split the main tab (from B) so it holds a live PTY sized to B's 80-wide
+    // viewport — A is not a viewer yet.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_b),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_y = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root_main && *id != pane_solo)
+        .expect("the main-tab split pane");
+    let before = fake.resizes(pane_y).unwrap();
+
+    // A closes its tab's only pane: the tab closes and A moves to the main
+    // tab, whose viewport now reduces to A's 40x10 — its live PTY reflows
+    // smaller. PaneClosing + PaneRemoved + TabClosed + TabFocused +
+    // PtyResized(pane_y).
+    let env = envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 5);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_a)
+            .unwrap()
+            .active_tab(),
+        tab_main
+    );
+    let after = fake.resizes(pane_y).unwrap();
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(after.last().unwrap().cols < before.last().unwrap().cols);
+    assert_eq!(rt.pty_sizes[&pane_y], *after.last().unwrap());
+}
+
+#[test]
+fn close_last_pane_of_an_unviewed_tab_reflows_nothing() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let root_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, root_front);
+    add_tab(&mut session, tab_back, pane_back);
+    add_client(&mut session, client_id, tab_front, Some(root_front));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // A live PTY on the viewed front tab.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root_front && *id != pane_back)
+        .expect("the front-tab split pane");
+    let resizes_x = fake.resizes(pane_x).unwrap().len();
+    let size_x = rt.pty_sizes[&pane_x];
+
+    // Closing the unviewed back tab's only pane closes that tab; no viewer
+    // moved, so no tab's viewport changed and nothing reflows — PaneClosing +
+    // PaneRemoved + TabClosed only.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(pane_back),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert!(!rt.sessions[&sid].tabs.contains_key(&tab_back));
+    assert_eq!(fake.resizes(pane_x).unwrap().len(), resizes_x);
+    assert_eq!(rt.pty_sizes[&pane_x], size_x);
+}
+
+#[test]
+fn close_pane_reflow_skips_a_collapsed_stack_member() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // [root | A], then stack B onto A: [root | stack(A collapsed, B expanded)].
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_a = other_pane(&rt, sid, root);
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let pane_b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != pane_a)
+        .expect("the stacked pane");
+    let resizes_a = fake.resizes(pane_a).unwrap().len();
+    let size_a = rt.pty_sizes[&pane_a];
+    let resizes_b = fake.resizes(pane_b).unwrap().len();
+
+    // Closing root hands the stack the full tab. The expanded member B
+    // reflows wider; the collapsed member A has no content rect and keeps its
+    // last size, with no event — PaneClosing + PaneRemoved + LayoutChanged +
+    // PtyResized(B).
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(root),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let b_resizes = fake.resizes(pane_b).unwrap();
+    assert_eq!(b_resizes.len(), resizes_b + 1);
+    assert_eq!(rt.pty_sizes[&pane_b], *b_resizes.last().unwrap());
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_a);
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
 }
 
 #[test]
