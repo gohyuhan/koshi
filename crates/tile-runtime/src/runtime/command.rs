@@ -355,7 +355,14 @@ impl Runtime {
     /// repair, and — when the last pane of the last tab goes — tab close and
     /// session quit. The kill runs on a detached thread because a graceful
     /// kill sleeps out its grace window, and the dispatcher thread must never
-    /// stall. Surviving PTYs keep their last-set sizes.
+    /// stall.
+    ///
+    /// After the removal the survivors reflow: the tab re-solves against its
+    /// viewport and each live PTY whose size changed is resized, one
+    /// [`Event::PtyResized`] per applied resize, in layout order. When the
+    /// close emptied the tab, the nearest surviving tab its viewers moved to
+    /// reflows instead. A tab with no viewer has no viewport and keeps its
+    /// sizes.
     fn handle_close_pane(
         &mut self,
         command_id: CommandId,
@@ -414,7 +421,7 @@ impl Runtime {
 
         // Commit the state removal: registry drop, layout collapse, per-client
         // focus repair, empty-tab close, last-tab quit — one shared cascade.
-        let events = remove_pane_cascade(
+        let mut events = remove_pane_cascade(
             session,
             target.tab_id,
             target.pane_id,
@@ -425,6 +432,34 @@ impl Runtime {
         // The pane is gone from state; drop its runtime PTY bookkeeping too.
         self.pty_handles.remove(&target.pane_id);
         self.pty_sizes.remove(&target.pane_id);
+
+        // The survivors reclaim the closed pane's space: re-solve the tab and
+        // resize each live PTY whose size changed. When the close emptied the
+        // tab, its viewers moved to the nearest surviving tab (the cascade's
+        // `TabFocused`), and that tab's viewport now counts the movers — so it
+        // reflows instead. A tab left with no viewer has no viewport and keeps
+        // its sizes.
+        let reflow_tab = if session.tabs.contains_key(&target.tab_id) {
+            Some(target.tab_id)
+        } else {
+            events.iter().find_map(|event| match event {
+                Event::TabFocused(focused) => Some(focused.tab_id),
+                _ => None,
+            })
+        };
+        if let Some(tab_id) = reflow_tab {
+            if let Some(viewport) = session.tab_viewport(tab_id) {
+                let rects = Self::tab_content_rects(session, tab_id, viewport);
+                Self::reflow_changed(
+                    backend.as_ref(),
+                    &self.pty_handles,
+                    &mut self.pty_sizes,
+                    rects,
+                    None,
+                    &mut events,
+                );
+            }
+        }
 
         // Kill the child off-thread: a graceful kill sleeps out its grace
         // window, and the dispatcher must keep draining. The kill also purges
