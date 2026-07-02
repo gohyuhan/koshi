@@ -22,6 +22,7 @@ use tile_core::geometry::Size;
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_layout::mode::LayoutMode;
+use tile_layout::tree::SplitNode;
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
@@ -420,14 +421,17 @@ fn new_pane_explicit_source_absent_is_not_found() {
 fn new_pane_without_an_anchor_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
-    // A directional new-pane splits a source leaf (`source: None` = the focused
-    // pane); an internal source has no focused pane to anchor on. (The stacked /
-    // in-place shapes reject as pending before anchor resolution, covered
-    // separately.)
+    // A new-pane anchors on a source leaf (`source: None` = the focused pane);
+    // an internal source has no focused pane to anchor on. The stacked shape
+    // resolves its anchor the same way, so it rejects identically.
     let cases = vec![
         NewPaneArgs::default(),
         NewPaneArgs {
             direction: Some(tile_core::geometry::Direction::Right),
+            ..NewPaneArgs::default()
+        },
+        NewPaneArgs {
+            stacked: true,
             ..NewPaneArgs::default()
         },
     ];
@@ -483,7 +487,7 @@ fn new_pane_defaults_to_the_focused_pane() {
 }
 
 #[test]
-fn new_pane_stacked_is_pending() {
+fn new_pane_stacked_on_a_plain_leaf_creates_a_stack() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -492,9 +496,13 @@ fn new_pane_stacked_is_pending() {
     add_pane(&mut session, pane);
     add_tab(&mut session, tab, pane);
     add_client(&mut session, client_id, tab, Some(pane));
-    rt.sessions.insert(session.id, session);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
 
-    // The stacked variant is a later task; it routes to a clean pending reject.
+    // A stacked new-pane on a plain leaf turns the leaf into a two-member
+    // stack: the source collapses to a header, the new pane is the expanded
+    // active member and takes focus — PaneCreated + LayoutChanged +
+    // PaneFocused + PtyResized(new pane).
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
@@ -503,18 +511,135 @@ fn new_pane_stacked_is_pending() {
         }),
     );
     let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("stacked/in-place new-pane pending".to_string()),
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
         }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let new_pane = other_pane(&rt, sid, pane);
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![pane, new_pane], 1))
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(new_pane)
+    );
+    assert!(rt.pty_handles.contains_key(&new_pane));
+}
+
+#[test]
+fn new_pane_stacked_onto_a_stack_member_appends() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab, a);
+    session
+        .tabs
+        .get_mut(&tab)
+        .unwrap()
+        .update_layout(LayoutNode::Split(SplitNode::stack(vec![a, b], 1)));
+    add_client(&mut session, client_id, tab, Some(b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Stacking from a pane already inside a stack appends to that stack: the
+    // new pane joins as the last member, becomes the expanded active one, and
+    // every earlier member collapses.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let new_pane = {
+        let mut others = rt.sessions[&sid]
+            .panes
+            .list()
+            .map(PaneRecord::id)
+            .filter(|id| *id != a && *id != b);
+        let pane = others.next().expect("a third pane exists");
+        assert!(others.next().is_none(), "exactly one new pane");
+        pane
+    };
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![a, b, new_pane], 2))
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(new_pane)
     );
 }
 
 #[test]
-fn new_pane_stacked_with_invalid_source_still_pending() {
+fn new_pane_stacked_ignores_direction() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // `--stacked` with a direction still stacks — a stack has no direction, so
+    // the flag routes to the stack edit and the direction is never read.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            direction: Some(tile_core::geometry::Direction::Down),
+            ..NewPaneArgs::default()
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let new_pane = other_pane(&rt, sid, pane);
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![pane, new_pane], 1))
+    );
+}
+
+#[test]
+fn new_pane_stacked_with_a_missing_source_is_not_found() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -525,9 +650,8 @@ fn new_pane_stacked_with_invalid_source_still_pending() {
     add_client(&mut session, client_id, tab, Some(pane));
     rt.sessions.insert(session.id, session);
 
-    // A stacked request naming a pane that does not exist: the pending reject
-    // wins over target resolution, so the reason is the feature-pending one, not
-    // `TargetNotFound`.
+    // A stacked request naming a pane that does not exist resolves its target
+    // like any other new-pane and rejects `TargetNotFound`.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
@@ -541,9 +665,98 @@ fn new_pane_stacked_with_invalid_source_still_pending() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("stacked/in-place new-pane pending".to_string()),
+            reason: RejectReason::TargetNotFound,
+            help: None,
         }
+    );
+}
+
+#[test]
+fn new_pane_stacked_with_no_space_is_min_size() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    // A 2x1 viewport cannot hold a stack: a two-member stack needs one header
+    // row plus the active member's minimum rows.
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 2, rows: 1 },
+        tab,
+    );
+    client.update_focused_pane(tab, pane);
+    session.attach_client(client);
+    rt.sessions.insert(session.id, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space for a new pane".to_string()),
+        }
+    );
+}
+
+#[test]
+fn new_pane_stacked_spawn_failure_leaves_no_trace() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "boom".to_string(),
+    });
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let before_layout = rt.sessions[&sid].tabs[&tab].layout().clone();
+
+    // Launch-then-commit holds for the stacked shape too: the child cannot
+    // launch, so no stack is created and nothing is committed.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("failed to launch the pane's process".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].panes.len(), 1);
+    assert_eq!(rt.sessions[&sid].tabs[&tab].layout(), &before_layout);
+    assert!(rt.pty_handles.is_empty());
+    assert!(fake.spawned_panes().is_empty());
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(root)
     );
 }
 
@@ -578,7 +791,7 @@ fn new_pane_with_no_space_is_min_size() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinSize,
-            help: Some("not enough space to split".to_string()),
+            help: Some("not enough space for a new pane".to_string()),
         }
     );
 }
@@ -1806,7 +2019,7 @@ fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinSize,
-            help: Some("not enough space to split".to_string()),
+            help: Some("not enough space for a new pane".to_string()),
         }
     );
     let session = &rt.sessions[&sid];
@@ -2051,7 +2264,7 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinSize,
-            help: Some("not enough space to split".to_string()),
+            help: Some("not enough space for a new pane".to_string()),
         }
     );
     assert_eq!(rt.sessions[&sid].panes.len(), 2);

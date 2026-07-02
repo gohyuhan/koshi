@@ -1,5 +1,5 @@
-//! Structural edits to the layout tree: splitting panes in, taking them out,
-//! swapping their contents.
+//! Structural edits to the layout tree: splitting panes in, stacking them,
+//! taking them out.
 //!
 //! Every edit is pure: it borrows the current tree and returns a new one,
 //! leaving the input untouched. A failed edit returns an error and changes
@@ -122,50 +122,6 @@ pub fn add_to_stack(
         *slot = LayoutNode::Split(SplitNode::stack(vec![anchor, new_pane], 1));
     }
     Ok(result)
-}
-
-/// A rejected in-place replacement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum ReplaceError {
-    /// The pane to replace is not in this layout.
-    #[error("pane {target} is not in this layout")]
-    PaneNotFound { target: PaneId },
-}
-
-impl DomainError for ReplaceError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
-/// Swap the pane shown at `target`'s position for `new_pane`, changing no
-/// geometry at all.
-///
-/// The slot keeps its weights, its stack membership, its collapsed state,
-/// and its active status — only the pane id changes, so a subsequent solve
-/// places every other pane exactly where it was. This is the in-place
-/// content swap; the prior pane id comes back so the caller can clean up
-/// the runtime it replaced.
-///
-/// # Errors
-///
-/// [`ReplaceError::PaneNotFound`] when `target` has no leaf in `tree`; the
-/// caller's tree is unchanged.
-pub fn replace_leaf(
-    tree: &LayoutNode,
-    target: PaneId,
-    new_pane: PaneId,
-) -> Result<(LayoutNode, PaneId), ReplaceError> {
-    let Some(path) = tree.path_to(target) else {
-        return Err(ReplaceError::PaneNotFound { target });
-    };
-    let mut result = tree.clone();
-    *result.node_at_mut(&path) = LayoutNode::Pane(new_pane);
-    Ok((result, target))
 }
 
 /// A rejected removal.

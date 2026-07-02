@@ -33,15 +33,16 @@ pub struct NewPaneSpec {
     pub command: Option<SpawnSpec>,
 }
 
-/// Apply an already-built, already-spawned split to `tab_id`: switch the focused
-/// client onto the tab (if it is not already there), register the new pane as
-/// `Running`, swap in `candidate` as the tab's layout, and focus the new pane for
-/// `focus_client` when one is given and still attached.
+/// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
+/// focused client onto the tab (if it is not already there), register the new
+/// pane as `Running`, swap in `candidate` as the tab's layout, and focus the new
+/// pane for `focus_client` when one is given and still attached.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
-/// [`tile_layout::edit::split_leaf`], preflighted its fit against the sizing
-/// viewport, and spawned the child under `new_pane_id` — so this only commits
-/// state (and, because the child is already live, registers the pane `Running`).
+/// [`tile_layout::edit::split_leaf`] or [`tile_layout::edit::add_to_stack`],
+/// preflighted its fit against the sizing viewport, and spawned the child under
+/// `new_pane_id` — so this only commits state (and, because the child is already
+/// live, registers the pane `Running`).
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `spec` carries the title, cwd,
 /// and command recorded on the new pane so a later restore or respawn can recover
