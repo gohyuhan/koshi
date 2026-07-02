@@ -485,13 +485,14 @@ impl Runtime {
     ///
     /// The border that moves is resolved by the layout crate's resize
     /// transaction: the pane grows toward `args.direction`, and the adjacent
-    /// sibling on that side donates the cells. The tab is solved against the
-    /// smallest real terminal viewport ([`Self::attached_viewport`]); a
-    /// session with no attached client rejects, since the donor's spare cells
-    /// can only be measured against an actual terminal size. On success the
-    /// tab's tree is swapped in, [`Event::LayoutChanged`] is emitted, and
-    /// every live PTY whose solved size changed is resized through the shared
-    /// reflow path, one [`Event::PtyResized`] each.
+    /// sibling on that side donates the cells. The target pane's tab must be
+    /// viewed by at least one attached client: the tab is solved against that
+    /// real viewport ([`Session::tab_viewport`]), so the donor's spare cells
+    /// are measured against the exact terminal displaying the result, and a
+    /// tab no client currently views rejects. On success the tab's tree is
+    /// swapped in, [`Event::LayoutChanged`] is emitted, and every live PTY
+    /// whose solved size changed is resized through the shared reflow path,
+    /// one [`Event::PtyResized`] each.
     fn handle_resize_pane(
         &mut self,
         command_id: CommandId,
@@ -519,12 +520,12 @@ impl Runtime {
         let Some(session) = self.sessions.get_mut(&target.session_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
-        let Some(viewport) = Self::attached_viewport(session, target.tab_id) else {
+        let Some(viewport) = session.tab_viewport(target.tab_id) else {
             return Self::rejected(
                 command_id,
                 Rejection::new(
                     RejectReason::InvalidState,
-                    "no attached client to size against",
+                    "pane's tab is not viewed by any client",
                 ),
             );
         };
@@ -711,26 +712,9 @@ impl Runtime {
             .unwrap_or_default()
     }
 
-    /// The smallest real terminal viewport applicable to `tab_id`: the tab's
+    /// The viewport `tab_id` is solved against when a pane closes: the tab's
     /// own viewport when attached clients view it, else the smallest viewport
-    /// among all attached clients. `None` when the session has no attached
-    /// client — every `Some` this returns is the size of an actual terminal.
-    fn attached_viewport(session: &Session, tab_id: TabId) -> Option<Size> {
-        session.tab_viewport(tab_id).or_else(|| {
-            session
-                .clients
-                .list_attached()
-                .map(|client| client.viewport())
-                .reduce(|a, b| Size {
-                    cols: a.cols.min(b.cols),
-                    rows: a.rows.min(b.rows),
-                })
-        })
-    }
-
-    /// The viewport `tab_id` is solved against when a pane closes: the real
-    /// terminal viewport from [`Self::attached_viewport`], else a nominal
-    /// 80x24.
+    /// among all attached clients, else a nominal 80x24.
     ///
     /// The 80x24 leg is reached only when the session has no attached client
     /// at all — a headless close issued through the CLI, where no terminal
@@ -740,7 +724,19 @@ impl Runtime {
     /// viewer keeps its PTY sizes), and the next attach re-solves the tab
     /// against the client's real terminal.
     fn close_viewport(session: &Session, tab_id: TabId) -> Size {
-        Self::attached_viewport(session, tab_id).unwrap_or(Size { cols: 80, rows: 24 })
+        session
+            .tab_viewport(tab_id)
+            .or_else(|| {
+                session
+                    .clients
+                    .list_attached()
+                    .map(|client| client.viewport())
+                    .reduce(|a, b| Size {
+                        cols: a.cols.min(b.cols),
+                        rows: a.rows.min(b.rows),
+                    })
+            })
+            .unwrap_or(Size { cols: 80, rows: 24 })
     }
 
     /// Resize the live PTYs in `rects` whose size actually changed, routing the

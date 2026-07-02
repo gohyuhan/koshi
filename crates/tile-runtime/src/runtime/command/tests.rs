@@ -4126,8 +4126,8 @@ fn resize_pane_with_no_attached_client_is_rejected() {
     let viewport = Size { cols: 80, rows: 24 };
     let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport);
 
-    // No client is attached anywhere, so no terminal size exists to measure
-    // the donor's spare cells against.
+    // No client is attached anywhere, so no tab is viewed and no terminal
+    // displays the result.
     let env = envelope(Command::ResizePane(ResizePaneArgs {
         pane: Some(pane_left),
         direction: Direction::Right,
@@ -4139,7 +4139,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("no attached client to size against".to_string()),
+            help: Some("pane's tab is not viewed by any client".to_string()),
         }
     );
     assert_eq!(
@@ -4149,7 +4149,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
 }
 
 #[test]
-fn resize_pane_in_an_unviewed_tab_sizes_to_attached_clients() {
+fn resize_pane_in_an_unviewed_tab_is_rejected() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_front = TabId::new();
@@ -4174,9 +4174,8 @@ fn resize_pane_in_an_unviewed_tab_sizes_to_attached_clients() {
     let viewport = Size { cols: 80, rows: 24 };
     let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport);
 
-    // Nobody views the back tab, but the attached client's terminal size
-    // bounds the solve: the border moves and only LayoutChanged is emitted
-    // (neither pane has a live PTY).
+    // A client is attached, but none views the back tab — no terminal
+    // displays the result, so the resize rejects and mutates nothing.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::ResizePane(ResizePaneArgs {
@@ -4186,34 +4185,17 @@ fn resize_pane_in_an_unviewed_tab_sizes_to_attached_clients() {
         }),
     );
     let command_id = env.id;
-    match rt.dispatch(env) {
-        CommandResult::Ok {
-            command_id: ok_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_id, command_id);
-            assert_eq!(emitted_events.len(), 1);
-        }
-        other => panic!("expected Ok, got {other:?}"),
-    }
-
-    let rects_after = Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport);
-    let width = |rects: &[(PaneId, Option<Rect>)], pane: PaneId| {
-        rects
-            .iter()
-            .find(|(id, _)| *id == pane)
-            .and_then(|(_, rect)| *rect)
-            .expect("pane has a content rect")
-            .size
-            .cols
-    };
     assert_eq!(
-        width(&rects_after, pane_left),
-        width(&rects_before, pane_left) + 4
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane's tab is not viewed by any client".to_string()),
+        }
     );
     assert_eq!(
-        width(&rects_after, pane_right),
-        width(&rects_before, pane_right) - 4
+        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport),
+        rects_before
     );
 }
 
