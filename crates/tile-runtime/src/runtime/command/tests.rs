@@ -202,9 +202,6 @@ fn client_scoped_command_without_a_client_is_unauthorized() {
     let (mut rt, _tx) = new_runtime();
 
     let commands = vec![
-        Command::FocusPane(FocusPaneArgs {
-            pane: PaneId::new(),
-        }),
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Next,
         }),
@@ -1165,19 +1162,23 @@ fn focus_pane_in_the_active_tab_resolves() {
     add_client(&mut session, client_id, tab_id, Some(pane));
     rt.sessions.insert(session.id, session);
 
+    // The pane is already this client's focus, so the command resolves and
+    // completes as a no-op: applied, zero events.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::FocusPane(FocusPaneArgs { pane }),
+        Command::FocusPane(FocusPaneArgs { pane, client: None }),
     );
     let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("focus pane not yet implemented".to_string()),
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 0);
         }
-    );
+        other => panic!("expected Ok, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1198,7 +1199,10 @@ fn focus_pane_outside_the_active_tab_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::FocusPane(FocusPaneArgs { pane: outside }),
+        Command::FocusPane(FocusPaneArgs {
+            pane: outside,
+            client: None,
+        }),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1209,6 +1213,679 @@ fn focus_pane_outside_the_active_tab_is_not_found() {
             help: Some("pane not in the client's active tab".to_string()),
         }
     );
+}
+
+#[test]
+fn focus_from_a_sessionless_source_has_no_session_context() {
+    let (mut rt, _tx) = new_runtime();
+
+    // An internal source names neither client nor session; the resolver has
+    // no session to find a target client in.
+    let env = envelope(Command::FocusPane(FocusPaneArgs {
+        pane: PaneId::new(),
+        client: None,
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("no session context".to_string()),
+        }
+    );
+}
+
+#[test]
+fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(a)),
+                LayoutChild::new(LayoutNode::Pane(b)),
+            ],
+        )));
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // Exactly the focus fact: a plain move changes no layout and no PTY.
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+    assert_eq!(session.tabs[&tab_id].focus_mru().first(), Some(&b));
+}
+
+#[test]
+fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(a)),
+                LayoutChild::new(LayoutNode::Pane(b)),
+            ],
+        )));
+    // A 2x1 viewport is below every pane's border-inclusive floor, so the
+    // solve suppresses the whole split — `b` cannot take focus.
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 2, rows: 1 },
+        tab_id,
+    );
+    client.update_focused_pane(tab_id, a);
+    session.attach_client(client);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is suppressed; not enough space to show it".to_string()),
+        }
+    );
+    // Nothing moved: focus and MRU are untouched.
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(a)
+    );
+    assert!(!session.tabs[&tab_id].focus_mru().contains(&b));
+}
+
+#[test]
+fn focus_collapsed_stack_member_activates_the_stack() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    // `a` is the expanded member; `b` is collapsed to a header strip.
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::stack(vec![a, b], 0)));
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // LayoutChanged (the stack swapped members) + PaneFocused. No
+            // PtyResized: neither pane has a live PTY here.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab_id].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![a, b], 1))
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+    assert_eq!(session.tabs[&tab_id].focus_mru().first(), Some(&b));
+}
+
+#[test]
+fn focus_active_stack_member_changes_no_layout() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_pane(&mut session, c);
+    add_tab(&mut session, tab_id, a);
+    // `b` is the stack's expanded member: focusing it needs no activation.
+    let layout = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(a)),
+            LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+        ],
+    ));
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(layout.clone());
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // Only the focus fact — the tree is untouched.
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab_id].layout(), &layout);
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+}
+
+#[test]
+fn focus_already_focused_collapsed_member_reactivates_without_a_focus_event() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    // The client's focus already points at `b`, but `b` sits collapsed (as
+    // happens when another actor swaps the stack's active member).
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::stack(vec![a, b], 0)));
+    add_client(&mut session, client_id, tab_id, Some(b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged only: the stack expands `b`, but the focus did not
+            // move, so no PaneFocused is emitted.
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab_id].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![a, b], 1))
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+}
+
+#[test]
+fn focus_explicit_client_wins_over_the_issuer() {
+    let (mut rt, _tx) = new_runtime();
+    let issuer = ClientId::new();
+    let target = ClientId::new();
+    let tab_x = TabId::new();
+    let tab_y = TabId::new();
+    let (p, q, r) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, p);
+    add_pane(&mut session, q);
+    add_pane(&mut session, r);
+    add_tab(&mut session, tab_x, p);
+    add_tab(&mut session, tab_y, q);
+    session
+        .tabs
+        .get_mut(&tab_y)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(q)),
+                LayoutChild::new(LayoutNode::Pane(r)),
+            ],
+        )));
+    add_client(&mut session, issuer, tab_x, Some(p));
+    add_client(&mut session, target, tab_y, Some(q));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // `r` is not in the issuer's active tab — the pane resolves against the
+    // NAMED client's active tab, proving the explicit target wins.
+    let env = envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::FocusPane(FocusPaneArgs {
+            pane: r,
+            client: Some(target),
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session
+            .clients
+            .get(target)
+            .expect("target")
+            .focused_pane(tab_y),
+        Some(r)
+    );
+    // The issuer's own focus is untouched.
+    assert_eq!(
+        session
+            .clients
+            .get(issuer)
+            .expect("issuer")
+            .focused_pane(tab_x),
+        Some(p)
+    );
+}
+
+#[test]
+fn focus_unattached_explicit_client_is_rejected_without_fallback() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab_id, pane);
+    add_client(&mut session, client_id, tab_id, None);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The named client does not exist; the valid issuer is NOT used instead.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane,
+            client: Some(ClientId::new()),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        None
+    );
+}
+
+#[test]
+fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(a)),
+                LayoutChild::new(LayoutNode::Pane(b)),
+            ],
+        )));
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+}
+
+#[test]
+fn focus_from_a_clientless_source_with_two_clients_is_ambiguous() {
+    let (mut rt, _tx) = new_runtime();
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab_id, pane);
+    add_client(&mut session, ClientId::new(), tab_id, None);
+    add_client(&mut session, ClientId::new(), tab_id, None);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("multiple clients; name a target client for the focus".to_string()),
+        }
+    );
+}
+
+#[test]
+fn focus_with_no_attached_client_at_all_is_invalid() {
+    let (mut rt, _tx) = new_runtime();
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab_id, pane);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no attached client whose focus could move".to_string()),
+        }
+    );
+}
+
+#[test]
+fn focus_an_exited_pane_succeeds() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(a)),
+                LayoutChild::new(LayoutNode::Pane(b)),
+            ],
+        )));
+    // A dead pane is a visible, focusable placeholder until it is removed.
+    let exited_at = SystemTime::now();
+    {
+        let record = session.panes.get_mut(b).expect("record");
+        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessExited {
+            code: Some(0),
+            at: exited_at,
+        });
+        assert_eq!(
+            *record.lifecycle(),
+            PaneLifecycle::Exited {
+                code: Some(0),
+                at: exited_at,
+            }
+        );
+    }
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+}
+
+#[test]
+fn focus_activation_reflows_the_expanded_member_pty() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_tab(&mut session, tab_id, a);
+    add_client(&mut session, client_id, tab_id, Some(a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split off a live pane `b`, then stack `c` onto it: the stack is
+    // [b, c] with `c` active and `b` collapsed to a header.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let b = other_pane(&rt, sid, a);
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let c = {
+        let mut others = rt.sessions[&sid]
+            .panes
+            .list()
+            .map(PaneRecord::id)
+            .filter(|id| *id != a && *id != b);
+        let pane = others.next().expect("a third pane exists");
+        assert!(others.next().is_none(), "exactly one new pane");
+        pane
+    };
+    let c_resizes_before = fake.resizes(c).expect("c spawned").len();
+
+    // Focusing collapsed `b` expands it: at an 80x24 viewport the halved
+    // right column is 40x24, the stack's active member outer rect is 40x23
+    // (one header row), so `b`'s PTY content becomes 38x21.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged + PtyResized(b) + PaneFocused. `c` collapses to a
+            // header and keeps its last PTY size, so it is not resized.
+            assert_eq!(emitted_events.len(), 3);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab_id].layout(),
+        &LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutChild::new(LayoutNode::Pane(a)),
+                LayoutChild::new(LayoutNode::Split(SplitNode::stack(vec![b, c], 0))),
+            ],
+        ))
+    );
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(b)
+    );
+    assert_eq!(
+        fake.resizes(b).expect("b spawned").last().copied(),
+        Some(PtySize { cols: 38, rows: 21 })
+    );
+    // The newly collapsed `c` keeps its last PTY size: no resize reached it.
+    assert_eq!(fake.resizes(c).expect("c spawned").len(), c_resizes_before);
 }
 
 #[test]
@@ -1427,7 +2104,7 @@ fn focus_target_with_removed_registry_record_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::FocusPane(FocusPaneArgs { pane }),
+        Command::FocusPane(FocusPaneArgs { pane, client: None }),
     );
     let command_id = env.id;
     assert_eq!(

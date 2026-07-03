@@ -43,6 +43,11 @@ fn pane_commands_roundtrip() {
     }));
     roundtrip(&Command::FocusPane(FocusPaneArgs {
         pane: PaneId::new(),
+        client: None,
+    }));
+    roundtrip(&Command::FocusPane(FocusPaneArgs {
+        pane: PaneId::new(),
+        client: Some(ClientId::new()),
     }));
     roundtrip(&Command::RenamePane(RenamePaneArgs {
         pane: None,
@@ -141,6 +146,7 @@ fn command_variant_names_are_canonical() {
         (
             Command::FocusPane(FocusPaneArgs {
                 pane: PaneId::new(),
+                client: None,
             }),
             "FocusPane",
         ),
@@ -287,6 +293,7 @@ fn command_kind_mirrors_command() {
         (
             Command::FocusPane(FocusPaneArgs {
                 pane: PaneId::new(),
+                client: None,
             }),
             CommandKind::FocusPane,
         ),

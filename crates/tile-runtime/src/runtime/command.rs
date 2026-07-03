@@ -17,10 +17,10 @@ use std::time::SystemTime;
 
 use tile_core::{
     command::{
-        ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs,
-        ResizePaneArgs, TabTarget,
+        ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs,
+        NewPaneArgs, ResizePaneArgs, TabTarget,
     },
-    event::{Event, LayoutChanged, PtyResized, RejectReason},
+    event::{Event, LayoutChanged, PaneFocused, PtyResized, RejectReason},
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     process::{KillPolicy, PtySize, SpawnSpec},
@@ -28,6 +28,7 @@ use tile_core::{
 use tile_layout::{
     content::content_rects,
     edit::{add_to_stack, split_leaf},
+    focus::stack_activate,
     resize::{resize, ResizeError},
     solver::{fits, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
@@ -88,6 +89,15 @@ struct PaneTarget {
     pane_id: PaneId,
 }
 
+/// A resolved [`Command::FocusPane`] target: the session and client whose
+/// focus moves, and that client's active tab — the tab the pane was resolved
+/// in. The `Ok` half of [`Runtime::resolve_focus_target`].
+struct FocusPaneTarget {
+    session_id: SessionId,
+    client_id: ClientId,
+    tab_id: TabId,
+}
+
 impl Runtime {
     /// Dispatch one command and report its outcome.
     ///
@@ -114,7 +124,9 @@ impl Runtime {
             Command::ResizePane(args) => {
                 self.handle_resize_pane(envelope.id, &envelope.source, &args)
             }
-            Command::FocusPane(_) => self.reject(envelope.id, "focus pane"),
+            Command::FocusPane(args) => {
+                self.handle_focus_pane(envelope.id, &envelope.source, &args)
+            }
             Command::NewTab(_) => self.reject(envelope.id, "new tab"),
             Command::CloseTab(_) => self.reject(envelope.id, "close tab"),
             Command::RenameTab(_) => self.reject(envelope.id, "rename tab"),
@@ -570,6 +582,117 @@ impl Runtime {
         scope.commit(command_id)
     }
 
+    /// Handle [`Command::FocusPane`]: move the target client's focus to the
+    /// named pane in its active tab.
+    ///
+    /// The pane must be visible on screen: one suppressed for lack of space is
+    /// [`RejectReason::InvalidState`]. A collapsed stack member is a valid
+    /// target — focusing it activates its stack (the member expands, the
+    /// previously active member collapses to a header) and the tab's PTYs
+    /// reflow to the new geometry. Emits [`Event::LayoutChanged`] plus
+    /// per-pane [`Event::PtyResized`] when a stack activation changed the
+    /// geometry, and [`Event::PaneFocused`] when the client's focus actually
+    /// moved; focusing the already-focused pane of an already-active member
+    /// completes with no events. A rejected focus mutates nothing.
+    fn handle_focus_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &FocusPaneArgs,
+    ) -> CommandResult {
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match Self::resolve_focus_target(args, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+
+        let backend = Arc::clone(self.pty_backend());
+
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(viewport) = session.tab_viewport(target.tab_id) else {
+            return Self::rejected(
+                command_id,
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "pane's tab is not viewed by any client",
+                ),
+            );
+        };
+        let Some(tab) = session.tabs.get_mut(&target.tab_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        // Solve the tab as displayed: a pane suppressed for lack of space
+        // cannot take focus.
+        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let solved = solve_with_mode(tab.layout(), tab.layout_mode(), tab_rect);
+        if solved.suppressed.contains(&args.pane) {
+            return Self::rejected(
+                command_id,
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "pane is suppressed; not enough space to show it",
+                ),
+            );
+        }
+
+        // A collapsed stack member is a valid target: focusing it expands it.
+        // The activation mutates a candidate tree, swapped in whole, and the
+        // changed geometry reflows every affected PTY.
+        let mut events = Vec::new();
+        let mut candidate = tab.layout().clone();
+        let activated = candidate
+            .stack_containing_mut(args.pane)
+            .and_then(|stack| stack_activate(stack, args.pane))
+            .is_some();
+        if activated {
+            tab.update_layout(candidate);
+            events.push(Event::LayoutChanged(LayoutChanged {
+                tab_id: target.tab_id,
+            }));
+            let rects = Self::tab_content_rects(session, target.tab_id, viewport);
+            Self::reflow_changed(
+                backend.as_ref(),
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                rects,
+                None,
+                &mut events,
+            );
+        }
+
+        let Some(client) = session.clients.get_mut(target.client_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
+        };
+        let prior_pane = client.focused_pane(target.tab_id);
+        if prior_pane == Some(args.pane) && !activated {
+            return TransactionScope::new().commit(command_id);
+        }
+        client.update_focused_pane(target.tab_id, args.pane);
+        if let Some(tab) = session.tabs.get_mut(&target.tab_id) {
+            tab.record_focus_mru(args.pane);
+        }
+        if prior_pane != Some(args.pane) {
+            events.push(Event::PaneFocused(PaneFocused {
+                client_id: target.client_id,
+                tab_id: target.tab_id,
+                pane_id: args.pane,
+                prior_pane,
+            }));
+        }
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
     /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
     /// neighbor on the requested side is [`RejectReason::InvalidState`], and
@@ -811,12 +934,14 @@ impl Runtime {
 
     /// Whether `command` acts on a specific client's view (its focused pane,
     /// active tab, lock mode, or copy-mode state) and so cannot be issued by a
-    /// source that names no client.
+    /// source that names no client. [`Command::FocusPane`] is absent: it
+    /// resolves its own target client (explicit `client` argument, issuing
+    /// client, or the session's sole attached client) in
+    /// [`Self::resolve_focus_target`].
     fn is_client_scoped(command: &Command) -> bool {
         matches!(
             command,
-            Command::FocusPane(_)
-                | Command::FocusTab(_)
+            Command::FocusTab(_)
                 | Command::ToggleLockMode
                 | Command::SetLockMode(_)
                 | Command::TogglePaneFullscreen
@@ -885,7 +1010,7 @@ impl Runtime {
         session: Option<&Session>,
     ) -> Result<(), Rejection> {
         match command {
-            Command::FocusPane(args) => self.resolve_focus_target(args.pane, source, session),
+            Command::FocusPane(args) => Self::resolve_focus_target(args, source, session).map(drop),
             Command::ClosePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::ResizePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::WriteToPane(args) => self.resolve_pane_or_focused(args.pane, source, session),
@@ -1168,22 +1293,64 @@ impl Runtime {
         }
     }
 
-    /// Resolve the [`Command::FocusPane`] target against the source client's
-    /// active tab.
+    /// Resolve the [`Command::FocusPane`] target: the client whose focus moves
+    /// and the pane, which must live in that client's active tab. Shared by
+    /// validation and [`Self::handle_focus_pane`] so both apply one contract.
+    ///
+    /// The target client is the explicit `client` argument when set — it wins
+    /// even over an in-session issuer, and one not attached to the acting
+    /// session is [`RejectReason::TargetNotFound`], never a fallback to the
+    /// issuer. With no explicit target the issuing client is used; a source
+    /// with no client defaults to the session's sole attached client, a
+    /// session with several is [`RejectReason::TargetAmbiguous`], and one with
+    /// none is [`RejectReason::InvalidState`]. Focus is tab-local, so the pane
+    /// resolves through [`Self::require_pane_in_active_tab`].
     fn resolve_focus_target(
-        &self,
-        pane: PaneId,
+        args: &FocusPaneArgs,
         source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<(), Rejection> {
+    ) -> Result<FocusPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
-        let client_id = source.client_id().ok_or_else(|| {
-            Rejection::new(
-                RejectReason::Unauthorized,
-                "command requires an attached client",
-            )
-        })?;
-        Self::require_pane_in_active_tab(session, client_id, pane)
+        let client_id = match args.client.or_else(|| source.client_id()) {
+            Some(client_id) => {
+                if session.clients.get(client_id).is_none() {
+                    return Err(Rejection::new(
+                        RejectReason::TargetNotFound,
+                        "target client not attached to the session",
+                    ));
+                }
+                client_id
+            }
+            None => {
+                let mut attached = session.clients.list_attached();
+                match (attached.next(), attached.next()) {
+                    (None, _) => {
+                        return Err(Rejection::new(
+                            RejectReason::InvalidState,
+                            "no attached client whose focus could move",
+                        ))
+                    }
+                    (Some(only), None) => only.id(),
+                    (Some(_), Some(_)) => {
+                        return Err(Rejection::new(
+                            RejectReason::TargetAmbiguous,
+                            "multiple clients; name a target client for the focus",
+                        ))
+                    }
+                }
+            }
+        };
+        Self::require_pane_in_active_tab(session, client_id, args.pane)?;
+        let tab_id = session
+            .clients
+            .get(client_id)
+            .map(|client| client.active_tab())
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        Ok(FocusPaneTarget {
+            session_id: session.id,
+            client_id,
+            tab_id,
+        })
     }
 
     /// Resolve the client's focused pane. A client with no focused pane is

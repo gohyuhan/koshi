@@ -126,15 +126,18 @@ pub fn remove_pane_cascade(
             for (client_id, verdict) in verdicts {
                 match verdict {
                     FocusRepairResult::Focused(new_pane) => {
+                        let mut prior_pane = None;
                         if let Some(client) = session.clients.get_mut(client_id) {
-                            client.update_focused_pane(tab_id, new_pane);
+                            prior_pane = client.update_focused_pane(tab_id, new_pane);
                         }
                         if let Some(tab) = session.tabs.get_mut(&tab_id) {
                             tab.record_focus_mru(new_pane);
                         }
                         events.push(Event::PaneFocused(PaneFocused {
-                            pane_id: new_pane,
+                            client_id,
                             tab_id,
+                            pane_id: new_pane,
+                            prior_pane,
                         }));
                     }
                     FocusRepairResult::TerminalTooSmall => {

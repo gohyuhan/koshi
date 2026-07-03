@@ -96,8 +96,10 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
             }),
             Event::LayoutChanged(LayoutChanged { tab_id: tab }),
             Event::PaneFocused(PaneFocused {
-                pane_id: new_id,
+                client_id: client,
                 tab_id: tab,
+                pane_id: new_id,
+                prior_pane: Some(source),
             }),
         ]
     );
@@ -211,8 +213,10 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
             }),
             Event::LayoutChanged(LayoutChanged { tab_id: tab_b }),
             Event::PaneFocused(PaneFocused {
-                pane_id: new_id,
+                client_id,
                 tab_id: tab_b,
+                pane_id: new_id,
+                prior_pane: None,
             }),
         ]
     );
