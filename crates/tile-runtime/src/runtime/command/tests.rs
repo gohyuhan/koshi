@@ -5104,8 +5104,8 @@ fn new_tab_with_an_empty_name_is_rejected() {
 }
 
 #[test]
-fn new_tab_with_a_name_over_64_chars_is_rejected() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
+fn new_tab_accepts_a_name_over_64_chars() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
     let pane_a = PaneId::new();
@@ -5116,24 +5116,36 @@ fn new_tab_with_a_name_over_64_chars_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
+    // The name is stored whole at any length; the renderer truncates long
+    // names at display time.
+    let name = "x".repeat(65);
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewTab(NewTabArgs {
-            name: Some("x".repeat(65)),
+            name: Some(name.clone()),
             ..NewTabArgs::default()
         }),
     );
     let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("tab name too long (max 64 characters)".to_string()),
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized.
+            assert_eq!(emitted_events.len(), 5);
         }
-    );
-    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
-    assert!(fake.spawned_panes().is_empty());
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs.len(), 2);
+    let new_tab = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab");
+    assert_eq!(new_tab.name(), name);
 }
 
 #[test]
@@ -5982,7 +5994,106 @@ fn rename_tab_with_an_empty_name_is_rejected() {
 }
 
 #[test]
-fn rename_tab_with_a_name_over_64_chars_is_rejected() {
+fn rename_tab_accepts_a_name_over_64_chars() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // 65 multi-byte characters, stored whole: names have no length cap at
+    // validate; the renderer truncates long names at display time.
+    let name = "字".repeat(65);
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: None,
+            name: name.clone(),
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), name);
+}
+
+#[test]
+fn rename_pane_updates_the_title_and_emits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No explicit target: the issuer's focused pane is renamed.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenamePane(RenamePaneArgs {
+            pane: None,
+            name: "build-watch".to_string(),
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        Some("build-watch".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_to_its_current_title_is_ok_with_no_events() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    session.panes.get_mut(pane_a).expect("pane").title = Some("same".to_string());
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenamePane(RenamePaneArgs {
+            pane: Some(pane_a),
+            name: "same".to_string(),
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        Some("same".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_with_an_empty_name_is_rejected() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -5996,9 +6107,9 @@ fn rename_tab_with_a_name_over_64_chars_is_rejected() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: "字".repeat(65),
+        Command::RenamePane(RenamePaneArgs {
+            pane: None,
+            name: String::new(),
         }),
     );
     let command_id = env.id;
@@ -6007,10 +6118,108 @@ fn rename_tab_with_a_name_over_64_chars_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("tab name too long (max 64 characters)".to_string()),
+            help: Some("pane name cannot be empty".to_string()),
         }
     );
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        None
+    );
+}
+
+#[test]
+fn rename_pane_accepts_a_name_over_64_chars() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // 65 multi-byte characters, stored whole: names have no length cap at
+    // validate; the renderer truncates long names at display time.
+    let name = "字".repeat(65);
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenamePane(RenamePaneArgs {
+            pane: None,
+            name: name.clone(),
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        Some(name)
+    );
+}
+
+#[test]
+fn rename_pane_explicit_target_resolves_its_owning_session() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // An internal source carries no session or client context; the explicit
+    // pane target alone finds the owning session.
+    let env = envelope(Command::RenamePane(RenamePaneArgs {
+        pane: Some(pane_a),
+        name: "logs".to_string(),
+    }));
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        Some("logs".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_in_session_cli_defaults_to_the_issuing_pane() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No explicit target from the in-session CLI: the pane the command was
+    // issued from is renamed.
+    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let result = rt.dispatch(envelope_from(
+        source,
+        Command::RenamePane(RenamePaneArgs {
+            pane: None,
+            name: "issuer".to_string(),
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
+        Some("issuer".to_string())
+    );
 }
 
 // --- FocusTab handler ----------------------------------------------------------
@@ -6513,33 +6722,6 @@ fn new_tab_for_a_client_below_minimum_size_is_rejected() {
     );
     assert_eq!(rt.sessions[&sid].tabs.len(), 1);
     assert!(fake.spawned_panes().is_empty());
-}
-
-#[test]
-fn rename_tab_accepts_a_name_of_exactly_64_chars() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    // 64 characters (not bytes) is the inclusive cap — multi-byte chars count
-    // once each.
-    let name = "字".repeat(64);
-    let result = rt.dispatch(envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: name.clone(),
-        }),
-    ));
-    assert!(matches!(result, CommandResult::Ok { .. }));
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), name);
 }
 
 /// The [`resize_fixture`] tab zoomed onto the split pane through dispatch:

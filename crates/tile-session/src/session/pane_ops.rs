@@ -1,5 +1,5 @@
-//! NewPane state commit: the pure session-state application behind
-//! `Command::NewPane`.
+//! Pane state ops: the pure session-state applications behind
+//! `Command::NewPane` and `Command::RenamePane`.
 //!
 //! Like [`crate::session::tab_ops`], this layer edits state and drafts events
 //! only — it never spawns a process or touches a terminal. The runtime builds
@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
+use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, PaneRenamed, TabFocused};
 use tile_core::ids::{ClientId, PaneId, TabId};
 use tile_core::process::SpawnSpec;
 use tile_layout::mode::LayoutMode;
@@ -137,6 +137,26 @@ pub fn commit_new_pane(
         }));
     }
     (previous_tab, events)
+}
+
+/// Rename `pane_id`: set its display title.
+///
+/// A no-op (no event) when the pane is unknown or the title is unchanged;
+/// pane titles need not be unique — nothing resolves a pane by title. Layout,
+/// focus, and PTYs are untouched. Returns [`Event::PaneRenamed`].
+#[must_use]
+pub fn rename_pane(session: &mut Session, pane_id: PaneId, new_name: String) -> Vec<Event> {
+    let Some(record) = session.panes.get_mut(pane_id) else {
+        return Vec::new();
+    };
+    if record.title.as_deref() == Some(new_name.as_str()) {
+        return Vec::new(); // unchanged, nothing to emit
+    }
+    record.title = Some(new_name.clone());
+    vec![Event::PaneRenamed(PaneRenamed {
+        pane_id,
+        name: new_name,
+    })]
 }
 
 #[cfg(test)]
