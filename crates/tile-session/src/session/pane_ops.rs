@@ -103,9 +103,10 @@ pub fn commit_new_pane(
     }
 
     // Auto-focus the resolved client on the new pane.
+    let mut prior_pane = None;
     if let Some(client_id) = focus {
         if let Some(client) = session.clients.get_mut(client_id) {
-            client.update_focused_pane(tab_id, new_pane_id);
+            prior_pane = client.update_focused_pane(tab_id, new_pane_id);
         }
     }
 
@@ -114,10 +115,12 @@ pub fn commit_new_pane(
         tab_id,
     }));
     events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
-    if focus.is_some() {
+    if let Some(client_id) = focus {
         events.push(Event::PaneFocused(PaneFocused {
-            pane_id: new_pane_id,
+            client_id,
             tab_id,
+            pane_id: new_pane_id,
+            prior_pane,
         }));
     }
     (previous_tab, events)

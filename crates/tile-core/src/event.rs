@@ -176,10 +176,14 @@ pub struct PaneRemoved {
 /// Payload for [`Event::PaneFocused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneFocused {
+    /// The client whose focus moved.
+    pub client_id: ClientId,
+    /// The tab the focus moved in.
+    pub tab_id: TabId,
     /// The newly focused pane.
     pub pane_id: PaneId,
-    /// The tab it belongs to.
-    pub tab_id: TabId,
+    /// The pane that held this client's focus in the tab before, if any.
+    pub prior_pane: Option<PaneId>,
 }
 
 /// Payload for [`Event::PtyResized`].

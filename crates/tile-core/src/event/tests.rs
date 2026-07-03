@@ -302,8 +302,10 @@ fn event_variant_names_are_canonical() {
         ),
         (
             Event::PaneFocused(PaneFocused {
-                pane_id: PaneId::new(),
+                client_id: ClientId::new(),
                 tab_id: TabId::new(),
+                pane_id: PaneId::new(),
+                prior_pane: None,
             }),
             "PaneFocused",
         ),

@@ -199,6 +199,13 @@ pub struct ResizePaneArgs {
 pub struct FocusPaneArgs {
     /// Pane to focus.
     pub pane: PaneId,
+    /// Client whose focus moves. When set, that client is targeted and takes
+    /// priority even over an in-session issuer; a client not attached to the
+    /// acting session is rejected outright (no fallback). `None` targets the
+    /// issuing client or, for a source with no client, the session's sole
+    /// attached client — a session with several attached clients and no named
+    /// target is rejected rather than moving an arbitrary client's focus.
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::NewTab`].
