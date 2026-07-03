@@ -16,6 +16,7 @@ use tile_core::geometry::{Direction, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_core::process::{ShellKind, SpawnSpec};
 use tile_layout::edit::split_leaf;
+use tile_layout::mode::LayoutMode;
 use tile_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
@@ -316,4 +317,31 @@ fn commit_with_a_stale_focus_client_claims_no_focus() {
     );
     assert_eq!(session.panes.len(), 2);
     assert!(session.tabs.get(&tab).expect("tab").focus_mru().is_empty());
+}
+
+#[test]
+fn commit_drops_the_tabs_fullscreen() {
+    let (mut session, tab, source, client) = session_one_pane();
+    session
+        .tabs
+        .get_mut(&tab)
+        .expect("tab")
+        .update_layout_mode(LayoutMode::Fullscreen { focused: source });
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    // The new pane lands in the tiled view the caller sized it against.
+    assert_eq!(
+        session.tabs.get(&tab).expect("tab").layout_mode(),
+        LayoutMode::Tiled
+    );
 }

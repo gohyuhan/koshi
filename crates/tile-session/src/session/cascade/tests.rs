@@ -8,9 +8,10 @@
 
 use std::time::SystemTime;
 
-use tile_core::event::Event;
+use tile_core::event::{Event, LayoutChanged, PaneClosing, PaneRemoved};
 use tile_core::geometry::{Point, Rect, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
+use tile_layout::mode::LayoutMode;
 use tile_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use tile_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
@@ -577,4 +578,38 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
         session.clients.get(client_id).unwrap().focused_pane(tab_id),
         None
     );
+}
+
+#[test]
+fn removing_a_pane_from_a_fullscreen_tab_returns_it_to_tiled() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    session.attach_client(focused_client(session.id, tab_id, a));
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout_mode(LayoutMode::Fullscreen { focused: a });
+
+    // Removing the hidden pane drops the fullscreen along with the leaf;
+    // the focus was on the survivor, so no repair events follow.
+    let events = remove_pane_cascade(&mut session, tab_id, b, rect(), EmptyTabPolicy::CloseTab);
+
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: b }),
+            Event::PaneRemoved(PaneRemoved { pane_id: b, tab_id }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+        ]
+    );
+    assert_eq!(session.tabs[&tab_id].layout_mode(), LayoutMode::Tiled);
+    assert_eq!(*session.tabs[&tab_id].layout(), LayoutNode::Pane(a));
 }
