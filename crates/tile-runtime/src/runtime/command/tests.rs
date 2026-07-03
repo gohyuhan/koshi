@@ -21,6 +21,7 @@ use tile_core::command::{
 use tile_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use tile_core::geometry::{Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
+use tile_core::naming;
 use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_layout::mode::LayoutMode;
 use tile_layout::tree::{LayoutChild, SplitNode};
@@ -30,6 +31,7 @@ use tile_pane::pane::state::PaneRecord;
 use tile_pty::backend::state::PtyBackend;
 use tile_pty::error::PtyError;
 use tile_session::client::{Client, ClientRegistry};
+use tile_session::session::pane_ops::NewPaneSpec;
 use tile_session::session::state::{Session, Tab};
 use tile_session::session::tab_ops;
 use tile_test_support::fake_pty::FakePtyBackend;
@@ -124,7 +126,15 @@ fn bare_session(id: SessionId) -> Session {
 /// requested.
 fn stopping_session(id: SessionId) -> Session {
     let mut session = bare_session(id);
-    let _ = tab_ops::new_tab(&mut session, "t".to_string(), SystemTime::now());
+    let _ = tab_ops::commit_new_tab(
+        &mut session,
+        TabId::new(),
+        PaneId::new(),
+        "t".to_string(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::now(),
+    );
     session.request_stop();
     session
 }
@@ -202,9 +212,6 @@ fn client_scoped_command_without_a_client_is_unauthorized() {
     let (mut rt, _tx) = new_runtime();
 
     let commands = vec![
-        Command::FocusTab(FocusTabArgs {
-            target: TabTarget::Next,
-        }),
         Command::ToggleLockMode,
         Command::SetLockMode(LockModeArgs { locked: true }),
         Command::TogglePaneFullscreen,
@@ -348,11 +355,14 @@ fn tab_command_without_session_context_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
     // An internal source has no session context to resolve a tab within.
-    // (FocusTab is client-scoped and rejects earlier as Unauthorized, so it is
-    // covered by the client-scoped test, not here.)
     let commands = vec![
         Command::CloseTab(CloseTabArgs {
             tab: Some(TabId::new()),
+            force: false,
+        }),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Next,
+            client: None,
         }),
         Command::CloseTab(CloseTabArgs::default()),
         Command::RenameTab(RenameTabArgs {
@@ -2031,7 +2041,7 @@ fn in_session_cli_session_id_is_authoritative_over_a_mismatched_client() {
 }
 
 #[test]
-fn focus_tab_relative_resolves_from_a_live_active_tab() {
+fn focus_tab_next_in_a_single_tab_session_is_a_clean_noop() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -2040,22 +2050,29 @@ fn focus_tab_relative_resolves_from_a_live_active_tab() {
     add_pane(&mut session, pane);
     add_tab(&mut session, tab, pane);
     add_client(&mut session, client_id, tab, None);
-    rt.sessions.insert(session.id, session);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
 
-    let env = envelope_from(
+    // Next wraps the single tab back onto itself: the target resolves to the
+    // already-active tab, so nothing changes and no events are emitted.
+    let result = rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Next,
+            client: None,
         }),
-    );
-    let command_id = env.id;
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
     assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("focus tab not yet implemented".to_string()),
-        }
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab
     );
 }
 
@@ -2077,6 +2094,7 @@ fn focus_tab_relative_with_a_stale_active_tab_is_not_found() {
         CommandSource::key_binding(client_id),
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Prev,
+            client: None,
         }),
     );
     let command_id = env.id;
@@ -2135,20 +2153,23 @@ fn in_session_cli_tab_default_uses_the_source_pane_tab() {
     add_client(&mut session, client_id, tab_b, None);
     rt.sessions.insert(session.id, session);
 
-    // CloseTab with no explicit tab — InSessionCli should resolve via the tab
+    // CloseTab with no explicit tab — InSessionCli resolves via the tab
     // containing pane_a (tab A), not the client's active tab (tab B).
     let source =
         CommandSource::in_session_cli(session_id, client_id, pane_a, PathBuf::from("/sock"));
-    let env = envelope_from(source, Command::CloseTab(CloseTabArgs::default()));
-    let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("close tab not yet implemented".to_string()),
-        }
-    );
+    let result = rt.dispatch(envelope_from(
+        source,
+        Command::CloseTab(CloseTabArgs::default()),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    // Tab A — the source pane's tab — was closed; the client's active tab B
+    // is untouched.
+    let session = &rt.sessions[&session_id];
+    assert!(!session.tabs.contains_key(&tab_a));
+    assert!(session.tabs.contains_key(&tab_b));
+    assert!(session.panes.get(pane_a).is_none());
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), tab_b);
 }
 
 #[test]
@@ -4936,4 +4957,1477 @@ fn resize_pane_in_a_nested_split_moves_the_enclosing_border() {
             rows: size_b.rows,
         }
     );
+}
+
+// --- NewTab handler ----------------------------------------------------------
+
+#[test]
+fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs {
+            name: Some("build".to_string()),
+            ..NewTabArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized;
+            // the vacated tab has no viewer left, so nothing else reflows.
+            assert_eq!(emitted_events.len(), 5);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs.len(), 2);
+    let new_tab = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab");
+    assert_eq!(new_tab.name(), "build");
+    assert_eq!(new_tab.index(), 1);
+    let new_pane = new_tab.layout().leaf_panes()[0];
+
+    // The issuer switched onto the new tab and focuses its root pane.
+    let client = session.clients.get(client_id).unwrap();
+    assert_eq!(client.active_tab(), new_tab.id());
+    assert_eq!(client.focused_pane(new_tab.id()), Some(new_pane));
+
+    // The root pane is Running, records the default-shell request (no
+    // explicit command), and was spawned at the client's full viewport:
+    // 80x24 outer -> 78x22 content.
+    let record = session.panes.get(new_pane).unwrap();
+    assert_eq!(*record.lifecycle(), PaneLifecycle::Running);
+    assert_eq!(record.command, None);
+    assert_eq!(record.title, None);
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    assert_eq!(
+        fake.resizes(new_pane).unwrap(),
+        vec![PtySize { cols: 78, rows: 22 }]
+    );
+    assert_eq!(rt.pty_sizes[&new_pane], PtySize { cols: 78, rows: 22 });
+}
+
+#[test]
+fn new_tab_generates_a_free_name_when_none_is_given() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    // The generated name is `T-<adjective>-<noun>` with both words drawn from
+    // the same language's lists, and does not collide with the existing tab.
+    let session = &rt.sessions[&sid];
+    let new_tab = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab");
+    let mut pieces = new_tab.name().splitn(3, '-');
+    assert_eq!(pieces.next(), Some("T"));
+    let adjective = pieces.next().expect("adjective");
+    let noun = pieces.next().expect("noun");
+    let language_pairs = [
+        (&naming::EN_ADJECTIVES, &naming::EN_NOUNS),
+        (&naming::JA_ADJECTIVES, &naming::JA_NOUNS),
+        (&naming::ZH_HANT_ADJECTIVES, &naming::ZH_HANT_NOUNS),
+    ];
+    let language = language_pairs
+        .iter()
+        .position(|(adjectives, _)| adjectives.contains(&adjective))
+        .expect("adjective from a known language list");
+    assert!(language_pairs[language].1.contains(&noun));
+    assert_ne!(new_tab.name(), "t");
+}
+
+#[test]
+fn new_tab_with_an_empty_name_is_rejected() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs {
+            name: Some(String::new()),
+            ..NewTabArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("tab name cannot be empty".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_tab_with_a_name_over_64_chars_is_rejected() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs {
+            name: Some("x".repeat(65)),
+            ..NewTabArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("tab name too long (max 64 characters)".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_tab_spawn_failure_commits_nothing() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "boom".to_string(),
+    });
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("failed to launch the pane's process".to_string()),
+        }
+    );
+
+    // Nothing was committed: no tab, no pane record, no view moved, no handle.
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs.len(), 1);
+    assert_eq!(session.panes.len(), 1);
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), tab_a);
+    assert!(rt.pty_handles.is_empty());
+}
+
+#[test]
+fn new_tab_explicit_client_wins_over_the_issuer() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let issuer = ClientId::new();
+    let named = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, issuer, tab_a, Some(pane_a));
+    add_client(&mut session, named, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::NewTab(NewTabArgs {
+            client: Some(named),
+            ..NewTabArgs::default()
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    let new_tab_id = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab")
+        .id();
+    assert_eq!(session.clients.get(named).unwrap().active_tab(), new_tab_id);
+    assert_eq!(session.clients.get(issuer).unwrap().active_tab(), tab_a);
+}
+
+#[test]
+fn new_tab_with_an_unattached_explicit_client_is_rejected() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs {
+            client: Some(ClientId::new()),
+            ..NewTabArgs::default()
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_tab_external_source_defaults_to_the_sole_client() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::NewTab(NewTabArgs::default()),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    let new_tab_id = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab")
+        .id();
+    assert_eq!(
+        session.clients.get(client_id).unwrap().active_tab(),
+        new_tab_id
+    );
+}
+
+#[test]
+fn new_tab_external_source_with_two_clients_is_ambiguous() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, ClientId::new(), tab_a, None);
+    add_client(&mut session, ClientId::new(), tab_a, None);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("multiple clients; name a target client for the new tab".to_string()),
+        }
+    );
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_tab_with_no_attached_client_is_invalid() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no attached client to switch onto the new tab".to_string()),
+        }
+    );
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+
+    // Mover A is the 40x10 size constraint on the shared tab; B views it at
+    // the full 80x24.
+    let mover = ClientId::new();
+    let mut a = Client::new(
+        mover,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_a,
+    );
+    a.update_focused_pane(tab_a, pane_a);
+    session.attach_client(a);
+    let stayer = ClientId::new();
+    add_client(&mut session, stayer, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split the shared tab so it holds a live PTY sized to the 40x10
+    // constraint: two half-columns of 40 -> outer 20x10 -> content 18x8.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(stayer),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = other_pane(&rt, sid, pane_a);
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 18, rows: 8 }
+    );
+
+    // A creates a new tab and leaves: the vacated tab's viewport grows to
+    // B's 80x24 -> outer 40x24 -> content 38x22. The new tab's root pane is
+    // sized to A's own 40x10 viewport -> content 38x8.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(mover),
+        Command::NewTab(NewTabArgs::default()),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => {
+            // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized
+            // (spawn), then the vacated tab's one live PTY reflowed
+            // (`pane_a` never spawned, so only the split pane resizes).
+            assert_eq!(emitted_events.len(), 6);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 38, rows: 22 }
+    );
+    let new_tab = rt.sessions[&sid]
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab");
+    let new_pane = new_tab.layout().leaf_panes()[0];
+    assert_eq!(
+        fake.resizes(new_pane).unwrap(),
+        vec![PtySize { cols: 38, rows: 8 }]
+    );
+}
+
+// --- CloseTab handler ----------------------------------------------------------
+
+#[test]
+fn close_tab_removes_state_kills_children_and_moves_viewers() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Give the doomed tab a live PTY by splitting it while viewed.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // PaneClosing+PaneRemoved for each of the two panes, TabClosed,
+            // TabFocused (the viewer moves to tab_a; its pane has no PTY, so
+            // nothing reflows).
+            assert_eq!(emitted_events.len(), 6);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert!(!session.tabs.contains_key(&tab_b));
+    assert!(session.panes.get(pane_b).is_none());
+    assert!(session.panes.get(pane_x).is_none());
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), tab_a);
+    assert!(!rt.pty_handles.contains_key(&pane_x));
+    assert!(!rt.pty_sizes.contains_key(&pane_x));
+    assert_eq!(
+        wait_for_kill(&fake, pane_x),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+#[test]
+fn close_tab_with_a_busy_confirm_pane_rejects_without_force() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(pane_x)
+        .unwrap()
+        .close_policy = PaneClosePolicy::ConfirmIfBusy;
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("a pane in the tab may be busy; pass --force to close anyway".to_string()),
+        }
+    );
+
+    // All-or-nothing: nothing was closed, nothing killed.
+    let session = &rt.sessions[&sid];
+    assert!(session.tabs.contains_key(&tab_b));
+    assert!(session.panes.get(pane_x).is_some());
+    assert!(rt.pty_handles.contains_key(&pane_x));
+    assert!(fake.kills(pane_x).unwrap().is_empty());
+}
+
+#[test]
+fn close_tab_force_kills_a_busy_confirm_pane() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(pane_x)
+        .unwrap()
+        .close_policy = PaneClosePolicy::ConfirmIfBusy;
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: true,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert!(!rt.sessions[&sid].tabs.contains_key(&tab_b));
+    assert_eq!(wait_for_kill(&fake, pane_x), vec![KillPolicy::Force]);
+}
+
+#[test]
+fn close_tab_confirm_if_busy_exited_pane_closes() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+    {
+        let record = rt
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .panes
+            .get_mut(pane_x)
+            .unwrap();
+        record.close_policy = PaneClosePolicy::ConfirmIfBusy;
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+                code: Some(0),
+                at: SystemTime::now(),
+            })
+            .unwrap();
+    }
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: false,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert!(!rt.sessions[&sid].tabs.contains_key(&tab_b));
+    assert_eq!(
+        wait_for_kill(&fake, pane_x),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+#[test]
+fn close_last_tab_quits_the_session() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs::default()),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // PaneClosing, PaneRemoved, TabClosed, Quit.
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert!(session.tabs.is_empty());
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+}
+
+#[test]
+fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(TabId::new()),
+            force: false,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: None,
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+}
+
+#[test]
+fn close_tab_reflows_the_tab_its_viewers_move_to() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+
+    // B (80x24) views tab_a; the mover A (40x10) views the doomed tab_b.
+    let stayer = ClientId::new();
+    add_client(&mut session, stayer, tab_a, Some(pane_a));
+    let mover = ClientId::new();
+    let a = Client::new(
+        mover,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_b,
+    );
+    session.attach_client(a);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split tab_a while only B views it: its PTY starts at the 80-wide
+    // geometry (outer 40x24 -> content 38x22).
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(stayer),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 38, rows: 22 }
+    );
+
+    // A closes its own tab and is moved to tab_a, which now counts A's 40x10
+    // viewport: outer 20x10 -> content 18x8.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(mover),
+        Command::CloseTab(CloseTabArgs::default()),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => {
+            // PaneClosing, PaneRemoved, TabClosed, TabFocused, PtyResized.
+            assert_eq!(emitted_events.len(), 5);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 18, rows: 8 }
+    );
+    assert_eq!(
+        rt.sessions[&sid].clients.get(mover).unwrap().active_tab(),
+        tab_a
+    );
+}
+
+// --- RenameTab handler ---------------------------------------------------------
+
+#[test]
+fn rename_tab_updates_the_name_and_emits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: None,
+            name: "build".to_string(),
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "build");
+}
+
+#[test]
+fn rename_tab_to_its_current_name_is_ok_with_no_events() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a); // add_tab names it "t"
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: Some(tab_a),
+            name: "t".to_string(),
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
+}
+
+#[test]
+fn rename_tab_with_an_empty_name_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: None,
+            name: String::new(),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("tab name cannot be empty".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
+}
+
+#[test]
+fn rename_tab_with_a_name_over_64_chars_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: None,
+            name: "字".repeat(65),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("tab name too long (max 64 characters)".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
+}
+
+// --- FocusTab handler ----------------------------------------------------------
+
+#[test]
+fn focus_tab_switches_the_view_and_emits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_b),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // TabFocused only: neither tab holds a live PTY to reflow.
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_b
+    );
+}
+
+#[test]
+fn focus_tab_index_next_and_prev_resolve_against_the_display_order() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a); // index 0
+    add_tab(&mut session, tab_b, pane_b); // index 1
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let active = |rt: &Runtime| {
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab()
+    };
+
+    // Next from tab_a (index 0) steps to tab_b (index 1).
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Next,
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(active(&rt), tab_b);
+
+    // Next from the last tab wraps to the first.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Next,
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(active(&rt), tab_a);
+
+    // Prev from the first tab wraps to the last.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Prev,
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(active(&rt), tab_b);
+
+    // An explicit index resolves the tab at that display position.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Index(0),
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(active(&rt), tab_a);
+}
+
+#[test]
+fn focus_tab_on_the_already_active_tab_is_ok_with_no_events() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_a),
+            client: None,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_a
+    );
+}
+
+#[test]
+fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    for target in [TabTarget::Id(TabId::new()), TabTarget::Index(9)] {
+        let env = envelope_from(
+            CommandSource::key_binding(client_id),
+            Command::FocusTab(FocusTabArgs {
+                target,
+                client: None,
+            }),
+        );
+        let command_id = env.id;
+        assert_eq!(
+            rt.dispatch(env),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: None,
+            }
+        );
+    }
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_a
+    );
+}
+
+#[test]
+fn focus_tab_explicit_client_wins_over_the_issuer() {
+    let (mut rt, _tx) = new_runtime();
+    let issuer = ClientId::new();
+    let named = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, issuer, tab_a, Some(pane_a));
+    add_client(&mut session, named, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(issuer),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_b),
+            client: Some(named),
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.clients.get(named).unwrap().active_tab(), tab_b);
+    assert_eq!(session.clients.get(issuer).unwrap().active_tab(), tab_a);
+}
+
+#[test]
+fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_b),
+            client: Some(ClientId::new()),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_a
+    );
+}
+
+#[test]
+fn focus_tab_external_source_defaults_to_the_sole_client() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_b),
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_b
+    );
+}
+
+#[test]
+fn focus_tab_external_source_with_two_clients_is_ambiguous() {
+    let (mut rt, _tx) = new_runtime();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, ClientId::new(), tab_a, None);
+    add_client(&mut session, ClientId::new(), tab_a, None);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_a),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("multiple clients; name a target client for the target tab".to_string()),
+        }
+    );
+}
+
+#[test]
+fn focus_tab_with_no_attached_client_is_invalid() {
+    let (mut rt, _tx) = new_runtime();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::ExternalCli {
+            session_id: Some(sid),
+        },
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_a),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no attached client to switch onto the target tab".to_string()),
+        }
+    );
+}
+
+#[test]
+fn focus_tab_reflows_both_the_target_and_the_left_tab() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+
+    // The mover A (30x8) starts on tab_a; B (40x10) views tab_b.
+    let mover = ClientId::new();
+    let a = Client::new(
+        mover,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 30, rows: 8 },
+        tab_a,
+    );
+    session.attach_client(a);
+    let stayer = ClientId::new();
+    let b = Client::new(
+        stayer,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 40, rows: 10 },
+        tab_b,
+    );
+    let mut b = b;
+    b.update_focused_pane(tab_b, pane_b);
+    session.attach_client(b);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split tab_b while only B (40x10) views it: the new PTY sizes to the
+    // half column — outer 20x10 -> content 18x8.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(stayer),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && *id != pane_b)
+        .expect("the split pane");
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 18, rows: 8 }
+    );
+
+    // A switches onto tab_b: its viewport tightens to min(40,30) x min(10,8)
+    // = 30x8 — outer 15x8 -> content 13x6.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(mover),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_b),
+            client: None,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => {
+            // TabFocused + the tightened PTY's resize (tab_a holds no PTY).
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 13, rows: 6 }
+    );
+
+    // A switches back to tab_a: tab_b loses the 30x8 constraint and reflows
+    // back to B's 40x10 geometry — the left tab reflowed.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(mover),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab_a),
+            client: None,
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(
+        *fake.resizes(pane_x).unwrap().last().unwrap(),
+        PtySize { cols: 18, rows: 8 }
+    );
+}
+
+#[test]
+fn new_tab_for_a_client_below_minimum_size_is_rejected() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    // A 1x1 viewport cannot hold even one minimum-size pane.
+    let client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 1, rows: 1 },
+        tab_a,
+    );
+    session.attach_client(client);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinSize,
+            help: Some("not enough space for a new tab".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
+    assert!(fake.spawned_panes().is_empty());
+}
+
+#[test]
+fn rename_tab_accepts_a_name_of_exactly_64_chars() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // 64 characters (not bytes) is the inclusive cap — multi-byte chars count
+    // once each.
+    let name = "字".repeat(64);
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameTab(RenameTabArgs {
+            tab: None,
+            name: name.clone(),
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), name);
 }

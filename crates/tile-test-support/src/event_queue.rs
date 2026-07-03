@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use std::panic::catch_unwind;
     use tile_core::event::{TabClosed, TabCreated, TabFocused};
-    use tile_core::ids::TabId;
+    use tile_core::ids::{ClientId, TabId};
 
     fn created() -> Event {
         Event::TabCreated(TabCreated {
@@ -171,7 +171,9 @@ mod tests {
 
     fn focused() -> Event {
         Event::TabFocused(TabFocused {
+            client_id: ClientId::new(),
             tab_id: TabId::new(),
+            prior_tab: TabId::new(),
         })
     }
 

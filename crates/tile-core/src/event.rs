@@ -217,10 +217,19 @@ pub struct TabClosed {
 }
 
 /// Payload for [`Event::TabFocused`].
+///
+/// A client's active tab is per-client state, so the payload names the client
+/// whose view switched — with several clients attached, `tab_id` alone could
+/// not say whose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabFocused {
+    /// The client whose active tab changed.
+    pub client_id: ClientId,
     /// The newly focused tab.
     pub tab_id: TabId,
+    /// The tab the client was viewing before the switch. When the switch was
+    /// forced by a tab close, this is the closed tab.
+    pub prior_tab: TabId,
 }
 
 /// Payload for [`Event::PaneRenamed`].

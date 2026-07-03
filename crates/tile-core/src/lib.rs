@@ -10,6 +10,7 @@ pub mod event;
 pub mod geometry;
 pub mod ids;
 pub mod lock;
+pub mod naming;
 pub mod process;
 pub mod redact;
 pub mod types;

@@ -59,9 +59,11 @@ fn pane_commands_roundtrip() {
 fn tab_and_session_commands_roundtrip() {
     roundtrip(&Command::FocusTab(FocusTabArgs {
         target: TabTarget::Next,
+        client: None,
     }));
     roundtrip(&Command::FocusTab(FocusTabArgs {
         target: TabTarget::Index(2),
+        client: None,
     }));
     roundtrip(&Command::MoveTab(MoveTabArgs {
         tab: None,
@@ -162,6 +164,7 @@ fn command_variant_names_are_canonical() {
         (
             Command::FocusTab(FocusTabArgs {
                 target: TabTarget::Next,
+                client: None,
             }),
             "FocusTab",
         ),
@@ -312,6 +315,7 @@ fn command_kind_mirrors_command() {
         (
             Command::FocusTab(FocusTabArgs {
                 target: TabTarget::Next,
+                client: None,
             }),
             CommandKind::FocusTab,
         ),

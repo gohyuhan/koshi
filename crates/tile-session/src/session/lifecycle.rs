@@ -18,7 +18,7 @@ use crate::error::InvalidTransition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabLifecycle {
-    /// The tab exists but its root pane has not spawned yet.
+    /// The tab was just created; no lifecycle transition has advanced it yet.
     Creating,
     /// The tab is visible and its panes are interactive.
     Active,
