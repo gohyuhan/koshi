@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use tile_core::command::{
@@ -28,7 +28,7 @@ use tile_layout::tree::{LayoutChild, SplitNode};
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use tile_pane::pane::state::PaneRecord;
-use tile_pty::backend::state::PtyBackend;
+use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::error::PtyError;
 use tile_session::client::{Client, ClientRegistry};
 use tile_session::session::pane_ops::NewPaneSpec;
@@ -5468,6 +5468,116 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
     assert!(!rt.pty_sizes.contains_key(&pane_x));
     assert_eq!(
         wait_for_kill(&fake, pane_x),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+/// A backend whose `kill` blocks on a shared barrier before delegating to the
+/// wrapped fake. Every expected kill must have started before any completes,
+/// so the test distinguishes concurrent per-pane kill threads from a serial
+/// kill loop: serial, the first kill waits on the barrier forever and the
+/// later kills never start.
+struct BarrierKillBackend {
+    inner: Arc<FakePtyBackend>,
+    barrier: Barrier,
+}
+
+impl PtyBackend for BarrierKillBackend {
+    fn spawn(
+        &self,
+        pane_id: PaneId,
+        spec: SpawnSpec,
+        size: PtySize,
+    ) -> Result<PtyHandle, PtyError> {
+        self.inner.spawn(pane_id, spec, size)
+    }
+    fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError> {
+        self.inner.resize(pane, size)
+    }
+    fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError> {
+        self.inner.write(pane, bytes)
+    }
+    fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
+        self.barrier.wait();
+        self.inner.kill(pane, kill_policy)
+    }
+}
+
+#[test]
+fn close_tab_kills_every_pane_concurrently() {
+    // The doomed tab holds three panes (the PTY-less root plus two spawned
+    // splits); the barrier releases a kill only once all three have started.
+    let fake = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(BarrierKillBackend {
+        inner: fake.clone(),
+        barrier: Barrier::new(3),
+    });
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let (_tx, inbox_rx) = mpsc::channel();
+    let mut rt = Runtime::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        TerminalCleanupGuard::new(),
+    );
+
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Two splits give the doomed tab two live PTYs.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let spawned: Vec<PaneId> = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .filter(|id| *id != pane_a && *id != pane_b)
+        .collect();
+    let [pane_x, pane_y] = spawned[..] else {
+        panic!("expected exactly two split panes, got {spawned:?}");
+    };
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: false,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    // Both live children die with their own graceful policy; reaching this at
+    // all proves the kills started concurrently, or the barrier would have
+    // held the lone serial kill thread forever.
+    assert_eq!(
+        wait_for_kill(&fake, pane_x),
+        vec![KillPolicy::Graceful {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+    assert_eq!(
+        wait_for_kill(&fake, pane_y),
         vec![KillPolicy::Graceful {
             timeout: GRACEFUL_TIMEOUT_DURATION
         }]

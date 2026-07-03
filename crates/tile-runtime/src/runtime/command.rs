@@ -983,13 +983,15 @@ impl Runtime {
         }
 
         // Kill the children off-thread: a graceful kill sleeps out its grace
-        // window, and the dispatcher must keep draining. Each kill also
-        // purges the backend's own entry for its pane.
-        let _ = thread::spawn(move || {
-            for (pane_id, kill_policy) in kills {
+        // window, and the dispatcher must keep draining. One thread per pane
+        // so every child receives its stop request immediately; each kill
+        // also purges the backend's own entry for its pane.
+        for (pane_id, kill_policy) in kills {
+            let backend = Arc::clone(&backend);
+            let _ = thread::spawn(move || {
                 let _ = backend.kill(pane_id, kill_policy);
-            }
-        });
+            });
+        }
 
         let mut scope = TransactionScope::new();
         for event in events {
