@@ -1,8 +1,8 @@
 //! Tab operations: the pure state transitions for creating, closing, renaming,
 //! focusing, and reordering a session's tabs.
 //!
-//! Each operation mutates the session (or a single client) and returns the
-//! [`Event`]s describing what changed, for the caller to emit. They draft
+//! Each operation mutates the session and returns the [`Event`]s describing
+//! what changed, for the caller to emit. They draft
 //! events and edit state only — never spawning or killing a process or touching
 //! a terminal. That work is the runtime's, driven by the events returned here:
 //! a [`close_tab`] emits [`Event::PaneClosing`]/[`Event::PaneRemoved`] and the
@@ -10,23 +10,24 @@
 //!
 //! Tab display order is a dense `0..len` index on each [`Tab`]: a tab's index
 //! *is* its position. Every operation that changes the tab set keeps it dense —
-//! [`new_tab`] appends, [`close_tab`] removes and renumbers, [`move_tab`]
-//! reorders — so consumers can treat index and display position as one. Closing
-//! a tab funnels through `close_and_refocus_tab`, shared with the close/quit
-//! cascade, so a user-closed tab and a tab emptied by a self-exiting shell tear
-//! down identically.
+//! [`commit_new_tab`] appends, [`close_tab`] removes and renumbers,
+//! [`move_tab`] reorders — so consumers can treat index and display position as
+//! one. Closing a tab funnels through `close_and_refocus_tab`, shared with the
+//! close/quit cascade, so a user-closed tab and a tab emptied by a
+//! self-exiting shell tear down identically.
 
 use std::time::SystemTime;
 
 use tile_core::event::{
-    Event, PaneClosing, PaneCreated, PaneRemoved, TabClosed, TabCreated, TabFocused, TabMoved,
-    TabRenamed,
+    Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, TabClosed, TabCreated, TabFocused,
+    TabMoved, TabRenamed,
 };
 use tile_core::ids::{ClientId, PaneId, TabId};
+use tile_pane::pane::lifecycle::PaneLifecycleEvent;
 use tile_pane::pane::state::PaneRecord;
 
-use crate::client::Client;
 use crate::session::lifecycle::SessionLifecycleEvent;
+use crate::session::pane_ops::NewPaneSpec;
 use crate::session::state::{Session, Tab};
 
 /// Which tab a focus request names, resolved against the current display order
@@ -43,29 +44,53 @@ pub enum TabTarget {
     Next,
 }
 
-/// Create a new tab holding a single fresh terminal pane, appended after the
-/// last tab.
+/// Apply an already-spawned new tab: register its root pane as `Running`,
+/// append the tab after the last one, and switch the focused client onto it.
 ///
-/// Mints the tab and its root pane and registers a `Spawning` [`PaneRecord`] —
-/// the runtime attaches the PTY and advances it to `Running`. The tab takes the
-/// next dense display index (`len`, i.e. the end). Does **not** change any
-/// client's active tab; showing the new tab is a separate [`focus_tab`] the
-/// caller composes. `created_at` is supplied by the caller so the timestamp
-/// crosses the IPC boundary intact and tests stay deterministic. Returns
-/// [`Event::TabCreated`] then [`Event::PaneCreated`].
+/// The caller (the runtime) has minted `new_tab_id` and `new_pane_id` and
+/// spawned the root pane's child under `new_pane_id` — so this only commits
+/// state, and a failed spawn never creates a tab. The tab takes the next dense
+/// display index (`len`, i.e. the end). The first tab transitions the session
+/// from `Starting` to `Running`; subsequent tabs leave the lifecycle alone.
+/// `spec` carries the title, cwd, and command recorded on the root pane so a
+/// later restore or respawn can recover the request; `created_at` is supplied
+/// by the caller so the timestamp crosses the IPC boundary intact and tests
+/// stay deterministic.
+///
+/// `focus_client` — when given and still attached — switches onto the new tab
+/// and focuses its root pane; a stale id focuses nothing, exactly like `None`.
+/// Other clients never move.
+///
+/// Returns the focused client's *previous* tab when one was switched (so the
+/// caller can reflow the tab it left), and the events to emit:
+/// [`Event::TabCreated`], [`Event::PaneCreated`], then — only when
+/// `focus_client` applies — [`Event::TabFocused`] and [`Event::PaneFocused`],
+/// in that order.
 #[must_use]
-pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> Vec<Event> {
+pub fn commit_new_tab(
+    session: &mut Session,
+    new_tab_id: TabId,
+    new_pane_id: PaneId,
+    name: String,
+    focus_client: Option<ClientId>,
+    spec: NewPaneSpec,
+    created_at: SystemTime,
+) -> (Option<TabId>, Vec<Event>) {
+    // Only a still-attached client can be focused.
+    let focus = focus_client.filter(|client_id| session.clients.get(*client_id).is_some());
+
     let mut events = vec![];
 
-    let new_pane_id = PaneId::new();
-    let new_tab_id = TabId::new();
+    // Register the root pane. Its process is already live, so it enters
+    // `Running` straight away; the spawn request is recorded so a later
+    // restore or respawn can recover it.
+    let mut record = PaneRecord::new(new_pane_id, created_at);
+    record.title = spec.name;
+    record.cwd = spec.cwd;
+    record.command = spec.command;
+    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+    let _ = session.panes.insert(record);
 
-    // first create the default pane for the new tab
-    let new_pane: PaneRecord = PaneRecord::new(new_pane_id, created_at);
-    // record into pane registry
-    let _ = session.panes.insert(new_pane);
-
-    // new tab
     let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
     // The first tab transitions the session from Starting to Running; subsequent
     // tabs are a no-op at this layer. The runtime pre-checks admission
@@ -74,17 +99,42 @@ pub fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> V
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
     }
-    // Record the new tab in the session's registry.
     session.tabs.insert(new_tab_id, new_tab);
 
     events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
-
     events.push(Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
         tab_id: new_tab_id,
     }));
 
-    events
+    // Switch the focused client onto the new tab and focus its root pane,
+    // remembering the tab it left for the caller to reflow.
+    let mut previous_tab = None;
+    if let Some(client_id) = focus {
+        let Some(client) = session.clients.get_mut(client_id) else {
+            return (previous_tab, events);
+        };
+        let prior_tab = client.active_tab();
+        previous_tab = Some(prior_tab);
+        client.update_active_tab(new_tab_id);
+        events.push(Event::TabFocused(TabFocused {
+            client_id,
+            tab_id: new_tab_id,
+            prior_tab,
+        }));
+        let prior_pane = client.update_focused_pane(new_tab_id, new_pane_id);
+        if let Some(tab) = session.tabs.get_mut(&new_tab_id) {
+            tab.record_focus_mru(new_pane_id);
+        }
+        events.push(Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: new_tab_id,
+            pane_id: new_pane_id,
+            prior_pane,
+        }));
+    }
+
+    (previous_tab, events)
 }
 
 /// Close `tab_id` and everything in it.
@@ -136,35 +186,54 @@ pub fn rename_tab(session: &mut Session, tab_id: TabId, new_name: String) -> Vec
     })]
 }
 
-/// Point `client` at the tab named by `target`, resolved against the current
-/// display order.
+/// Point the client `client_id` at the tab named by `target`, resolved
+/// against the current display order.
 ///
 /// [`TabTarget::Id`] focuses that tab if it exists; [`TabTarget::Index`] the tab
 /// at that display position; [`TabTarget::Next`]/[`TabTarget::Prev`] step one
 /// position, wrapping at the ends. An unresolvable target — unknown id,
-/// out-of-range index — and re-focusing the already-active tab are no-ops. Only
-/// this client's active tab changes; per-tab focus is preserved, so switching
-/// back restores the pane it was on. Returns [`Event::TabFocused`].
+/// out-of-range index, unattached client — and re-focusing the already-active
+/// tab are no-ops. Only this client's active tab changes; per-tab focus is
+/// preserved, so switching back restores the pane it was on. Returns
+/// [`Event::TabFocused`].
 #[must_use]
-pub fn focus_tab(session: &Session, client: &mut Client, target: TabTarget) -> Vec<Event> {
-    let Some(target_id) = resolve_tab_target(session, client.active_tab(), target) else {
+pub fn focus_tab(session: &mut Session, client_id: ClientId, target: TabTarget) -> Vec<Event> {
+    let Some(client) = session.clients.get(client_id) else {
+        return Vec::new();
+    };
+    let prior_tab = client.active_tab();
+
+    let Some(target_id) = resolve_tab_target(session, prior_tab, target) else {
         return Vec::new();
     };
 
     // Already viewing it — nothing to do.
-    if client.active_tab() == target_id {
+    if prior_tab == target_id {
         return Vec::new();
     }
 
+    let Some(client) = session.clients.get_mut(client_id) else {
+        return Vec::new();
+    };
     client.update_active_tab(target_id);
 
-    vec![Event::TabFocused(TabFocused { tab_id: target_id })]
+    vec![Event::TabFocused(TabFocused {
+        client_id,
+        tab_id: target_id,
+        prior_tab,
+    })]
 }
 
 /// Resolve a [`TabTarget`] to a concrete tab id against the current display
 /// order. A missing `Id` and an out-of-range `Index` resolve to `None` (the
-/// caller treats that as a no-op); `Next`/`Prev` wrap around the ends.
-fn resolve_tab_target(session: &Session, active_tab: TabId, target: TabTarget) -> Option<TabId> {
+/// caller treats that as a no-op); `Next`/`Prev` wrap around the ends,
+/// stepping from `active_tab`.
+#[must_use]
+pub fn resolve_tab_target(
+    session: &Session,
+    active_tab: TabId,
+    target: TabTarget,
+) -> Option<TabId> {
     match target {
         TabTarget::Id(id) => session.tabs.contains_key(&id).then_some(id),
         TabTarget::Index(index) => tab_at_index(session, index),
@@ -281,7 +350,11 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
             if client.active_tab() == tab_id {
                 if let Some(next) = next_tab {
                     client.update_active_tab(next);
-                    events.push(Event::TabFocused(TabFocused { tab_id: next }));
+                    events.push(Event::TabFocused(TabFocused {
+                        client_id,
+                        tab_id: next,
+                        prior_tab: tab_id,
+                    }));
                 }
             }
         }

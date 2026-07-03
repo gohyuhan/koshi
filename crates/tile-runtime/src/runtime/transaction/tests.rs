@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use tile_core::command::CommandResult;
 use tile_core::event::{Event, LayoutChanged, TabCreated, TabFocused};
-use tile_core::ids::{CommandId, TabId};
+use tile_core::ids::{ClientId, CommandId, TabId};
 
 use super::*;
 
@@ -19,16 +19,26 @@ fn a_new_scope_buffers_no_events() {
 #[test]
 fn emit_appends_in_call_order() {
     let tab = TabId::new();
+    let prior = TabId::new();
+    let client_id = ClientId::new();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
-    scope.emit(Event::TabFocused(TabFocused { tab_id: tab }));
+    scope.emit(Event::TabFocused(TabFocused {
+        client_id,
+        tab_id: tab,
+        prior_tab: prior,
+    }));
     scope.emit(Event::Quit);
 
     assert_eq!(
         scope.events(),
         &[
             Event::TabCreated(TabCreated { tab_id: tab }),
-            Event::TabFocused(TabFocused { tab_id: tab }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: tab,
+                prior_tab: prior,
+            }),
             Event::Quit,
         ]
     );

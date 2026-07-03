@@ -336,7 +336,9 @@ fn event_variant_names_are_canonical() {
         ),
         (
             Event::TabFocused(TabFocused {
+                client_id: ClientId::new(),
                 tab_id: TabId::new(),
+                prior_tab: TabId::new(),
             }),
             "TabFocused",
         ),

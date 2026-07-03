@@ -18,10 +18,26 @@ use tile_pane::pane::state::PaneRecord;
 use tile_pane::registry::PaneRegistry;
 
 use super::lifecycle::{SessionLifecycle, TabLifecycle};
+use super::pane_ops::NewPaneSpec;
 use super::state::{Session, Tab};
-use super::tab_ops::{close_tab, new_tab};
+use super::tab_ops::{close_tab, commit_new_tab};
 use crate::client::{Client, ClientRegistry};
 use crate::error::SessionConsistencyError;
+
+/// Create a tab through [`commit_new_tab`] with freshly minted ids, no focus
+/// client, and an empty spec — the session-level fixture for these tests.
+fn new_tab(session: &mut Session, name: String, created_at: SystemTime) -> Vec<Event> {
+    commit_new_tab(
+        session,
+        TabId::new(),
+        PaneId::new(),
+        name,
+        None,
+        NewPaneSpec::default(),
+        created_at,
+    )
+    .1
+}
 
 /// A client viewing `active_tab`, with a fixed viewport and `UNIX_EPOCH` attach
 /// time so tests stay deterministic.

@@ -211,10 +211,18 @@ pub struct FocusPaneArgs {
 /// Arguments for [`Command::NewTab`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewTabArgs {
-    /// Optional tab name.
+    /// Optional tab name; `None` generates one.
     pub name: Option<String>,
     /// Working directory for the tab's first pane; `None` inherits.
     pub cwd: Option<PathBuf>,
+    /// Client that switches onto the new tab. When set, that client is
+    /// targeted and takes priority even over an in-session issuer; a client
+    /// not attached to the acting session is rejected outright (no fallback).
+    /// `None` targets the issuing client or, for a source with no client, the
+    /// session's sole attached client — a session with several attached
+    /// clients and no named target is rejected rather than switching an
+    /// arbitrary one.
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::CloseTab`].
@@ -222,6 +230,8 @@ pub struct NewTabArgs {
 pub struct CloseTabArgs {
     /// Tab to close; `None` closes the focused tab.
     pub tab: Option<TabId>,
+    /// Kill every pane's child immediately, overriding each close policy.
+    pub force: bool,
 }
 
 /// Arguments for [`Command::RenameTab`].
@@ -251,6 +261,14 @@ pub enum TabTarget {
 pub struct FocusTabArgs {
     /// Which tab to focus.
     pub target: TabTarget,
+    /// Client whose view switches. When set, that client is targeted and
+    /// takes priority even over an in-session issuer; a client not attached
+    /// to the acting session is rejected outright (no fallback). `None`
+    /// targets the issuing client or, for a source with no client, the
+    /// session's sole attached client — a session with several attached
+    /// clients and no named target is rejected rather than switching an
+    /// arbitrary client's view.
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::WriteToPane`].

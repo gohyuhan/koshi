@@ -77,9 +77,14 @@ pub fn commit_new_pane(
     if let Some(client_id) = focus {
         if let Some(client) = session.clients.get_mut(client_id) {
             if client.active_tab() != tab_id {
-                previous_tab = Some(client.active_tab());
+                let prior_tab = client.active_tab();
+                previous_tab = Some(prior_tab);
                 client.update_active_tab(tab_id);
-                events.push(Event::TabFocused(TabFocused { tab_id }));
+                events.push(Event::TabFocused(TabFocused {
+                    client_id,
+                    tab_id,
+                    prior_tab,
+                }));
             }
         }
     }

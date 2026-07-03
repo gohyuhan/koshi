@@ -206,7 +206,11 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
     assert_eq!(
         events,
         vec![
-            Event::TabFocused(TabFocused { tab_id: tab_b }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: tab_b,
+                prior_tab: tab_a,
+            }),
             Event::PaneCreated(PaneCreated {
                 pane_id: new_id,
                 tab_id: tab_b,
