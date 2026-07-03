@@ -6024,6 +6024,232 @@ fn rename_tab_accepts_a_name_over_64_chars() {
 }
 
 #[test]
+fn move_tab_reorders_and_emits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let tab_c = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let pane_c = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_pane(&mut session, pane_c);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_tab(&mut session, tab_c, pane_c);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Explicit tab C (slot 2) to the front.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::MoveTab(MoveTabArgs {
+            tab: Some(tab_c),
+            index: 0,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    // New order C, A, B — the others closed ranks behind the moved tab.
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab_c].index(), 0);
+    assert_eq!(session.tabs[&tab_a].index(), 1);
+    assert_eq!(session.tabs[&tab_b].index(), 2);
+    // Order-only change: the client still views the same tab.
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), tab_a);
+}
+
+#[test]
+fn move_tab_defaults_to_the_issuers_active_tab() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    // The issuer views tab B (slot 1).
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::MoveTab(MoveTabArgs {
+            tab: None,
+            index: 0,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab_b].index(), 0);
+    assert_eq!(session.tabs[&tab_a].index(), 1);
+}
+
+#[test]
+fn move_tab_clamps_an_out_of_range_index() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let tab_c = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let pane_c = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_pane(&mut session, pane_c);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_tab(&mut session, tab_c, pane_c);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Index 99 clamps to the last slot (2).
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::MoveTab(MoveTabArgs {
+            tab: Some(tab_a),
+            index: 99,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab_b].index(), 0);
+    assert_eq!(session.tabs[&tab_c].index(), 1);
+    assert_eq!(session.tabs[&tab_a].index(), 2);
+}
+
+#[test]
+fn move_tab_to_its_current_slot_is_ok_with_no_events() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::MoveTab(MoveTabArgs {
+            tab: Some(tab_a),
+            index: 0,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab_a].index(), 0);
+    assert_eq!(session.tabs[&tab_b].index(), 1);
+}
+
+#[test]
+fn in_session_cli_move_tab_defaults_to_the_source_pane_tab() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    // Client's active tab is B, but the CLI command was issued from tab A's pane.
+    add_client(&mut session, client_id, tab_b, None);
+    rt.sessions.insert(session.id, session);
+
+    // MoveTab with no explicit tab — InSessionCli resolves via the tab
+    // containing pane_a (tab A), not the client's active tab (tab B).
+    let source =
+        CommandSource::in_session_cli(session_id, client_id, pane_a, PathBuf::from("/sock"));
+    let result = rt.dispatch(envelope_from(
+        source,
+        Command::MoveTab(MoveTabArgs {
+            tab: None,
+            index: 1,
+        }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let session = &rt.sessions[&session_id];
+    assert_eq!(session.tabs[&tab_b].index(), 0);
+    assert_eq!(session.tabs[&tab_a].index(), 1);
+}
+
+#[test]
+fn move_tab_with_an_unknown_tab_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::MoveTab(MoveTabArgs {
+            tab: Some(TabId::new()),
+            index: 0,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: None,
+        }
+    );
+    // A rejected move mutates nothing.
+    assert_eq!(rt.sessions[&sid].tabs[&tab_a].index(), 0);
+}
+
+#[test]
 fn rename_pane_updates_the_title_and_emits() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
