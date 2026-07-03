@@ -1,17 +1,19 @@
-//! Tests for the NewPane state commit.
+//! Tests for the pane state ops.
 //!
-//! Each test builds a one-pane session, prepares a split candidate with
-//! [`split_leaf`] (as the runtime does), and applies it with [`commit_new_pane`],
-//! asserting the emitted events, the post-split layout tree, the registered pane,
-//! and the client's focus. Fit preflight and source resolution belong to the
-//! runtime (which builds the candidate and spawns before committing), so they are
-//! covered by the runtime's tests, not here.
+//! For the NewPane commit, each test builds a one-pane session, prepares a
+//! split candidate with [`split_leaf`] (as the runtime does), and applies it
+//! with [`commit_new_pane`], asserting the emitted events, the post-split
+//! layout tree, the registered pane, and the client's focus. Fit preflight and
+//! source resolution belong to the runtime (which builds the candidate and
+//! spawns before committing), so they are covered by the runtime's tests, not
+//! here. [`rename_pane`] tests assert the title write and the emitted event;
+//! name validation is likewise the runtime's.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
+use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, PaneRenamed, TabFocused};
 use tile_core::geometry::{Direction, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
 use tile_core::process::{ShellKind, SpawnSpec};
@@ -21,7 +23,7 @@ use tile_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use tile_pane::pane::lifecycle::PaneLifecycle;
 use tile_pane::pane::state::PaneRecord;
 
-use super::{commit_new_pane, NewPaneSpec};
+use super::{commit_new_pane, rename_pane, NewPaneSpec};
 use crate::client::{Client, ClientRegistry};
 use crate::session::state::{Session, Tab};
 
@@ -344,4 +346,68 @@ fn commit_drops_the_tabs_fullscreen() {
         session.tabs.get(&tab).expect("tab").layout_mode(),
         LayoutMode::Tiled
     );
+}
+
+#[test]
+fn rename_pane_sets_the_title_and_emits() {
+    let (mut session, _tab, pane, _client) = session_one_pane();
+    assert_eq!(session.panes.get(pane).expect("pane").title, None);
+
+    let events = rename_pane(&mut session, pane, "build-watch".to_string());
+
+    assert_eq!(
+        events,
+        vec![Event::PaneRenamed(PaneRenamed {
+            pane_id: pane,
+            name: "build-watch".to_string(),
+        })]
+    );
+    assert_eq!(
+        session.panes.get(pane).expect("pane").title,
+        Some("build-watch".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_overwrites_an_existing_title() {
+    let (mut session, _tab, pane, _client) = session_one_pane();
+    let _ = rename_pane(&mut session, pane, "old".to_string());
+
+    let events = rename_pane(&mut session, pane, "new".to_string());
+
+    assert_eq!(
+        events,
+        vec![Event::PaneRenamed(PaneRenamed {
+            pane_id: pane,
+            name: "new".to_string(),
+        })]
+    );
+    assert_eq!(
+        session.panes.get(pane).expect("pane").title,
+        Some("new".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_to_its_current_title_is_a_no_op() {
+    let (mut session, _tab, pane, _client) = session_one_pane();
+    let _ = rename_pane(&mut session, pane, "same".to_string());
+
+    let events = rename_pane(&mut session, pane, "same".to_string());
+
+    assert_eq!(events, Vec::new());
+    assert_eq!(
+        session.panes.get(pane).expect("pane").title,
+        Some("same".to_string())
+    );
+}
+
+#[test]
+fn rename_pane_for_an_unknown_pane_is_a_no_op() {
+    let (mut session, _tab, pane, _client) = session_one_pane();
+
+    let events = rename_pane(&mut session, PaneId::new(), "ghost".to_string());
+
+    assert_eq!(events, Vec::new());
+    assert_eq!(session.panes.get(pane).expect("pane").title, None);
 }

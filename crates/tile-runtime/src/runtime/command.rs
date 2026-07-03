@@ -18,8 +18,8 @@ use std::time::SystemTime;
 use tile_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        FocusPaneArgs, FocusTabArgs, NewPaneArgs, NewTabArgs, RenameTabArgs, ResizePaneArgs,
-        TabTarget,
+        FocusPaneArgs, FocusTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameTabArgs,
+        ResizePaneArgs, TabTarget,
     },
     event::{Event, LayoutChanged, PaneFocused, PtyResized, RejectReason},
     geometry::{Direction, Point, Rect, Size},
@@ -175,7 +175,9 @@ impl Runtime {
             Command::TogglePaneFullscreen => {
                 self.handle_toggle_pane_fullscreen(envelope.id, &envelope.source)
             }
-            Command::RenamePane(_) => self.reject(envelope.id, "rename pane"),
+            Command::RenamePane(args) => {
+                self.handle_rename_pane(envelope.id, &envelope.source, &args)
+            }
             Command::MoveTab(_) => self.reject(envelope.id, "move tab"),
             Command::RenameSession(_) => self.reject(envelope.id, "rename session"),
         }
@@ -797,7 +799,7 @@ impl Runtime {
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
         if let Some(name) = &args.name {
-            if let Err(rejection) = Self::validate_tab_name(name) {
+            if let Err(rejection) = Self::validate_display_name("tab", name) {
                 return Self::rejected(command_id, rejection);
             }
         }
@@ -1050,10 +1052,10 @@ impl Runtime {
 
     /// Handle [`Command::RenameTab`]: update the tab's display name.
     ///
-    /// The name is validated first — non-empty, at most 64 characters — then
-    /// applied through [`tab_ops::rename_tab`]; renaming a tab to its current
-    /// name is a clean no-op with no events. Names resolve nothing, so
-    /// layout, focus, and PTYs are untouched.
+    /// The name is validated first — non-empty; stored whole at any length —
+    /// then applied through [`tab_ops::rename_tab`]; renaming a tab to its
+    /// current name is a clean no-op with no events. Names resolve nothing,
+    /// so layout, focus, and PTYs are untouched.
     fn handle_rename_tab(
         &mut self,
         command_id: CommandId,
@@ -1068,7 +1070,7 @@ impl Runtime {
             Ok(tab_id) => tab_id,
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
-        if let Err(rejection) = Self::validate_tab_name(&args.name) {
+        if let Err(rejection) = Self::validate_display_name("tab", &args.name) {
             return Self::rejected(command_id, rejection);
         }
         let Some(session_id) = acting.map(|session| session.id) else {
@@ -1277,20 +1279,55 @@ impl Runtime {
         scope.commit(command_id)
     }
 
-    /// Confirm a tab name is usable: non-empty and at most 64 characters.
-    /// Applied to an explicit `--name` on create and to every rename;
-    /// generated names never pass through here.
-    fn validate_tab_name(name: &str) -> Result<(), Rejection> {
+    /// Handle [`Command::RenamePane`]: update the pane's display title.
+    ///
+    /// The target resolves like ClosePane/ResizePane — an explicit pane by a
+    /// global owner scan, else the issuing pane (in-session CLI) or the
+    /// source client's focused pane. The name is validated first — non-empty;
+    /// stored whole at any length — then applied through
+    /// [`pane_ops::rename_pane`]; renaming a pane to its current title is a
+    /// clean no-op with no events. Titles resolve nothing, so layout, focus,
+    /// and PTYs are untouched.
+    fn handle_rename_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &RenamePaneArgs,
+    ) -> CommandResult {
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_pane_target(args.pane, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        if let Err(rejection) = Self::validate_display_name("pane", &args.name) {
+            return Self::rejected(command_id, rejection);
+        }
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        let events = pane_ops::rename_pane(session, target.pane_id, args.name.clone());
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
+    /// Confirm a display name is usable: non-empty. `subject` names the kind
+    /// of thing being named ("pane", "tab") in the rejection hint. Names are
+    /// stored whole at any length; the renderer truncates them at 64
+    /// characters at display time. Applied to an explicit `--name` on create
+    /// and to every rename; generated names never pass through here.
+    fn validate_display_name(subject: &str, name: &str) -> Result<(), Rejection> {
         if name.is_empty() {
             return Err(Rejection::new(
                 RejectReason::InvalidState,
-                "tab name cannot be empty",
-            ));
-        }
-        if name.chars().count() > 64 {
-            return Err(Rejection::new(
-                RejectReason::InvalidState,
-                "tab name too long (max 64 characters)",
+                &format!("{subject} name cannot be empty"),
             ));
         }
         Ok(())
