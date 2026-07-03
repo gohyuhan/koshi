@@ -18,8 +18,8 @@ use std::time::SystemTime;
 use tile_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        FocusPaneArgs, FocusTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameTabArgs,
-        ResizePaneArgs, TabTarget,
+        FocusPaneArgs, FocusTabArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs,
+        RenameTabArgs, ResizePaneArgs, TabTarget,
     },
     event::{Event, LayoutChanged, PaneFocused, PtyResized, RejectReason},
     geometry::{Direction, Point, Rect, Size},
@@ -178,7 +178,7 @@ impl Runtime {
             Command::RenamePane(args) => {
                 self.handle_rename_pane(envelope.id, &envelope.source, &args)
             }
-            Command::MoveTab(_) => self.reject(envelope.id, "move tab"),
+            Command::MoveTab(args) => self.handle_move_tab(envelope.id, &envelope.source, &args),
             Command::RenameSession(_) => self.reject(envelope.id, "rename session"),
         }
     }
@@ -1153,6 +1153,46 @@ impl Runtime {
                 );
             }
         }
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
+    /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
+    /// slot within its session.
+    ///
+    /// The target tab — an explicit `--tab`, else the issuing pane's tab for
+    /// the in-session CLI, else the issuer's active tab — moves to the
+    /// requested zero-based index, clamped to the valid range, and the other
+    /// tabs close ranks around it. Display order is the only thing that
+    /// changes: which tab each client views, layout, focus, and PTYs are all
+    /// untouched. Moving a tab to the slot it already occupies is a clean
+    /// no-op with no events. A rejected move mutates nothing.
+    fn handle_move_tab(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &MoveTabArgs,
+    ) -> CommandResult {
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let tab_id = match self.resolve_tab_or_active(args.tab, source, acting) {
+            Ok(tab_id) => tab_id,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let Some(session_id) = acting.map(|session| session.id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        let events = tab_ops::move_tab(session, tab_id, args.index);
 
         let mut scope = TransactionScope::new();
         for event in events {
