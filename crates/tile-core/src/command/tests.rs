@@ -28,7 +28,6 @@ fn unit_commands_roundtrip() {
 fn pane_commands_roundtrip() {
     roundtrip(&Command::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
-        name: Some("logs".to_string()),
         client: Some(ClientId::new()),
         ..NewPaneArgs::default()
     }));
@@ -49,10 +48,7 @@ fn pane_commands_roundtrip() {
         pane: PaneId::new(),
         client: Some(ClientId::new()),
     }));
-    roundtrip(&Command::RenamePane(RenamePaneArgs {
-        pane: None,
-        name: "editor".to_string(),
-    }));
+    roundtrip(&Command::RenamePane(RenamePaneArgs { pane: None }));
 }
 
 #[test]
@@ -70,7 +66,7 @@ fn tab_and_session_commands_roundtrip() {
         index: 0,
     }));
     roundtrip(&Command::RenameSession(RenameSessionArgs {
-        name: "work".to_string(),
+        session: Some(SessionId::new()),
     }));
 }
 
@@ -154,13 +150,7 @@ fn command_variant_names_are_canonical() {
         ),
         (Command::NewTab(NewTabArgs::default()), "NewTab"),
         (Command::CloseTab(CloseTabArgs::default()), "CloseTab"),
-        (
-            Command::RenameTab(RenameTabArgs {
-                tab: None,
-                name: "t".to_string(),
-            }),
-            "RenameTab",
-        ),
+        (Command::RenameTab(RenameTabArgs { tab: None }), "RenameTab"),
         (
             Command::FocusTab(FocusTabArgs {
                 target: TabTarget::Next,
@@ -186,7 +176,6 @@ fn command_variant_names_are_canonical() {
                     env: std::collections::BTreeMap::new(),
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
-                name: None,
                 cwd: None,
             }),
             "RunCommandPane",
@@ -200,10 +189,7 @@ fn command_variant_names_are_canonical() {
         ),
         (Command::TogglePaneFullscreen, "TogglePaneFullscreen"),
         (
-            Command::RenamePane(RenamePaneArgs {
-                pane: None,
-                name: "p".to_string(),
-            }),
+            Command::RenamePane(RenamePaneArgs { pane: None }),
             "RenamePane",
         ),
         (
@@ -214,9 +200,7 @@ fn command_variant_names_are_canonical() {
             "MoveTab",
         ),
         (
-            Command::RenameSession(RenameSessionArgs {
-                name: "s".to_string(),
-            }),
+            Command::RenameSession(RenameSessionArgs { session: None }),
             "RenameSession",
         ),
     ];
@@ -306,10 +290,7 @@ fn command_kind_mirrors_command() {
             CommandKind::CloseTab,
         ),
         (
-            Command::RenameTab(RenameTabArgs {
-                tab: None,
-                name: "t".to_string(),
-            }),
+            Command::RenameTab(RenameTabArgs { tab: None }),
             CommandKind::RenameTab,
         ),
         (
@@ -337,7 +318,6 @@ fn command_kind_mirrors_command() {
                     env: std::collections::BTreeMap::new(),
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
-                name: None,
                 cwd: None,
             }),
             CommandKind::RunCommandPane,
@@ -357,10 +337,7 @@ fn command_kind_mirrors_command() {
             CommandKind::TogglePaneFullscreen,
         ),
         (
-            Command::RenamePane(RenamePaneArgs {
-                pane: None,
-                name: "p".to_string(),
-            }),
+            Command::RenamePane(RenamePaneArgs { pane: None }),
             CommandKind::RenamePane,
         ),
         (
@@ -371,9 +348,7 @@ fn command_kind_mirrors_command() {
             CommandKind::MoveTab,
         ),
         (
-            Command::RenameSession(RenameSessionArgs {
-                name: "s".to_string(),
-            }),
+            Command::RenameSession(RenameSessionArgs { session: None }),
             CommandKind::RenameSession,
         ),
     ];

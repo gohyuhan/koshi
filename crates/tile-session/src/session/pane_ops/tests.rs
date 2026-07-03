@@ -7,7 +7,7 @@
 //! source resolution belong to the runtime (which builds the candidate and
 //! spawns before committing), so they are covered by the runtime's tests, not
 //! here. [`rename_pane`] tests assert the title write and the emitted event;
-//! name validation is likewise the runtime's.
+//! name generation is likewise the runtime's.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -278,14 +278,13 @@ fn commit_records_name_cwd_and_command_on_the_new_pane() {
         candidate,
         Some(client),
         NewPaneSpec {
-            name: Some("logs".to_owned()),
             cwd: Some(cwd.clone()),
             command: Some(command.clone()),
         },
         SystemTime::UNIX_EPOCH,
     );
     let record = session.panes.get(new_id).expect("record");
-    assert_eq!(record.title.as_deref(), Some("logs"));
+    assert_eq!(record.title, None);
     assert_eq!(record.cwd.as_deref(), Some(cwd.as_path()));
     assert_eq!(record.command.as_ref(), Some(&command));
 }

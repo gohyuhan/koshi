@@ -313,10 +313,7 @@ fn write_to_pane_routes_the_pane_target() {
 fn rename_pane_default_target_without_context_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
-    let env = envelope(Command::RenamePane(RenamePaneArgs {
-        pane: None,
-        name: "p".to_string(),
-    }));
+    let env = envelope(Command::RenamePane(RenamePaneArgs { pane: None }));
     let command_id = env.id;
 
     assert_eq!(
@@ -365,10 +362,7 @@ fn tab_command_without_session_context_is_not_found() {
             client: None,
         }),
         Command::CloseTab(CloseTabArgs::default()),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: "t".to_string(),
-        }),
+        Command::RenameTab(RenameTabArgs { tab: None }),
         Command::MoveTab(MoveTabArgs {
             tab: None,
             index: 0,
@@ -397,12 +391,8 @@ fn session_scoped_command_without_session_is_not_found() {
     // no session, so there is nothing to act on.
     let commands = vec![
         Command::NewTab(NewTabArgs::default()),
-        Command::RenameSession(RenameSessionArgs {
-            name: "s".to_string(),
-        }),
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
-            name: None,
             cwd: None,
         }),
     ];
@@ -1992,7 +1982,6 @@ fn run_command_pane_requires_a_pane_anchor() {
         source,
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
-            name: None,
             cwd: None,
         }),
     );
@@ -4976,10 +4965,7 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewTab(NewTabArgs {
-            name: Some("build".to_string()),
-            ..NewTabArgs::default()
-        }),
+        Command::NewTab(NewTabArgs::default()),
     );
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -5002,7 +4988,11 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
         .values()
         .find(|tab| tab.id() != tab_a)
         .expect("the created tab");
-    assert_eq!(new_tab.name(), "build");
+    assert!(
+        new_tab.name().starts_with("T-"),
+        "generated tab name, got {}",
+        new_tab.name()
+    );
     assert_eq!(new_tab.index(), 1);
     let new_pane = new_tab.layout().leaf_panes()[0];
 
@@ -5027,7 +5017,7 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
 }
 
 #[test]
-fn new_tab_generates_a_free_name_when_none_is_given() {
+fn new_tab_generates_a_free_name() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -5068,84 +5058,6 @@ fn new_tab_generates_a_free_name_when_none_is_given() {
         .expect("adjective from a known language list");
     assert!(language_pairs[language].1.contains(&noun));
     assert_ne!(new_tab.name(), "t");
-}
-
-#[test]
-fn new_tab_with_an_empty_name_is_rejected() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::NewTab(NewTabArgs {
-            name: Some(String::new()),
-            ..NewTabArgs::default()
-        }),
-    );
-    let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("tab name cannot be empty".to_string()),
-        }
-    );
-    assert_eq!(rt.sessions[&sid].tabs.len(), 1);
-    assert!(fake.spawned_panes().is_empty());
-}
-
-#[test]
-fn new_tab_accepts_a_name_over_64_chars() {
-    let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    // The name is stored whole at any length; the renderer truncates long
-    // names at display time.
-    let name = "x".repeat(65);
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::NewTab(NewTabArgs {
-            name: Some(name.clone()),
-            ..NewTabArgs::default()
-        }),
-    );
-    let command_id = env.id;
-    match rt.dispatch(env) {
-        CommandResult::Ok {
-            command_id: ok_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_id, command_id);
-            // TabCreated, PaneCreated, TabFocused, PaneFocused, PtyResized.
-            assert_eq!(emitted_events.len(), 5);
-        }
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    let session = &rt.sessions[&sid];
-    assert_eq!(session.tabs.len(), 2);
-    let new_tab = session
-        .tabs
-        .values()
-        .find(|tab| tab.id() != tab_a)
-        .expect("the created tab");
-    assert_eq!(new_tab.name(), name);
 }
 
 #[test]
@@ -5901,7 +5813,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
 // --- RenameTab handler ---------------------------------------------------------
 
 #[test]
-fn rename_tab_updates_the_name_and_emits() {
+fn rename_tab_assigns_a_generated_name_and_emits() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -5913,12 +5825,11 @@ fn rename_tab_updates_the_name_and_emits() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
+    // No explicit target: the issuer's active tab gets a fresh generated
+    // name — the caller supplies none.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: "build".to_string(),
-        }),
+        Command::RenameTab(RenameTabArgs { tab: None }),
     );
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -5931,11 +5842,13 @@ fn rename_tab_updates_the_name_and_emits() {
         }
         other => panic!("expected Ok, got {other:?}"),
     }
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "build");
+    let name = rt.sessions[&sid].tabs[&tab_a].name().to_string();
+    assert_ne!(name, "t");
+    assert!(name.starts_with("T-"), "generated tab name, got {name}");
 }
 
 #[test]
-fn rename_tab_to_its_current_name_is_ok_with_no_events() {
+fn rename_tab_explicit_tab_gets_a_generated_name() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -5949,78 +5862,15 @@ fn rename_tab_to_its_current_name_is_ok_with_no_events() {
 
     let result = rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: Some(tab_a),
-            name: "t".to_string(),
-        }),
-    ));
-    match result {
-        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
-}
-
-#[test]
-fn rename_tab_with_an_empty_name_is_rejected() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: String::new(),
-        }),
-    );
-    let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("tab name cannot be empty".to_string()),
-        }
-    );
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), "t");
-}
-
-#[test]
-fn rename_tab_accepts_a_name_over_64_chars() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    // 65 multi-byte characters, stored whole: names have no length cap at
-    // validate; the renderer truncates long names at display time.
-    let name = "字".repeat(65);
-    let result = rt.dispatch(envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenameTab(RenameTabArgs {
-            tab: None,
-            name: name.clone(),
-        }),
+        Command::RenameTab(RenameTabArgs { tab: Some(tab_a) }),
     ));
     match result {
         CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
         other => panic!("expected Ok, got {other:?}"),
     }
-    assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), name);
+    let name = rt.sessions[&sid].tabs[&tab_a].name().to_string();
+    assert_ne!(name, "t");
+    assert!(name.starts_with("T-"), "generated tab name, got {name}");
 }
 
 #[test]
@@ -6250,7 +6100,7 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
 }
 
 #[test]
-fn rename_pane_updates_the_title_and_emits() {
+fn rename_pane_assigns_a_generated_title_and_emits() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -6262,13 +6112,11 @@ fn rename_pane_updates_the_title_and_emits() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    // No explicit target: the issuer's focused pane is renamed.
+    // No explicit target: the issuer's focused pane gets a fresh generated
+    // title — the caller supplies none.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::RenamePane(RenamePaneArgs {
-            pane: None,
-            name: "build-watch".to_string(),
-        }),
+        Command::RenamePane(RenamePaneArgs { pane: None }),
     );
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -6281,109 +6129,14 @@ fn rename_pane_updates_the_title_and_emits() {
         }
         other => panic!("expected Ok, got {other:?}"),
     }
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        Some("build-watch".to_string())
-    );
-}
-
-#[test]
-fn rename_pane_to_its_current_title_is_ok_with_no_events() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    session.panes.get_mut(pane_a).expect("pane").title = Some("same".to_string());
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let result = rt.dispatch(envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenamePane(RenamePaneArgs {
-            pane: Some(pane_a),
-            name: "same".to_string(),
-        }),
-    ));
-    match result {
-        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        Some("same".to_string())
-    );
-}
-
-#[test]
-fn rename_pane_with_an_empty_name_is_rejected() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    let env = envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenamePane(RenamePaneArgs {
-            pane: None,
-            name: String::new(),
-        }),
-    );
-    let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("pane name cannot be empty".to_string()),
-        }
-    );
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        None
-    );
-}
-
-#[test]
-fn rename_pane_accepts_a_name_over_64_chars() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab_a = TabId::new();
-    let pane_a = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane_a);
-    add_tab(&mut session, tab_a, pane_a);
-    add_client(&mut session, client_id, tab_a, Some(pane_a));
-    let sid = session.id;
-    rt.sessions.insert(sid, session);
-
-    // 65 multi-byte characters, stored whole: names have no length cap at
-    // validate; the renderer truncates long names at display time.
-    let name = "字".repeat(65);
-    let result = rt.dispatch(envelope_from(
-        CommandSource::key_binding(client_id),
-        Command::RenamePane(RenamePaneArgs {
-            pane: None,
-            name: name.clone(),
-        }),
-    ));
-    match result {
-        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
-        other => panic!("expected Ok, got {other:?}"),
-    }
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        Some(name)
-    );
+    let title = rt.sessions[&sid]
+        .panes
+        .get(pane_a)
+        .expect("pane")
+        .title
+        .clone()
+        .expect("generated title");
+    assert!(title.starts_with("P-"), "generated pane title, got {title}");
 }
 
 #[test]
@@ -6401,18 +6154,19 @@ fn rename_pane_explicit_target_resolves_its_owning_session() {
 
     // An internal source carries no session or client context; the explicit
     // pane target alone finds the owning session.
-    let env = envelope(Command::RenamePane(RenamePaneArgs {
-        pane: Some(pane_a),
-        name: "logs".to_string(),
-    }));
+    let env = envelope(Command::RenamePane(RenamePaneArgs { pane: Some(pane_a) }));
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
         other => panic!("expected Ok, got {other:?}"),
     }
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        Some("logs".to_string())
-    );
+    let title = rt.sessions[&sid]
+        .panes
+        .get(pane_a)
+        .expect("pane")
+        .title
+        .clone()
+        .expect("generated title");
+    assert!(title.starts_with("P-"), "generated pane title, got {title}");
 }
 
 #[test]
@@ -6433,19 +6187,303 @@ fn rename_pane_in_session_cli_defaults_to_the_issuing_pane() {
     let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
     let result = rt.dispatch(envelope_from(
         source,
-        Command::RenamePane(RenamePaneArgs {
-            pane: None,
-            name: "issuer".to_string(),
-        }),
+        Command::RenamePane(RenamePaneArgs { pane: None }),
     ));
     match result {
         CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
         other => panic!("expected Ok, got {other:?}"),
     }
-    assert_eq!(
-        rt.sessions[&sid].panes.get(pane_a).expect("pane").title,
-        Some("issuer".to_string())
+    let title = rt.sessions[&sid]
+        .panes
+        .get(pane_a)
+        .expect("pane")
+        .title
+        .clone()
+        .expect("generated title");
+    assert!(title.starts_with("P-"), "generated pane title, got {title}");
+}
+
+// --- RenameSession handler -------------------------------------------------
+
+#[test]
+fn rename_session_assigns_a_generated_name_and_emits() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+
+    // An explicit id names the target; the new name is generated, never
+    // caller-supplied.
+    let env = envelope(Command::RenameSession(RenameSessionArgs {
+        session: Some(sid),
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let name = rt.sessions[&sid].name.clone();
+    assert_ne!(name, "s");
+    assert!(name.starts_with("S-"), "generated session name, got {name}");
+}
+
+#[test]
+fn rename_session_in_session_cli_defaults_to_the_issuing_session() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    let other = SessionId::new();
+    rt.sessions.insert(other, bare_session(other));
+
+    // No explicit target from the in-session CLI: the session the command
+    // was issued inside gets a fresh generated name, even with other
+    // sessions around.
+    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let result = rt.dispatch(envelope_from(
+        source,
+        Command::RenameSession(RenameSessionArgs { session: None }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let name = rt.sessions[&sid].name.clone();
+    assert_ne!(name, "s");
+    assert!(name.starts_with("S-"), "generated session name, got {name}");
+    assert_eq!(rt.sessions[&other].name, "s");
+}
+
+#[test]
+fn rename_session_external_cli_defaults_to_the_envelope_session() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+    let other = SessionId::new();
+    rt.sessions.insert(other, bare_session(other));
+
+    // No explicit args target: the session the external CLI named on its
+    // envelope gets a fresh generated name, even with other sessions around.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::RenameSession(RenameSessionArgs { session: None }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let name = rt.sessions[&sid].name.clone();
+    assert_ne!(name, "s");
+    assert!(name.starts_with("S-"), "generated session name, got {name}");
+    assert_eq!(rt.sessions[&other].name, "s");
+}
+
+#[test]
+fn rename_session_external_cli_without_a_session_context_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+
+    let env = envelope_from(
+        CommandSource::external_cli(None),
+        Command::RenameSession(RenameSessionArgs { session: None }),
     );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("name a target session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_without_an_id_from_outside_a_session_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+
+    // Even with a sole session to guess, an internal source must name its
+    // target: the no-id flow is the in-session CLI's only.
+    let env = envelope(Command::RenameSession(RenameSessionArgs { session: None }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("name a target session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_keybinding_defaults_to_the_issuers_session() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // No explicit target from a keybinding: the session the pressing client
+    // is attached to gets a fresh generated name.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RenameSession(RenameSessionArgs { session: None }),
+    ));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let name = rt.sessions[&sid].name.clone();
+    assert_ne!(name, "s");
+    assert!(name.starts_with("S-"), "generated session name, got {name}");
+}
+
+#[test]
+fn rename_session_without_an_id_from_a_mouse_source_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::mouse(client_id),
+        Command::RenameSession(RenameSessionArgs { session: None }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("name a target session".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_with_an_unknown_id_is_not_found() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+
+    let env = envelope(Command::RenameSession(RenameSessionArgs {
+        session: Some(SessionId::new()),
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: None,
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_on_a_stopping_session_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, stopping_session(sid));
+
+    // An explicit id resolves outside the acting-session admission check;
+    // the resolver still gates it: a winding-down session takes no mutations.
+    let env = envelope(Command::RenameSession(RenameSessionArgs {
+        session: Some(sid),
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("session is stopping".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_in_session_cli_on_a_stopping_session_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = stopping_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The issuer's own session is winding down: admission rejects the rename.
+    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::RenameSession(RenameSessionArgs { session: None }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("session is stopping".to_string()),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].name, "s");
+}
+
+#[test]
+fn rename_session_generated_name_skips_taken_session_names() {
+    let (mut rt, _tx) = new_runtime();
+    let sid = SessionId::new();
+    rt.sessions.insert(sid, bare_session(sid));
+    let other = SessionId::new();
+    rt.sessions.insert(other, bare_session(other));
+
+    // The generator treats every existing session name as taken, so the new
+    // name collides with neither the sibling's nor the target's old one.
+    let result = rt.dispatch(envelope(Command::RenameSession(RenameSessionArgs {
+        session: Some(sid),
+    })));
+    match result {
+        CommandResult::Ok { emitted_events, .. } => assert_eq!(emitted_events.len(), 1),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let name = rt.sessions[&sid].name.clone();
+    assert_ne!(name, "s");
+    assert_ne!(name, rt.sessions[&other].name);
 }
 
 // --- FocusTab handler ----------------------------------------------------------

@@ -463,7 +463,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "rename-pane",
             "Rename Pane",
-            "Set the display name of the focused pane",
+            "Assign a fresh generated name to the focused pane",
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RenamePane),
@@ -512,7 +512,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "rename-tab",
             "Rename Tab",
-            "Set the name of the focused tab",
+            "Assign a fresh generated name to the focused tab",
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::RenameTab),
@@ -529,7 +529,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "rename-session",
             "Rename Session",
-            "Rename the current session",
+            "Assign a fresh generated name to the current session, or one named by id",
             Global,
             vec![Session],
             CoreCommand(CommandKind::RenameSession),

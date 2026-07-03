@@ -296,7 +296,6 @@ fn commit_new_tab_records_the_spec_on_the_root_pane() {
     let mut session = session_with(vec![], vec![]);
     let new_pane_id = PaneId::new();
     let spec = NewPaneSpec {
-        name: Some("root".to_owned()),
         cwd: Some(PathBuf::from("/srv")),
         command: None,
     };
@@ -312,7 +311,7 @@ fn commit_new_tab_records_the_spec_on_the_root_pane() {
     );
 
     let record = session.panes.get(new_pane_id).unwrap();
-    assert_eq!(record.title, Some("root".to_owned()));
+    assert_eq!(record.title, None);
     assert_eq!(record.cwd, Some(PathBuf::from("/srv")));
     assert_eq!(record.command, None);
 }
