@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use tile_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use tile_core::ids::{ClientId, PaneId, TabId};
 use tile_core::process::SpawnSpec;
+use tile_layout::mode::LayoutMode;
 use tile_layout::tree::LayoutNode;
 use tile_pane::pane::lifecycle::PaneLifecycleEvent;
 use tile_pane::pane::state::PaneRecord;
@@ -35,8 +36,9 @@ pub struct NewPaneSpec {
 
 /// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
 /// focused client onto the tab (if it is not already there), register the new
-/// pane as `Running`, swap in `candidate` as the tab's layout, and focus the new
-/// pane for `focus_client` when one is given and still attached.
+/// pane as `Running`, swap in `candidate` as the tab's layout — dropping the
+/// tab's fullscreen when one was on, so the new pane lands visible — and focus
+/// the new pane for `focus_client` when one is given and still attached.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
 /// [`tile_layout::edit::split_leaf`] or [`tile_layout::edit::add_to_stack`],
@@ -99,9 +101,15 @@ pub fn commit_new_pane(
     let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
     let _ = session.panes.insert(record);
 
-    // Swap in the pre-built tree and record focus history.
+    // Swap in the pre-built tree and record focus history. A layout edit
+    // returns the tab to the tiled view: a pane added to a fullscreen tab
+    // drops the fullscreen, so the new pane lands visible in the tiled
+    // layout the caller sized it against.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.update_layout(candidate);
+        if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
+            tab.update_layout_mode(LayoutMode::Tiled);
+        }
         if focus.is_some() {
             tab.record_focus_mru(new_pane_id);
         }

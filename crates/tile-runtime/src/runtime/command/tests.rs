@@ -6541,3 +6541,451 @@ fn rename_tab_accepts_a_name_of_exactly_64_chars() {
     assert!(matches!(result, CommandResult::Ok { .. }));
     assert_eq!(rt.sessions[&sid].tabs[&tab_a].name(), name);
 }
+
+/// The [`resize_fixture`] tab zoomed onto the split pane through dispatch:
+/// mode `Fullscreen { focused: pane_a }`, its PTY resized to the full-tab
+/// content rect (80x24 viewport -> 78x22).
+fn fullscreen_fixture() -> (
+    Runtime,
+    Arc<FakePtyBackend>,
+    mpsc::Sender<RuntimeEvent>,
+    SessionId,
+    ClientId,
+    PaneId,
+    PaneId,
+    PtySize,
+) {
+    let (mut rt, fake, tx, sid, client_id, root, pane_a, size_a) = resize_fixture();
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::TogglePaneFullscreen,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    (rt, fake, tx, sid, client_id, root, pane_a, size_a)
+}
+
+/// The id of the session's single tab.
+fn only_tab(rt: &Runtime, sid: SessionId) -> TabId {
+    rt.sessions[&sid].tabs.keys().copied().next().unwrap()
+}
+
+#[test]
+fn toggle_fullscreen_promotes_the_focused_pane_and_reflows_its_pty() {
+    let (mut rt, fake, _tx, sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    let tab = only_tab(&rt, sid);
+    let tree_before = rt.sessions[&sid].tabs[&tab].layout().clone();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::TogglePaneFullscreen,
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            // LayoutChanged plus the promoted pane's PtyResized; the hidden
+            // root has no PTY and the focus was already on the pane.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab].layout_mode(),
+        LayoutMode::Fullscreen { focused: pane_a }
+    );
+    // The mode is a solve-time overlay: the tree itself is untouched.
+    assert_eq!(*session.tabs[&tab].layout(), tree_before);
+    let full = PtySize { cols: 78, rows: 22 };
+    assert_eq!(rt.pty_sizes[&pane_a], full);
+    assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), full);
+}
+
+#[test]
+fn toggle_fullscreen_off_restores_the_exact_prior_layout_and_sizes() {
+    let (mut rt, fake, _tx, sid, client_id, _root, pane_a, size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+    let tree_before = rt.sessions[&sid].tabs[&tab].layout().clone();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::TogglePaneFullscreen,
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged plus the pane shrinking back to its tiled rect.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab].layout_mode(), LayoutMode::Tiled);
+    assert_eq!(*session.tabs[&tab].layout(), tree_before);
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+    assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), size_a);
+}
+
+#[test]
+fn toggle_fullscreen_from_the_issuing_pane_moves_the_acting_focus() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, size_a) = resize_fixture();
+    let tab = only_tab(&rt, sid);
+
+    // Issued from inside root's pane while the client's focus is on the
+    // split pane: root is promoted and the focus follows it.
+    let source = CommandSource::in_session_cli(sid, client_id, root, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::TogglePaneFullscreen);
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged plus PaneFocused: root has no PTY to resize, and
+            // the hidden pane keeps its last size eventlessly.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab].layout_mode(),
+        LayoutMode::Fullscreen { focused: root }
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab),
+        Some(root)
+    );
+    assert_eq!(session.tabs[&tab].focus_mru().first(), Some(&root));
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
+}
+
+#[test]
+fn toggle_fullscreen_on_an_unviewed_tab_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Issued from inside the unviewed tab's pane: the toggle would resize
+    // real PTYs against a viewport no client provides.
+    let source = CommandSource::in_session_cli(sid, client_id, pane_b, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::TogglePaneFullscreen);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane's tab is not viewed by any client".to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab_b].layout_mode(),
+        LayoutMode::Tiled
+    );
+}
+
+#[test]
+fn toggle_fullscreen_below_the_pane_floor_is_rejected() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab_id, pane);
+    // A 3x3 viewport is below the border-inclusive floor (4 columns), so
+    // even the whole tab cannot show the pane's content minimum.
+    let mut client = Client::new(
+        client_id,
+        session.id,
+        SystemTime::now(),
+        Size { cols: 3, rows: 3 },
+        tab_id,
+    );
+    client.update_focused_pane(tab_id, pane);
+    session.attach_client(client);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::TogglePaneFullscreen,
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("not enough space to fullscreen the pane".to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab_id].layout_mode(),
+        LayoutMode::Tiled
+    );
+}
+
+#[test]
+fn focus_pane_under_fullscreen_retargets_the_zoom() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+    let full = PtySize { cols: 78, rows: 22 };
+
+    // Root is hidden behind the fullscreen — focusing it swaps the zoom to
+    // it instead of rejecting or dropping the mode.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: root,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged plus PaneFocused: root has no PTY, and the
+            // newly hidden pane keeps its last size eventlessly.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab].layout_mode(),
+        LayoutMode::Fullscreen { focused: root }
+    );
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab),
+        Some(root)
+    );
+    assert_eq!(rt.pty_sizes[&pane_a], full);
+}
+
+#[test]
+fn focus_pane_retargeting_back_skips_the_unchanged_pty() {
+    let (mut rt, fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+    let full = PtySize { cols: 78, rows: 22 };
+
+    let focus = |pane: PaneId| {
+        envelope_from(
+            CommandSource::key_binding(client_id),
+            Command::FocusPane(FocusPaneArgs { pane, client: None }),
+        )
+    };
+    assert!(matches!(rt.dispatch(focus(root)), CommandResult::Ok { .. }));
+    let resizes_before = fake.resizes(pane_a).unwrap().len();
+
+    // Retargeting back gives the pane the same full-tab rect it last held,
+    // so the reflow applies nothing.
+    match rt.dispatch(focus(pane_a)) {
+        CommandResult::Ok { emitted_events, .. } => {
+            // LayoutChanged plus PaneFocused, no PtyResized.
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout_mode(),
+        LayoutMode::Fullscreen { focused: pane_a }
+    );
+    assert_eq!(rt.pty_sizes[&pane_a], full);
+    assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
+}
+
+#[test]
+fn focus_pane_on_the_promoted_pane_is_a_no_op() {
+    let (mut rt, _fake, _tx, sid, client_id, _root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            pane: pane_a,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(emitted_events.len(), 0);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout_mode(),
+        LayoutMode::Fullscreen { focused: pane_a }
+    );
+}
+
+#[test]
+fn focus_pane_refocusing_a_hidden_current_pane_retargets_without_a_focus_event() {
+    let (mut rt, _tx) = new_runtime();
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, a);
+    add_pane(&mut session, b);
+    add_tab(&mut session, tab_id, a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(side_by_side(a, b));
+    add_client(&mut session, client_a, tab_id, Some(a));
+    add_client(&mut session, client_b, tab_id, Some(b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Client A zooms its own pane; client B's focus is now hidden behind it.
+    let env = envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::TogglePaneFullscreen,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    // B re-focuses the pane it already holds: the zoom swaps to it, and no
+    // focus event fires because B's focus never moved.
+    let env = envelope_from(
+        CommandSource::key_binding(client_b),
+        Command::FocusPane(FocusPaneArgs {
+            pane: b,
+            client: None,
+        }),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { emitted_events, .. } => {
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(
+        session.tabs[&tab_id].layout_mode(),
+        LayoutMode::Fullscreen { focused: b }
+    );
+    assert_eq!(
+        session.clients.get(client_b).unwrap().focused_pane(tab_id),
+        Some(b)
+    );
+}
+
+#[test]
+fn new_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
+    let (mut rt, _fake, _tx, sid, client_id, _root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+
+    // Splitting the promoted pane: the tab returns to the tiled view and
+    // both halves of the split are sized against it (root 40, the split
+    // pair 20 each -> 18x22 content).
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab].layout_mode(), LayoutMode::Tiled);
+    let pane_b = session
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_a && rt.pty_sizes.contains_key(id))
+        .expect("the new pane");
+    let half = PtySize { cols: 18, rows: 22 };
+    assert_eq!(rt.pty_sizes[&pane_a], half);
+    assert_eq!(rt.pty_sizes[&pane_b], half);
+}
+
+#[test]
+fn resize_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
+    let (mut rt, _fake, _tx, sid, client_id, _root, pane_a, size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+
+    // The moved border must be visible: the resize lands in the tiled view.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            amount: 5,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout_mode(),
+        LayoutMode::Tiled
+    );
+    let expected = PtySize {
+        cols: size_a.cols + 5,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+}
+
+#[test]
+fn close_pane_hidden_behind_a_fullscreen_drops_it() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+    let full = PtySize { cols: 78, rows: 22 };
+
+    // Closing the hidden root: the survivor already fills the tab, so its
+    // PTY keeps the full-tab size it holds.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(root),
+            force: true,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab].layout_mode(), LayoutMode::Tiled);
+    assert_eq!(*session.tabs[&tab].layout(), LayoutNode::Pane(pane_a));
+    assert_eq!(rt.pty_sizes[&pane_a], full);
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab),
+        Some(pane_a)
+    );
+}
+
+#[test]
+fn close_pane_closing_the_promoted_pane_drops_the_fullscreen() {
+    let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
+    let tab = only_tab(&rt, sid);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(pane_a),
+            force: true,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let session = &rt.sessions[&sid];
+    assert_eq!(session.tabs[&tab].layout_mode(), LayoutMode::Tiled);
+    assert_eq!(*session.tabs[&tab].layout(), LayoutNode::Pane(root));
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab),
+        Some(root)
+    );
+}

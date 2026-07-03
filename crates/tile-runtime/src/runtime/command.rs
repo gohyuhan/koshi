@@ -31,6 +31,7 @@ use tile_layout::{
     content::content_rects,
     edit::{add_to_stack, split_leaf},
     focus::stack_activate,
+    mode::LayoutMode,
     resize::{resize, ResizeError},
     solver::{fits, solve, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
@@ -101,6 +102,16 @@ struct FocusPaneTarget {
     tab_id: TabId,
 }
 
+/// The resolved default-pane context of a command that names no target: the
+/// acting session, the source's client, and the pane the command acts on —
+/// an in-session CLI's issuing pane, else the client's focused pane. The
+/// `Ok` half of [`Runtime::resolve_default_pane`].
+struct DefaultPaneTarget {
+    session_id: SessionId,
+    client_id: ClientId,
+    pane_id: PaneId,
+}
+
 /// A resolved [`Command::NewTab`] target: the session the tab joins and the
 /// client that switches onto it. The `Ok` half of
 /// [`Runtime::resolve_new_tab_target`].
@@ -161,7 +172,9 @@ impl Runtime {
             Command::RunCommandPane(_) => self.reject(envelope.id, "run command pane"),
             Command::CopyMode(_) => self.reject(envelope.id, "copy mode"),
             Command::Plugin(_) => self.reject(envelope.id, "plugin"),
-            Command::TogglePaneFullscreen => self.reject(envelope.id, "toggle pane fullscreen"),
+            Command::TogglePaneFullscreen => {
+                self.handle_toggle_pane_fullscreen(envelope.id, &envelope.source)
+            }
             Command::RenamePane(_) => self.reject(envelope.id, "rename pane"),
             Command::MoveTab(_) => self.reject(envelope.id, "move tab"),
             Command::RenameSession(_) => self.reject(envelope.id, "rename session"),
@@ -204,8 +217,10 @@ impl Runtime {
     /// source, tab unviewed) the session's sole client; a session with several
     /// attached clients and no named target is rejected as ambiguous, and one with
     /// no attached client at all is rejected. The designated client is switched
-    /// onto the tab (if not already there) and the tab it left is reflowed. All
-    /// events seal in one transaction.
+    /// onto the tab (if not already there) and the tab it left is reflowed. A
+    /// fullscreen tab drops its fullscreen at the commit, so the new pane
+    /// lands in the tiled view it was sized against. All events seal in one
+    /// transaction.
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -237,7 +252,13 @@ impl Runtime {
         let Some(tab) = session.tabs.get(&target.tab_id) else {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
-        let layout_mode = tab.layout_mode();
+        // A pane added to a fullscreen tab lands in the tiled view — the
+        // commit drops the fullscreen — so the candidate is sized against the
+        // tiled solve the clients will see.
+        let layout_mode = match tab.layout_mode() {
+            LayoutMode::Fullscreen { .. } => LayoutMode::Tiled,
+            mode => mode,
+        };
         let new_pane_id = PaneId::new();
         let edited = if args.stacked {
             add_to_stack(tab.layout(), target.source_pane, new_pane_id)
@@ -267,10 +288,10 @@ impl Runtime {
             Err(rejection) => return Self::rejected(command_id, rejection),
         };
 
-        // Solve the candidate against that viewport to size the new pane and its
-        // siblings. Fit passed above, so in a tiled layout the new pane has a real
-        // content rect; a hiding layout mode that gives it no area rejects
-        // cleanly, still before any mutation.
+        // Solve the candidate against that viewport to size the new pane and
+        // its siblings. Fit passed above, so the new pane has a real content
+        // rect; a solve that still gives it no area rejects defensively,
+        // before any mutation.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         let rects = content_rects(&solve_with_mode(&candidate, layout_mode, tab_rect));
         let Some(new_rect) = rects
@@ -526,9 +547,10 @@ impl Runtime {
     /// real viewport ([`Session::tab_viewport`]), so the donor's spare cells
     /// are measured against the exact terminal displaying the result, and a
     /// tab no client currently views rejects. On success the tab's tree is
-    /// swapped in, [`Event::LayoutChanged`] is emitted, and every live PTY
-    /// whose solved size changed is resized through the shared reflow path,
-    /// one [`Event::PtyResized`] each.
+    /// swapped in — a fullscreen tab drops its fullscreen, making the moved
+    /// border visible — [`Event::LayoutChanged`] is emitted, and every live
+    /// PTY whose solved size changed is resized through the shared reflow
+    /// path, one [`Event::PtyResized`] each.
     fn handle_resize_pane(
         &mut self,
         command_id: CommandId,
@@ -583,6 +605,12 @@ impl Runtime {
             Err(error) => return Self::rejected(command_id, Self::resize_rejection(&error)),
         };
         tab.update_layout(resized);
+        // A layout edit returns the tab to the tiled view: resizing a pane of
+        // a fullscreen tab drops the fullscreen, so the moved border is
+        // visible in the reflow below.
+        if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
+            tab.update_layout_mode(LayoutMode::Tiled);
+        }
 
         // The border moved: re-solve the tab and resize each live PTY whose
         // size changed.
@@ -613,8 +641,11 @@ impl Runtime {
     /// [`RejectReason::InvalidState`]. A collapsed stack member is a valid
     /// target — focusing it activates its stack (the member expands, the
     /// previously active member collapses to a header) and the tab's PTYs
-    /// reflow to the new geometry. Emits [`Event::LayoutChanged`] plus
-    /// per-pane [`Event::PtyResized`] when a stack activation changed the
+    /// reflow to the new geometry. Fullscreen follows focus: on a fullscreen
+    /// tab, focusing a pane other than the promoted one retargets the
+    /// fullscreen to it — the zoomed view swaps content, the mode stays on.
+    /// Emits [`Event::LayoutChanged`] plus per-pane [`Event::PtyResized`]
+    /// when a stack activation or a fullscreen retarget changed the
     /// geometry, and [`Event::PaneFocused`] when the client's focus actually
     /// moved; focusing the already-focused pane of an already-active member
     /// completes with no events. A rejected focus mutates nothing.
@@ -651,10 +682,21 @@ impl Runtime {
             return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
         };
 
-        // Solve the tab as displayed: a pane suppressed for lack of space
-        // cannot take focus.
+        // Fullscreen follows focus: focusing a pane hidden behind a
+        // fullscreen tab retargets the fullscreen to it, so the mode the tab
+        // will show is solved and checked, not the one it left.
+        let effective_mode = match tab.layout_mode() {
+            LayoutMode::Fullscreen { focused } if focused != args.pane => {
+                LayoutMode::Fullscreen { focused: args.pane }
+            }
+            mode => mode,
+        };
+        let retargeted = effective_mode != tab.layout_mode();
+
+        // Solve the tab as it will display: a pane suppressed for lack of
+        // space cannot take focus.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        let solved = solve_with_mode(tab.layout(), tab.layout_mode(), tab_rect);
+        let solved = solve_with_mode(tab.layout(), effective_mode, tab_rect);
         if solved.suppressed.contains(&args.pane) {
             return Self::rejected(
                 command_id,
@@ -667,7 +709,8 @@ impl Runtime {
 
         // A collapsed stack member is a valid target: focusing it expands it.
         // The activation mutates a candidate tree, swapped in whole, and the
-        // changed geometry reflows every affected PTY.
+        // changed geometry — the activation, the fullscreen retarget, or both
+        // — reflows every affected PTY once.
         let mut events = Vec::new();
         let mut candidate = tab.layout().clone();
         let activated = candidate
@@ -676,6 +719,11 @@ impl Runtime {
             .is_some();
         if activated {
             tab.update_layout(candidate);
+        }
+        if retargeted {
+            tab.update_layout_mode(effective_mode);
+        }
+        if activated || retargeted {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
             }));
@@ -694,7 +742,7 @@ impl Runtime {
             return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
         };
         let prior_pane = client.focused_pane(target.tab_id);
-        if prior_pane == Some(args.pane) && !activated {
+        if prior_pane == Some(args.pane) && !activated && !retargeted {
             return TransactionScope::new().commit(command_id);
         }
         client.update_focused_pane(target.tab_id, args.pane);
@@ -880,9 +928,9 @@ impl Runtime {
     /// `--force`. `--force` force-kills every pane regardless of policy. The
     /// removal itself is [`tab_ops::close_tab`]: pane records drop, the tab
     /// goes, viewers move to the nearest surviving tab, and closing the last
-    /// tab quits the session. The kills run on one detached thread because a
-    /// graceful kill sleeps out its grace window and the dispatcher must
-    /// never stall.
+    /// tab quits the session. The kills run on one detached thread per pane —
+    /// a graceful kill sleeps out its grace window, so every child gets its
+    /// stop request immediately and the dispatcher never stalls.
     ///
     /// After the removal, the tab the displaced viewers landed on reflows to
     /// its new viewport (it now counts the movers). A destination with no
@@ -1101,6 +1149,124 @@ impl Runtime {
                     None,
                     &mut events,
                 );
+            }
+        }
+
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
+    /// Handle [`Command::TogglePaneFullscreen`]: switch the target pane's tab
+    /// between the tiled view and a fullscreen of that pane.
+    ///
+    /// The target is the command's default pane — the in-session issuing
+    /// pane, else the source client's focused pane. A fullscreen tab toggles
+    /// back to tiled whichever pane resolved; a tiled tab fullscreens the
+    /// target and, when the acting client's focus was elsewhere, moves its
+    /// focus to the pane now filling the tab ([`Event::PaneFocused`]). The
+    /// mode is a solve-time overlay — the tree is untouched, so toggling out
+    /// restores the exact prior layout. The tab must be viewed by at least
+    /// one attached client (the mode change resizes real PTYs), and a
+    /// viewport too small to show the fullscreen pane at its content minimum
+    /// rejects. Emits [`Event::LayoutChanged`] plus one [`Event::PtyResized`]
+    /// per PTY whose solved size changed; a rejected toggle mutates nothing.
+    fn handle_toggle_pane_fullscreen(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+    ) -> CommandResult {
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_default_pane(source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+
+        let backend = Arc::clone(self.pty_backend());
+
+        let Some(session) = self.sessions.get_mut(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let tab_id = match Self::tab_of_pane(session, target.pane_id) {
+            Ok(tab_id) => tab_id,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let Some(viewport) = session.tab_viewport(tab_id) else {
+            return Self::rejected(
+                command_id,
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "pane's tab is not viewed by any client",
+                ),
+            );
+        };
+        let Some(tab) = session.tabs.get_mut(&tab_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+
+        // Flip the mode. Entering solves the candidate mode first: a viewport
+        // too small to show the pane at its content minimum rejects before
+        // anything mutates.
+        let entered = match tab.layout_mode() {
+            LayoutMode::Fullscreen { .. } => {
+                tab.update_layout_mode(LayoutMode::Tiled);
+                false
+            }
+            LayoutMode::Tiled => {
+                let mode = LayoutMode::Fullscreen {
+                    focused: target.pane_id,
+                };
+                let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+                let solved = solve_with_mode(tab.layout(), mode, tab_rect);
+                if solved.suppressed.contains(&target.pane_id) {
+                    return Self::rejected(
+                        command_id,
+                        Rejection::new(
+                            RejectReason::InvalidState,
+                            "not enough space to fullscreen the pane",
+                        ),
+                    );
+                }
+                tab.update_layout_mode(mode);
+                true
+            }
+        };
+
+        // The mode changed: re-solve the tab and resize each live PTY whose
+        // size changed.
+        let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
+        let rects = Self::tab_content_rects(session, tab_id, viewport);
+        Self::reflow_changed(
+            backend.as_ref(),
+            &self.pty_handles,
+            &mut self.pty_sizes,
+            rects,
+            None,
+            &mut events,
+        );
+
+        // Entering fullscreen watches the target pane: the acting client's
+        // focus moves to it when it was elsewhere.
+        if entered {
+            if let Some(client) = session.clients.get_mut(target.client_id) {
+                let prior_pane = client.focused_pane(tab_id);
+                if prior_pane != Some(target.pane_id) {
+                    client.update_focused_pane(tab_id, target.pane_id);
+                    if let Some(tab) = session.tabs.get_mut(&tab_id) {
+                        tab.record_focus_mru(target.pane_id);
+                    }
+                    events.push(Event::PaneFocused(PaneFocused {
+                        client_id: target.client_id,
+                        tab_id,
+                        pane_id: target.pane_id,
+                        prior_pane,
+                    }));
+                }
             }
         }
 
@@ -1345,7 +1511,8 @@ impl Runtime {
     /// state.
     fn validate(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
         // 1. Source policy: a client-scoped command needs a client to act for.
-        if Self::is_client_scoped(&envelope.command) && envelope.source.client_id().is_none() {
+        if Self::requires_issuing_client(&envelope.command) && envelope.source.client_id().is_none()
+        {
             return Err(Rejection::new(
                 RejectReason::Unauthorized,
                 "command requires an attached client",
@@ -1375,7 +1542,7 @@ impl Runtime {
     /// and [`Command::NewTab`] are absent: each resolves its own target
     /// client (explicit `client` argument, issuing client, or the session's
     /// sole attached client) in its resolver.
-    fn is_client_scoped(command: &Command) -> bool {
+    fn requires_issuing_client(command: &Command) -> bool {
         matches!(
             command,
             Command::ToggleLockMode
@@ -1457,7 +1624,7 @@ impl Runtime {
             Command::ToggleLockMode
             | Command::SetLockMode(_)
             | Command::TogglePaneFullscreen
-            | Command::CopyMode(_) => self.resolve_default_pane(source, session),
+            | Command::CopyMode(_) => self.resolve_default_pane(source, session).map(drop),
             Command::CloseTab(args) => self
                 .resolve_tab_or_active(args.tab, source, session)
                 .map(drop),
@@ -1471,7 +1638,7 @@ impl Runtime {
                 Self::resolve_focus_tab_target(args, source, session).map(drop)
             }
             Command::NewTab(args) => Self::resolve_new_tab_target(args, source, session).map(drop),
-            Command::RunCommandPane(_) => self.resolve_default_pane(source, session),
+            Command::RunCommandPane(_) => self.resolve_default_pane(source, session).map(drop),
             Command::RenameSession(_) => Self::require_session(session).map(drop),
             Command::Plugin(_) => Ok(()),
         }
@@ -1663,7 +1830,7 @@ impl Runtime {
     ) -> Result<(), Rejection> {
         match pane {
             Some(pane) => self.resolve_pane_global(pane),
-            None => self.resolve_default_pane(source, session),
+            None => self.resolve_default_pane(source, session).map(drop),
         }
     }
 
@@ -1673,19 +1840,34 @@ impl Runtime {
     /// ([`CommandSource::InSessionCli`]'s `pane_id`) within that session; any
     /// other client source targets that client's focused pane. Fails with
     /// [`RejectReason::TargetNotFound`] when there is no such context — a target
-    /// is never silently guessed.
+    /// is never silently guessed. Shared by validation and the target-less
+    /// handlers so both apply one contract.
     fn resolve_default_pane(
         &self,
         source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<(), Rejection> {
+    ) -> Result<DefaultPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         match source {
-            CommandSource::InSessionCli { pane_id, .. } => {
-                Self::resolve_pane_in_session(session, *pane_id)
+            CommandSource::InSessionCli {
+                client_id, pane_id, ..
+            } => {
+                Self::resolve_pane_in_session(session, *pane_id)?;
+                Ok(DefaultPaneTarget {
+                    session_id: session.id,
+                    client_id: *client_id,
+                    pane_id: *pane_id,
+                })
             }
             _ => match source.client_id() {
-                Some(client_id) => Self::resolve_focused_pane(session, client_id),
+                Some(client_id) => {
+                    let pane_id = Self::resolve_focused_pane(session, client_id)?;
+                    Ok(DefaultPaneTarget {
+                        session_id: session.id,
+                        client_id,
+                        pane_id,
+                    })
+                }
                 None => Err(Rejection::new(
                     RejectReason::TargetNotFound,
                     "no target and no focused pane to default to",
@@ -1799,7 +1981,7 @@ impl Runtime {
     /// Resolve the client's focused pane. A client with no focused pane is
     /// [`RejectReason::TargetNotFound`]; a focus pointing outside the active tab
     /// is rejected too, rather than trusting the focus invariant.
-    fn resolve_focused_pane(session: &Session, client_id: ClientId) -> Result<(), Rejection> {
+    fn resolve_focused_pane(session: &Session, client_id: ClientId) -> Result<PaneId, Rejection> {
         let client = session
             .clients
             .get(client_id)
@@ -1807,7 +1989,8 @@ impl Runtime {
         let pane = client
             .focused_pane(client.active_tab())
             .ok_or_else(|| Rejection::new(RejectReason::TargetNotFound, "no focused pane"))?;
-        Self::require_pane_in_active_tab(session, client_id, pane)
+        Self::require_pane_in_active_tab(session, client_id, pane)?;
+        Ok(pane)
     }
 
     /// Resolve an explicit tab target within the acting session, or the default

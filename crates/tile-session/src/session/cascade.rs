@@ -25,6 +25,7 @@ use tile_core::geometry::Rect;
 use tile_core::ids::{ClientId, PaneId, TabId};
 use tile_layout::edit::{remove_pane, RemoveError};
 use tile_layout::focus::focus_candidates;
+use tile_layout::mode::LayoutMode;
 use tile_layout::normalize::normalize;
 use tile_layout::solver::solve_with_mode;
 use tile_pane::pane::lifecycle::PaneLifecycleEvent;
@@ -41,7 +42,8 @@ use crate::session::tab_ops::close_and_refocus_tab;
 /// shell:
 /// 1. drop the pane from the registry and the tab's focus history;
 /// 2. collapse its leaf out of the layout — *before* focus repair, so the tree
-///    never names a gone pane while candidates are computed;
+///    never names a gone pane while candidates are computed — and drop the
+///    tab's fullscreen when one was on, returning it to the tiled view;
 /// 3. for every client focused on it, pick the inheriting focus with
 ///    [`repair_focus`] and apply the verdict;
 /// 4. if the tab is now empty, apply `empty_tab_policy` —
@@ -86,6 +88,13 @@ pub fn remove_pane_cascade(
             let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
             let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
             tab.update_layout(canonical);
+            // A layout edit returns the tab to the tiled view: removing a
+            // pane from a fullscreen tab drops the fullscreen, and focus
+            // repair below ranks candidates against the layout the clients
+            // now see.
+            if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
+                tab.update_layout_mode(LayoutMode::Tiled);
+            }
             Some(info)
         }
         Err(RemoveError::LastPane { .. }) => None,

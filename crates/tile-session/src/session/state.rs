@@ -99,6 +99,13 @@ impl Tab {
         self.layout = layout;
     }
 
+    /// Set how this tab's layout is solved. The tree itself is untouched:
+    /// entering fullscreen hides the other panes at solve time, and leaving
+    /// it restores the exact prior layout.
+    pub fn update_layout_mode(&mut self, mode: LayoutMode) {
+        self.layout_mode = mode;
+    }
+
     /// Records `pane` as the most-recently focused: moves it to the front,
     /// keeping one entry per pane, and drops the oldest once the cap is hit.
     pub fn record_focus_mru(&mut self, pane: PaneId) {
