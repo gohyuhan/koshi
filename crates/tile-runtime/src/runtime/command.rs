@@ -19,8 +19,8 @@ use tile_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
         FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
-        RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, TabTarget,
-        WriteToPaneArgs,
+        RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs,
+        TabTarget, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -178,7 +178,15 @@ impl Runtime {
             Command::SetLockMode(args) => {
                 self.handle_set_lock_mode(envelope.id, &envelope.source, &args)
             }
-            Command::RunCommandPane(_) => self.reject(envelope.id, "run command pane"),
+            Command::RunCommandPane(args) => {
+                let new_pane_args = Self::run_command_new_pane_args(&args);
+                self.handle_new_pane(
+                    envelope.id,
+                    &envelope.source,
+                    &new_pane_args,
+                    envelope.issued_at,
+                )
+            }
             Command::CopyMode(_) => self.reject(envelope.id, "copy mode"),
             Command::Plugin(_) => self.reject(envelope.id, "plugin"),
             Command::TogglePaneFullscreen => {
@@ -234,6 +242,23 @@ impl Runtime {
     /// fullscreen tab drops its fullscreen at the commit, so the new pane
     /// lands in the tiled view it was sized against. All events seal in one
     /// transaction.
+    /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
+    /// its command is required (never the default shell), it splits the default
+    /// anchor pane rightward into the tiled view, and carries the working
+    /// directory through. Shared by [`Self::dispatch`] and
+    /// [`Self::resolve_target`] so the validate pre-check and the handler resolve
+    /// the same anchor pane.
+    fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
+        NewPaneArgs {
+            source: None,
+            direction: None,
+            stacked: false,
+            cwd: args.cwd.clone(),
+            command: Some(args.command.clone()),
+            client: None,
+        }
+    }
+
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -1908,7 +1933,9 @@ impl Runtime {
                 Self::resolve_focus_tab_target(args, source, session).map(drop)
             }
             Command::NewTab(args) => Self::resolve_new_tab_target(args, source, session).map(drop),
-            Command::RunCommandPane(_) => self.resolve_default_pane(source, session).map(drop),
+            Command::RunCommandPane(args) => self
+                .resolve_new_pane_source(&Self::run_command_new_pane_args(args), source, session)
+                .map(drop),
             Command::RenameSession(args) => self
                 .resolve_session_target(args.session, source, session)
                 .map(drop),

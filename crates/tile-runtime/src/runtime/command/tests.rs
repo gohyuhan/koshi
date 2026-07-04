@@ -27,6 +27,7 @@ use tile_layout::mode::LayoutMode;
 use tile_layout::tree::{LayoutChild, SplitNode};
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
+use tile_pane::pane::policy::PaneExitPolicy;
 use tile_pane::pane::state::PaneRecord;
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::error::PtyError;
@@ -2365,6 +2366,83 @@ fn run_command_pane_requires_a_pane_anchor() {
             reason: RejectReason::TargetNotFound,
             help: Some("no target and no focused pane to default to".to_string()),
         }
+    );
+}
+
+#[test]
+fn run_command_pane_spawns_and_records_the_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Splits the focused pane and spawns the requested command in the new pane.
+    match rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RunCommandPane(RunCommandPaneArgs {
+            command: spawn_spec(),
+            cwd: None,
+        }),
+    )) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    // The command is spawned verbatim and recorded on the pane, which takes the
+    // default close-on-exit policy.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), spawn_spec());
+    let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
+    assert_eq!(record.command, Some(spawn_spec()));
+    assert_eq!(record.exit_policy, PaneExitPolicy::CloseOnExit);
+    // The new command pane is focused for the issuing client.
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .focused_pane(tab),
+        Some(new_pane)
+    );
+}
+
+#[test]
+fn run_command_pane_carries_cwd_into_the_command() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The command carries no cwd of its own, so the args `cwd` fills it in.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::RunCommandPane(RunCommandPaneArgs {
+            command: spawn_spec(),
+            cwd: Some(PathBuf::from("/work")),
+        }),
+    ));
+
+    // `--cwd` reaches the spawned child and is recorded as the pane's directory.
+    let new_pane = other_pane(&rt, sid, root);
+    assert_eq!(
+        fake.spawn_spec(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/work"))
+    );
+    assert_eq!(
+        rt.sessions[&sid].panes.get(new_pane).unwrap().cwd,
+        Some(PathBuf::from("/work"))
     );
 }
 
