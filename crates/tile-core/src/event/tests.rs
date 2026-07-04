@@ -47,6 +47,13 @@ fn lifecycle_events_roundtrip() {
     roundtrip(&Event::PaneOutputUpdated(PaneOutputUpdated {
         pane_id: PaneId::new(),
     }));
+    roundtrip(&Event::PaneCommandStarted(PaneCommandStarted {
+        pane_id: PaneId::new(),
+    }));
+    roundtrip(&Event::PaneCommandFinished(PaneCommandFinished {
+        pane_id: PaneId::new(),
+        exit_code: Some(1),
+    }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
         mode: InputMode::CopyMode,
@@ -322,6 +329,19 @@ fn event_variant_names_are_canonical() {
             "PaneOutputUpdated",
         ),
         (
+            Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: PaneId::new(),
+            }),
+            "PaneCommandStarted",
+        ),
+        (
+            Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: PaneId::new(),
+                exit_code: None,
+            }),
+            "PaneCommandFinished",
+        ),
+        (
             Event::LayoutChanged(LayoutChanged {
                 tab_id: TabId::new(),
             }),
@@ -568,7 +588,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 41);
+    assert_eq!(cases.len(), 43);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }

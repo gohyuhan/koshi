@@ -107,6 +107,13 @@ pub enum Event {
     /// A mouse event was delivered to a capable plugin.
     PluginMouseInput(PluginMouseInput),
 
+    // Shell integration (OSC 133 semantic prompts).
+    /// A command began running in a pane (OSC 133;C). Carries no command text.
+    PaneCommandStarted(PaneCommandStarted),
+    /// A command finished in a pane (OSC 133;D), with the exit code when the
+    /// shell reports one. Carries no command text.
+    PaneCommandFinished(PaneCommandFinished),
+
     // Delivery and rejection.
     /// A pane's bounded scrollback dropped lines on overflow.
     PaneScrollbackTruncated(PaneScrollbackTruncated),
@@ -601,6 +608,26 @@ pub struct PaneMouseForwarded {
 pub struct PluginMouseInput {
     /// The plugin the mouse input was delivered to.
     pub plugin_id: PluginId,
+}
+
+// ============================================================================
+// Shell integration (OSC 133 semantic prompts)
+// ============================================================================
+
+/// Payload for [`Event::PaneCommandStarted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneCommandStarted {
+    /// The pane whose shell reported a command starting.
+    pub pane_id: PaneId,
+}
+
+/// Payload for [`Event::PaneCommandFinished`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneCommandFinished {
+    /// The pane whose shell reported the command ending.
+    pub pane_id: PaneId,
+    /// The command's exit code, when the shell reports one.
+    pub exit_code: Option<i32>,
 }
 
 // ============================================================================
