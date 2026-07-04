@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ratatui = { version = "0.30.2", default-features = false }
 tile-core = { version = "0.1.0", path = "../tile-core" }
 tile-layout = { version = "0.1.0", path = "../tile-layout" }
 tile-pane = { version = "0.1.0", path = "../tile-pane" }

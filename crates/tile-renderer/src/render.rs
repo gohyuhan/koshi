@@ -1,6 +1,172 @@
-//! Core rendering. Placeholder per standard source layout.
+//! Stock (plugin-free) frame composition.
+//!
+//! [`render_frame`] paints one [`RenderSnapshot`] into a ratatui [`Buffer`] as
+//! three fixed zones: a **tabline** on the top row (session name and tab list on
+//! the left, a right-aligned status section — scroll position and mode tag), the
+//! **pane area** in the middle (a bordered box per visible pane, the focused
+//! pane's border highlighted), and the **keybinding hint bar** on the bottom row
+//! — a tile-owned row reserved here and left blank until config and action
+//! metadata are available to fill it.
+//!
+//! This is the core chrome only. Terminal cell content, cursor placement, stack
+//! headers, the keybinding hints themselves, and the too-small overlay are
+//! painted by later tasks over the same buffer; plugin-contributed segments
+//! (empty here) are injected once the plugin host lands.
 
 pub mod state;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect as RatatuiRect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Widget};
+
+use tile_core::geometry::Rect;
+use tile_core::lock::LockMode;
+
+use crate::snapshot::RenderSnapshot;
+
+/// Paint `snapshot` into `buf` over `area` (the client's full viewport).
+///
+/// Blanks `area` first so a buffer reused across frames shows no stale cells,
+/// then draws the pane borders and the tabline over the top row. The bottom row
+/// is the tile-owned keybinding hint bar: reserved and left blank here, filled by
+/// a later task. Does nothing for a zero-size area.
+pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // A per-client snapshot solves the tab that client is viewing into
+    // `session.active_tab`, so its id must match the client's viewed tab.
+    debug_assert_eq!(
+        snapshot.client.active_tab, snapshot.session.active_tab.id,
+        "snapshot builder must solve the client's active tab into session.active_tab"
+    );
+
+    // Blank the viewport first: ratatui double-buffers without clearing, so a
+    // reused buffer would otherwise keep leftover cells in the tabline gap, the
+    // reserved hint row, and any pane interior not painted this frame.
+    Clear.render(area, buf);
+
+    draw_panes(snapshot, buf);
+
+    let tabline = RatatuiRect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    draw_tabline(snapshot, tabline, buf);
+}
+
+/// Draw a bordered box for every visible pane in the active tab, highlighting
+/// the client's focused pane's border.
+fn draw_panes(snapshot: &RenderSnapshot, buf: &mut Buffer) {
+    let focused = snapshot.client.focused_pane;
+    for slot in &snapshot.session.active_tab.layout_solved {
+        if !slot.visible {
+            continue;
+        }
+        let style = if Some(slot.pane_id) == focused {
+            border_focused_style()
+        } else {
+            border_unfocused_style()
+        };
+        Block::new()
+            .borders(Borders::ALL)
+            .border_style(style)
+            .render(to_ratatui_rect(slot.rect), buf);
+    }
+}
+
+/// Draw the tabline: session name and tab list on the left, an optional scroll
+/// indicator and the mode tag right-aligned.
+fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+    let mut left = vec![Span::raw(snapshot.session.name.clone()), Span::raw(" │ ")];
+    for (i, meta) in snapshot.session.tabs_metadata.iter().enumerate() {
+        if i > 0 {
+            left.push(Span::raw(" "));
+        }
+        let label = format!("{}:{}", meta.index + 1, meta.name);
+        let style = if meta.active {
+            tab_active_style()
+        } else {
+            Style::default()
+        };
+        left.push(Span::styled(label, style));
+    }
+    buf.set_line(area.x, area.y, &Line::from(left), area.width);
+
+    let mut right = Vec::new();
+    if let Some((offset, total)) = focused_scroll(snapshot) {
+        right.push(Span::raw(format!("SCROLL {offset}/{total} ")));
+    }
+    right.push(Span::styled(
+        format!("[{}]", mode_tag(snapshot.client.lock_mode)),
+        mode_style(),
+    ));
+    let right = Line::from(right);
+    let width = right.width() as u16;
+    buf.set_line(area.right().saturating_sub(width), area.y, &right, width);
+}
+
+/// The short mode tag shown in the tabline for each input mode.
+fn mode_tag(mode: LockMode) -> &'static str {
+    match mode {
+        LockMode::Normal => "BASE",
+        LockMode::Locked => "LOCK",
+        LockMode::Resize => "RESIZE",
+        LockMode::PaneMode => "PANE",
+        LockMode::TabMode => "TAB",
+        LockMode::ScrollMode => "SCROLL",
+        LockMode::SearchMode => "SEARCH",
+    }
+}
+
+/// The focused pane's scroll position as `(lines scrolled up, retained lines)`,
+/// or `None` when the pane is at the live tail (nothing to indicate).
+fn focused_scroll(snapshot: &RenderSnapshot) -> Option<(usize, usize)> {
+    let focused = snapshot.client.focused_pane?;
+    let pane = snapshot.panes.iter().find(|pane| pane.id == focused)?;
+    let offset = pane.grid_view.as_ref().map_or(0, |view| view.view_offset);
+    if offset == 0 {
+        return None;
+    }
+    Some((offset, pane.scrollback.retained_lines))
+}
+
+/// Convert a layout [`Rect`] (tile-core cells) into a ratatui rect.
+fn to_ratatui_rect(rect: Rect) -> RatatuiRect {
+    RatatuiRect {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.cols,
+        height: rect.size.rows,
+    }
+}
+
+/// Inverted style marking the active tab in the tab list.
+fn tab_active_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// Bold style for the tabline mode tag.
+fn mode_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// Highlighted border style for the focused pane.
+fn border_focused_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Dim border style for unfocused panes.
+fn border_unfocused_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
 
 #[cfg(test)]
 mod tests;
