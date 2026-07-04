@@ -1,7 +1,8 @@
 //! Tests for stock frame composition: the three zones render into a ratatui
 //! buffer, tabs show their marker, the mode tag tracks the client lock mode,
-//! pane borders draw with focus highlighting, collapsed stack members render as
-//! inverted title strips, and degenerate sizes are safe.
+//! pane borders draw with focus highlighting, terminal cells paint into pane
+//! content rects with their styles and wide-glyph handling, collapsed stack
+//! members render as inverted title strips, and degenerate sizes are safe.
 
 use super::*;
 
@@ -9,8 +10,8 @@ use std::sync::Arc;
 
 use tile_core::geometry::{Point, Size};
 use tile_core::ids::{ClientId, PaneId, SessionId, TabId};
-use tile_terminal::grid::state::Grid;
-use tile_terminal::style::Style as TermStyle;
+use tile_terminal::grid::state::{Cell, Grid};
+use tile_terminal::style::{Color as TermColor, Style as TermStyle};
 
 use crate::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
@@ -478,6 +479,160 @@ fn narrow_stack_header_indicator_does_not_bleed_left() {
     for x in 10..13 {
         assert!(buf[(x, 1)].modifier.contains(Modifier::REVERSED));
     }
+}
+
+/// A one-pane snapshot whose single visible pane shows `grid`.
+fn content_snap(grid: Grid, outer: Rect, reverse_video: bool, viewport: Size) -> RenderSnapshot {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, outer, true)],
+        Some(pane),
+        LockMode::Normal,
+        viewport,
+    );
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(grid),
+        view_offset: 0,
+    });
+    snap.panes[0].reverse_video = reverse_video;
+    snap
+}
+
+#[test]
+fn pane_cells_render_with_glyphs_and_styles() {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut style = TermStyle::default();
+    style.set_fg(TermColor::Rgb(10, 20, 30));
+    style.set_bg(TermColor::Indexed(4));
+    style.set_bold(true);
+    style.set_italic(true);
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('A', 1, style);
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    // Styled glyph at the content origin (inside the one-cell border).
+    assert_eq!(buf[(1, 2)].symbol(), "A");
+    assert_eq!(buf[(1, 2)].fg, Color::Rgb(10, 20, 30));
+    assert_eq!(buf[(1, 2)].bg, Color::Indexed(4));
+    assert!(buf[(1, 2)]
+        .modifier
+        .contains(Modifier::BOLD | Modifier::ITALIC));
+
+    // A default blank grid cell: a space in the terminal-default (reset) colors.
+    assert_eq!(buf[(2, 2)].symbol(), " ");
+    assert_eq!(buf[(2, 2)].fg, Color::Reset);
+    assert_eq!(buf[(2, 2)].bg, Color::Reset);
+}
+
+#[test]
+fn wide_glyph_spans_two_columns_without_splitting() {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('中', 2, TermStyle::default());
+    // The continuation half of the wide glyph (width 0).
+    *grid.cell_mut(0, 1).unwrap() = Cell::new(' ', 0, TermStyle::default());
+    *grid.cell_mut(0, 2).unwrap() = Cell::new('x', 1, TermStyle::default());
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    // The wide glyph sits whole in its base column; its continuation column is
+    // left blank, and the next real cell keeps its own grid column (no drift).
+    assert_eq!(buf[(1, 2)].symbol(), "中");
+    assert_eq!(buf[(2, 2)].symbol(), " ");
+    assert_eq!(buf[(3, 2)].symbol(), "x");
+}
+
+#[test]
+fn wide_glyph_at_right_edge_is_padded() {
+    // The content rect is 5 wide (outer 7 minus borders); a wide glyph in the
+    // last column has no room for its second half.
+    let mut grid = Grid::blank(1, 5, TermStyle::default());
+    *grid.cell_mut(0, 4).unwrap() = Cell::new('中', 2, TermStyle::default());
+    let snap = content_snap(grid, rect(0, 1, 7, 3), false, Size { cols: 7, rows: 4 });
+    let buf = render(&snap, 7, 4);
+
+    // Padded to a blank; a half-glyph never bleeds onto the right border.
+    assert_eq!(buf[(5, 2)].symbol(), " ");
+    assert_eq!(buf[(6, 2)].symbol(), "│");
+}
+
+#[test]
+fn combining_marks_join_the_base_into_one_symbol() {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut cell = Cell::new('e', 1, TermStyle::default());
+    cell.push_combining('\u{0301}'); // combining acute accent
+    *grid.cell_mut(0, 0).unwrap() = cell;
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    assert_eq!(buf[(1, 2)].symbol(), "e\u{0301}");
+}
+
+#[test]
+fn reverse_video_toggles_reverse_per_cell() {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('a', 1, TermStyle::default());
+    let mut reversed = TermStyle::default();
+    reversed.set_reverse(true);
+    *grid.cell_mut(0, 1).unwrap() = Cell::new('b', 1, reversed);
+    let snap = content_snap(grid, rect(0, 1, 40, 6), true, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    // Screen reverse (DECSCNM) reverses a plain cell...
+    assert!(buf[(1, 2)].modifier.contains(Modifier::REVERSED));
+    // ...and cancels a cell that is already reversed (reverse XOR reverse).
+    assert!(!buf[(2, 2)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn visible_pane_without_grid_draws_no_content() {
+    let pane = PaneId::new();
+    let snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    // `grid_view` is None (a plugin pane or an empty slot): interior stays blank.
+    let buf = render(&snap, 40, 8);
+    assert_eq!(buf[(1, 2)].symbol(), " ");
+    assert_eq!(buf[(1, 2)].fg, Color::Reset);
+}
+
+#[test]
+fn grid_larger_than_content_rect_clips_without_bleeding() {
+    // A grid wider and taller than the content rect: only the cells that fit are
+    // drawn and nothing writes onto the border or past the pane.
+    let mut grid = Grid::blank(20, 100, TermStyle::default());
+    for col in 0..100u16 {
+        *grid.cell_mut(0, col).unwrap() = Cell::new('#', 1, TermStyle::default());
+    }
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    // Content fills the content columns (1..=38 of the first content row)...
+    assert_eq!(buf[(1, 2)].symbol(), "#");
+    assert_eq!(buf[(38, 2)].symbol(), "#");
+    // ...and the right border (col 39) is untouched.
+    assert_eq!(buf[(39, 2)].symbol(), "│");
+}
+
+#[test]
+fn grid_smaller_than_content_rect_leaves_remainder_blank() {
+    let mut grid = Grid::blank(1, 2, TermStyle::default());
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('h', 1, TermStyle::default());
+    *grid.cell_mut(0, 1).unwrap() = Cell::new('i', 1, TermStyle::default());
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    assert_eq!(buf[(1, 2)].symbol(), "h");
+    assert_eq!(buf[(2, 2)].symbol(), "i");
+    // Beyond the two-cell grid the content rect stays blank.
+    assert_eq!(buf[(3, 2)].symbol(), " ");
+    assert_eq!(buf[(1, 3)].symbol(), " ");
 }
 
 #[test]
