@@ -2,7 +2,9 @@
 //! buffer, tabs show their marker, the mode tag tracks the client lock mode,
 //! pane borders draw with focus highlighting, terminal cells paint into pane
 //! content rects with their styles and wide-glyph handling, collapsed stack
-//! members render as inverted title strips, and degenerate sizes are safe.
+//! members render as inverted title strips, the focused pane's cursor cell is
+//! reported (clamped inside its content area, and hidden for unfocused, plugin,
+//! hidden, or app-hidden cursors), and degenerate sizes are safe.
 
 use super::*;
 
@@ -633,6 +635,133 @@ fn grid_smaller_than_content_rect_leaves_remainder_blank() {
     // Beyond the two-cell grid the content rect stays blank.
     assert_eq!(buf[(3, 2)].symbol(), " ");
     assert_eq!(buf[(1, 3)].symbol(), " ");
+}
+
+#[test]
+fn cursor_at_focused_pane_maps_to_content_cell() {
+    // Pane box (0,1) 40x6 → content origin (1,2). Cursor at row 2, col 5 within
+    // the content area → absolute buffer cell (1+5, 2+2).
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].cursor = CursorSnapshot {
+        row: 2,
+        col: 5,
+        visible: true,
+        blink: false,
+    };
+    assert_eq!(cursor_position(&snap), Some(Position::new(6, 4)));
+}
+
+#[test]
+fn cursor_past_content_rect_is_clamped_inside_it() {
+    // A frozen cursor (e.g. a dead pane whose content rect later shrank) beyond
+    // the content area: the returned cell is clamped to the last cell inside the
+    // rect, never onto the border or a neighbour. Content rect origin (1,2),
+    // 38x4 → last cell (38, 5).
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].cursor = CursorSnapshot {
+        row: 99,
+        col: 99,
+        visible: true,
+        blink: false,
+    };
+    assert_eq!(cursor_position(&snap), Some(Position::new(38, 5)));
+}
+
+#[test]
+fn hidden_cursor_places_nothing() {
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].cursor.visible = false;
+    assert_eq!(cursor_position(&snap), None);
+}
+
+#[test]
+fn no_focused_pane_places_no_cursor() {
+    let pane = PaneId::new();
+    let snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        None,
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    assert_eq!(cursor_position(&snap), None);
+}
+
+#[test]
+fn plugin_pane_places_no_cursor() {
+    // A visible focused pane with a visible cursor but no grid is a plugin pane:
+    // no cursor here (that waits on the plugin UI API).
+    let pane = PaneId::new();
+    let snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    assert!(snap.panes[0].grid_view.is_none());
+    assert!(snap.panes[0].cursor.visible);
+    assert_eq!(cursor_position(&snap), None);
+}
+
+#[test]
+fn invisible_focused_pane_places_no_cursor() {
+    // Focused pane suppressed / hidden (no content rect): nowhere to place it.
+    let pane = PaneId::new();
+    let snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, 40, 6), false)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    assert_eq!(cursor_position(&snap), None);
+}
+
+#[test]
+fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[("t", true)],
+        &[(a, rect(0, 1, 20, 6), true), (b, rect(20, 1, 20, 6), true)],
+        Some(b),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    // Both panes carry a grid and a visible cursor at their own content origin.
+    for pane in &mut snap.panes {
+        pane.grid_view = Some(GridView {
+            grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+            view_offset: 0,
+        });
+    }
+
+    // Focused on B (content origin (21,2)): the cursor sits in B, never in A.
+    assert_eq!(cursor_position(&snap), Some(Position::new(21, 2)));
+
+    // Refocus A (content origin (1,2)): the cursor jumps to A.
+    snap.client.focused_pane = Some(a);
+    assert_eq!(cursor_position(&snap), Some(Position::new(1, 2)));
 }
 
 #[test]

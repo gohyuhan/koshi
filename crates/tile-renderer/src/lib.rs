@@ -8,4 +8,4 @@ pub mod types;
 pub mod render;
 pub mod snapshot;
 
-pub use render::render_frame;
+pub use render::{cursor_position, render_frame};
