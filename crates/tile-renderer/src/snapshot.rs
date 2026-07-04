@@ -85,6 +85,13 @@ pub struct TabSnapshot {
     /// The solved layout: one [`PaneSlot`] per pane, giving outer and content
     /// rects and coarse status.
     pub layout_solved: Vec<PaneSlot>,
+    /// The viewport size the layout was solved for: the tab's effective size,
+    /// the element-wise minimum viewport across the clients viewing this tab.
+    /// The [`layout_solved`](Self::layout_solved) rects live in this space with
+    /// origin `(0, 0)`. A client whose own [`viewport`](ClientSnapshot::viewport)
+    /// is larger draws this layout centered and letterboxes the surrounding
+    /// margin; a client at exactly this size draws it edge to edge.
+    pub effective_size: Size,
     /// Header strips for stacked panes (title bars for collapsed stack members).
     pub stack_headers: Vec<StackHeader>,
     /// Whether the tab is tiled or a single pane is fullscreen.

@@ -5,7 +5,10 @@
 //! members render as inverted title strips, the focused pane's cursor cell is
 //! reported (clamped inside its content area, and hidden for unfocused, plugin,
 //! hidden, or app-hidden cursors), a centered too-small overlay replaces the
-//! frame when the tab has no room for any pane, and degenerate sizes are safe.
+//! frame when the tab has no room for any pane, a viewport larger than the
+//! effective size centers the layout and letterboxes the margin (with the cursor
+//! shifted to match), and degenerate sizes — including a buffer shorter than the
+//! laid-out frame — are safe.
 
 use super::*;
 
@@ -96,6 +99,7 @@ fn build(
                 id: tab_id,
                 name: "active".to_string(),
                 layout_solved: slots,
+                effective_size: viewport,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
                 all_suppressed: false,
@@ -125,6 +129,17 @@ fn render(snapshot: &RenderSnapshot, w: u16, h: u16) -> Buffer {
     let mut buf = Buffer::empty(area);
     render_frame(snapshot, area, &mut buf);
     buf
+}
+
+/// The client's viewport as an origin-`(0, 0)` render area, matching what
+/// [`render`] paints into — the `area` [`cursor_position`] takes.
+fn viewport_area(snapshot: &RenderSnapshot) -> RatatuiRect {
+    RatatuiRect {
+        x: 0,
+        y: 0,
+        width: snapshot.client.viewport.cols,
+        height: snapshot.client.viewport.rows,
+    }
 }
 
 /// The visible text of buffer row `y`.
@@ -654,7 +669,10 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
         visible: true,
         blink: false,
     };
-    assert_eq!(cursor_position(&snap), Some(Position::new(6, 4)));
+    assert_eq!(
+        cursor_position(&snap, viewport_area(&snap)),
+        Some(Position::new(6, 4))
+    );
 }
 
 #[test]
@@ -675,7 +693,10 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
         visible: true,
         blink: false,
     };
-    assert_eq!(cursor_position(&snap), Some(Position::new(38, 5)));
+    assert_eq!(
+        cursor_position(&snap, viewport_area(&snap)),
+        Some(Position::new(38, 5))
+    );
 }
 
 #[test]
@@ -687,7 +708,7 @@ fn hidden_cursor_places_nothing() {
         Size { cols: 40, rows: 8 },
     );
     snap.panes[0].cursor.visible = false;
-    assert_eq!(cursor_position(&snap), None);
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
 }
 
 #[test]
@@ -701,7 +722,7 @@ fn no_focused_pane_places_no_cursor() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    assert_eq!(cursor_position(&snap), None);
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
 }
 
 #[test]
@@ -719,7 +740,7 @@ fn plugin_pane_places_no_cursor() {
     );
     assert!(snap.panes[0].grid_view.is_none());
     assert!(snap.panes[0].cursor.visible);
-    assert_eq!(cursor_position(&snap), None);
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
 }
 
 #[test]
@@ -734,7 +755,7 @@ fn invisible_focused_pane_places_no_cursor() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    assert_eq!(cursor_position(&snap), None);
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
 }
 
 #[test]
@@ -758,11 +779,17 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
     }
 
     // Focused on B (content origin (21,2)): the cursor sits in B, never in A.
-    assert_eq!(cursor_position(&snap), Some(Position::new(21, 2)));
+    assert_eq!(
+        cursor_position(&snap, viewport_area(&snap)),
+        Some(Position::new(21, 2))
+    );
 
     // Refocus A (content origin (1,2)): the cursor jumps to A.
     snap.client.focused_pane = Some(a);
-    assert_eq!(cursor_position(&snap), Some(Position::new(1, 2)));
+    assert_eq!(
+        cursor_position(&snap, viewport_area(&snap)),
+        Some(Position::new(1, 2))
+    );
 }
 
 /// A snapshot whose active tab has no room for any pane: every slot suppressed
@@ -819,7 +846,7 @@ fn too_small_frame_places_no_cursor() {
     // Every pane is suppressed (no content area), so the overlay frame shows no
     // hardware cursor.
     let snap = too_small_snap(Size { cols: 60, rows: 10 });
-    assert_eq!(cursor_position(&snap), None);
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
 }
 
 #[test]
@@ -875,4 +902,190 @@ fn small_and_zero_size_areas_are_safe() {
         },
         &mut empty,
     );
+}
+
+/// A letterbox snapshot: a client `viewport` larger than the `effective` solved
+/// size, with one visible pane laid out in the effective space (row 0 tabline,
+/// bottom row hint bar, the pane box between).
+fn letterbox_snap(pane: PaneId, viewport: Size, effective: Size) -> RenderSnapshot {
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(
+            pane,
+            rect(0, 1, effective.cols, effective.rows.saturating_sub(2)),
+            true,
+        )],
+        Some(pane),
+        LockMode::Normal,
+        viewport,
+    );
+    snap.session.active_tab.effective_size = effective;
+    snap
+}
+
+#[test]
+fn larger_viewport_centers_layout_and_letterboxes_margin() {
+    let pane = PaneId::new();
+    let snap = letterbox_snap(
+        pane,
+        Size { cols: 60, rows: 12 },
+        Size { cols: 40, rows: 8 },
+    );
+    let buf = render(&snap, 60, 12);
+
+    // Effective 40x8 centered in 60x12 → offset (10, 2). The pane box shifts by
+    // that offset: top-left (0,1) → (10,3), top-right (39,1) → (49,3), and the
+    // bottom-left (0,6) → (10,8).
+    assert_eq!(buf[(10, 3)].symbol(), "┌");
+    assert_eq!(buf[(49, 3)].symbol(), "┐");
+    assert_eq!(buf[(10, 8)].symbol(), "└");
+
+    // The tabline shifts with it: the session name starts at the content origin.
+    assert_eq!(buf[(10, 2)].symbol(), "s");
+    assert!(row_text(&buf, 2).contains("1:shell"));
+
+    // Margin cells outside the centered content carry the dim letterbox fill:
+    // left of, right of, above, and below the content rect.
+    for (x, y) in [(0, 0), (9, 5), (50, 5), (30, 11)] {
+        assert_eq!(buf[(x, y)].symbol(), " ", "margin ({x},{y})");
+        assert_eq!(buf[(x, y)].bg, Color::DarkGray, "margin ({x},{y})");
+    }
+
+    // A cell inside the content rect keeps the default background: the fill
+    // lands only in the margin, never over the layout.
+    assert_eq!(buf[(11, 4)].bg, Color::Reset);
+}
+
+#[test]
+fn cursor_shifts_into_centered_content() {
+    let pane = PaneId::new();
+    let mut snap = letterbox_snap(
+        pane,
+        Size { cols: 60, rows: 12 },
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(4, 38, TermStyle::default())),
+        view_offset: 0,
+    });
+    snap.panes[0].cursor = CursorSnapshot {
+        row: 2,
+        col: 5,
+        visible: true,
+        blink: false,
+    };
+
+    // Content origin offset (10,2); pane inner origin (1,2) places to (11,4);
+    // the cursor at row 2, col 5 within it lands at (11+5, 4+2) = (16, 6).
+    assert_eq!(
+        cursor_position(&snap, viewport_area(&snap)),
+        Some(Position::new(16, 6))
+    );
+}
+
+#[test]
+fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
+    // A resize race can hand render_frame an `area` larger than the buffer. The
+    // letterbox fill must clip to the buffer, not index out of bounds.
+    let pane = PaneId::new();
+    let snap = letterbox_snap(
+        pane,
+        Size { cols: 60, rows: 12 },
+        Size { cols: 40, rows: 8 },
+    );
+    let mut buf = Buffer::empty(RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 30,
+        height: 6,
+    });
+    render_frame(
+        &snap,
+        RatatuiRect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 12,
+        },
+        &mut buf,
+    );
+
+    // No panic, and a margin cell inside the smaller buffer still got the fill.
+    assert_eq!(buf[(0, 0)].bg, Color::DarkGray);
+}
+
+#[test]
+fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
+    // Resize race: the snapshot's layout was solved for a taller frame than the
+    // current buffer. Chrome rows (stack-header strips) laid out below the buffer
+    // must be skipped, not written out of bounds.
+    let active = PaneId::new();
+    let collapsed = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active, rect(0, 3, 30, 6), true),
+            (collapsed, rect(0, 8, 30, 1), false),
+        ],
+        Some(active),
+        LockMode::Normal,
+        Size { cols: 30, rows: 10 },
+    );
+    snap.panes[1].title = Some("logs".to_string());
+    // A strip at row 8 — below a buffer only 5 rows tall.
+    snap.session.active_tab.stack_headers = vec![StackHeader {
+        pane: collapsed,
+        rect: rect(0, 8, 30, 1),
+        position: 1,
+        total: 2,
+    }];
+
+    // Buffer shorter than the solved layout; area matches the buffer.
+    let mut buf = Buffer::empty(RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 30,
+        height: 5,
+    });
+    render_frame(
+        &snap,
+        RatatuiRect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 5,
+        },
+        &mut buf,
+    );
+
+    // No panic: the in-bounds tabline drew, and the below-buffer strip was skipped
+    // (its title appears on no row).
+    assert!(row_text(&buf, 0).contains("sess"));
+    for y in 0..5 {
+        assert!(!row_text(&buf, y).contains("logs"), "row {y}");
+    }
+}
+
+#[test]
+fn equal_viewport_draws_no_letterbox() {
+    let pane = PaneId::new();
+    let snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    let buf = render(&snap, 40, 8);
+
+    // Effective size equals the viewport: the layout fills the frame and no cell
+    // carries the letterbox background.
+    for y in 0..8 {
+        for x in 0..40 {
+            assert_ne!(buf[(x, y)].bg, Color::DarkGray, "cell ({x},{y})");
+        }
+    }
 }

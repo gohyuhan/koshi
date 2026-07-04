@@ -37,6 +37,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         id: tab_id,
         name: "shell".to_string(),
         layout_solved: vec![slot],
+        effective_size: Size { cols: 80, rows: 24 },
         stack_headers: Vec::new(),
         layout_mode: LayoutMode::Tiled,
         all_suppressed: false,
@@ -105,6 +106,7 @@ fn builds_from_fixture_with_exact_values() {
     let tab = &snap.session.active_tab;
     assert_eq!(tab.name, "shell");
     assert_eq!(tab.layout_mode, LayoutMode::Tiled);
+    assert_eq!(tab.effective_size, Size { cols: 80, rows: 24 });
     assert!(!tab.all_suppressed);
     assert!(tab.stack_headers.is_empty());
     assert_eq!(tab.layout_solved.len(), 1);
