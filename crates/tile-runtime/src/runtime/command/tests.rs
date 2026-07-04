@@ -310,6 +310,214 @@ fn write_to_pane_routes_the_pane_target() {
 }
 
 #[test]
+fn write_to_a_running_pane_delivers_the_bytes() {
+    let (mut rt, fake, _tx, _sid, _client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // An explicit target on a live pane injects the bytes into its child and
+    // completes with no events — the write is a side effect, not a state change.
+    let env = envelope(Command::WriteToPane(WriteToPaneArgs {
+        pane: Some(pane_a),
+        data: vec![b'l', b's', b'\n'],
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert!(emitted_events.is_empty());
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(fake.writes(pane_a).unwrap(), vec![vec![b'l', b's', b'\n']]);
+}
+
+#[test]
+fn write_to_pane_defaults_to_the_clients_focused_pane() {
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // No explicit target: a keybinding source writes to the client's focused
+    // pane, which the split left on `pane_a`.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: vec![b'a'],
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(fake.writes(pane_a).unwrap(), vec![vec![b'a']]);
+}
+
+#[test]
+fn write_to_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
+    let (mut rt, fake, _tx, sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // Issued from inside `pane_a` with no explicit target: the captured issuing
+    // pane is the target.
+    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: vec![b'b'],
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(fake.writes(pane_a).unwrap(), vec![vec![b'b']]);
+}
+
+#[test]
+fn write_to_an_exited_pane_is_rejected() {
+    let (mut rt, fake, _tx, sid, _client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // Drive the live split to `Exited`; a dead pane takes no input.
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(pane_a)
+        .unwrap()
+        .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+            code: Some(0),
+            at: SystemTime::now(),
+        })
+        .unwrap();
+
+    let env = envelope(Command::WriteToPane(WriteToPaneArgs {
+        pane: Some(pane_a),
+        data: vec![b'x'],
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is not accepting input".to_string()),
+        }
+    );
+    assert!(fake.writes(pane_a).unwrap().is_empty());
+}
+
+#[test]
+fn write_to_a_closing_pane_is_rejected() {
+    let (mut rt, fake, _tx, sid, _client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // A pane mid-teardown (`Closing`) takes no input.
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .panes
+        .get_mut(pane_a)
+        .unwrap()
+        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+            since: SystemTime::now(),
+        })
+        .unwrap();
+
+    let env = envelope(Command::WriteToPane(WriteToPaneArgs {
+        pane: Some(pane_a),
+        data: vec![b'x'],
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is not accepting input".to_string()),
+        }
+    );
+    assert!(fake.writes(pane_a).unwrap().is_empty());
+}
+
+#[test]
+fn write_from_a_plugin_source_is_denied() {
+    let (mut rt, fake, _tx, _sid, _client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // A plugin write needs the `pane_write` capability, not yet grantable, so it
+    // is denied before any byte reaches the pane.
+    let env = envelope_from(
+        CommandSource::plugin(PluginId::new()),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane_a),
+            data: vec![b'x'],
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("plugin lacks the pane_write capability".to_string()),
+        }
+    );
+    assert!(fake.writes(pane_a).unwrap().is_empty());
+}
+
+#[test]
+fn write_backend_failure_is_reported() {
+    // A pane `Running` in the model but absent from the backend (its child died
+    // between the liveness check and the write) makes the backend write fail;
+    // the failure is reported, not swallowed.
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    session
+        .panes
+        .get_mut(pane)
+        .unwrap()
+        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+        .unwrap();
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope(Command::WriteToPane(WriteToPaneArgs {
+        pane: Some(pane),
+        data: vec![b'x'],
+    }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is not accepting input".to_string()),
+        }
+    );
+}
+
+#[test]
+fn write_with_empty_data_is_a_noop_ok() {
+    let (mut rt, _fake, _tx, _sid, _client_id, _root, pane_a, _size_a) = resize_fixture();
+
+    // An empty payload is a legal no-op write: it applies with no events.
+    let env = envelope(Command::WriteToPane(WriteToPaneArgs {
+        pane: Some(pane_a),
+        data: Vec::new(),
+    }));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert!(emitted_events.is_empty());
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[test]
 fn rename_pane_default_target_without_context_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
