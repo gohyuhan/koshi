@@ -46,6 +46,10 @@ pub enum Event {
     PaneFocused(PaneFocused),
     /// A pane's PTY was resized (emitted per affected pane after a layout solve).
     PtyResized(PtyResized),
+    /// A pane's terminal content changed: a coalesced, metadata-only damage
+    /// tick carrying no content. Lossy class — bursts collapse to at most one
+    /// pending tick per pane per subscriber.
+    PaneOutputUpdated(PaneOutputUpdated),
     /// A tab's layout tree changed.
     LayoutChanged(LayoutChanged),
     /// A tab was created.
@@ -191,6 +195,13 @@ pub struct PtyResized {
     pub pane_id: PaneId,
     /// The new PTY dimensions in cells.
     pub size: PtySize,
+}
+
+/// Payload for [`Event::PaneOutputUpdated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneOutputUpdated {
+    /// The pane whose terminal content changed.
+    pub pane_id: PaneId,
 }
 
 /// Payload for [`Event::LayoutChanged`].

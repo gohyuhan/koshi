@@ -44,6 +44,9 @@ fn lifecycle_events_roundtrip() {
         pane_id: PaneId::new(),
         size: PtySize { cols: 80, rows: 24 },
     }));
+    roundtrip(&Event::PaneOutputUpdated(PaneOutputUpdated {
+        pane_id: PaneId::new(),
+    }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
         mode: InputMode::CopyMode,
@@ -313,6 +316,12 @@ fn event_variant_names_are_canonical() {
             "PtyResized",
         ),
         (
+            Event::PaneOutputUpdated(PaneOutputUpdated {
+                pane_id: PaneId::new(),
+            }),
+            "PaneOutputUpdated",
+        ),
+        (
             Event::LayoutChanged(LayoutChanged {
                 tab_id: TabId::new(),
             }),
@@ -559,7 +568,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 40);
+    assert_eq!(cases.len(), 41);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
