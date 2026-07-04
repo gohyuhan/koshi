@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+tile-core = { version = "0.1.0", path = "../tile-core" }
+tile-layout = { version = "0.1.0", path = "../tile-layout" }
+tile-pane = { version = "0.1.0", path = "../tile-pane" }
+tile-terminal = { version = "0.1.0", path = "../tile-terminal" }
