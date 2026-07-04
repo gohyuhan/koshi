@@ -1,7 +1,8 @@
-//! Generated default names for sessions, tabs, and panes.
+//! Generated names for sessions, tabs, and panes.
 //!
-//! When a create command carries no explicit `--name`, the runtime asks this
-//! module for one instead of prompting the user. A generated name is
+//! Names are only ever system-generated — no command accepts caller text
+//! for one, at creation or rename. The runtime asks this module for every
+//! name it assigns. A generated name is
 //! `<TYPE>-<adjective>-<noun>`, where `TYPE` is a one-letter kind tag (`S`,
 //! `T`, or `P`) and the adjective and noun come from the same language's
 //! 50-entry word lists — English, Japanese, or Traditional Chinese — e.g.

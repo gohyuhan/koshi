@@ -7,6 +7,7 @@ pub mod focus;
 pub mod lifecycle;
 pub mod pane_ops;
 pub mod policy;
+pub mod session_ops;
 pub mod state;
 pub mod tab_ops;
 

@@ -157,8 +157,6 @@ pub struct NewPaneArgs {
     pub direction: Option<Direction>,
     /// Stack the new pane onto the source instead of splitting space.
     pub stacked: bool,
-    /// Optional display name.
-    pub name: Option<String>,
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
     /// Command to run; `None` launches the default shell.
@@ -208,11 +206,10 @@ pub struct FocusPaneArgs {
     pub client: Option<ClientId>,
 }
 
-/// Arguments for [`Command::NewTab`].
+/// Arguments for [`Command::NewTab`]. The tab's name is not supplied by the
+/// caller — the runtime assigns a freshly generated one.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewTabArgs {
-    /// Optional tab name; `None` generates one.
-    pub name: Option<String>,
     /// Working directory for the tab's first pane; `None` inherits.
     pub cwd: Option<PathBuf>,
     /// Client that switches onto the new tab. When set, that client is
@@ -234,13 +231,12 @@ pub struct CloseTabArgs {
     pub force: bool,
 }
 
-/// Arguments for [`Command::RenameTab`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Arguments for [`Command::RenameTab`]. The new name is not supplied by the
+/// caller — the runtime assigns a freshly generated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenameTabArgs {
     /// Tab to rename; `None` renames the focused tab.
     pub tab: Option<TabId>,
-    /// New name.
-    pub name: String,
 }
 
 /// Where [`Command::FocusTab`] should move focus.
@@ -287,24 +283,22 @@ pub struct LockModeArgs {
     pub locked: bool,
 }
 
-/// Arguments for [`Command::RunCommandPane`].
+/// Arguments for [`Command::RunCommandPane`]. The pane's title is not
+/// supplied by the caller — titles are only ever system-generated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommandPaneArgs {
     /// The command to spawn.
     pub command: SpawnSpec,
-    /// Optional display name.
-    pub name: Option<String>,
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
 }
 
-/// Arguments for [`Command::RenamePane`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Arguments for [`Command::RenamePane`]. The new name is not supplied by the
+/// caller — the runtime assigns a freshly generated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenamePaneArgs {
     /// Pane to rename; `None` renames the focused pane.
     pub pane: Option<PaneId>,
-    /// New name.
-    pub name: String,
 }
 
 /// Arguments for [`Command::MoveTab`].
@@ -316,11 +310,12 @@ pub struct MoveTabArgs {
     pub index: usize,
 }
 
-/// Arguments for [`Command::RenameSession`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Arguments for [`Command::RenameSession`]. The new name is not supplied by
+/// the caller — the runtime assigns a freshly generated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenameSessionArgs {
-    /// New session name.
-    pub name: String,
+    /// Session to rename; `None` targets the source's own session context.
+    pub session: Option<SessionId>,
 }
 
 /// Copy mode, selection, and search commands.

@@ -70,10 +70,6 @@ fn rename_move_suppression_and_reload_events_roundtrip() {
         old_name: "default".to_string(),
         new_name: "main".to_string(),
     }));
-    roundtrip(&Event::SessionRenameFailed(SessionRenameFailed {
-        session_id: SessionId::new(),
-        reason: "empty name".to_string(),
-    }));
     roundtrip(&Event::PaneSuppressed(PaneSuppressed {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
@@ -373,13 +369,6 @@ fn event_variant_names_are_canonical() {
             "SessionRenamed",
         ),
         (
-            Event::SessionRenameFailed(SessionRenameFailed {
-                session_id: SessionId::new(),
-                reason: "empty name".to_string(),
-            }),
-            "SessionRenameFailed",
-        ),
-        (
             Event::PaneSuppressed(PaneSuppressed {
                 pane_id: PaneId::new(),
                 tab_id: TabId::new(),
@@ -570,7 +559,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 41);
+    assert_eq!(cases.len(), 40);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }

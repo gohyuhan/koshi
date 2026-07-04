@@ -85,7 +85,6 @@ pub fn commit_new_tab(
     // `Running` straight away; the spawn request is recorded so a later
     // restore or respawn can recover it.
     let mut record = PaneRecord::new(new_pane_id, created_at);
-    record.title = spec.name;
     record.cwd = spec.cwd;
     record.command = spec.command;
     let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);

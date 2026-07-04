@@ -62,8 +62,6 @@ pub enum Event {
     TabRenamed(TabRenamed),
     /// The session display name changed.
     SessionRenamed(SessionRenamed),
-    /// A session rename was rejected after validation.
-    SessionRenameFailed(SessionRenameFailed),
     /// A pane became invisible because the terminal is too small.
     PaneSuppressed(PaneSuppressed),
     /// A suppressed pane became visible again after a resize.
@@ -270,15 +268,6 @@ pub struct SessionRenamed {
     pub old_name: String,
     /// The session's new display name.
     pub new_name: String,
-}
-
-/// Payload for [`Event::SessionRenameFailed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRenameFailed {
-    /// The session whose rename failed.
-    pub session_id: SessionId,
-    /// Human-facing rejection reason.
-    pub reason: String,
 }
 
 /// Payload for [`Event::PaneSuppressed`].

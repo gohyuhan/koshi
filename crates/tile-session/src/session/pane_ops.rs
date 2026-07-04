@@ -20,14 +20,12 @@ use tile_pane::pane::state::PaneRecord;
 
 use crate::session::state::Session;
 
-/// What to record on a freshly created pane: its display title and the spawn
-/// request (working directory and command) the PTY layer later honors. Bundled
-/// so the requested program and cwd are never silently dropped — the new pane's
+/// What to record on a freshly created pane: the spawn request (working
+/// directory and command) the PTY layer later honors. Bundled so the
+/// requested program and cwd are never silently dropped — the new pane's
 /// record is self-describing for restore and respawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewPaneSpec {
-    /// Optional display title.
-    pub name: Option<String>,
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
     /// Command to run; `None` launches the default shell.
@@ -95,7 +93,6 @@ pub fn commit_new_pane(
     // straight away; the spawn request is recorded so a later restore or respawn
     // can recover it.
     let mut record = PaneRecord::new(new_pane_id, created_at);
-    record.title = spec.name;
     record.cwd = spec.cwd;
     record.command = spec.command;
     let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
