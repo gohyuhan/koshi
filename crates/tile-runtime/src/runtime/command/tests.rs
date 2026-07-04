@@ -1048,9 +1048,10 @@ fn in_session_cli_with_missing_source_pane_is_not_found() {
     );
 }
 
-#[test]
-fn client_focused_pane_resolves_to_unimplemented() {
-    let (mut rt, _tx) = new_runtime();
+/// A single-client session focused on one pane, returned with the session id
+/// so a lock test can dispatch and read the client's mode back.
+fn lock_fixture() -> (Runtime, mpsc::Sender<RuntimeEvent>, ClientId, SessionId) {
+    let (mut rt, tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
     let pane = PaneId::new();
@@ -1058,21 +1059,183 @@ fn client_focused_pane_resolves_to_unimplemented() {
     add_pane(&mut session, pane);
     add_tab(&mut session, tab, pane);
     add_client(&mut session, client_id, tab, Some(pane));
-    rt.sessions.insert(session.id, session);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    (rt, tx, client_id, sid)
+}
+
+/// Read `client_id`'s lock mode out of session `sid`.
+fn lock_mode_of(rt: &Runtime, sid: SessionId, client_id: ClientId) -> LockMode {
+    rt.sessions[&sid]
+        .clients
+        .get(client_id)
+        .expect("client")
+        .lock_mode()
+}
+
+#[test]
+fn toggle_lock_mode_locks_an_unlocked_client() {
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+
+    // A default-Normal client toggles into Locked: exactly one event.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
+}
+
+#[test]
+fn toggle_lock_mode_unlocks_a_locked_client() {
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+    rt.sessions
+        .get_mut(&sid)
+        .expect("session")
+        .clients
+        .get_mut(client_id)
+        .expect("client")
+        .update_lock_mode(LockMode::Locked);
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::ToggleLockMode,
     );
     let command_id = env.id;
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("toggle lock mode not yet implemented".to_string()),
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
         }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Normal);
+}
+
+#[test]
+fn set_lock_mode_locks_then_unlocks() {
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+
+    let lock = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::SetLockMode(LockModeArgs { locked: true }),
     );
+    let lock_id = lock.id;
+    match rt.dispatch(lock) {
+        CommandResult::Ok {
+            command_id,
+            emitted_events,
+        } => {
+            assert_eq!(command_id, lock_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
+
+    let unlock = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::SetLockMode(LockModeArgs { locked: false }),
+    );
+    let unlock_id = unlock.id;
+    match rt.dispatch(unlock) {
+        CommandResult::Ok {
+            command_id,
+            emitted_events,
+        } => {
+            assert_eq!(command_id, unlock_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Normal);
+}
+
+#[test]
+fn setting_the_current_lock_mode_emits_nothing() {
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+
+    // The client is already Normal; unlocking it changes nothing.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::SetLockMode(LockModeArgs { locked: false }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 0);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Normal);
+}
+
+#[test]
+fn lock_mode_is_isolated_between_clients() {
+    let (mut rt, _tx) = new_runtime();
+    let (alice, bob) = (ClientId::new(), ClientId::new());
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    // Both clients view the same tab and pane, proving lock is per-client, not
+    // per-pane.
+    add_client(&mut session, alice, tab, Some(pane));
+    add_client(&mut session, bob, tab, Some(pane));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(CommandSource::key_binding(alice), Command::ToggleLockMode);
+    let _ = rt.dispatch(env);
+
+    assert_eq!(lock_mode_of(&rt, sid, alice), LockMode::Locked);
+    assert_eq!(lock_mode_of(&rt, sid, bob), LockMode::Normal);
+}
+
+#[test]
+fn lock_mode_toggles_without_a_focused_pane() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let mut session = bare_session(SessionId::new());
+    // No pane, no focus: lock is client-scoped, so it still applies.
+    add_client(&mut session, client_id, TabId::new(), None);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 1);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
 }
 
 #[test]
@@ -1083,9 +1246,10 @@ fn client_without_focused_pane_is_not_found() {
     add_client(&mut session, client_id, TabId::new(), None);
     rt.sessions.insert(session.id, session);
 
+    // CopyMode resolves the focused pane; this client has none.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::ToggleLockMode,
+        Command::CopyMode(CopyModeCommand::Enter),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1110,7 +1274,7 @@ fn focused_pane_that_no_longer_exists_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::ToggleLockMode,
+        Command::CopyMode(CopyModeCommand::Enter),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1953,10 +2117,10 @@ fn focused_default_outside_active_tab_is_not_found() {
     add_client(&mut session, client_id, tab, Some(focused_elsewhere));
     rt.sessions.insert(session.id, session);
 
-    // ToggleLockMode defaults through the focused pane; it is outside the tab.
+    // CopyMode defaults through the focused pane; it is outside the tab.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::ToggleLockMode,
+        Command::CopyMode(CopyModeCommand::Enter),
     );
     let command_id = env.id;
     assert_eq!(

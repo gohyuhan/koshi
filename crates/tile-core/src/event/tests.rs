@@ -45,7 +45,7 @@ fn lifecycle_events_roundtrip() {
         size: PtySize { cols: 80, rows: 24 },
     }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
-        pane_id: PaneId::new(),
+        client_id: ClientId::new(),
         mode: InputMode::CopyMode,
     }));
 }
@@ -411,7 +411,7 @@ fn event_variant_names_are_canonical() {
         ),
         (
             Event::InputModeChanged(InputModeChanged {
-                pane_id: PaneId::new(),
+                client_id: ClientId::new(),
                 mode: InputMode::Normal,
             }),
             "InputModeChanged",

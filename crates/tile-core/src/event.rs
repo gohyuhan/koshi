@@ -340,8 +340,9 @@ pub enum InputMode {
 /// Payload for [`Event::InputModeChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputModeChanged {
-    /// The pane whose mode changed.
-    pub pane_id: PaneId,
+    /// The client whose input mode changed. Lock mode is client-scoped:
+    /// clients sharing a session hold independent modes.
+    pub client_id: ClientId,
     /// The mode now in effect.
     pub mode: InputMode,
 }
