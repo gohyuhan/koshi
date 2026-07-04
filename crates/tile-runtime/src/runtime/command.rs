@@ -20,6 +20,7 @@ use tile_core::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
         FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
         RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, TabTarget,
+        WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -170,7 +171,9 @@ impl Runtime {
                 self.handle_rename_tab(envelope.id, &envelope.source, &args)
             }
             Command::FocusTab(args) => self.handle_focus_tab(envelope.id, &envelope.source, &args),
-            Command::WriteToPane(_) => self.reject(envelope.id, "write to pane"),
+            Command::WriteToPane(args) => {
+                self.handle_write_to_pane(envelope.id, &envelope.source, &args)
+            }
             Command::ToggleLockMode => self.handle_toggle_lock_mode(envelope.id, &envelope.source),
             Command::SetLockMode(args) => {
                 self.handle_set_lock_mode(envelope.id, &envelope.source, &args)
@@ -1494,6 +1497,71 @@ impl Runtime {
             scope.emit(event);
         }
         scope.commit(command_id)
+    }
+
+    /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
+    /// stdin. The target is an explicit `--pane` (resolved globally) or the
+    /// source's default pane, and must be live — a pane that has exited, is
+    /// closing, or is gone takes no input ([`RejectReason::InvalidState`]). A
+    /// plugin source is denied pending the `pane_write` capability.
+    ///
+    /// The write is a side effect that changes no session state, so a
+    /// successful write commits no events; the child's response returns
+    /// through the normal PTY output path. A backend write failure — the
+    /// child died between the liveness check and the write — is
+    /// [`RejectReason::InvalidState`], reported to the caller rather than
+    /// silently dropped.
+    fn handle_write_to_pane(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &WriteToPaneArgs,
+    ) -> CommandResult {
+        // Plugin input injection requires the `pane_write` capability granted
+        // by the plugin host; until that lands a plugin source is denied.
+        if matches!(source, CommandSource::Plugin { .. }) {
+            return CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::Unauthorized,
+                help: Some("plugin lacks the pane_write capability".to_string()),
+            };
+        }
+        let acting = match self.acting_session(source) {
+            Ok(acting) => acting,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let target = match self.resolve_pane_target(args.pane, source, acting) {
+            Ok(target) => target,
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let Some(session) = self.sessions.get(&target.session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(record) = session.panes.get(target.pane_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        match record.lifecycle() {
+            PaneLifecycle::Spawning | PaneLifecycle::Running => {}
+            PaneLifecycle::Exited { .. }
+            | PaneLifecycle::Closing { .. }
+            | PaneLifecycle::Removed => {
+                return Self::rejected(
+                    command_id,
+                    Rejection::new(RejectReason::InvalidState, "pane is not accepting input"),
+                );
+            }
+        }
+        if self
+            .pty_backend()
+            .write(target.pane_id, &args.data)
+            .is_err()
+        {
+            return Self::rejected(
+                command_id,
+                Rejection::new(RejectReason::InvalidState, "pane is not accepting input"),
+            );
+        }
+        TransactionScope::new().commit(command_id)
     }
 
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
