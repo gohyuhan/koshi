@@ -18,12 +18,15 @@ use std::time::SystemTime;
 use tile_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        FocusPaneArgs, FocusTabArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs,
-        RenameSessionArgs, RenameTabArgs, ResizePaneArgs, TabTarget,
+        FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
+        RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, TabTarget,
     },
-    event::{Event, LayoutChanged, PaneFocused, PtyResized, RejectReason},
+    event::{
+        Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
+    },
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+    lock::LockMode,
     naming::{generate_name, NameKind},
     process::{KillPolicy, PtySize, SpawnSpec},
 };
@@ -168,8 +171,10 @@ impl Runtime {
             }
             Command::FocusTab(args) => self.handle_focus_tab(envelope.id, &envelope.source, &args),
             Command::WriteToPane(_) => self.reject(envelope.id, "write to pane"),
-            Command::ToggleLockMode => self.reject(envelope.id, "toggle lock mode"),
-            Command::SetLockMode(_) => self.reject(envelope.id, "set lock mode"),
+            Command::ToggleLockMode => self.handle_toggle_lock_mode(envelope.id, &envelope.source),
+            Command::SetLockMode(args) => {
+                self.handle_set_lock_mode(envelope.id, &envelope.source, &args)
+            }
             Command::RunCommandPane(_) => self.reject(envelope.id, "run command pane"),
             Command::CopyMode(_) => self.reject(envelope.id, "copy mode"),
             Command::Plugin(_) => self.reject(envelope.id, "plugin"),
@@ -1355,6 +1360,99 @@ impl Runtime {
         scope.commit(command_id)
     }
 
+    /// Handle [`Command::ToggleLockMode`]: flip the acting client between
+    /// pass-through [`LockMode::Locked`] and [`LockMode::Normal`].
+    ///
+    /// A client already locked unlocks; a client in any other mode locks. The
+    /// toggle always changes the mode, so it always emits.
+    fn handle_toggle_lock_mode(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+    ) -> CommandResult {
+        self.set_lock_mode(command_id, source, |current| match current {
+            LockMode::Locked => LockMode::Normal,
+            _ => LockMode::Locked,
+        })
+    }
+
+    /// Handle [`Command::SetLockMode`]: set the acting client to
+    /// [`LockMode::Locked`] when `args.locked`, else [`LockMode::Normal`].
+    ///
+    /// Setting the mode the client already holds is a no-op: applied, zero
+    /// events.
+    fn handle_set_lock_mode(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &LockModeArgs,
+    ) -> CommandResult {
+        let next = if args.locked {
+            LockMode::Locked
+        } else {
+            LockMode::Normal
+        };
+        self.set_lock_mode(command_id, source, move |_| next)
+    }
+
+    /// Set the acting client's [`LockMode`], emitting [`Event::InputModeChanged`]
+    /// only when it changes. `resolve` maps the client's current mode to the
+    /// next one, so the toggle and the explicit set share one path.
+    ///
+    /// Lock mode is client-scoped: the target is the acting client alone — no
+    /// pane is resolved, so a client with no focused pane still locks. Nothing
+    /// in the layout, focus, or any PTY changes; a no-op change mutates nothing.
+    fn set_lock_mode(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        resolve: impl FnOnce(LockMode) -> LockMode,
+    ) -> CommandResult {
+        let session_id = match self.acting_session(source) {
+            Ok(Some(session)) => session.id,
+            Ok(None) => {
+                return Self::rejected(
+                    command_id,
+                    Rejection::new(RejectReason::TargetNotFound, "no session context"),
+                )
+            }
+            Err(rejection) => return Self::rejected(command_id, rejection),
+        };
+        let Some(client_id) = source.client_id() else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::Unauthorized));
+        };
+
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
+        };
+        let Some(client) = session.clients.get_mut(client_id) else {
+            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
+        };
+
+        let current = client.lock_mode();
+        let next = resolve(current);
+        let mut scope = TransactionScope::new();
+        if next != current {
+            client.update_lock_mode(next);
+            scope.emit(Event::InputModeChanged(InputModeChanged {
+                client_id,
+                mode: Self::input_mode(next),
+            }));
+        }
+        scope.commit(command_id)
+    }
+
+    /// Map a [`LockMode`] to the wire-facing [`InputMode`] carried on
+    /// [`Event::InputModeChanged`]. The lock commands only ever produce
+    /// [`LockMode::Normal`] or [`LockMode::Locked`]; the modal layers report as
+    /// [`InputMode::Normal`].
+    fn input_mode(mode: LockMode) -> InputMode {
+        match mode {
+            LockMode::Locked => InputMode::Locked,
+            _ => InputMode::Normal,
+        }
+    }
+
     /// Handle [`Command::RenamePane`]: update the pane's display title.
     ///
     /// The target resolves like ClosePane/ResizePane — an explicit pane by a
@@ -1723,10 +1821,12 @@ impl Runtime {
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
-            Command::ToggleLockMode
-            | Command::SetLockMode(_)
-            | Command::TogglePaneFullscreen
-            | Command::CopyMode(_) => self.resolve_default_pane(source, session).map(drop),
+            // Lock mode is client-scoped: the acting client (confirmed attached
+            // by `acting_session`) is the whole target — no pane or tab to resolve.
+            Command::ToggleLockMode | Command::SetLockMode(_) => Ok(()),
+            Command::TogglePaneFullscreen | Command::CopyMode(_) => {
+                self.resolve_default_pane(source, session).map(drop)
+            }
             Command::CloseTab(args) => self
                 .resolve_tab_or_active(args.tab, source, session)
                 .map(drop),
