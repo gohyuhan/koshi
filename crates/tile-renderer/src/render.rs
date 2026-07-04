@@ -9,10 +9,11 @@
 //! metadata are available to fill it.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
-//! in the pane area. This is the core chrome only. Terminal cell content, cursor
-//! placement, the keybinding hints themselves, and the too-small overlay are
-//! painted by later tasks over the same buffer; plugin-contributed segments
-//! (empty here) are injected once the plugin host lands.
+//! in the pane area, and each visible terminal pane's cells are painted into its
+//! content rect. Cursor placement, the keybinding hints themselves, and the
+//! too-small overlay are painted by later tasks over the same buffer;
+//! plugin-contributed segments (empty here) are injected once the plugin host
+//! lands.
 
 pub mod state;
 
@@ -25,16 +26,18 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 use tile_core::geometry::Rect;
 use tile_core::ids::PaneId;
 use tile_core::lock::LockMode;
+use tile_terminal::grid::state::{Cell, Grid};
+use tile_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::RenderSnapshot;
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
 /// Blanks `area` first so a buffer reused across frames shows no stale cells,
-/// then draws the pane borders and the collapsed stack-member strips, then the
-/// tabline over the top row. The bottom row is the tile-owned keybinding hint
-/// bar: reserved and left blank here, filled by a later task. Does nothing for a
-/// zero-size area.
+/// then draws the pane borders, each visible pane's terminal cells, and the
+/// collapsed stack-member strips, then the tabline over the top row. The bottom
+/// row is the tile-owned keybinding hint bar: reserved and left blank here,
+/// filled by a later task. Does nothing for a zero-size area.
 pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -53,6 +56,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
     Clear.render(area, buf);
 
     draw_panes(snapshot, buf);
+    draw_pane_contents(snapshot, buf);
     draw_stack_headers(snapshot, buf);
 
     let tabline = RatatuiRect {
@@ -81,6 +85,128 @@ fn draw_panes(snapshot: &RenderSnapshot, buf: &mut Buffer) {
             .borders(Borders::ALL)
             .border_style(style)
             .render(to_ratatui_rect(slot.rect), buf);
+    }
+}
+
+/// Paint each visible terminal pane's cells into its content rect.
+///
+/// For every visible pane slot that has a content rect and a terminal grid,
+/// draws the grid into that rect. Plugin panes (no grid) and panes with no
+/// content rect (suppressed, hidden, or a collapsed stack member) draw nothing.
+fn draw_pane_contents(snapshot: &RenderSnapshot, buf: &mut Buffer) {
+    for slot in &snapshot.session.active_tab.layout_solved {
+        if !slot.visible {
+            continue;
+        }
+        let Some(inner) = slot.inner_rect else {
+            continue;
+        };
+        let Some(pane) = snapshot.panes.iter().find(|pane| pane.id == slot.pane_id) else {
+            continue;
+        };
+        let Some(view) = &pane.grid_view else {
+            continue;
+        };
+        draw_grid(&view.grid, to_ratatui_rect(inner), pane.reverse_video, buf);
+    }
+}
+
+/// Paint one terminal `grid` into `area`, one buffer cell per grid cell.
+///
+/// Each grid cell is placed at its own column, so the on-screen columns follow
+/// the grid rather than a re-measured glyph width. The continuation half of a
+/// wide glyph (width 0) is skipped — the wide base already covers it. A wide
+/// glyph whose second half falls outside the content area is replaced by a blank
+/// so no half-glyph bleeds past the edge. `reverse_video` (DECSCNM) toggles
+/// reverse for every cell. `area` is clipped to the buffer so an oversized rect
+/// cannot index out of bounds.
+fn draw_grid(grid: &Grid, area: RatatuiRect, reverse_video: bool, buf: &mut Buffer) {
+    let area = area.intersection(buf.area);
+    let (grid_rows, grid_cols) = grid.dimensions();
+    let rows = grid_rows.min(area.height);
+    let cols = grid_cols.min(area.width);
+    for row in 0..rows {
+        for col in 0..cols {
+            let Some(cell) = grid.cell(row, col) else {
+                continue;
+            };
+            let width = cell.width();
+            if width == 0 {
+                continue;
+            }
+            let x = area.x + col;
+            let y = area.y + row;
+            let style = cell_style(cell.style(), reverse_video);
+            if width >= 2 && col + 1 >= cols {
+                buf[(x, y)].set_char(' ').set_style(style);
+                continue;
+            }
+            if cell.combining().is_empty() {
+                buf[(x, y)].set_char(cell.ch()).set_style(style);
+            } else {
+                buf[(x, y)].set_symbol(&cell_symbol(cell)).set_style(style);
+            }
+        }
+    }
+}
+
+/// The glyph a cell draws: its base character followed by any combining marks
+/// and joined code points, as one string.
+fn cell_symbol(cell: &Cell) -> String {
+    let mut symbol = String::with_capacity(1 + cell.combining().len());
+    symbol.push(cell.ch());
+    symbol.extend(cell.combining().iter().copied());
+    symbol
+}
+
+/// Map a terminal cell style to a ratatui [`Style`].
+///
+/// Colors map directly, the terminal default becoming ratatui's reset. Each
+/// boolean attribute maps to its modifier; every underline variant collapses to
+/// a single underline, and overline and underline color have no ratatui modifier
+/// and are not drawn. `reverse_video` (DECSCNM) combines with the cell's own
+/// reverse by exclusive-or, so a screen-wide reverse cancels a cell already in
+/// reverse.
+fn cell_style(style: CellStyle, reverse_video: bool) -> Style {
+    let attrs = style.attrs();
+    let mut modifier = Modifier::empty();
+    if attrs.bold() {
+        modifier |= Modifier::BOLD;
+    }
+    if attrs.faint() {
+        modifier |= Modifier::DIM;
+    }
+    if attrs.italic() {
+        modifier |= Modifier::ITALIC;
+    }
+    if attrs.underline() != UnderlineStyle::None {
+        modifier |= Modifier::UNDERLINED;
+    }
+    if attrs.blink() {
+        modifier |= Modifier::SLOW_BLINK;
+    }
+    if attrs.conceal() {
+        modifier |= Modifier::HIDDEN;
+    }
+    if attrs.strike() {
+        modifier |= Modifier::CROSSED_OUT;
+    }
+    if attrs.reverse() ^ reverse_video {
+        modifier |= Modifier::REVERSED;
+    }
+    Style::default()
+        .fg(cell_color(style.fg()))
+        .bg(cell_color(style.bg()))
+        .add_modifier(modifier)
+}
+
+/// Map a terminal color to a ratatui [`Color`]; the terminal default becomes
+/// ratatui's reset (the outer terminal's own default).
+fn cell_color(color: CellColor) -> Color {
+    match color {
+        CellColor::Default => Color::Reset,
+        CellColor::Indexed(index) => Color::Indexed(index),
+        CellColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
 
