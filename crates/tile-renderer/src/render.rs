@@ -8,8 +8,9 @@
 //! — a tile-owned row reserved here and left blank until config and action
 //! metadata are available to fill it.
 //!
-//! This is the core chrome only. Terminal cell content, cursor placement, stack
-//! headers, the keybinding hints themselves, and the too-small overlay are
+//! Collapsed members of a stacked pane group are drawn as one-row title strips
+//! in the pane area. This is the core chrome only. Terminal cell content, cursor
+//! placement, the keybinding hints themselves, and the too-small overlay are
 //! painted by later tasks over the same buffer; plugin-contributed segments
 //! (empty here) are injected once the plugin host lands.
 
@@ -22,6 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use tile_core::geometry::Rect;
+use tile_core::ids::PaneId;
 use tile_core::lock::LockMode;
 
 use crate::snapshot::RenderSnapshot;
@@ -29,9 +31,10 @@ use crate::snapshot::RenderSnapshot;
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
 /// Blanks `area` first so a buffer reused across frames shows no stale cells,
-/// then draws the pane borders and the tabline over the top row. The bottom row
-/// is the tile-owned keybinding hint bar: reserved and left blank here, filled by
-/// a later task. Does nothing for a zero-size area.
+/// then draws the pane borders and the collapsed stack-member strips, then the
+/// tabline over the top row. The bottom row is the tile-owned keybinding hint
+/// bar: reserved and left blank here, filled by a later task. Does nothing for a
+/// zero-size area.
 pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -50,6 +53,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
     Clear.render(area, buf);
 
     draw_panes(snapshot, buf);
+    draw_stack_headers(snapshot, buf);
 
     let tabline = RatatuiRect {
         x: area.x,
@@ -78,6 +82,46 @@ fn draw_panes(snapshot: &RenderSnapshot, buf: &mut Buffer) {
             .border_style(style)
             .render(to_ratatui_rect(slot.rect), buf);
     }
+}
+
+/// Draw the one-row title strip for every collapsed stack member: a collapse
+/// arrow and the pane title on the left, a `[position/total]` indicator
+/// right-aligned, over an inverted-background row that marks the strip as
+/// tile-owned.
+fn draw_stack_headers(snapshot: &RenderSnapshot, buf: &mut Buffer) {
+    let style = stack_header_style();
+    for header in &snapshot.session.active_tab.stack_headers {
+        let rect = to_ratatui_rect(header.rect);
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
+
+        // Invert the whole row first so the gap between the title and the
+        // indicator carries the strip background too.
+        buf.set_style(rect, style);
+
+        let title = header_title(snapshot, header.pane);
+        let left = Line::from(format!("▸ {title}"));
+        buf.set_line(rect.x, rect.y, &left, rect.width);
+
+        // Right-align `[N/total]`, clamped inside the strip so a stack narrower
+        // than the indicator never writes into a neighbouring pane.
+        let indicator = Line::from(format!("[{}/{}]", header.position + 1, header.total));
+        let width = indicator.width() as u16;
+        let x = rect.right().saturating_sub(width).max(rect.x);
+        buf.set_line(x, rect.y, &indicator, rect.right() - x);
+    }
+}
+
+/// The title drawn on a stack member's header strip: the pane's terminal title,
+/// or empty when the pane has none.
+fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> String {
+    snapshot
+        .panes
+        .iter()
+        .find(|snap| snap.id == pane)
+        .and_then(|snap| snap.title.clone())
+        .unwrap_or_default()
 }
 
 /// Draw the tabline: session name and tab list on the left, an optional scroll
@@ -148,6 +192,11 @@ fn to_ratatui_rect(rect: Rect) -> RatatuiRect {
 
 /// Inverted style marking the active tab in the tab list.
 fn tab_active_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
+
+/// Inverted style marking a collapsed stack member's tile-owned header strip.
+fn stack_header_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 

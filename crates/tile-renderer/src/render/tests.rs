@@ -1,6 +1,7 @@
 //! Tests for stock frame composition: the three zones render into a ratatui
 //! buffer, tabs show their marker, the mode tag tracks the client lock mode,
-//! pane borders draw with focus highlighting, and degenerate sizes are safe.
+//! pane borders draw with focus highlighting, collapsed stack members render as
+//! inverted title strips, and degenerate sizes are safe.
 
 use super::*;
 
@@ -16,6 +17,7 @@ use crate::snapshot::{
     ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use tile_layout::mode::LayoutMode;
+use tile_layout::solver::StackHeader;
 use tile_pane::pane::state::PaneKind;
 
 /// A cell rect: origin `(x, y)`, size `cols x rows`.
@@ -310,6 +312,172 @@ fn reused_buffer_is_blanked_before_painting() {
     assert_eq!(buf[(22, 2)].symbol(), " ");
     // Reserved hint row (bottom): fully blank.
     assert!(row_text(&buf, 5).chars().all(|c| c == ' '));
+}
+
+#[test]
+fn stack_headers_render_collapsed_strips() {
+    let active = PaneId::new();
+    let b = PaneId::new();
+    let c = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active, rect(0, 3, 30, 4), true),
+            (b, rect(0, 1, 30, 1), false),
+            (c, rect(0, 2, 30, 1), false),
+        ],
+        Some(active),
+        LockMode::Normal,
+        Size { cols: 30, rows: 8 },
+    );
+    snap.panes[1].title = Some("editor".to_string());
+    snap.panes[2].title = Some("logs".to_string());
+    snap.session.active_tab.stack_headers = vec![
+        StackHeader {
+            pane: b,
+            rect: rect(0, 1, 30, 1),
+            position: 1,
+            total: 3,
+        },
+        StackHeader {
+            pane: c,
+            rect: rect(0, 2, 30, 1),
+            position: 2,
+            total: 3,
+        },
+    ];
+    let buf = render(&snap, 30, 8);
+
+    // Row 1: B's strip — arrow + title on the left, [2/3] right-aligned.
+    let strip_b = row_text(&buf, 1);
+    assert!(strip_b.starts_with("▸ editor"), "strip: {strip_b:?}");
+    assert!(strip_b.trim_end().ends_with("[2/3]"), "strip: {strip_b:?}");
+    // Row 2: C's strip.
+    let strip_c = row_text(&buf, 2);
+    assert!(strip_c.starts_with("▸ logs"), "strip: {strip_c:?}");
+    assert!(strip_c.trim_end().ends_with("[3/3]"), "strip: {strip_c:?}");
+
+    // The whole strip row is inverted (the tile-owned marker), gap included.
+    for x in 0..30 {
+        assert!(
+            buf[(x, 1)].modifier.contains(Modifier::REVERSED),
+            "col {x} of strip not inverted"
+        );
+    }
+}
+
+#[test]
+fn five_child_stack_shows_n_minus_one_headers() {
+    let active = PaneId::new();
+    let m1 = PaneId::new();
+    let m2 = PaneId::new();
+    let m3 = PaneId::new();
+    let m4 = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active, rect(0, 5, 30, 3), true),
+            (m1, rect(0, 1, 30, 1), false),
+            (m2, rect(0, 2, 30, 1), false),
+            (m3, rect(0, 3, 30, 1), false),
+            (m4, rect(0, 4, 30, 1), false),
+        ],
+        Some(active),
+        LockMode::Normal,
+        Size { cols: 30, rows: 10 },
+    );
+    let members = [m1, m2, m3, m4];
+    snap.session.active_tab.stack_headers = members
+        .iter()
+        .enumerate()
+        .map(|(i, &pane)| StackHeader {
+            pane,
+            rect: rect(0, (i + 1) as u16, 30, 1),
+            position: i + 1,
+            total: 5,
+        })
+        .collect();
+    let buf = render(&snap, 30, 10);
+
+    // Four collapsed strips (rows 1..=4), each labelled [k/5]; the active member
+    // keeps its content area below.
+    for (i, k) in (2..=5).enumerate() {
+        let row = row_text(&buf, (i + 1) as u16);
+        assert!(
+            row.trim_end().ends_with(&format!("[{k}/5]")),
+            "row {}: {row:?}",
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn stack_header_without_title_still_shows_arrow_and_indicator() {
+    let active = PaneId::new();
+    let member = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active, rect(0, 2, 30, 4), true),
+            (member, rect(0, 1, 30, 1), false),
+        ],
+        Some(active),
+        LockMode::Normal,
+        Size { cols: 30, rows: 8 },
+    );
+    // The collapsed member carries no title (None from `build`).
+    snap.session.active_tab.stack_headers = vec![StackHeader {
+        pane: member,
+        rect: rect(0, 1, 30, 1),
+        position: 0,
+        total: 2,
+    }];
+    let buf = render(&snap, 30, 8);
+
+    let row = row_text(&buf, 1);
+    assert!(row.starts_with("▸ "), "row: {row:?}");
+    assert!(row.trim_end().ends_with("[1/2]"), "row: {row:?}");
+}
+
+#[test]
+fn narrow_stack_header_indicator_does_not_bleed_left() {
+    let active = PaneId::new();
+    let member = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active, rect(0, 2, 20, 4), true),
+            (member, rect(10, 1, 3, 1), false),
+        ],
+        Some(active),
+        LockMode::Normal,
+        Size { cols: 20, rows: 8 },
+    );
+    // A 3-wide strip at x=10 with a 7-wide indicator "[10/10]".
+    snap.session.active_tab.stack_headers = vec![StackHeader {
+        pane: member,
+        rect: rect(10, 1, 3, 1),
+        position: 9,
+        total: 10,
+    }];
+    let buf = render(&snap, 20, 8);
+
+    // The indicator clips inside the strip: nothing is written left of x=10.
+    for x in 0..10 {
+        assert_eq!(buf[(x, 1)].symbol(), " ", "col {x} written outside strip");
+        assert!(
+            !buf[(x, 1)].modifier.contains(Modifier::REVERSED),
+            "col {x} inverted outside strip"
+        );
+    }
+    // The strip's own cells (x=10..13) are inverted.
+    for x in 10..13 {
+        assert!(buf[(x, 1)].modifier.contains(Modifier::REVERSED));
+    }
 }
 
 #[test]
