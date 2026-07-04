@@ -139,3 +139,44 @@ fn bg_fill_keeps_only_the_background() {
         }
     );
 }
+
+#[test]
+fn style_getters_return_each_set_field() {
+    let mut style = Style::default();
+    style.set_fg(Color::Indexed(1));
+    style.set_bg(Color::Indexed(2));
+    style.set_bold(true);
+    style.set_underline_color(Some(Color::Rgb(7, 8, 9)));
+
+    assert_eq!(style.fg(), Color::Indexed(1));
+    assert_eq!(style.bg(), Color::Indexed(2));
+    assert!(style.attrs().bold());
+    assert_eq!(style.underline_color(), Some(Color::Rgb(7, 8, 9)));
+}
+
+#[test]
+fn attr_flags_getters_return_each_set_flag() {
+    // A distinct on/off pattern per flag: any getter reading the wrong field
+    // returns the mismatched value.
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_italic(false);
+    style.set_underline(UnderlineStyle::Double);
+    style.set_reverse(true);
+    style.set_faint(false);
+    style.set_blink(true);
+    style.set_conceal(false);
+    style.set_strike(true);
+    style.set_overline(false);
+
+    let attrs = style.attrs();
+    assert!(attrs.bold());
+    assert!(!attrs.italic());
+    assert_eq!(attrs.underline(), UnderlineStyle::Double);
+    assert!(attrs.reverse());
+    assert!(!attrs.faint());
+    assert!(attrs.blink());
+    assert!(!attrs.conceal());
+    assert!(attrs.strike());
+    assert!(!attrs.overline());
+}

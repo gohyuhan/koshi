@@ -9,8 +9,8 @@
 //! engine, so it cannot change it.
 //!
 //! Everything here is a plain data package: scalar copies of the live state,
-//! plus an [`Arc`]-shared [`Grid`] so freezing the screen buffer is a reference
-//! bump rather than a deep copy. The snapshot is built and read in the same
+//! plus the screen [`Grid`] behind an [`Arc`] so cloning a built snapshot
+//! shares the buffer by reference. The snapshot is built and read in the same
 //! process (the terminal `Grid`/`Cursor` types are not serializable); a
 //! detached client is served by the separate session-persistence path.
 //!
@@ -18,7 +18,6 @@
 //! snapshot from live state, and the renderer code that draws each field, live
 //! in later tasks; the fields carried here are the contract between them.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tile_core::geometry::{Rect, Size};
@@ -98,6 +97,15 @@ pub struct TabSnapshot {
 /// One pane's placement in the solved layout: where its box sits, its content
 /// area, and coarse status flags. Paired with a [`PaneSnapshot`] by
 /// [`pane_id`](Self::pane_id).
+///
+/// The builder keeps these fields consistent: [`visible`](Self::visible) is
+/// true exactly when [`inner_rect`](Self::inner_rect) is `Some` (the pane has a
+/// content area to draw), and a [`suppressed`](Self::suppressed) pane is not
+/// visible. [`dead`](Self::dead) is an orthogonal axis: it does not by itself
+/// change visibility — an exited pane stays laid out, drawn dimmed, until it is
+/// removed. `inner_rect` is `None` for three distinct reasons — no room,
+/// hidden, or a collapsed stack member — and [`suppressed`](Self::suppressed)
+/// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSlot {
     /// The pane this slot places.
@@ -105,10 +113,11 @@ pub struct PaneSlot {
     /// The outer pane box, including the 1-cell border gutter.
     pub rect: Rect,
     /// The content area inside the border — the layout-owned rect the PTY was
-    /// sized from, taken verbatim from `tile_layout::content_rects`. `None`
-    /// when the pane shows no content (suppressed, hidden, or a collapsed stack
-    /// member). The renderer draws cells and places the cursor here and never
-    /// re-computes the inset.
+    /// sized from, taken verbatim from
+    /// [`content_rects`](tile_layout::content::content_rects). `None` when the
+    /// pane shows no content (suppressed, hidden, or a collapsed stack member).
+    /// The renderer draws cells and places the cursor here and never re-computes
+    /// the inset.
     pub inner_rect: Option<Rect>,
     /// Whether the pane runs a terminal or a plugin.
     pub kind: PaneKind,
@@ -133,10 +142,11 @@ pub struct PaneSnapshot {
     /// The visible terminal cells. `None` for a pane with no terminal content
     /// (a plugin pane, or a slot showing nothing this frame).
     pub grid_view: Option<GridView>,
+    /// Whether the whole screen is in reverse video (DECSCNM): the renderer
+    /// swaps the default foreground and background for every cell.
+    pub reverse_video: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: ScrollbackMeta,
-    /// Whether this pane holds the viewing client's focus.
-    pub focused: bool,
 }
 
 /// The cursor's on-screen position, relative to the content area's origin, plus
@@ -149,14 +159,20 @@ pub struct CursorSnapshot {
     pub col: u16,
     /// Whether the cursor is visible (the app may hide it).
     pub visible: bool,
+    /// Whether the cursor blinks.
+    pub blink: bool,
 }
 
-/// A cheap-to-clone view of the visible cells: the screen grid shared by
-/// reference, plus how far the view is scrolled back from the live tail.
+/// The visible cells for one pane: the live screen grid, plus how far the view
+/// is scrolled back from the tail.
+///
+/// The grid is held behind an [`Arc`], so cloning a built [`GridView`] shares
+/// the buffer by reference. The history rows for a non-zero
+/// [`view_offset`](Self::view_offset) are supplied by the scroll feature that
+/// sets it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridView {
-    /// The visible screen buffer, shared by reference so cloning the snapshot
-    /// bumps a refcount instead of copying every cell.
+    /// The live screen buffer.
     pub grid: Arc<Grid>,
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
@@ -185,8 +201,10 @@ pub struct ClientSnapshot {
     pub viewport: Size,
     /// The tab the client is currently viewing.
     pub active_tab: TabId,
-    /// The client's focused pane in each tab it has visited.
-    pub focused_pane_per_tab: HashMap<TabId, PaneId>,
+    /// The client's focused pane in the active tab, or `None` when the tab has
+    /// no focusable pane. The renderer highlights the pane whose
+    /// [`PaneSlot::pane_id`] matches, and places the cursor there.
+    pub focused_pane: Option<PaneId>,
     /// The client's input mode (drives the mode tag and keybind resolution).
     pub lock_mode: LockMode,
 }

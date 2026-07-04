@@ -61,26 +61,24 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
             row: 0,
             col: 5,
             visible: true,
+            blink: false,
         },
         grid_view: Some(GridView {
             grid,
             view_offset: 0,
         }),
+        reverse_video: false,
         scrollback: ScrollbackMeta {
             truncated: false,
             retained_lines: 0,
         },
-        focused: true,
     };
-
-    let mut focused_pane_per_tab = HashMap::new();
-    focused_pane_per_tab.insert(tab_id, pane_id);
 
     let client = ClientSnapshot {
         id: ClientId::new(),
         viewport: Size { cols: 80, rows: 24 },
         active_tab: tab_id,
-        focused_pane_per_tab,
+        focused_pane: Some(pane_id),
         lock_mode: LockMode::Normal,
     };
 
@@ -142,9 +140,10 @@ fn builds_from_fixture_with_exact_values() {
             row: 0,
             col: 5,
             visible: true,
+            blink: false,
         }
     );
-    assert!(pane.focused);
+    assert!(!pane.reverse_video);
     assert_eq!(
         pane.scrollback,
         ScrollbackMeta {
@@ -161,10 +160,8 @@ fn builds_from_fixture_with_exact_values() {
     assert_eq!(snap.client.viewport, Size { cols: 80, rows: 24 });
     assert_eq!(snap.client.lock_mode, LockMode::Normal);
     assert_eq!(snap.client.active_tab, tab.id);
-    assert_eq!(
-        snap.client.focused_pane_per_tab.get(&tab.id),
-        Some(&pane.id)
-    );
+    // Focus is identified by matching this id against each PaneSlot's pane_id.
+    assert_eq!(snap.client.focused_pane, Some(pane.id));
 
     // Stock, plugin-free UI.
     assert_eq!(snap.plugin_ui, PluginUiSnapshot::default());
