@@ -13,13 +13,14 @@ use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use tile_core::command::{
-    ClosePaneArgs, CloseTabArgs, CommandSource, CopyModeCommand, EnablePluginArgs, FocusPaneArgs,
-    FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PluginCommand,
-    RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs,
-    TabTarget, WriteToPaneArgs,
+    ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, CopyModeCommand, CopyTarget,
+    EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveCursorArgs,
+    MoveTabArgs, MoveUnit, NewPaneArgs, NewTabArgs, PluginCommand, RenamePaneArgs,
+    RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs, SearchArgs,
+    SelectionKind, SetSelectionArgs, TabTarget, WriteToPaneArgs,
 };
 use tile_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use tile_core::geometry::{Size, SplitDirection};
+use tile_core::geometry::{Direction, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use tile_core::naming;
 use tile_core::process::{PtySize, ShellKind, SpawnSpec};
@@ -1521,6 +1522,63 @@ fn copy_mode_resolves_the_focused_pane() {
             help: Some("copy mode not yet implemented".to_string()),
         }
     );
+}
+
+#[test]
+fn every_copy_mode_variant_routes_to_the_stub_reject() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // Every CopyModeCommand sub-variant resolves the same focused pane and
+    // routes through its own arm of the exhaustive match to the shared
+    // not-yet-implemented rejection.
+    let variants = vec![
+        CopyModeCommand::Enter,
+        CopyModeCommand::Exit,
+        CopyModeCommand::MoveCursor(MoveCursorArgs {
+            unit: MoveUnit::Cell,
+            direction: Direction::Up,
+        }),
+        CopyModeCommand::SetSelection(SetSelectionArgs {
+            kind: SelectionKind::Character,
+            anchor: GridPos { row: 0, col: 0 },
+            cursor: GridPos { row: 0, col: 1 },
+        }),
+        CopyModeCommand::ClearSelection,
+        CopyModeCommand::Copy(CopyArgs {
+            target: CopyTarget::Osc52,
+        }),
+        CopyModeCommand::Search(SearchArgs {
+            query: "needle".to_string(),
+            regex: false,
+            case_sensitive: false,
+        }),
+        CopyModeCommand::SearchNext,
+        CopyModeCommand::SearchPrev,
+    ];
+
+    for variant in variants {
+        let env = envelope_from(
+            CommandSource::key_binding(client_id),
+            Command::CopyMode(variant),
+        );
+        let command_id = env.id;
+        assert_eq!(
+            rt.dispatch(env),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some("copy mode not yet implemented".to_string()),
+            }
+        );
+    }
 }
 
 #[test]

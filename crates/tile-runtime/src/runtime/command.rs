@@ -18,9 +18,9 @@ use std::time::SystemTime;
 use tile_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
-        RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs,
-        TabTarget, WriteToPaneArgs,
+        CopyModeCommand, FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs, NewPaneArgs,
+        NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
+        RunCommandPaneArgs, TabTarget, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -187,7 +187,7 @@ impl Runtime {
                     envelope.issued_at,
                 )
             }
-            Command::CopyMode(_) => self.reject(envelope.id, "copy mode"),
+            Command::CopyMode(command) => self.handle_copy_mode(envelope.id, &command),
             Command::Plugin(_) => self.reject(envelope.id, "plugin"),
             Command::TogglePaneFullscreen => {
                 self.handle_toggle_pane_fullscreen(envelope.id, &envelope.source)
@@ -210,6 +210,24 @@ impl Runtime {
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!("{label} not yet implemented")),
+        }
+    }
+
+    /// Route a [`Command::CopyMode`] sub-command to its handler. The
+    /// exhaustive match gives each [`CopyModeCommand`] variant its own routing
+    /// seam; every arm rejects with [`RejectReason::InvalidState`] until
+    /// copy-mode handling lands.
+    fn handle_copy_mode(&self, command_id: CommandId, command: &CopyModeCommand) -> CommandResult {
+        match command {
+            CopyModeCommand::Enter => self.reject(command_id, "copy mode"),
+            CopyModeCommand::Exit => self.reject(command_id, "copy mode"),
+            CopyModeCommand::MoveCursor(_) => self.reject(command_id, "copy mode"),
+            CopyModeCommand::SetSelection(_) => self.reject(command_id, "copy mode"),
+            CopyModeCommand::ClearSelection => self.reject(command_id, "copy mode"),
+            CopyModeCommand::Copy(_) => self.reject(command_id, "copy mode"),
+            CopyModeCommand::Search(_) => self.reject(command_id, "copy mode"),
+            CopyModeCommand::SearchNext => self.reject(command_id, "copy mode"),
+            CopyModeCommand::SearchPrev => self.reject(command_id, "copy mode"),
         }
     }
 
