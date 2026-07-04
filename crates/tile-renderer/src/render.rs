@@ -12,10 +12,11 @@
 //! in the pane area, and each visible terminal pane's cells are painted into its
 //! content rect. The focused pane's cursor cell is reported separately by
 //! [`cursor_position`] for the caller to place the terminal's hardware cursor,
-//! since the buffer itself carries no cursor. The keybinding hints and the
-//! too-small overlay are painted by later tasks over the same buffer;
-//! plugin-contributed segments (empty here) are injected once the plugin host
-//! lands.
+//! since the buffer itself carries no cursor. When the active tab has no room
+//! for any pane, a centered "terminal too small" overlay replaces the pane
+//! render for that frame. The keybinding hints are painted by a later task over
+//! the same buffer; plugin-contributed segments (empty here) are injected once
+//! the plugin host lands.
 
 pub mod state;
 
@@ -39,7 +40,9 @@ use crate::snapshot::{PaneSnapshot, RenderSnapshot};
 /// then draws the pane borders, each visible pane's terminal cells, and the
 /// collapsed stack-member strips, then the tabline over the top row. The bottom
 /// row is the tile-owned keybinding hint bar: reserved and left blank here,
-/// filled by a later task. Does nothing for a zero-size area.
+/// filled by a later task. When the active tab has no room for any pane
+/// (`all_suppressed`), draws only a centered too-small overlay and returns,
+/// skipping the panes and the tabline. Does nothing for a zero-size area.
 pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -56,6 +59,12 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
     // reused buffer would otherwise keep leftover cells in the tabline gap, the
     // reserved hint row, and any pane interior not painted this frame.
     Clear.render(area, buf);
+
+    // No room for any pane: the whole frame becomes the too-small overlay.
+    if snapshot.session.active_tab.all_suppressed {
+        draw_too_small_overlay(area, buf);
+        return;
+    }
 
     draw_panes(snapshot, buf);
     draw_pane_contents(snapshot, buf);
@@ -106,8 +115,12 @@ pub fn cursor_position(snapshot: &RenderSnapshot) -> Option<Position> {
         return None;
     }
 
-    // Clamp inside the content area: a dead pane keeps a frozen cursor while its
-    // content rect can shrink, so the raw position may fall past the rect.
+    // `cursor.col`/`row` are pane-local: counted from the content area's own
+    // top-left (0,0). `inner` is that content area in absolute screen cells, so
+    // adding its origin lifts the local cursor to a screen position — x with the
+    // column, y with the row. Clamp inside the content area: a dead pane keeps a
+    // frozen cursor while its content rect can shrink, so the raw sum may fall
+    // past the rect.
     let inner = to_ratatui_rect(inner);
     let x = (inner.x + pane.cursor.col).min(inner.right().saturating_sub(1));
     let y = (inner.y + pane.cursor.row).min(inner.bottom().saturating_sub(1));
@@ -137,6 +150,23 @@ fn draw_panes(snapshot: &RenderSnapshot, buf: &mut Buffer) {
             .border_style(style)
             .render(to_ratatui_rect(slot.rect), buf);
     }
+}
+
+/// Draw the "terminal too small" overlay: one centered, bold line telling the
+/// user to enlarge the window, shown when the tab has no room for any pane.
+///
+/// Centered on the middle row of `area` and horizontally within it. A message
+/// wider than the viewport is clipped to the right edge, so nothing is written
+/// out of bounds on a very narrow screen.
+fn draw_too_small_overlay(area: RatatuiRect, buf: &mut Buffer) {
+    let message = Line::from(Span::styled(
+        "Terminal too small — enlarge window",
+        too_small_style(),
+    ));
+    let width = message.width() as u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height / 2;
+    buf.set_line(x, y, &message, area.right().saturating_sub(x));
 }
 
 /// Paint each visible terminal pane's cells into its content rect.
@@ -376,6 +406,11 @@ fn stack_header_style() -> Style {
 
 /// Bold style for the tabline mode tag.
 fn mode_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// Bold style for the terminal-too-small overlay message.
+fn too_small_style() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
 

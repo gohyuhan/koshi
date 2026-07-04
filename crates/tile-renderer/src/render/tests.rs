@@ -4,7 +4,8 @@
 //! content rects with their styles and wide-glyph handling, collapsed stack
 //! members render as inverted title strips, the focused pane's cursor cell is
 //! reported (clamped inside its content area, and hidden for unfocused, plugin,
-//! hidden, or app-hidden cursors), and degenerate sizes are safe.
+//! hidden, or app-hidden cursors), a centered too-small overlay replaces the
+//! frame when the tab has no room for any pane, and degenerate sizes are safe.
 
 use super::*;
 
@@ -762,6 +763,77 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
     // Refocus A (content origin (1,2)): the cursor jumps to A.
     snap.client.focused_pane = Some(a);
     assert_eq!(cursor_position(&snap), Some(Position::new(1, 2)));
+}
+
+/// A snapshot whose active tab has no room for any pane: every slot suppressed
+/// and `all_suppressed` set, as the layout solver produces on a too-small tab.
+fn too_small_snap(viewport: Size) -> RenderSnapshot {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), false)],
+        Some(pane),
+        LockMode::Normal,
+        viewport,
+    );
+    snap.session.active_tab.all_suppressed = true;
+    snap.session.active_tab.layout_solved[0].suppressed = true;
+    snap
+}
+
+#[test]
+fn too_small_overlay_shown_when_all_suppressed() {
+    let snap = too_small_snap(Size { cols: 60, rows: 10 });
+    let buf = render(&snap, 60, 10);
+
+    // Centered on the middle row (10/2 = 5); the 35-wide message is horizontally
+    // centered, starting at col (60-35)/2 = 12, and drawn bold.
+    let row = row_text(&buf, 5);
+    assert!(
+        row.contains("Terminal too small — enlarge window"),
+        "overlay row: {row:?}"
+    );
+    assert_eq!(buf[(12, 5)].symbol(), "T");
+    assert!(buf[(12, 5)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn too_small_overlay_replaces_tabline_and_panes() {
+    let snap = too_small_snap(Size { cols: 60, rows: 10 });
+    let buf = render(&snap, 60, 10);
+
+    // The tabline is skipped: the session name and tab list are not drawn.
+    assert!(!row_text(&buf, 0).contains("sess"));
+    assert!(!row_text(&buf, 0).contains("1:shell"));
+    // No pane border is drawn on any row.
+    for y in 0..10 {
+        let row = row_text(&buf, y);
+        assert!(!row.contains('┌'), "top-left border on row {y}: {row:?}");
+        assert!(!row.contains('│'), "side border on row {y}: {row:?}");
+    }
+}
+
+#[test]
+fn too_small_frame_places_no_cursor() {
+    // Every pane is suppressed (no content area), so the overlay frame shows no
+    // hardware cursor.
+    let snap = too_small_snap(Size { cols: 60, rows: 10 });
+    assert_eq!(cursor_position(&snap), None);
+}
+
+#[test]
+fn too_small_overlay_clips_on_narrow_screen() {
+    // Viewport narrower than the 35-wide message: it clips to the width with no
+    // panic and no write past the right edge.
+    let snap = too_small_snap(Size { cols: 10, rows: 4 });
+    let buf = render(&snap, 10, 4);
+
+    // Centered on row 2; the message saturates to col 0 and shows its 10-cell
+    // clipped prefix.
+    let row = row_text(&buf, 2);
+    assert!(row.starts_with("Terminal t"), "clipped row: {row:?}");
+    assert_eq!(row.chars().count(), 10);
 }
 
 #[test]
