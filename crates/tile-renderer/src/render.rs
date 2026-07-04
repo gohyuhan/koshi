@@ -10,7 +10,9 @@
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
-//! content rect. Cursor placement, the keybinding hints themselves, and the
+//! content rect. The focused pane's cursor cell is reported separately by
+//! [`cursor_position`] for the caller to place the terminal's hardware cursor,
+//! since the buffer itself carries no cursor. The keybinding hints and the
 //! too-small overlay are painted by later tasks over the same buffer;
 //! plugin-contributed segments (empty here) are injected once the plugin host
 //! lands.
@@ -18,7 +20,7 @@
 pub mod state;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect as RatatuiRect;
+use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
@@ -29,7 +31,7 @@ use tile_core::lock::LockMode;
 use tile_terminal::grid::state::{Cell, Grid};
 use tile_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::RenderSnapshot;
+use crate::snapshot::{PaneSnapshot, RenderSnapshot};
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
@@ -68,6 +70,55 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
     draw_tabline(snapshot, tabline, buf);
 }
 
+/// The buffer cell where the client's focused pane wants the hardware cursor, or
+/// `None` when no cursor should show this frame.
+///
+/// Companion to [`render_frame`]: the buffer carries no cursor, so the caller
+/// reads this alongside the paint and places the terminal's cursor at the
+/// returned [`Position`] (or hides it on `None`). The position is the focused
+/// pane's cursor cell — its row and column within the content area, offset by
+/// that area's origin and clamped inside it — in the same absolute buffer
+/// coordinates the panes are drawn in.
+///
+/// Returns `None` when the client has no focused pane; that pane has no placed
+/// slot or no content snapshot; it is not visible or has no content area
+/// (suppressed, hidden, or a collapsed stack member); it has no terminal grid
+/// (a plugin pane, or a slot showing nothing this frame); or the application has
+/// hidden its cursor.
+pub fn cursor_position(snapshot: &RenderSnapshot) -> Option<Position> {
+    let focused = snapshot.client.focused_pane?;
+
+    let slot = snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .find(|slot| slot.pane_id == focused)?;
+    if !slot.visible {
+        return None;
+    }
+    let inner = slot.inner_rect?;
+
+    let pane = find_pane(snapshot, focused)?;
+    // A plugin pane (no grid) gets a cursor only when the plugin asks for one.
+    pane.grid_view.as_ref()?;
+    if !pane.cursor.visible {
+        return None;
+    }
+
+    // Clamp inside the content area: a dead pane keeps a frozen cursor while its
+    // content rect can shrink, so the raw position may fall past the rect.
+    let inner = to_ratatui_rect(inner);
+    let x = (inner.x + pane.cursor.col).min(inner.right().saturating_sub(1));
+    let y = (inner.y + pane.cursor.row).min(inner.bottom().saturating_sub(1));
+    Some(Position::new(x, y))
+}
+
+/// Find the [`PaneSnapshot`] with the given id in this frame.
+fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
+    snapshot.panes.iter().find(|pane| pane.id == id)
+}
+
 /// Draw a bordered box for every visible pane in the active tab, highlighting
 /// the client's focused pane's border.
 fn draw_panes(snapshot: &RenderSnapshot, buf: &mut Buffer) {
@@ -101,7 +152,7 @@ fn draw_pane_contents(snapshot: &RenderSnapshot, buf: &mut Buffer) {
         let Some(inner) = slot.inner_rect else {
             continue;
         };
-        let Some(pane) = snapshot.panes.iter().find(|pane| pane.id == slot.pane_id) else {
+        let Some(pane) = find_pane(snapshot, slot.pane_id) else {
             continue;
         };
         let Some(view) = &pane.grid_view else {
@@ -242,10 +293,7 @@ fn draw_stack_headers(snapshot: &RenderSnapshot, buf: &mut Buffer) {
 /// The title drawn on a stack member's header strip: the pane's terminal title,
 /// or empty when the pane has none.
 fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> String {
-    snapshot
-        .panes
-        .iter()
-        .find(|snap| snap.id == pane)
+    find_pane(snapshot, pane)
         .and_then(|snap| snap.title.clone())
         .unwrap_or_default()
 }
@@ -298,7 +346,7 @@ fn mode_tag(mode: LockMode) -> &'static str {
 /// or `None` when the pane is at the live tail (nothing to indicate).
 fn focused_scroll(snapshot: &RenderSnapshot) -> Option<(usize, usize)> {
     let focused = snapshot.client.focused_pane?;
-    let pane = snapshot.panes.iter().find(|pane| pane.id == focused)?;
+    let pane = find_pane(snapshot, focused)?;
     let offset = pane.grid_view.as_ref().map_or(0, |view| view.view_offset);
     if offset == 0 {
         return None;
