@@ -95,6 +95,26 @@ impl Style {
             underline_color: None,
         }
     }
+
+    /// The foreground (text) color.
+    pub fn fg(&self) -> Color {
+        self.fg
+    }
+
+    /// The background color.
+    pub fn bg(&self) -> Color {
+        self.bg
+    }
+
+    /// The boolean text attributes (bold, italic, reverse, …).
+    pub fn attrs(&self) -> AttrFlags {
+        self.attrs
+    }
+
+    /// The underline color (SGR 58); `None` follows the foreground color.
+    pub fn underline_color(&self) -> Option<Color> {
+        self.underline_color
+    }
 }
 
 /// A foreground or background color.
@@ -131,6 +151,53 @@ pub struct AttrFlags {
     strike: bool,
     /// Overline (SGR 53).
     overline: bool,
+}
+
+impl AttrFlags {
+    /// Bold / increased intensity (SGR 1).
+    pub fn bold(&self) -> bool {
+        self.bold
+    }
+
+    /// Italic (SGR 3).
+    pub fn italic(&self) -> bool {
+        self.italic
+    }
+
+    /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms).
+    pub fn underline(&self) -> UnderlineStyle {
+        self.underline
+    }
+
+    /// Reverse video — swap foreground and background (SGR 7).
+    pub fn reverse(&self) -> bool {
+        self.reverse
+    }
+
+    /// Faint / decreased intensity (SGR 2).
+    pub fn faint(&self) -> bool {
+        self.faint
+    }
+
+    /// Blink (SGR 5 slow or 6 rapid).
+    pub fn blink(&self) -> bool {
+        self.blink
+    }
+
+    /// Conceal — hidden text (SGR 8).
+    pub fn conceal(&self) -> bool {
+        self.conceal
+    }
+
+    /// Crossed-out / strikethrough (SGR 9).
+    pub fn strike(&self) -> bool {
+        self.strike
+    }
+
+    /// Overline (SGR 53).
+    pub fn overline(&self) -> bool {
+        self.overline
+    }
 }
 
 /// The underline style of a cell — one rendition aspect with mutually exclusive

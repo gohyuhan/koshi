@@ -944,6 +944,12 @@ dependencies = [
 [[package]]
 name = "tile-renderer"
 version = "0.1.0"
+dependencies = [
+ "tile-core",
+ "tile-layout",
+ "tile-pane",
+ "tile-terminal",
+]
 
 [[package]]
 name = "tile-runtime"

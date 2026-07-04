@@ -5,3 +5,4 @@ pub mod error;
 pub mod types;
 
 pub mod render;
+pub mod snapshot;
