@@ -30,17 +30,24 @@ fn pty_output_carries_its_pane_and_bytes() {
 }
 
 #[test]
-fn child_exit_carries_its_pane_and_status() {
+fn child_exit_carries_its_pane_status_and_time() {
     let pane = PaneId::new();
     let event = RuntimeEvent::ChildExit {
         pane_id: pane,
         status: ExitStatus::Signaled(9),
+        exited_at: SystemTime::UNIX_EPOCH,
     };
-    let RuntimeEvent::ChildExit { pane_id, status } = &event else {
+    let RuntimeEvent::ChildExit {
+        pane_id,
+        status,
+        exited_at,
+    } = &event
+    else {
         panic!("expected ChildExit");
     };
     assert_eq!(*pane_id, pane);
     assert_eq!(*status, ExitStatus::Signaled(9));
+    assert_eq!(*exited_at, SystemTime::UNIX_EPOCH);
 }
 
 #[test]

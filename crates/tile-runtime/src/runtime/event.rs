@@ -15,6 +15,8 @@
 //! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
 //! that crosses the IPC socket.
 
+use std::time::SystemTime;
+
 use tile_core::{
     command::CommandEnvelope,
     geometry::Size,
@@ -43,6 +45,9 @@ pub enum RuntimeEvent {
         pane_id: PaneId,
         /// How the child ended: an exit code or a terminating signal.
         status: ExitStatus,
+        /// When the producer observed the exit, carried on the event so the
+        /// handler never reads the clock itself.
+        exited_at: SystemTime,
     },
     /// A client's outer terminal changed size.
     Resize {
