@@ -1,11 +1,12 @@
 //! Core runtime components: command dispatch, the event inbox, PTY output
-//! routing, render scheduling, event transactions, and the runtime state
-//! container.
+//! routing, render scheduling, the render-snapshot builder, event
+//! transactions, and the runtime state container.
 
 pub mod command;
 pub mod event;
 pub mod pty_output;
 pub mod render_schedule;
+pub mod snapshot;
 pub mod state;
 pub mod transaction;
 

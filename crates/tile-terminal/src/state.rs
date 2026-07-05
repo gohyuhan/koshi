@@ -17,6 +17,7 @@
 //! reachable as `tile_terminal::state::*`.
 
 use std::cmp::min;
+use std::sync::Arc;
 
 use tile_core::process::PtySize;
 
@@ -42,11 +43,16 @@ pub use screen::Screen;
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalState {
-    /// The primary (normal, scrolling) screen buffer.
-    primary: Grid,
+    /// The primary (normal, scrolling) screen buffer, reference-counted so a
+    /// render snapshot can share it without copying; a write clones it once on
+    /// demand (copy-on-write via [`Arc::make_mut`] in [`active_grid_mut`]).
+    ///
+    /// [`active_grid_mut`]: Self::active_grid_mut
+    primary: Arc<Grid>,
     /// The alternate screen buffer used by full-screen apps; swapped in via DEC
-    /// mode `?1049`/`?47` and never appended to the `scrollback`.
-    alternate: Grid,
+    /// mode `?1049`/`?47` and never appended to the `scrollback`. Reference-counted
+    /// like `primary`.
+    alternate: Arc<Grid>,
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
     active: Screen,
@@ -107,8 +113,8 @@ impl TerminalState {
             saved: None,
         };
         TerminalState {
-            primary: terminal_size.clone(),
-            alternate: terminal_size.clone(),
+            primary: Arc::new(terminal_size.clone()),
+            alternate: Arc::new(terminal_size),
             active: Screen::Primary,
             primary_cursor: terminal_cursor,
             alternate_cursor: terminal_cursor,
@@ -132,8 +138,8 @@ impl TerminalState {
         // Blank each screen with its own render background.
         let primary_fill = self.primary_render.style.bg_fill();
         let alternate_fill = self.alternate_render.style.bg_fill();
-        self.primary = Grid::blank(size.rows, size.cols, primary_fill);
-        self.alternate = Grid::blank(size.rows, size.cols, alternate_fill);
+        self.primary = Arc::new(Grid::blank(size.rows, size.cols, primary_fill));
+        self.alternate = Arc::new(Grid::blank(size.rows, size.cols, alternate_fill));
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
@@ -164,16 +170,31 @@ impl TerminalState {
     /// `alternate`, per the active screen.
     pub fn active_grid(&self) -> &Grid {
         match self.active {
-            Screen::Primary => &self.primary,
-            Screen::Alternate => &self.alternate,
+            Screen::Primary => self.primary.as_ref(),
+            Screen::Alternate => self.alternate.as_ref(),
         }
     }
 
-    /// Mutable access to the active screen buffer, for writing cells.
+    /// Mutable access to the active screen buffer, for writing cells. Clones the
+    /// buffer once (copy-on-write) if a render snapshot still shares it, so the
+    /// snapshot keeps the pre-write contents.
     pub fn active_grid_mut(&mut self) -> &mut Grid {
         match self.active {
-            Screen::Primary => &mut self.primary,
-            Screen::Alternate => &mut self.alternate,
+            Screen::Primary => Arc::make_mut(&mut self.primary),
+            Screen::Alternate => Arc::make_mut(&mut self.alternate),
+        }
+    }
+
+    /// A reference-counted handle to the active screen buffer for the render
+    /// snapshot: clones the `Arc`, not the grid. The next write to this screen
+    /// clones the buffer once ([`active_grid_mut`]), leaving this handle pointing
+    /// at the frozen contents.
+    ///
+    /// [`active_grid_mut`]: Self::active_grid_mut
+    pub fn active_grid_arc(&self) -> Arc<Grid> {
+        match self.active {
+            Screen::Primary => Arc::clone(&self.primary),
+            Screen::Alternate => Arc::clone(&self.alternate),
         }
     }
 
