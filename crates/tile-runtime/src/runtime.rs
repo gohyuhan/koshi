@@ -4,6 +4,7 @@
 
 pub mod command;
 pub mod event;
+pub mod render_schedule;
 pub mod state;
 pub mod transaction;
 
