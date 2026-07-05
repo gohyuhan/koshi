@@ -9,8 +9,10 @@
 //! the base cell, with variation-selector width promotion), `execute` (C0 control
 //! bytes, including the `SI`/`SO` charset shifts), `csi_dispatch` (relative + absolute cursor moves, line-relative
 //! moves, forward/back tab stops, erase in display/line and erase-char, SGR,
-//! insert/delete char & line, scroll up/down, the DECSTBM scroll region, and
-//! the DEC private modes for the alternate screen and cursor visibility),
+//! insert/delete char & line, scroll up/down, the DECSTBM scroll region,
+//! the DEC private modes for the alternate screen and cursor visibility, and
+//! the device queries — DA1/DA2/DA3, the DSR family, DECRQM — whose replies
+//! land on the state's reply queue),
 //! `esc_dispatch` (cursor save/restore,
 //! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (the OSC 0/1/2 window title and the
 //! OSC 7 working-directory report). The
@@ -20,11 +22,12 @@
 //! UTF-8 upstream, so `print` receives a ready `char`.
 //!
 //! The performer's helpers are split across submodules by concern — charset
-//! translation ([`charset`]), grapheme clustering and wide-glyph placement
-//! ([`glyph`]), cursor motion / scrolling / the scroll region ([`motion`]),
-//! alternate-screen entry/exit ([`alt_screen`]), SGR ([`sgr`]), OSC parsing
-//! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
-//! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
+//! translation ([`charset`]), device-query replies ([`device`]), grapheme
+//! clustering and wide-glyph placement ([`glyph`]), cursor motion / scrolling
+//! / the scroll region ([`motion`]), alternate-screen entry/exit
+//! ([`alt_screen`]), SGR ([`sgr`]), OSC parsing ([`osc`]), and CSI parameter
+//! accessors ([`params`]) — while the [`vte::Perform`] trait impl itself stays
+//! here as the dispatch surface.
 
 use crate::grid::state::Cell;
 use crate::state::{MouseEncoding, MouseTracking, Screen, TerminalState};
@@ -37,6 +40,7 @@ use self::sgr::apply_sgr;
 
 mod alt_screen;
 mod charset;
+mod device;
 mod glyph;
 mod motion;
 mod osc;
@@ -204,9 +208,11 @@ impl vte::Perform for TerminalState {
     /// Handle a CSI sequence: cursor movement (CUU/CUD/CUF/CUB/CUP/HVP/HPA/VPA/
     /// CNL/CPL/CHT/CBT), erase in display/line/character (ED/EL/ECH), graphics
     /// rendition (SGR), cell/line operations (ICH/DCH/IL/DL), scroll (SU/SD),
-    /// scroll region setup (DECSTBM), and DEC private modes including alternate
+    /// scroll region setup (DECSTBM), DEC private modes including alternate
     /// screen (`?47`/`?1047`/`?1049`), cursor visibility (`?25`/DECTCEM), mouse
-    /// tracking/encoding, bracketed paste, autowrap (`?7`/DECAWM), and others.
+    /// tracking/encoding, bracketed paste, autowrap (`?7`/DECAWM), and the
+    /// device queries (DA1/DA2/DA3, the DSR family, DECRQM/RQM) that queue
+    /// reply bytes for the app.
     fn csi_dispatch(
         &mut self,
         params: &vte::Params,
@@ -232,6 +238,31 @@ impl vte::Perform for TerminalState {
         // been kept intact — drop it.
         if ignore {
             return;
+        }
+
+        // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM): each queues its
+        // response bytes on the reply queue for the runtime to write back into
+        // the PTY. Dispatched on the exact (intermediates, action) pair —
+        // before the DEC private-mode block, which would otherwise consume the
+        // `?`-intermediate forms (`CSI ? Ps n`, `CSI ? Ps $ p`). The `$`-form
+        // pairs leave `CSI ! p` (DECSTR) untouched.
+        match (intermediates, action) {
+            // DA1 — primary device attributes.
+            (b"", 'c') => return self.device_attributes_primary(params),
+            // DA2 — secondary device attributes.
+            (b">", 'c') => return self.device_attributes_secondary(params),
+            // DA3 — tertiary device attributes (unit id).
+            (b"=", 'c') => return self.device_attributes_tertiary(params),
+            // DSR — operating status (5) / cursor position report (6).
+            (b"", 'n') => return self.device_status_report(params),
+            // DEC-form DSR — cursor position, printer, UDK, keyboard,
+            // locator, macro space, checksum, data integrity, multi-session.
+            (b"?", 'n') => return self.dec_device_status_report(params),
+            // DECRQM — request DEC private mode state.
+            (b"?$", 'p') => return self.report_dec_mode(params),
+            // RQM, ANSI form — request ANSI mode state.
+            (b"$", 'p') => return self.report_ansi_mode(params),
+            _ => {}
         }
 
         // DEC private modes carry a `?` private marker, which vte collects into
@@ -409,7 +440,7 @@ impl vte::Perform for TerminalState {
             return;
         }
 
-        // A non-`?` intermediate marks a sequence (charset, device query, …)
+        // Any other intermediate marks a sequence (DECSTR `!p`, DECSCA `"q`, …)
         // owned by a later task — skip it.
         if !intermediates.is_empty() {
             return;
@@ -689,8 +720,8 @@ impl vte::Perform for TerminalState {
                     self.active_cursor_mut().pending_wrap = false;
                 }
             }
-            // Any other CSI final byte (DEC private modes, device queries, …)
-            // is not handled yet; ignored rather than mis-applied.
+            // Any other CSI final byte is not handled yet; ignored rather than
+            // mis-applied.
             _ => {}
         }
     }

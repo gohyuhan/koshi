@@ -1,12 +1,13 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style, modes, title,
-//! reported working directory, and scrollback.
+//! reported working directory, scrollback, and the device-reply queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
 //! [`TerminalEngine`](crate::engine::TerminalEngine) — the runtime owns the
 //! `PaneId → TerminalEngine` map — so the state itself carries no identity.
 //! The VTE performer (see the `perform` submodule) mutates this model as PTY
-//! output arrives.
+//! output arrives; device queries in that output (DA/DSR/DECRQM) queue their
+//! answer bytes on the state, which the runtime drains back into the PTY.
 //!
 //! The state's component types live in sibling submodules — the active
 //! [`Screen`], the per-screen [`RenderState`] and its [`Charset`] slots, the
@@ -86,6 +87,11 @@ pub struct TerminalState {
     /// The `(row, col)` of the cell holding `cluster`'s base, or `None` when no
     /// run is active. Continuations attach here and width promotion widens it.
     cluster_base: Option<(u16, u16)>,
+    /// Bytes queued for the running app in answer to its device queries
+    /// (DA/DSR/DECRQM). The performer appends replies here; the runtime drains
+    /// them via [`take_replies`](Self::take_replies) and writes them back into
+    /// the pane's PTY. Device-global: one queue regardless of the active screen.
+    replies: Vec<u8>,
 }
 
 impl TerminalState {
@@ -116,6 +122,7 @@ impl TerminalState {
             alternate_scroll_region: None,
             cluster: String::new(),
             cluster_base: None,
+            replies: Vec::new(),
         }
     }
 
@@ -243,6 +250,14 @@ impl TerminalState {
     /// compose a scrolled-back view.
     pub fn scrollback(&self) -> &Scrollback {
         &self.scrollback
+    }
+
+    /// Drain the queued device-query replies (DA/DSR/DECRQM answers), leaving
+    /// the queue empty. The caller writes the returned bytes back into the
+    /// pane's PTY so the querying app receives its answer.
+    #[must_use = "undelivered replies hang the querying app"]
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
     }
 
     /// The scroll region (top and bottom margins) for the active screen, or
