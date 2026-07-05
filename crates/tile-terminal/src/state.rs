@@ -301,8 +301,7 @@ impl TerminalState {
 
     /// The cursor position `(row, col)` on the active screen, both zero-based.
     pub fn active_cursor_position(&self) -> (u16, u16) {
-        let cursor_position = (self.active_cursor().row, self.active_cursor().col);
-        cursor_position
+        (self.active_cursor().row, self.active_cursor().col)
     }
 
     /// The cursor for the active screen.
