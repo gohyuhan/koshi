@@ -23,7 +23,7 @@ use tile_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use tile_core::geometry::{Direction, Size, SplitDirection};
 use tile_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use tile_core::naming;
-use tile_core::process::{PtySize, ShellKind, SpawnSpec};
+use tile_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use tile_layout::mode::LayoutMode;
 use tile_layout::tree::{LayoutChild, SplitNode};
 use tile_observability::cleanup::TerminalCleanupGuard;
@@ -8066,4 +8066,211 @@ fn resize_pane_resizes_the_terminal_engine_with_its_pty() {
         engine_dimensions(&rt, pane_a),
         (expected.rows, expected.cols)
     );
+}
+
+#[test]
+fn child_exit_close_on_exit_removes_the_pane_and_reaps_it() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // The split pane's `CloseOnExit` child dies.
+    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+
+    // The exit is reported first, carrying the pane and its code.
+    match events.first() {
+        Some(Event::PaneProcessExited(exited)) => {
+            assert_eq!(exited.pane_id, new_pane);
+            assert_eq!(exited.exit_code, Some(0));
+        }
+        other => panic!("expected PaneProcessExited first, got {other:?}"),
+    }
+
+    // The pane is gone from state and from every runtime map.
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert!(!rt.pty_handles.contains_key(&new_pane));
+    assert!(!rt.pty_sizes.contains_key(&new_pane));
+    assert!(!rt.terminal_engines.contains_key(&new_pane));
+
+    // The already-dead child is only reaped: the backend entry is released via
+    // a single inline `Force` kill (the `exited` guard sends no signal).
+    assert_eq!(fake.kills(new_pane).unwrap(), vec![KillPolicy::Force]);
+
+    // The root survives and reclaims the whole tab.
+    assert_eq!(
+        rt.sessions[&sid].tabs[&tab].layout(),
+        &LayoutNode::Pane(root)
+    );
+}
+
+#[test]
+fn child_exit_of_the_last_pane_closes_the_tab_and_quits() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let events = rt.handle_child_exit(root, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+
+    // Removing the last pane closes the tab, and closing the last tab quits.
+    assert!(rt.sessions[&sid].panes.get(root).is_none());
+    assert!(rt.sessions[&sid].tabs.is_empty());
+    assert!(events.iter().any(|event| matches!(event, Event::Quit)));
+}
+
+#[test]
+fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // The sole pane of tab A exits: tab A closes, but tab B survives, so the
+    // session does not quit and the viewer moves to tab B (which reflows).
+    let events = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+
+    assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
+    assert!(!rt.sessions[&sid].tabs.contains_key(&tab_a));
+    assert!(rt.sessions[&sid].tabs.contains_key(&tab_b));
+    assert!(!events.iter().any(|event| matches!(event, Event::Quit)));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .unwrap()
+            .active_tab(),
+        tab_b
+    );
+}
+
+#[test]
+fn child_exit_of_an_unknown_pane_is_dropped() {
+    let (mut rt, _tx) = new_runtime();
+
+    // No session owns the pane (closed while its exit waited in the inbox).
+    let events = rt.handle_child_exit(
+        PaneId::new(),
+        ExitStatus::ExitCode(0),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert!(events.is_empty());
+}
+
+#[test]
+fn child_exit_by_signal_reports_no_exit_code() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    let events = rt.handle_child_exit(new_pane, ExitStatus::Signaled(9), SystemTime::UNIX_EPOCH);
+
+    // A signal has no numeric code.
+    match events.first() {
+        Some(Event::PaneProcessExited(exited)) => assert_eq!(exited.exit_code, None),
+        other => panic!("expected PaneProcessExited first, got {other:?}"),
+    }
+}
+
+#[test]
+fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // Make the pane respawn on exit, with its child marked running.
+    {
+        let record = rt
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .panes
+            .get_mut(new_pane)
+            .unwrap();
+        record.exit_policy = PaneExitPolicy::RespawnShell;
+        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+    }
+
+    let events = rt.handle_child_exit(new_pane, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+
+    // Only the exit is reported — the pane is not removed.
+    assert_eq!(events.len(), 1);
+    match events.first() {
+        Some(Event::PaneProcessExited(exited)) => {
+            assert_eq!(exited.pane_id, new_pane);
+            assert_eq!(exited.exit_code, Some(0));
+        }
+        other => panic!("expected PaneProcessExited, got {other:?}"),
+    }
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_some());
+
+    // The lifecycle advanced Running -> Exited -> Spawning: the respawn decision.
+    assert_eq!(
+        *rt.sessions[&sid].panes.get(new_pane).unwrap().lifecycle(),
+        PaneLifecycle::Spawning
+    );
+
+    // Bookkeeping is kept and the pane is never killed — it lives on.
+    assert!(rt.pty_handles.contains_key(&new_pane));
+    assert!(rt.pty_sizes.contains_key(&new_pane));
+    assert!(rt.terminal_engines.contains_key(&new_pane));
+    assert!(fake.kills(new_pane).unwrap().is_empty());
 }

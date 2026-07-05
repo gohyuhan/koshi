@@ -29,7 +29,7 @@ use tile_core::{
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
-    process::{KillPolicy, PtySize, SpawnSpec},
+    process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
 };
 use tile_layout::{
     content::content_rects,
@@ -44,7 +44,7 @@ use tile_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy};
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
 use tile_session::session::{
-    cascade::remove_pane_cascade,
+    cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
     policy::EmptyTabPolicy,
@@ -54,7 +54,9 @@ use tile_session::session::{
 };
 use tile_terminal::engine::TerminalEngine;
 
-use crate::runtime::{state::Runtime, transaction::TransactionScope};
+use crate::runtime::{
+    render_schedule::InvalidationReason, state::Runtime, transaction::TransactionScope,
+};
 
 /// A validation failure: the reason a command was rejected, plus an optional
 /// human-facing hint. The `Err` half of [`Runtime::validate`].
@@ -550,41 +552,15 @@ impl Runtime {
             EmptyTabPolicy::default(),
         );
 
-        // The pane is gone from state; drop its runtime bookkeeping too: PTY
-        // handle, size cache, and terminal engine. Output bytes still in
-        // flight for the pane now find no engine and are dropped.
-        self.pty_handles.remove(&target.pane_id);
-        self.pty_sizes.remove(&target.pane_id);
-        self.terminal_engines.remove(&target.pane_id);
-
-        // The survivors reclaim the closed pane's space: re-solve the tab and
-        // resize each live PTY whose size changed. When the close emptied the
-        // tab, its viewers moved to the nearest surviving tab (the cascade's
-        // `TabFocused`), and that tab's viewport now counts the movers — so it
-        // reflows instead. A tab left with no viewer has no viewport and keeps
-        // its sizes.
-        let reflow_tab = if session.tabs.contains_key(&target.tab_id) {
-            Some(target.tab_id)
-        } else {
-            events.iter().find_map(|event| match event {
-                Event::TabFocused(focused) => Some(focused.tab_id),
-                _ => None,
-            })
-        };
-        if let Some(tab_id) = reflow_tab {
-            if let Some(viewport) = session.tab_viewport(tab_id) {
-                let rects = Self::tab_content_rects(session, tab_id, viewport);
-                Self::reflow_changed(
-                    backend.as_ref(),
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    rects,
-                    None,
-                    &mut events,
-                );
-            }
-        }
+        // The pane is gone from state; drop its runtime bookkeeping and reflow
+        // the survivors into the space it freed.
+        self.release_pane_and_reflow(
+            target.session_id,
+            target.tab_id,
+            target.pane_id,
+            backend.as_ref(),
+            &mut events,
+        );
 
         // Kill the child off-thread: a graceful kill sleeps out its grace
         // window, and the dispatcher must keep draining. The kill also purges
@@ -600,6 +576,155 @@ impl Runtime {
             scope.emit(event);
         }
         scope.commit(command_id)
+    }
+
+    /// Drop a removed pane's runtime bookkeeping and reflow the survivors into
+    /// the space it freed.
+    ///
+    /// Removes the pane's PTY handle, size cache, and terminal engine — output
+    /// bytes still in flight for it now find no engine and are dropped — then
+    /// re-solves and resizes the tab that reclaims the space: the pane's own tab
+    /// when it survives, else the tab its viewers moved to (the cascade's
+    /// `TabFocused`). A tab left with no viewer has no viewport and keeps its
+    /// sizes. Each applied resize appends one [`Event::PtyResized`] to `events`.
+    ///
+    /// Shared by [`handle_close_pane`](Self::handle_close_pane) and
+    /// [`handle_child_exit`](Self::handle_child_exit). Killing the child and any
+    /// render invalidation stay with the caller: a close kills a live child on a
+    /// detached thread, while a child-exit reaps a dead one inline.
+    fn release_pane_and_reflow(
+        &mut self,
+        session_id: SessionId,
+        tab_id: TabId,
+        pane_id: PaneId,
+        backend: &dyn PtyBackend,
+        events: &mut Vec<Event>,
+    ) {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+
+        self.pty_handles.remove(&pane_id);
+        self.pty_sizes.remove(&pane_id);
+        self.terminal_engines.remove(&pane_id);
+
+        let reflow_tab = if session.tabs.contains_key(&tab_id) {
+            Some(tab_id)
+        } else {
+            events.iter().find_map(|event| match event {
+                Event::TabFocused(focused) => Some(focused.tab_id),
+                _ => None,
+            })
+        };
+        if let Some(reflow_tab) = reflow_tab {
+            if let Some(viewport) = session.tab_viewport(reflow_tab) {
+                let rects = Self::tab_content_rects(session, reflow_tab, viewport);
+                Self::reflow_changed(
+                    backend,
+                    &self.pty_handles,
+                    &mut self.pty_sizes,
+                    &mut self.terminal_engines,
+                    rects,
+                    None,
+                    events,
+                );
+            }
+        }
+    }
+
+    /// Route a child-process exit for `pane_id` through the pane's exit policy,
+    /// returning the resulting domain events.
+    ///
+    /// The child is already dead: the backend's watcher reaped it and set its
+    /// `exited` flag before this exit became observable. [`on_child_exit`]
+    /// applies the pane's exit policy — a `CloseOnExit` pane is removed (its tab
+    /// may close and the last tab quit) and its runtime bookkeeping is released
+    /// while the survivors reflow; a `RespawnShell` pane keeps its slot and its
+    /// bookkeeping, its lifecycle advancing to `Spawning`. An exit for a pane
+    /// already gone — closed while the exit waited in the inbox — is dropped.
+    ///
+    /// Releasing a removed pane's bookkeeping drops its PTY handle, size cache,
+    /// terminal engine, and the backend's own PTY entry. The backend purge goes
+    /// through `kill`, which drops the writer, joins the finished watcher, and
+    /// frees the master fd; the `exited` flag the watcher set makes it send no
+    /// signal to the dead child, so the purge is a bounded, inline call.
+    ///
+    /// `exited_at` is supplied by the producer that observed the exit; the
+    /// handler never reads the clock itself.
+    pub fn handle_child_exit(
+        &mut self,
+        pane_id: PaneId,
+        status: ExitStatus,
+        exited_at: SystemTime,
+    ) -> Vec<Event> {
+        // A signal-terminated child carries no numeric code; the session models
+        // that as `None`.
+        let exit_code = match status {
+            ExitStatus::ExitCode(code) => Some(code),
+            ExitStatus::Signaled(_) => None,
+        };
+
+        // Find the session that owns the pane. An exit for a pane already gone
+        // (closed while the exit waited in the inbox) is dropped.
+        let Some(session_id) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.panes.get(pane_id).is_some())
+            .map(|(id, _)| *id)
+        else {
+            return Vec::new();
+        };
+
+        // Clone the shared backend before borrowing the session: releasing the
+        // pane's PTY entry then needs no `&self` across the mutation.
+        let backend = Arc::clone(self.pty_backend());
+
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("session located above");
+        // The pane is in the registry but no tab's layout holds it — a
+        // registry↔layout desync (`OrphanedPaneRecord`) no valid state produces.
+        // Drop the exit: a data desync must not crash the runtime.
+        let Ok(tab_id) = Self::tab_of_pane(session, pane_id) else {
+            return Vec::new();
+        };
+
+        // Solve the tab against a deterministic viewport so focus repair ranks
+        // candidates geometrically even when no client currently views the tab.
+        let tab_rect = Rect::new(Point { x: 0, y: 0 }, Self::close_viewport(session, tab_id));
+
+        // Apply the exit policy: `PaneProcessExited`, then either the removal
+        // cascade (`CloseOnExit`) or a lifecycle advance to `Spawning`
+        // (`RespawnShell`).
+        let mut events = on_child_exit(
+            session,
+            tab_id,
+            pane_id,
+            exit_code,
+            exited_at,
+            tab_rect,
+            EmptyTabPolicy::default(),
+        );
+
+        // A respawning pane keeps its slot and bookkeeping — nothing to release.
+        if session.panes.get(pane_id).is_some() {
+            return events;
+        }
+
+        // The policy removed the pane: drop its runtime bookkeeping and reflow
+        // the survivors into the space it freed.
+        self.release_pane_and_reflow(session_id, tab_id, pane_id, backend.as_ref(), &mut events);
+
+        // Release the backend's own PTY entry. The child already exited, so the
+        // `exited`-flag guard skips the signal — this only drops the writer,
+        // joins the finished watcher, and frees the master fd.
+        let _ = backend.kill(pane_id, KillPolicy::Force);
+
+        self.render_scheduler
+            .invalidate(InvalidationReason::LayoutChanged);
+
+        events
     }
 
     /// Move one border of a pane by an exact cell count, then resize the
