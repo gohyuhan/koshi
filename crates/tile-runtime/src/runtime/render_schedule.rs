@@ -44,7 +44,8 @@ pub const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidationReason {
-    /// A child wrote bytes that changed visible cells.
+    /// A live pane's child wrote output bytes, staling that pane's cells,
+    /// cursor, or modes.
     PtyOutput = 0,
     /// The layout tree changed (split, close, resize, reflow).
     LayoutChanged = 1,

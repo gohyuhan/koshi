@@ -52,6 +52,7 @@ use tile_session::session::{
     state::Session,
     tab_ops,
 };
+use tile_terminal::engine::TerminalEngine;
 
 use crate::runtime::{state::Runtime, transaction::TransactionScope};
 
@@ -413,8 +414,11 @@ impl Runtime {
 
         // Park the handle and record its size so its receivers keep feeding output
         // and the reflows below can tell whether a later resize is a real change.
+        // The terminal engine gives the child's output a grid to land in.
         self.pty_handles.insert(new_pane_id, handle);
         self.pty_sizes.insert(new_pane_id, spawn_size);
+        self.terminal_engines
+            .insert(new_pane_id, TerminalEngine::new(spawn_size));
         // Announce the new pane's size — PaneCreated carries none.
         events.push(Event::PtyResized(PtyResized {
             pane_id: new_pane_id,
@@ -427,6 +431,7 @@ impl Runtime {
             backend.as_ref(),
             &self.pty_handles,
             &mut self.pty_sizes,
+            &mut self.terminal_engines,
             rects,
             Some(new_pane_id),
             &mut events,
@@ -442,6 +447,7 @@ impl Runtime {
                     backend.as_ref(),
                     &self.pty_handles,
                     &mut self.pty_sizes,
+                    &mut self.terminal_engines,
                     prev_rects,
                     None,
                     &mut events,
@@ -544,9 +550,12 @@ impl Runtime {
             EmptyTabPolicy::default(),
         );
 
-        // The pane is gone from state; drop its runtime PTY bookkeeping too.
+        // The pane is gone from state; drop its runtime bookkeeping too: PTY
+        // handle, size cache, and terminal engine. Output bytes still in
+        // flight for the pane now find no engine and are dropped.
         self.pty_handles.remove(&target.pane_id);
         self.pty_sizes.remove(&target.pane_id);
+        self.terminal_engines.remove(&target.pane_id);
 
         // The survivors reclaim the closed pane's space: re-solve the tab and
         // resize each live PTY whose size changed. When the close emptied the
@@ -569,6 +578,7 @@ impl Runtime {
                     backend.as_ref(),
                     &self.pty_handles,
                     &mut self.pty_sizes,
+                    &mut self.terminal_engines,
                     rects,
                     None,
                     &mut events,
@@ -677,6 +687,7 @@ impl Runtime {
             backend.as_ref(),
             &self.pty_handles,
             &mut self.pty_sizes,
+            &mut self.terminal_engines,
             rects,
             None,
             &mut events,
@@ -787,6 +798,7 @@ impl Runtime {
                 backend.as_ref(),
                 &self.pty_handles,
                 &mut self.pty_sizes,
+                &mut self.terminal_engines,
                 rects,
                 None,
                 &mut events,
@@ -930,8 +942,11 @@ impl Runtime {
 
         // Park the handle and record its size so its receivers keep feeding
         // output and later reflows can tell whether a resize is a real change.
+        // The terminal engine gives the child's output a grid to land in.
         self.pty_handles.insert(new_pane_id, handle);
         self.pty_sizes.insert(new_pane_id, spawn_size);
+        self.terminal_engines
+            .insert(new_pane_id, TerminalEngine::new(spawn_size));
         // Announce the new pane's size — PaneCreated carries none.
         events.push(Event::PtyResized(PtyResized {
             pane_id: new_pane_id,
@@ -948,6 +963,7 @@ impl Runtime {
                     backend.as_ref(),
                     &self.pty_handles,
                     &mut self.pty_sizes,
+                    &mut self.terminal_engines,
                     prev_rects,
                     None,
                     &mut events,
@@ -1047,11 +1063,13 @@ impl Runtime {
         // move to the nearest surviving tab, last-tab close quits the session.
         let mut events = tab_ops::close_tab(session, tab_id);
 
-        // The panes are gone from state; drop their runtime PTY bookkeeping.
-        // Keyed off the layout's own leaf list — the exact set the op removed.
+        // The panes are gone from state; drop their runtime bookkeeping — PTY
+        // handle, size cache, and terminal engine. Keyed off the layout's own
+        // leaf list — the exact set the op removed.
         for pane_id in &pane_ids {
             self.pty_handles.remove(pane_id);
             self.pty_sizes.remove(pane_id);
+            self.terminal_engines.remove(pane_id);
         }
 
         // Displaced viewers landed on the nearest surviving tab (the
@@ -1068,6 +1086,7 @@ impl Runtime {
                     backend.as_ref(),
                     &self.pty_handles,
                     &mut self.pty_sizes,
+                    &mut self.terminal_engines,
                     rects,
                     None,
                     &mut events,
@@ -1192,6 +1211,7 @@ impl Runtime {
                     backend.as_ref(),
                     &self.pty_handles,
                     &mut self.pty_sizes,
+                    &mut self.terminal_engines,
                     rects,
                     None,
                     &mut events,
@@ -1374,6 +1394,7 @@ impl Runtime {
             backend.as_ref(),
             &self.pty_handles,
             &mut self.pty_sizes,
+            &mut self.terminal_engines,
             rects,
             None,
             &mut events,
@@ -1783,12 +1804,14 @@ impl Runtime {
     /// A pane is passed to the executor only when it has a live handle, is not
     /// `skip` (the freshly-spawned pane is sized separately), and its new
     /// [`compute_pty_size`] differs from `pty_sizes` — so an unchanged pane is
-    /// left alone. The executor is stateless; this owns the last-set-size cache,
-    /// updating it for every pane it resizes.
+    /// left alone. The executor is stateless; this owns the last-set-size cache
+    /// and the terminal-engine map, updating the cache and resizing the pane's
+    /// engine grid for every pane it resizes, so engine and PTY agree on size.
     fn reflow_changed(
         backend: &dyn PtyBackend,
         pty_handles: &HashMap<PaneId, PtyHandle>,
         pty_sizes: &mut HashMap<PaneId, PtySize>,
+        terminal_engines: &mut HashMap<PaneId, TerminalEngine>,
         rects: Vec<(PaneId, Option<Rect>)>,
         skip: Option<PaneId>,
         events: &mut Vec<Event>,
@@ -1807,6 +1830,9 @@ impl Runtime {
         for result in resize_for_layout_change(backend, items) {
             if let Some(size) = result.applied {
                 pty_sizes.insert(result.pane_id, size);
+                if let Some(engine) = terminal_engines.get_mut(&result.pane_id) {
+                    engine.resize(size);
+                }
                 events.push(Event::PtyResized(PtyResized {
                     pane_id: result.pane_id,
                     size,

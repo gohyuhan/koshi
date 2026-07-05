@@ -83,7 +83,7 @@ fn holds_one_session_with_one_tab_and_pane() {
 
     rt.sessions.insert(session_id, session);
     rt.terminal_engines
-        .insert(pane_id, TerminalState::new(PtySize { cols: 80, rows: 24 }));
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 80, rows: 24 }));
 
     assert_eq!(rt.sessions().len(), 1);
     let session = rt.sessions().get(&session_id).expect("session present");
