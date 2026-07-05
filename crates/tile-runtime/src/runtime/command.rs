@@ -55,7 +55,8 @@ use tile_session::session::{
 use tile_terminal::engine::TerminalEngine;
 
 use crate::runtime::{
-    render_schedule::InvalidationReason, state::Runtime, transaction::TransactionScope,
+    render_schedule::InvalidationReason, snapshot::solve_tab, state::Runtime,
+    transaction::TransactionScope,
 };
 
 /// A validation failure: the reason a command was rejected, plus an optional
@@ -1885,13 +1886,7 @@ impl Runtime {
         session
             .tabs
             .get(&tab_id)
-            .map(|tab| {
-                content_rects(&solve_with_mode(
-                    tab.layout(),
-                    tab.layout_mode(),
-                    Rect::new(Point { x: 0, y: 0 }, viewport),
-                ))
-            })
+            .map(|tab| content_rects(&solve_tab(tab, viewport)))
             .unwrap_or_default()
     }
 
@@ -2043,9 +2038,7 @@ impl Runtime {
                 }
             }
             CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => self
-                .sessions()
-                .values()
-                .find(|session| session.clients.get(*client_id).is_some())
+                .session_for_client(*client_id)
                 .map(Some)
                 .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale)),
             CommandSource::ExternalCli {

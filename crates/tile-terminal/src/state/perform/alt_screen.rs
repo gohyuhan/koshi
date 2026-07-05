@@ -2,6 +2,8 @@
 //! primary, reset the alternate to a fresh buffer, and stash the primary cursor
 //! across a `?1049` switch.
 
+use std::sync::Arc;
+
 use crate::state::{SavedCursor, TerminalState};
 
 impl TerminalState {
@@ -28,9 +30,10 @@ impl TerminalState {
     /// `?1049 h` entry and the `?1047 l`/`?1049 l` clearing exits.
     pub(super) fn reset_alternate_buffer(&mut self) {
         let fill = self.active_render().style.bg_fill();
-        let (rows, cols) = self.alternate.dimensions();
+        let alternate = Arc::make_mut(&mut self.alternate);
+        let (rows, cols) = alternate.dimensions();
         for row in 0..rows {
-            self.alternate.clear_line(row, 0, cols, fill);
+            alternate.clear_line(row, 0, cols, fill);
         }
         self.alternate_scroll_region = None;
         self.alternate_cursor.row = 0;

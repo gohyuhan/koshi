@@ -14,8 +14,8 @@ fn put(state: &mut TerminalState, row: u16, col: u16, ch: char, width: u8) {
 #[test]
 fn new_initializes_both_screens_to_blank_of_size() {
     let state = TerminalState::new(PtySize { cols: 5, rows: 3 });
-    assert_eq!(state.primary, Grid::blank(3, 5, Style::default()));
-    assert_eq!(state.alternate, Grid::blank(3, 5, Style::default()));
+    assert_eq!(*state.primary, Grid::blank(3, 5, Style::default()));
+    assert_eq!(*state.alternate, Grid::blank(3, 5, Style::default()));
 }
 
 #[test]
@@ -42,9 +42,9 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
 #[test]
 fn active_grid_follows_active_screen() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
-    assert!(std::ptr::eq(state.active_grid(), &state.primary));
+    assert!(std::ptr::eq(state.active_grid(), state.primary.as_ref()));
     state.active = Screen::Alternate;
-    assert!(std::ptr::eq(state.active_grid(), &state.alternate));
+    assert!(std::ptr::eq(state.active_grid(), state.alternate.as_ref()));
 }
 
 #[test]
@@ -65,8 +65,8 @@ fn active_grid_mut_follows_active_screen() {
 fn resize_reallocs_both_grids_to_new_size() {
     let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
     state.resize(PtySize { cols: 10, rows: 5 });
-    assert_eq!(state.primary, Grid::blank(5, 10, Style::default()));
-    assert_eq!(state.alternate, Grid::blank(5, 10, Style::default()));
+    assert_eq!(*state.primary, Grid::blank(5, 10, Style::default()));
+    assert_eq!(*state.alternate, Grid::blank(5, 10, Style::default()));
 }
 
 #[test]
@@ -82,8 +82,8 @@ fn resize_fills_each_grid_with_its_own_screen_background() {
     blue_fill.set_bg(Color::Indexed(4)); // bg-only: fg + attrs stay default
     let mut red_fill = Style::default();
     red_fill.set_bg(Color::Indexed(1));
-    assert_eq!(state.primary, Grid::blank(2, 4, blue_fill)); // primary keeps its own blue
-    assert_eq!(state.alternate, Grid::blank(2, 4, red_fill)); // alternate keeps its own red
+    assert_eq!(*state.primary, Grid::blank(2, 4, blue_fill)); // primary keeps its own blue
+    assert_eq!(*state.alternate, Grid::blank(2, 4, red_fill)); // alternate keeps its own red
 }
 
 #[test]
