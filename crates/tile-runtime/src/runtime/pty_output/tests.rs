@@ -1,11 +1,14 @@
 //! Tests for PTY output handling: bytes reach only the owning pane's engine,
-//! a decode carries across chunks, output schedules a render, and bytes for a
-//! pane with no engine are dropped.
+//! a decode carries across chunks, output schedules a render, device-query
+//! replies are written back to the pane's PTY, and bytes for a pane with no
+//! engine are dropped.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
-use tile_core::process::PtySize;
+use tile_core::process::{PtySize, ShellKind, SpawnSpec};
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pty::backend::state::PtyBackend;
 use tile_terminal::engine::TerminalEngine;
@@ -23,10 +26,12 @@ impl SnapshotProvider for DummySnapshotProvider {}
 struct DummyStorage;
 impl Storage for DummyStorage {}
 
-/// A bare runtime with stub services and no sessions. The sender is returned
-/// so the inbox stays open.
-fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
+/// A bare runtime with stub services and no sessions, plus the fake PTY
+/// backend for asserting on writes. The sender is returned so the inbox stays
+/// open.
+fn new_runtime() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+    let fake = Arc::new(FakePtyBackend::new());
+    let pty_backend: Arc<dyn PtyBackend> = fake.clone();
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
     let (tx, inbox_rx) = mpsc::channel();
@@ -37,7 +42,7 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
         inbox_rx,
         TerminalCleanupGuard::new(),
     );
-    (runtime, tx)
+    (runtime, fake, tx)
 }
 
 /// Install an 8x3 terminal engine for a fresh pane id and return the id.
@@ -46,6 +51,19 @@ fn add_engine(rt: &mut Runtime) -> PaneId {
     rt.terminal_engines
         .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 3 }));
     pane_id
+}
+
+/// Register `pane_id` with the fake backend so its writes are recorded.
+fn spawn_in_fake(fake: &FakePtyBackend, pane_id: PaneId) {
+    let spec = SpawnSpec {
+        program: PathBuf::from("/bin/zsh"),
+        args: Vec::new(),
+        cwd: None,
+        env: BTreeMap::new(),
+        shell_kind: ShellKind::Zsh,
+    };
+    fake.spawn(pane_id, spec, PtySize { cols: 8, rows: 3 })
+        .expect("fake spawn succeeds");
 }
 
 /// The character at (`row`, `col`) on `pane_id`'s active grid.
@@ -60,7 +78,7 @@ fn ch(rt: &Runtime, pane_id: PaneId, row: u16, col: u16) -> char {
 
 #[test]
 fn bytes_update_only_the_owning_panes_grid() {
-    let (mut rt, _tx) = new_runtime();
+    let (mut rt, _fake, _tx) = new_runtime();
     let pane = add_engine(&mut rt);
     let other = add_engine(&mut rt);
 
@@ -87,7 +105,7 @@ fn bytes_update_only_the_owning_panes_grid() {
 
 #[test]
 fn an_escape_sequence_split_across_two_events_decodes_once() {
-    let (mut rt, _tx) = new_runtime();
+    let (mut rt, _fake, _tx) = new_runtime();
     let pane = add_engine(&mut rt);
 
     // SGR 31 (red foreground) split mid-sequence across two output events:
@@ -109,7 +127,7 @@ fn an_escape_sequence_split_across_two_events_decodes_once() {
 
 #[test]
 fn output_schedules_a_render() {
-    let (mut rt, _tx) = new_runtime();
+    let (mut rt, _fake, _tx) = new_runtime();
     let pane = add_engine(&mut rt);
 
     rt.handle_pty_output(pane, b"hi");
@@ -120,8 +138,61 @@ fn output_schedules_a_render() {
 }
 
 #[test]
+fn a_device_querys_reply_is_written_back_to_the_pty() {
+    let (mut rt, fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    spawn_in_fake(&fake, pane);
+
+    // DSR 5 (operating status) embedded in ordinary output.
+    rt.handle_pty_output(pane, b"hi\x1b[5n");
+
+    assert_eq!(fake.writes(pane).unwrap(), vec![b"\x1b[0n".to_vec()]);
+}
+
+#[test]
+fn replies_from_one_chunk_are_written_as_one_batch_in_query_order() {
+    let (mut rt, fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    spawn_in_fake(&fake, pane);
+
+    rt.handle_pty_output(pane, b"\x1b[5n\x1b[6n");
+
+    assert_eq!(
+        fake.writes(pane).unwrap(),
+        vec![b"\x1b[0n\x1b[1;1R".to_vec()]
+    );
+}
+
+#[test]
+fn output_without_a_query_writes_nothing_back() {
+    let (mut rt, fake, _tx) = new_runtime();
+    let pane = add_engine(&mut rt);
+    spawn_in_fake(&fake, pane);
+
+    rt.handle_pty_output(pane, b"hi\x1b[31m");
+
+    assert_eq!(fake.writes(pane).unwrap(), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn a_failed_reply_write_is_dropped_and_output_still_lands() {
+    let (mut rt, fake, _tx) = new_runtime();
+    // The engine exists but the pane was never spawned in the backend, so the
+    // reply write fails with an unknown-pane error.
+    let pane = add_engine(&mut rt);
+
+    rt.handle_pty_output(pane, b"x\x1b[5n");
+
+    // The chunk still reached the grid and scheduled a render; the failed
+    // write left no record.
+    assert_eq!(ch(&rt, pane, 0, 0), 'x');
+    assert!(rt.render_scheduler.poll(Instant::now()));
+    assert!(fake.writes(pane).is_err());
+}
+
+#[test]
 fn bytes_for_a_pane_with_no_engine_are_ignored() {
-    let (mut rt, _tx) = new_runtime();
+    let (mut rt, _fake, _tx) = new_runtime();
     let live = add_engine(&mut rt);
     let gone = PaneId::new();
 

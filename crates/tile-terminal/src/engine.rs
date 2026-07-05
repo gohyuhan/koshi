@@ -6,7 +6,9 @@
 //! at any byte; the parser is the state machine that carries such a partial
 //! decode from one chunk to the next, so it lives exactly as long as the
 //! pane's screen state. Bundling the pair keeps a pane's decoder and screen
-//! model one unit under one map entry in the runtime.
+//! model one unit under one map entry in the runtime. Each
+//! [`advance`](TerminalEngine::advance) call also hands back the reply bytes
+//! the chunk's device queries produced, for the caller to write into the PTY.
 
 use tile_core::process::PtySize;
 
@@ -32,12 +34,17 @@ impl TerminalEngine {
         }
     }
 
-    /// Feed one chunk of PTY output through the parser into the state.
+    /// Feed one chunk of PTY output through the parser into the state, and
+    /// return the reply bytes any device queries in the chunk produced
+    /// (DA/DSR/DECRQM answers — empty when the chunk held no query). The
+    /// caller writes the replies back into the pane's PTY.
     ///
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
     /// the parser resumes the partial decode on the next call.
-    pub fn advance(&mut self, bytes: &[u8]) {
+    #[must_use = "undelivered replies hang the querying app"]
+    pub fn advance(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.state, bytes);
+        self.state.take_replies()
     }
 
     /// The screen model, for reads (rendering, cursor and mode queries).
