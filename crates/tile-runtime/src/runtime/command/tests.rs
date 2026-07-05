@@ -7943,3 +7943,127 @@ fn close_pane_closing_the_promoted_pane_drops_the_fullscreen() {
         Some(root)
     );
 }
+
+/// The (rows, cols) of `pane`'s terminal-engine grid.
+fn engine_dimensions(rt: &Runtime, pane: PaneId) -> (u16, u16) {
+    rt.terminal_engines()[&pane]
+        .state()
+        .active_grid()
+        .dimensions()
+}
+
+#[test]
+fn new_pane_installs_a_terminal_engine_at_spawn_size() {
+    let (rt, _fake, _tx, _sid, _client_id, root, pane_a, size_a) = resize_fixture();
+
+    assert!(rt.terminal_engines().contains_key(&pane_a));
+    assert_eq!(
+        engine_dimensions(&rt, pane_a),
+        (size_a.rows, size_a.cols),
+        "engine grid matches the spawned PTY size"
+    );
+    // The fixture's root pane never spawned a PTY, so it has no engine.
+    assert!(!rt.terminal_engines().contains_key(&root));
+}
+
+#[test]
+fn close_pane_removes_the_terminal_engine() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    assert!(rt.terminal_engines().contains_key(&pane_a));
+
+    // No explicit pane: the focused (split) pane closes and its engine goes
+    // with its PTY bookkeeping.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(!rt.terminal_engines().contains_key(&pane_a));
+}
+
+#[test]
+fn new_tab_installs_a_terminal_engine_at_spawn_size() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let new_pane = other_pane(&rt, sid, root);
+    assert!(rt.terminal_engines().contains_key(&new_pane));
+    assert_eq!(
+        engine_dimensions(&rt, new_pane),
+        (rt.pty_sizes[&new_pane].rows, rt.pty_sizes[&new_pane].cols),
+        "engine grid matches the spawned PTY size"
+    );
+}
+
+#[test]
+fn close_tab_removes_the_terminal_engines_of_its_panes() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // A second tab whose single pane spawned an engine.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+    assert!(rt.terminal_engines().contains_key(&new_pane));
+
+    // Closing the client's active tab (the new one) drops its pane's engine.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(!rt.terminal_engines().contains_key(&new_pane));
+}
+
+#[test]
+fn resize_pane_resizes_the_terminal_engine_with_its_pty() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            amount: 5,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    // The reflow resized A's PTY by 5 columns; its engine grid follows.
+    let expected = PtySize {
+        cols: size_a.cols + 5,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+    assert_eq!(
+        engine_dimensions(&rt, pane_a),
+        (expected.rows, expected.cols)
+    );
+}

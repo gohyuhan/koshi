@@ -2,9 +2,11 @@
 //! reported working directory, and scrollback.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
-//! buffers. The runtime owns the `PaneId → TerminalState` map, so the state
-//! itself carries no identity. The VTE performer (see the `perform` submodule)
-//! mutates this model as PTY output arrives.
+//! buffers. The state travels inside a per-pane
+//! [`TerminalEngine`](crate::engine::TerminalEngine) — the runtime owns the
+//! `PaneId → TerminalEngine` map — so the state itself carries no identity.
+//! The VTE performer (see the `perform` submodule) mutates this model as PTY
+//! output arrives.
 //!
 //! The state's component types live in sibling submodules — the active
 //! [`Screen`], the per-screen [`RenderState`] and its [`Charset`] slots, the

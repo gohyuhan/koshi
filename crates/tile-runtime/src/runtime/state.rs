@@ -11,11 +11,11 @@ use tile_core::process::PtySize;
 use tile_observability::cleanup::TerminalCleanupGuard;
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_session::session::state::Session;
-use tile_terminal::state::TerminalState;
+use tile_terminal::engine::TerminalEngine;
 
 use crate::{
     placeholder::{EventBus, IpcServer, SnapshotProvider, Storage},
-    runtime::event::RuntimeEvent,
+    runtime::{event::RuntimeEvent, render_schedule::RenderScheduler},
 };
 
 /// Owns all mutable state for one tile process: the sessions and their layout
@@ -27,8 +27,11 @@ pub struct Runtime {
     pub(crate) sessions: HashMap<SessionId, Session>,
     /// Shared backend that spawns, resizes, writes to, and kills child PTYs.
     pty_backend: Arc<dyn PtyBackend>,
-    /// Per-pane terminal emulator state, keyed by pane id.
-    terminal_engines: HashMap<PaneId, TerminalState>,
+    /// Per-pane terminal engine (VTE parser + screen state), keyed by pane id.
+    /// An entry is inserted when the pane's child spawns, resized whenever its
+    /// PTY is, and removed when the pane closes — engines exist exactly for
+    /// live panes.
+    pub(crate) terminal_engines: HashMap<PaneId, TerminalEngine>,
     /// The read side of every spawned pane's PTY, keyed by pane id. Holding the
     /// handle keeps its reader thread feeding output; the event loop polls these.
     pub(crate) pty_handles: HashMap<PaneId, PtyHandle>,
@@ -45,6 +48,9 @@ pub struct Runtime {
     storage: Arc<dyn Storage>,
     /// Control-socket server, present once IPC is wired.
     ipc_server: Option<IpcServer>,
+    /// Decides when the dispatcher repaints: event handlers mark invalidation
+    /// reasons on it, the event loop polls it for render timing.
+    pub(crate) render_scheduler: RenderScheduler,
     /// Receiving end of the single runtime event inbox; the loop drains it.
     inbox_rx: Receiver<RuntimeEvent>,
     /// Restores the outer terminal when the process ends or panics.
@@ -52,8 +58,9 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Build a runtime with no sessions and no terminal engines, holding the
-    /// given PTY backend, service handles, event inbox, and cleanup guard.
+    /// Build a runtime with no sessions, no terminal engines, and a fresh
+    /// render scheduler, holding the given PTY backend, service handles,
+    /// event inbox, and cleanup guard.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
         snapshot_provider: Arc<dyn SnapshotProvider>,
@@ -71,6 +78,7 @@ impl Runtime {
             snapshot_provider,
             storage,
             ipc_server: None,
+            render_scheduler: RenderScheduler::new(),
             inbox_rx,
             cleanup_guard,
         }
@@ -85,7 +93,7 @@ impl Runtime {
         &self.pty_backend
     }
     /// Borrow the per-pane terminal engine map.
-    pub fn terminal_engines(&self) -> &HashMap<PaneId, TerminalState> {
+    pub fn terminal_engines(&self) -> &HashMap<PaneId, TerminalEngine> {
         &self.terminal_engines
     }
     /// Borrow the event bus.
