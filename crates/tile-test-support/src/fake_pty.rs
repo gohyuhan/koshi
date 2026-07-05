@@ -27,7 +27,10 @@ struct PaneRecord {
     resizes: Vec<PtySize>,
     writes: Vec<Vec<u8>>,
     kills: Vec<KillPolicy>,
-    output_tx: Sender<Vec<u8>>,
+    /// The output channel's sending end. `None` once [`close_output`](FakePtyBackend::close_output)
+    /// drops it — modelling the child's PTY reaching EOF, after which no further
+    /// output can be pushed.
+    output_tx: Option<Sender<Vec<u8>>>,
     exit_tx: Sender<ExitStatus>,
 }
 
@@ -84,7 +87,23 @@ impl FakePtyBackend {
             .panes
             .get(&pane)
             .ok_or(PtyError::UnknownPane { pane })?;
-        let _ = record.output_tx.send(bytes.into());
+        if let Some(output_tx) = &record.output_tx {
+            let _ = output_tx.send(bytes.into());
+        }
+        Ok(())
+    }
+
+    /// Close a pane's output channel, modelling its PTY reaching EOF once the
+    /// child is gone: the handle's output receiver then reports the channel
+    /// closed, and later [`push_output`](Self::push_output) calls are silently
+    /// dropped. Returns [`PtyError::UnknownPane`] if the pane was never spawned.
+    pub fn close_output(&self, pane: PaneId) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let record = state
+            .panes
+            .get_mut(&pane)
+            .ok_or(PtyError::UnknownPane { pane })?;
+        record.output_tx = None;
         Ok(())
     }
 
@@ -174,7 +193,7 @@ impl PtyBackend for FakePtyBackend {
                 resizes: vec![size],
                 writes: Vec::new(),
                 kills: Vec::new(),
-                output_tx,
+                output_tx: Some(output_tx),
                 exit_tx,
             },
         );

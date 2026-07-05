@@ -37,14 +37,17 @@ pub trait PtyBackend: Send + Sync {
 /// The read side of one spawned pane: its id and the channels the backend
 /// delivers child output and exit status on.
 ///
-/// Reads are non-blocking (`try_*`) so a single thread can poll without
-/// scheduling. The backend keeps the sending ends (see [`PtyHandle::new`]);
-/// dropping the handle just closes the receivers.
+/// The channels are held as `Option`: [`take_receivers`](PtyHandle::take_receivers)
+/// moves them out so a forwarder thread can block on them, after which the
+/// drained handle stays live as a per-pane token (`contains_key`/`remove` still
+/// address it) and the `try_*` polls return `None`. While the receivers are
+/// held, the `try_*` methods poll them without blocking. The backend keeps the
+/// sending ends (see [`PtyHandle::new`]); dropping the handle closes the receivers.
 #[derive(Debug)]
 pub struct PtyHandle {
     pane_id: PaneId,
-    output: Receiver<Vec<u8>>,
-    exit: Receiver<ExitStatus>,
+    output: Option<Receiver<Vec<u8>>>,
+    exit: Option<Receiver<ExitStatus>>,
 }
 
 impl PtyHandle {
@@ -55,8 +58,8 @@ impl PtyHandle {
         let (exit_sender, exit_receiver) = channel();
         let new_pty_handle = PtyHandle {
             pane_id,
-            output: output_receiver,
-            exit: exit_receiver,
+            output: Some(output_receiver),
+            exit: Some(exit_receiver),
         };
 
         (new_pty_handle, output_sender, exit_sender)
@@ -68,13 +71,27 @@ impl PtyHandle {
         self.pane_id
     }
 
-    /// The next chunk of child output, or `None` if none is pending.
-    pub fn try_read_output(&self) -> Option<Vec<u8>> {
-        self.output.try_recv().ok()
+    /// Move the output and exit receivers out of the handle, transferring
+    /// ownership to a forwarder thread that blocks on them. Returns `None` if
+    /// they were already taken.
+    pub fn take_receivers(&mut self) -> Option<(Receiver<Vec<u8>>, Receiver<ExitStatus>)> {
+        let output = self.output.take()?;
+        let exit = self.exit.take()?;
+        Some((output, exit))
     }
 
-    /// The child's exit status, or `None` if it has not exited yet.
+    /// The next chunk of child output, or `None` if none is pending or the
+    /// receivers have been taken.
+    pub fn try_read_output(&self) -> Option<Vec<u8>> {
+        self.output.as_ref().and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// The child's exit status, or `None` if it has not exited yet or the
+    /// receivers have been taken.
     pub fn try_exit_status(&self) -> Option<ExitStatus> {
-        self.exit.try_recv().ok()
+        self.exit.as_ref().and_then(|rx| rx.try_recv().ok())
     }
 }
+
+#[cfg(test)]
+mod tests;

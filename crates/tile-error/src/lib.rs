@@ -1,8 +1,8 @@
-//! Aggregate error. [`error::TileError`] wraps any crate's domain error so the runtime
-//! and diagnostics can handle one type while preserving its category and
-//! severity. It lives in `tile-observability` because wrapping the concrete
-//! per-crate errors needs those crates as dependencies, which `tile-core` (a
-//! dependency of every crate) cannot take on.
+//! `tile-error` — the aggregate [`TileError`] wraps any crate's domain error so
+//! the runtime and diagnostics can handle one type while preserving its
+//! category and severity. It lives in its own crate because wrapping the
+//! concrete per-crate errors needs those crates as dependencies, which
+//! `tile-core` (a dependency of every crate) cannot take on.
 
 use thiserror::Error;
 use tile_core::error::{DomainCategory, DomainError, Severity};

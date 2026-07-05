@@ -38,29 +38,24 @@ use tile_session::session::state::{Session, Tab};
 use tile_session::session::tab_ops;
 use tile_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{SnapshotProvider, Storage};
+use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
-
-struct DummySnapshotProvider;
-impl SnapshotProvider for DummySnapshotProvider {}
-
-struct DummyStorage;
-impl Storage for DummyStorage {}
 
 /// A bare runtime with stub services and no sessions. The sender is returned so
 /// the inbox stays open.
 fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
     let runtime = Runtime::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
+        tx.clone(),
         TerminalCleanupGuard::new(),
     );
     (runtime, tx)
@@ -72,14 +67,15 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
 fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
     let runtime = Runtime::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
+        tx.clone(),
         TerminalCleanupGuard::new(),
     );
     (runtime, fake, tx)
@@ -5946,14 +5942,15 @@ fn close_tab_kills_every_pane_concurrently() {
         inner: fake.clone(),
         barrier: Barrier::new(3),
     });
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
-    let (_tx, inbox_rx) = mpsc::channel();
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
+    let (tx, inbox_rx) = mpsc::channel();
     let mut rt = Runtime::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
+        tx.clone(),
         TerminalCleanupGuard::new(),
     );
 

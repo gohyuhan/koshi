@@ -13,23 +13,19 @@ use tile_session::session::state::Tab;
 use tile_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
-
-struct DummySnapshotProvider;
-impl SnapshotProvider for DummySnapshotProvider {}
-
-struct DummyStorage;
-impl Storage for DummyStorage {}
+use crate::placeholder::{NullSnapshotProvider, NullStorage};
 
 fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
     let runtime = Runtime::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
+        tx.clone(),
         TerminalCleanupGuard::new(),
     );
     (runtime, tx)
