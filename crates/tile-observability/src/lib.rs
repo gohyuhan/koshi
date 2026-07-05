@@ -1,9 +1,6 @@
 //! `tile-observability` — diagnostics: tracing setup, debug dumps, crash context,
 //! and event logs.
 
-/// Error types and wrappers for all tile domains.
-pub mod error;
-
 /// User-facing diagnostic messages (config errors, command rejections, resize failures).
 pub mod diagnostics;
 

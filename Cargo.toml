@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tile-cli",
     "crates/tile-core",
+    "crates/tile-error",
     "crates/tile-runtime",
     "crates/tile-session",
     "crates/tile-layout",

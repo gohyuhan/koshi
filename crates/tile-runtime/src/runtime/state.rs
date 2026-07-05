@@ -3,7 +3,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{mpsc::Receiver, Arc},
+    sync::{
+        mpsc::{Receiver, Sender},
+        Arc,
+    },
 };
 
 use tile_core::ids::{PaneId, SessionId};
@@ -33,7 +36,9 @@ pub struct Runtime {
     /// live panes.
     pub(crate) terminal_engines: HashMap<PaneId, TerminalEngine>,
     /// The read side of every spawned pane's PTY, keyed by pane id. Holding the
-    /// handle keeps its reader thread feeding output; the event loop polls these.
+    /// handle keeps the pane's PTY sending ends alive and marks the pane live;
+    /// a per-pane forwarder thread owns the handle's receivers and pushes the
+    /// child's output and exit into the inbox.
     pub(crate) pty_handles: HashMap<PaneId, PtyHandle>,
     /// The last size each live pane's PTY was set to, keyed by pane id. Kept in
     /// sync by every path that resizes a PTY, so a reflow can resize (and emit
@@ -53,6 +58,9 @@ pub struct Runtime {
     pub(crate) render_scheduler: RenderScheduler,
     /// Receiving end of the single runtime event inbox; the loop drains it.
     inbox_rx: Receiver<RuntimeEvent>,
+    /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
+    /// they can push [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`].
+    pub(crate) inbox_tx: Sender<RuntimeEvent>,
     /// Restores the outer terminal when the process ends or panics.
     cleanup_guard: TerminalCleanupGuard,
 }
@@ -66,6 +74,7 @@ impl Runtime {
         snapshot_provider: Arc<dyn SnapshotProvider>,
         storage: Arc<dyn Storage>,
         inbox_rx: Receiver<RuntimeEvent>,
+        inbox_tx: Sender<RuntimeEvent>,
         cleanup_guard: TerminalCleanupGuard,
     ) -> Self {
         Runtime {
@@ -80,6 +89,7 @@ impl Runtime {
             ipc_server: None,
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
+            inbox_tx,
             cleanup_guard,
         }
     }

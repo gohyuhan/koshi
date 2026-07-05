@@ -59,6 +59,26 @@ use crate::runtime::{
     transaction::TransactionScope,
 };
 
+/// The PTY size for a tab's sole root pane filling `viewport`: solve the
+/// single-pane layout, take the root's content rect, and clamp it to a PTY size.
+/// Shared by the new-tab path and genesis so both size the root pane identically.
+///
+/// Callers that gate on minimum size (the new-tab command) check
+/// [`fits`](tile_layout::solver::fits) first; genesis has no gate, and the
+/// solver always places a single leaf, so the `unwrap_or` fallback is a floor,
+/// not a real path.
+pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size) -> PtySize {
+    let candidate = LayoutNode::Pane(pane_id);
+    let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+    let rects = content_rects(&solve(&candidate, tab_rect));
+    let rect = rects
+        .iter()
+        .find(|(id, _)| *id == pane_id)
+        .and_then(|(_, content)| *content)
+        .unwrap_or(tab_rect);
+    compute_pty_size(rect)
+}
+
 /// A validation failure: the reason a command was rejected, plus an optional
 /// human-facing hint. The `Err` half of [`Runtime::validate`].
 struct Rejection {
@@ -415,13 +435,18 @@ impl Runtime {
             issued_at,
         );
 
-        // Park the handle and record its size so its receivers keep feeding output
-        // and the reflows below can tell whether a later resize is a real change.
-        // The terminal engine gives the child's output a grid to land in.
-        self.pty_handles.insert(new_pane_id, handle);
-        self.pty_sizes.insert(new_pane_id, spawn_size);
-        self.terminal_engines
-            .insert(new_pane_id, TerminalEngine::new(spawn_size));
+        // Park the handle so a forwarder relays its output/exit, and record its
+        // size so the reflows below can tell whether a later resize is a real
+        // change. The terminal engine gives the child's output a grid to land in.
+        Self::park_pane_pty(
+            &mut self.pty_handles,
+            &mut self.pty_sizes,
+            &mut self.terminal_engines,
+            &self.inbox_tx,
+            new_pane_id,
+            handle,
+            spawn_size,
+        );
         // Announce the new pane's size — PaneCreated carries none.
         events.push(Event::PtyResized(PtyResized {
             pane_id: new_pane_id,
@@ -1013,15 +1038,7 @@ impl Runtime {
                 Rejection::new(RejectReason::MinSize, "not enough space for a new tab"),
             );
         }
-        let rects = content_rects(&solve(&candidate, tab_rect));
-        let Some(new_rect) = rects
-            .iter()
-            .find(|(pane_id, _)| *pane_id == new_pane_id)
-            .and_then(|(_, content)| *content)
-        else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::InvalidState));
-        };
-        let spawn_size = compute_pty_size(new_rect);
+        let spawn_size = size_root_pane(new_pane_id, viewport);
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
@@ -1066,13 +1083,18 @@ impl Runtime {
             issued_at,
         );
 
-        // Park the handle and record its size so its receivers keep feeding
-        // output and later reflows can tell whether a resize is a real change.
-        // The terminal engine gives the child's output a grid to land in.
-        self.pty_handles.insert(new_pane_id, handle);
-        self.pty_sizes.insert(new_pane_id, spawn_size);
-        self.terminal_engines
-            .insert(new_pane_id, TerminalEngine::new(spawn_size));
+        // Park the handle so a forwarder relays its output/exit, and record its
+        // size so later reflows can tell whether a resize is a real change. The
+        // terminal engine gives the child's output a grid to land in.
+        Self::park_pane_pty(
+            &mut self.pty_handles,
+            &mut self.pty_sizes,
+            &mut self.terminal_engines,
+            &self.inbox_tx,
+            new_pane_id,
+            handle,
+            spawn_size,
+        );
         // Announce the new pane's size — PaneCreated carries none.
         events.push(Event::PtyResized(PtyResized {
             pane_id: new_pane_id,

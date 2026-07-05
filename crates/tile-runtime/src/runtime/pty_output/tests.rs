@@ -15,16 +15,10 @@ use tile_terminal::engine::TerminalEngine;
 use tile_terminal::style::{Color, Style};
 use tile_test_support::fake_pty::FakePtyBackend;
 
-use crate::placeholder::{SnapshotProvider, Storage};
+use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
-
-struct DummySnapshotProvider;
-impl SnapshotProvider for DummySnapshotProvider {}
-
-struct DummyStorage;
-impl Storage for DummyStorage {}
 
 /// A bare runtime with stub services and no sessions, plus the fake PTY
 /// backend for asserting on writes. The sender is returned so the inbox stays
@@ -32,14 +26,15 @@ impl Storage for DummyStorage {}
 fn new_runtime() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(DummySnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(DummyStorage);
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
     let runtime = Runtime::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
+        tx.clone(),
         TerminalCleanupGuard::new(),
     );
     (runtime, fake, tx)

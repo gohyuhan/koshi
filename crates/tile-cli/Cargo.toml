@@ -13,5 +13,14 @@ name = "tile"
 path = "src/main.rs"
 
 [dependencies]
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 thiserror = "2.0.18"
 tile-core = { version = "0.1.0", path = "../tile-core" }
+tile-observability = { version = "0.1.0", path = "../tile-observability" }
+tile-pty = { version = "0.1.0", path = "../tile-pty" }
+tile-renderer = { version = "0.1.0", path = "../tile-renderer" }
+tile-runtime = { version = "0.1.0", path = "../tile-runtime" }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tile-test-support = { version = "0.1.0", path = "../tile-test-support" }

@@ -73,7 +73,7 @@ impl std::fmt::Display for Severity {
 
 /// Implemented by every crate's domain error so a failure can be classified
 /// without knowing its concrete type. The aggregate `TileError` (in
-/// `tile-observability`) delegates through this trait.
+/// `tile-error`) delegates through this trait.
 pub trait DomainError {
     /// Which domain the failure belongs to.
     fn category(&self) -> DomainCategory;

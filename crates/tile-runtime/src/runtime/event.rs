@@ -58,6 +58,9 @@ pub enum RuntimeEvent {
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,
+    /// A request to stop the event loop and shut the process down. Produced by
+    /// the quit keybinding or by outer-input reaching end of stream.
+    Quit,
     /// Raw input bytes read from a client's terminal, awaiting decoding.
     OuterInput {
         /// Client the input came from.

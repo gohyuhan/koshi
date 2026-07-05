@@ -16,3 +16,15 @@ pub trait SnapshotProvider {}
 
 /// Session persistence backend. Stand-in until the storage layer is built.
 pub trait Storage {}
+
+/// A [`SnapshotProvider`] that holds nothing — the stock service until a real
+/// snapshot source exists, and the one tests use when they build a runtime
+/// without exercising snapshots.
+pub struct NullSnapshotProvider;
+impl SnapshotProvider for NullSnapshotProvider {}
+
+/// A [`Storage`] that persists nothing — the stock service until a real storage
+/// layer exists, and the one tests use when they build a runtime without
+/// exercising persistence.
+pub struct NullStorage;
+impl Storage for NullStorage {}
