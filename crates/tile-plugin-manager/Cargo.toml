@@ -1,7 +1,0 @@
-[package]
-name = "tile-plugin-manager"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]

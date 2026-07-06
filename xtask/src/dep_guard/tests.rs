@@ -17,20 +17,20 @@ fn graph(items: &[(&str, &[&str])]) -> Vec<CrateDeps> {
 #[test]
 fn allowed_graph_has_no_violations() {
     let g = graph(&[
-        ("tile-core", &[]),
-        ("tile-pty", &["tile-core", "portable-pty"]),
+        ("koshi-core", &[]),
+        ("koshi-pty", &["koshi-core", "portable-pty"]),
         (
-            "tile-plugin-host",
-            &["tile-core", "tile-plugin-api", "wasmtime"],
+            "koshi-plugin-host",
+            &["koshi-core", "koshi-plugin-api", "wasmtime"],
         ),
         (
-            "tile-plugin-manager",
-            &["tile-core", "tile-plugin-api", "tile-storage"],
+            "koshi-plugin-manager",
+            &["koshi-core", "koshi-plugin-api", "koshi-storage"],
         ),
         // Legitimately reaches wasmtime via the host; not a direct dep here.
         (
-            "tile-runtime",
-            &["tile-core", "tile-plugin-manager", "tile-plugin-host"],
+            "koshi-runtime",
+            &["koshi-core", "koshi-plugin-manager", "koshi-plugin-host"],
         ),
     ]);
     assert!(check(&g).is_empty());
@@ -38,19 +38,19 @@ fn allowed_graph_has_no_violations() {
 
 #[test]
 fn core_internal_dep_is_named() {
-    let g = graph(&[("tile-core", &["tile-pty"])]);
+    let g = graph(&[("koshi-core", &["koshi-pty"])]);
     let v = check(&g);
     assert_eq!(v.len(), 1);
-    assert!(v[0].contains("tile-core -> tile-pty"), "{}", v[0]);
+    assert!(v[0].contains("koshi-core -> koshi-pty"), "{}", v[0]);
 }
 
 #[test]
 fn plugin_manager_runtime_dep_is_named() {
-    let g = graph(&[("tile-plugin-manager", &["tile-runtime"])]);
+    let g = graph(&[("koshi-plugin-manager", &["koshi-runtime"])]);
     let v = check(&g);
     assert_eq!(v.len(), 1);
     assert!(
-        v[0].contains("tile-plugin-manager -> tile-runtime"),
+        v[0].contains("koshi-plugin-manager -> koshi-runtime"),
         "{}",
         v[0]
     );
@@ -58,11 +58,11 @@ fn plugin_manager_runtime_dep_is_named() {
 
 #[test]
 fn plugin_manager_host_dep_is_named() {
-    let g = graph(&[("tile-plugin-manager", &["tile-plugin-host"])]);
+    let g = graph(&[("koshi-plugin-manager", &["koshi-plugin-host"])]);
     let v = check(&g);
     assert_eq!(v.len(), 1);
     assert!(
-        v[0].contains("tile-plugin-manager -> tile-plugin-host"),
+        v[0].contains("koshi-plugin-manager -> koshi-plugin-host"),
         "{}",
         v[0]
     );
@@ -70,16 +70,16 @@ fn plugin_manager_host_dep_is_named() {
 
 #[test]
 fn wasmtime_outside_host_is_named() {
-    let g = graph(&[("tile-runtime", &["wasmtime"])]);
+    let g = graph(&[("koshi-runtime", &["wasmtime"])]);
     let v = check(&g);
     assert_eq!(v.len(), 1);
-    assert!(v[0].contains("tile-runtime -> wasmtime"), "{}", v[0]);
+    assert!(v[0].contains("koshi-runtime -> wasmtime"), "{}", v[0]);
 }
 
 #[test]
 fn portable_pty_outside_pty_is_named() {
-    let g = graph(&[("tile-pane", &["portable-pty"])]);
+    let g = graph(&[("koshi-pane", &["portable-pty"])]);
     let v = check(&g);
     assert_eq!(v.len(), 1);
-    assert!(v[0].contains("tile-pane -> portable-pty"), "{}", v[0]);
+    assert!(v[0].contains("koshi-pane -> portable-pty"), "{}", v[0]);
 }

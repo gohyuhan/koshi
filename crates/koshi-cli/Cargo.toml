@@ -1,0 +1,26 @@
+[package]
+name = "koshi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "koshi_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "koshi"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+thiserror = "2.0.18"
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-observability = { version = "0.1.0", path = "../koshi-observability" }
+koshi-pty = { version = "0.1.0", path = "../koshi-pty" }
+koshi-renderer = { version = "0.1.0", path = "../koshi-renderer" }
+koshi-runtime = { version = "0.1.0", path = "../koshi-runtime" }
+tracing = "0.1.44"
+
+[dev-dependencies]
+koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

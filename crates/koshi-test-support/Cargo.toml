@@ -1,0 +1,9 @@
+[package]
+name = "koshi-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-pty = { version = "0.1.0", path = "../koshi-pty" }

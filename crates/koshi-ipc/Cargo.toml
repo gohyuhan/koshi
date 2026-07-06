@@ -1,0 +1,9 @@
+[package]
+name = "koshi-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
