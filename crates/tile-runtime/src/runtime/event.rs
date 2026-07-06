@@ -20,7 +20,7 @@ use std::time::SystemTime;
 use tile_core::{
     command::CommandEnvelope,
     geometry::Size,
-    ids::{ClientId, PaneId},
+    ids::{ClientId, PaneId, SessionId, TabId},
     process::ExitStatus,
 };
 
@@ -55,6 +55,25 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// The client's new size in cells, before size reconciliation.
         size: Size,
+    },
+    /// A client joined a session and began viewing one of its tabs.
+    ClientAttached {
+        /// Session the client attached to.
+        session_id: SessionId,
+        /// The arriving client.
+        client_id: ClientId,
+        /// The client's terminal size in cells.
+        viewport: Size,
+        /// The tab the client begins viewing.
+        active_tab: TabId,
+        /// When the producer observed the attach, carried on the event so the
+        /// handler never reads the clock itself.
+        attached_at: SystemTime,
+    },
+    /// A client left, stopping its view of whatever tab it held.
+    ClientDetached {
+        /// The departing client.
+        client_id: ClientId,
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,

@@ -213,26 +213,31 @@ impl Session {
         Ok(())
     }
 
-    /// Attach `client` and mark the session live. `ClientAttached` only revives
-    /// a `Detaching` (no-client) session; attaching to an already-`Running` one
-    /// leaves the lifecycle unchanged.
-    pub fn attach_client(&mut self, client: Client) {
-        self.clients.attach(client);
+    /// Attach `client` and mark the session live, returning the record it
+    /// displaced when that id was already attached (a re-attach replaces in
+    /// place), else `None`. `ClientAttached` only revives a `Detaching`
+    /// (no-client) session; attaching to an already-`Running` one leaves the
+    /// lifecycle unchanged.
+    pub fn attach_client(&mut self, client: Client) -> Option<Client> {
+        let displaced = self.clients.attach(client);
         // `ClientAttached` only revives a `Detaching` session; from `Running`
         // it is an expected no-op, so a rejected transition is not a fault here.
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
+        displaced
     }
 
-    /// Detach the client `client_id`. When it was the *last* attached client the
-    /// session drops to `Detaching` — its tabs and panes stay alive; detaching
-    /// one of several clients leaves the session `Running`.
-    pub fn detach_client(&mut self, client_id: ClientId) {
-        self.clients.detach(client_id);
+    /// Detach the client `client_id`, returning the removed record (`None` if it
+    /// was not attached). When it was the *last* attached client the session
+    /// drops to `Detaching` — its tabs and panes stay alive; detaching one of
+    /// several clients leaves the session `Running`.
+    pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
+        let removed = self.clients.detach(client_id);
         if self.clients.is_empty() {
             // Already stopping/stopped sessions reject the park; that is fine —
             // a session winding down stays wound down when its last client goes.
             let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
+        removed
     }
 
     /// The viewport to size tab `tab_id` against: the per-axis minimum of the
