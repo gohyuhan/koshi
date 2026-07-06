@@ -43,7 +43,7 @@ use tile_layout::{
 use tile_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy};
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
-use tile_session::client::ClientRegistry;
+use tile_session::client::{Client, ClientRegistry};
 use tile_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
@@ -470,18 +470,15 @@ impl Runtime {
         // viewer, reflow its live panes to the viewport it now sizes against. A
         // tab left with no viewer has no viewport and keeps its sizes.
         if let Some(prev_tab) = prev_tab {
-            if let Some(viewport) = session.tab_viewport(prev_tab) {
-                let prev_rects = Self::tab_content_rects(session, prev_tab, viewport);
-                Self::reflow_changed(
-                    backend.as_ref(),
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    prev_rects,
-                    None,
-                    &mut events,
-                );
-            }
+            Self::reflow_tab_if_viewed(
+                backend.as_ref(),
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                prev_tab,
+                &mut events,
+            );
         }
 
         let mut scope = TransactionScope::new();
@@ -670,18 +667,15 @@ impl Runtime {
             })
         };
         if let Some(reflow_tab) = reflow_tab {
-            if let Some(viewport) = session.tab_viewport(reflow_tab) {
-                let rects = Self::tab_content_rects(session, reflow_tab, viewport);
-                Self::reflow_changed(
-                    backend,
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    rects,
-                    None,
-                    events,
-                );
-            }
+            Self::reflow_tab_if_viewed(
+                backend,
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                reflow_tab,
+                events,
+            );
         }
     }
 
@@ -768,6 +762,181 @@ impl Runtime {
         // `exited`-flag guard skips the signal — this only drops the writer,
         // joins the finished watcher, and frees the master fd.
         let _ = backend.kill(pane_id, KillPolicy::Force);
+
+        self.render_scheduler
+            .invalidate(InvalidationReason::LayoutChanged);
+
+        events
+    }
+
+    /// Attach a client to `session_id` viewing `active_tab`, then reconcile the
+    /// affected tabs' PTY sizes and schedule a redraw.
+    ///
+    /// A client lives in exactly one session. If this id already lives in another
+    /// session it is detached there first — reflowing the tab it leaves — so it
+    /// is never recorded twice. Within the target session an id that is already
+    /// attached is a re-attach: its view updates in place, keeping its per-tab
+    /// focus, scrollback offsets, and lock mode, and the tab it moves off of
+    /// reflows too. A fresh id is registered anew.
+    ///
+    /// The viewer joins each affected tab's effective size
+    /// ([`Session::tab_viewport`], the per-axis minimum across every client
+    /// viewing it), so a smaller client shrinks a tab and a departing one lets it
+    /// grow: the tab's live panes reflow to the new size, one
+    /// [`Event::PtyResized`] each. A tab no client views has no viewport and
+    /// keeps its sizes. The attach always invalidates
+    /// [`InvalidationReason::LayoutChanged`] so every client repaints from the
+    /// reconciled snapshot. An attach naming an unknown session, or a tab the
+    /// session does not hold, is dropped. `attached_at` is supplied by the
+    /// producer; the handler never reads the clock itself.
+    pub fn handle_client_attach(
+        &mut self,
+        session_id: SessionId,
+        client_id: ClientId,
+        viewport: Size,
+        active_tab: TabId,
+        attached_at: SystemTime,
+    ) -> Vec<Event> {
+        // Clone the shared backend before borrowing the session: the reflow then
+        // needs no `&self` across the mutation.
+        let backend = Arc::clone(self.pty_backend());
+        let mut events = Vec::new();
+
+        // Validate the target: an attach naming an unknown session, or a tab the
+        // session does not hold, is dropped so no client views a tab the renderer
+        // cannot solve.
+        match self.sessions.get(&session_id) {
+            Some(session) if session.tabs.contains_key(&active_tab) => {}
+            _ => return Vec::new(),
+        }
+
+        // If the id already lives in a different session, detach it there first —
+        // reflowing the tab it leaves — so it is never held in two registries.
+        if let Some(old_session_id) = self.session_for_client(client_id).map(|session| session.id) {
+            if old_session_id != session_id {
+                let old_session = self
+                    .sessions
+                    .get_mut(&old_session_id)
+                    .expect("session located above");
+                let old_tab = old_session
+                    .detach_client(client_id)
+                    .map(|client| client.active_tab());
+                if let Some(old_tab) = old_tab {
+                    Self::reflow_tab_if_viewed(
+                        backend.as_ref(),
+                        old_session,
+                        &self.pty_handles,
+                        &mut self.pty_sizes,
+                        &mut self.terminal_engines,
+                        old_tab,
+                        &mut events,
+                    );
+                }
+            }
+        }
+
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("target session validated above");
+
+        // A same-session re-attach updates the view in place, preserving the
+        // client's accumulated state and yielding the tab it moved off of; a
+        // fresh id is registered anew and has no prior tab.
+        let prior_tab = if let Some(client) = session.clients.get_mut(client_id) {
+            let prior = client.active_tab();
+            client.update_viewport(viewport);
+            client.update_active_tab(active_tab);
+            Some(prior)
+        } else {
+            session.attach_client(Client::new(
+                client_id,
+                session_id,
+                attached_at,
+                viewport,
+                active_tab,
+            ));
+            None
+        };
+
+        // Reflow the tab the client now views, plus — on a same-session move —
+        // the one it left.
+        Self::reflow_tab_if_viewed(
+            backend.as_ref(),
+            session,
+            &self.pty_handles,
+            &mut self.pty_sizes,
+            &mut self.terminal_engines,
+            active_tab,
+            &mut events,
+        );
+        if let Some(prior) = prior_tab {
+            if prior != active_tab {
+                Self::reflow_tab_if_viewed(
+                    backend.as_ref(),
+                    session,
+                    &self.pty_handles,
+                    &mut self.pty_sizes,
+                    &mut self.terminal_engines,
+                    prior,
+                    &mut events,
+                );
+            }
+        }
+
+        self.render_scheduler
+            .invalidate(InvalidationReason::LayoutChanged);
+
+        events
+    }
+
+    /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
+    /// was viewing and schedule a redraw.
+    ///
+    /// Removing the client hands back its record, whose `active_tab` names the
+    /// tab whose viewer set shrank. The departing viewer is dropped from that
+    /// tab's effective size, so if larger viewers remain the tab grows back: its
+    /// live panes reflow to the new [`Session::tab_viewport`], one
+    /// [`Event::PtyResized`] each. When it was the last viewer the tab has no
+    /// viewport and keeps its sizes. The detach always invalidates
+    /// [`InvalidationReason::LayoutChanged`] so the remaining clients repaint. A
+    /// detach for a client this runtime does not hold is dropped.
+    pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
+        // Clone the shared backend before borrowing the session: the reflow then
+        // needs no `&self` across the mutation.
+        let backend = Arc::clone(self.pty_backend());
+
+        // Find the session holding the client, then take it by key so the reflow
+        // keeps its disjoint field borrows. A detach for a client already gone is
+        // dropped.
+        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+            return Vec::new();
+        };
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("session located above");
+
+        // Removing the client returns its record; its `active_tab` is the tab
+        // whose effective size may now grow.
+        let active_tab = session
+            .detach_client(client_id)
+            .map(|client| client.active_tab());
+
+        let mut events = Vec::new();
+        // Reflow the tab the client left, if any other client still views it; a
+        // tab whose last viewer just left has no viewport and keeps its sizes.
+        if let Some(active_tab) = active_tab {
+            Self::reflow_tab_if_viewed(
+                backend.as_ref(),
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                active_tab,
+                &mut events,
+            );
+        }
 
         self.render_scheduler
             .invalidate(InvalidationReason::LayoutChanged);
@@ -1127,18 +1296,15 @@ impl Runtime {
         // reflow its live panes to the viewport it now sizes against. A tab
         // left with no viewer has no viewport and keeps its sizes.
         if let Some(prev_tab) = prev_tab {
-            if let Some(viewport) = session.tab_viewport(prev_tab) {
-                let prev_rects = Self::tab_content_rects(session, prev_tab, viewport);
-                Self::reflow_changed(
-                    backend.as_ref(),
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    prev_rects,
-                    None,
-                    &mut events,
-                );
-            }
+            Self::reflow_tab_if_viewed(
+                backend.as_ref(),
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                prev_tab,
+                &mut events,
+            );
         }
 
         let mut scope = TransactionScope::new();
@@ -1254,18 +1420,15 @@ impl Runtime {
             _ => None,
         });
         if let Some(destination) = destination {
-            if let Some(viewport) = session.tab_viewport(destination) {
-                let rects = Self::tab_content_rects(session, destination, viewport);
-                Self::reflow_changed(
-                    backend.as_ref(),
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    rects,
-                    None,
-                    &mut events,
-                );
-            }
+            Self::reflow_tab_if_viewed(
+                backend.as_ref(),
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                destination,
+                &mut events,
+            );
         }
 
         // Kill the children off-thread: a graceful kill sleeps out its grace
@@ -1379,18 +1542,15 @@ impl Runtime {
         // viewer, the left tab lost it. Reflow each that still has a viewer;
         // a tab with no viewer has no viewport and keeps its sizes.
         for tab_id in [target.tab_id, prior_tab] {
-            if let Some(viewport) = session.tab_viewport(tab_id) {
-                let rects = Self::tab_content_rects(session, tab_id, viewport);
-                Self::reflow_changed(
-                    backend.as_ref(),
-                    &self.pty_handles,
-                    &mut self.pty_sizes,
-                    &mut self.terminal_engines,
-                    rects,
-                    None,
-                    &mut events,
-                );
-            }
+            Self::reflow_tab_if_viewed(
+                backend.as_ref(),
+                session,
+                &self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                tab_id,
+                &mut events,
+            );
         }
 
         let mut scope = TransactionScope::new();
@@ -1963,6 +2123,34 @@ impl Runtime {
                     })
             })
             .unwrap_or(Size { cols: 80, rows: 24 })
+    }
+
+    /// Reflow `tab_id`'s live PTYs to its current effective size when a client
+    /// still views it, appending one [`Event::PtyResized`] per pane actually
+    /// resized. A tab no client views has no [`Session::tab_viewport`] and keeps
+    /// its sizes. The shared shape behind every "a tab's viewer set changed"
+    /// reflow — the full-tab solve with no freshly-spawned pane to skip.
+    fn reflow_tab_if_viewed(
+        backend: &dyn PtyBackend,
+        session: &Session,
+        pty_handles: &HashMap<PaneId, PtyHandle>,
+        pty_sizes: &mut HashMap<PaneId, PtySize>,
+        terminal_engines: &mut HashMap<PaneId, TerminalEngine>,
+        tab_id: TabId,
+        events: &mut Vec<Event>,
+    ) {
+        if let Some(viewport) = session.tab_viewport(tab_id) {
+            let rects = Self::tab_content_rects(session, tab_id, viewport);
+            Self::reflow_changed(
+                backend,
+                pty_handles,
+                pty_sizes,
+                terminal_engines,
+                rects,
+                None,
+                events,
+            );
+        }
     }
 
     /// Resize the live PTYs in `rects` whose size actually changed, routing the

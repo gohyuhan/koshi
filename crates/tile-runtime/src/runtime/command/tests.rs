@@ -8364,3 +8364,352 @@ fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
     assert!(rt.terminal_engines.contains_key(&new_pane));
     assert!(fake.kills(new_pane).unwrap().is_empty());
 }
+
+/// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
+/// of each. Panics unless the runtime holds a single session with a single tab
+/// and a single pane.
+fn only_slot(rt: &Runtime) -> (SessionId, TabId, PaneId) {
+    let session = rt.sessions.values().next().expect("exactly one session");
+    let tab_id = *session.tabs.keys().next().expect("exactly one tab");
+    let pane = session
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .next()
+        .expect("exactly one pane");
+    (session.id, tab_id, pane)
+}
+
+#[test]
+fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let small = Size { cols: 40, rows: 24 };
+    rt.bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, pane) = only_slot(&rt);
+    let resizes_before = fake.resizes(pane).expect("pane spawned").len();
+
+    // A smaller second client attaches to the same tab: the effective size drops
+    // to the per-axis minimum, so the live pane's PTY reflows down.
+    let events = rt.handle_client_attach(sid, ClientId::new(), small, tab_id, SystemTime::now());
+
+    let expected = size_root_pane(pane, small);
+    assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
+    assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+    assert_eq!(
+        events,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: pane,
+            size: expected,
+        })]
+    );
+}
+
+#[test]
+fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let small = Size { cols: 40, rows: 24 };
+    let big = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(small, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, pane) = only_slot(&rt);
+    let resizes_before = fake.resizes(pane).expect("pane spawned").len();
+
+    // The larger client cannot lower the per-axis minimum, so the effective size
+    // stays 40x24: no reflow, no resize event.
+    let events = rt.handle_client_attach(sid, ClientId::new(), big, tab_id, SystemTime::now());
+
+    assert!(events.is_empty());
+    assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before);
+}
+
+#[test]
+fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let small = Size { cols: 40, rows: 24 };
+    rt.bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, pane) = only_slot(&rt);
+
+    // Two clients view the tab; the smaller one holds it at 40x24.
+    let small_client = ClientId::new();
+    rt.handle_client_attach(sid, small_client, small, tab_id, SystemTime::now());
+    let resizes_before = fake.resizes(pane).expect("pane spawned").len();
+
+    // The smaller client leaves: only the 80x24 viewer remains, so the tab grows
+    // back and the pane's PTY reflows up.
+    let events = rt.handle_client_detach(small_client);
+
+    let expected = size_root_pane(pane, big);
+    assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
+    assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+    assert_eq!(
+        events,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: pane,
+            size: expected,
+        })]
+    );
+}
+
+#[test]
+fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let client = rt
+        .bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, pane) = only_slot(&rt);
+    let resizes_before = fake.resizes(pane).expect("pane spawned").len();
+
+    // The only viewer leaves: the tab has no viewport, so its PTY keeps its size
+    // and no resize event is produced. The pane itself stays alive.
+    let events = rt.handle_client_detach(client);
+
+    assert!(events.is_empty());
+    assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before);
+    assert!(rt.sessions[&sid].clients.get(client).is_none());
+    assert!(rt.sessions[&sid].panes.get(pane).is_some());
+}
+
+#[test]
+fn client_attach_to_an_unknown_session_is_dropped() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let events = rt.handle_client_attach(
+        SessionId::new(),
+        ClientId::new(),
+        Size { cols: 80, rows: 24 },
+        TabId::new(),
+        SystemTime::now(),
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
+fn client_detach_of_an_unknown_client_is_dropped() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let events = rt.handle_client_detach(ClientId::new());
+    assert!(events.is_empty());
+}
+
+#[test]
+fn client_attach_to_an_unknown_tab_is_dropped() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, pane) = only_slot(&rt);
+    let resizes_before = fake.resizes(pane).expect("pane spawned").len();
+
+    // The named tab is not one this session holds: the client is not attached
+    // and nothing reflows.
+    let stranger = ClientId::new();
+    let events = rt.handle_client_attach(sid, stranger, big, TabId::new(), SystemTime::now());
+
+    assert!(events.is_empty());
+    assert!(rt.sessions[&sid].clients.get(stranger).is_none());
+    assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before);
+}
+
+#[test]
+fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let small = Size { cols: 40, rows: 24 };
+    let client_a = rt
+        .bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_1, pane_1) = only_slot(&rt);
+
+    // A second live tab: `NewTab` moves client A onto it, leaving `tab_1` with
+    // no viewer and `pane_1` at its bootstrap size.
+    match rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_a),
+        Command::NewTab(NewTabArgs::default()),
+    )) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    let tab_2 = rt.sessions[&sid]
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_1)
+        .expect("the created tab")
+        .id();
+
+    // Two clients view `tab_1`; the smaller one (C) constrains `pane_1` to 40x24.
+    let client_b = ClientId::new();
+    let client_c = ClientId::new();
+    rt.handle_client_attach(sid, client_b, big, tab_1, SystemTime::now());
+    rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now());
+    assert_eq!(
+        *fake.resizes(pane_1).unwrap().last().unwrap(),
+        size_root_pane(pane_1, small)
+    );
+    let resizes_before = fake.resizes(pane_1).unwrap().len();
+
+    // C re-attaches onto `tab_2`: it leaves `tab_1`, where only the 80x24 client
+    // B remains, so `pane_1` grows back — the tab the client left is reflowed.
+    let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now());
+
+    let expected = size_root_pane(pane_1, big);
+    assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
+    assert_eq!(*fake.resizes(pane_1).unwrap().last().unwrap(), expected);
+    assert_eq!(
+        events,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: pane_1,
+            size: expected,
+        })]
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client_c)
+            .unwrap()
+            .active_tab(),
+        tab_2
+    );
+}
+
+#[test]
+fn client_attach_schedules_a_render() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+
+    // Drain the render the bootstrap scheduled, so a fresh render is due only if
+    // the attach schedules one.
+    let now = Instant::now();
+    assert!(rt.poll_render(now));
+    assert!(!rt.poll_render(now));
+
+    // A larger client attaches: it cannot shrink the tab, so no PTY reflows —
+    // but the new viewer still needs a frame.
+    rt.handle_client_attach(
+        sid,
+        ClientId::new(),
+        Size {
+            cols: 120,
+            rows: 40,
+        },
+        tab_id,
+        SystemTime::now(),
+    );
+
+    assert!(rt.poll_render(now + Duration::from_secs(1)));
+}
+
+#[test]
+fn client_detach_schedules_a_render() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .expect("bootstrap the genesis client");
+
+    // Drain the render the bootstrap scheduled.
+    let now = Instant::now();
+    assert!(rt.poll_render(now));
+    assert!(!rt.poll_render(now));
+
+    // The last viewer leaves: no PTY reflows, but the detach still schedules a
+    // render.
+    rt.handle_client_detach(client);
+
+    assert!(rt.poll_render(now + Duration::from_secs(1)));
+}
+
+#[test]
+fn same_session_reattach_preserves_client_view_state() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let client = rt
+        .bootstrap_local(big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, pane) = only_slot(&rt);
+
+    // The client accumulated per-tab focus.
+    rt.sessions
+        .get_mut(&sid)
+        .unwrap()
+        .clients
+        .get_mut(client)
+        .unwrap()
+        .update_focused_pane(tab_id, pane);
+
+    // A re-attach of the same live id (e.g. a transport blip with no clean
+    // detach) updates the view in place — it must not wipe accumulated state.
+    let grown = Size {
+        cols: 100,
+        rows: 30,
+    };
+    rt.handle_client_attach(sid, client, grown, tab_id, SystemTime::now());
+
+    let record = rt.sessions[&sid]
+        .clients
+        .get(client)
+        .expect("still attached");
+    assert_eq!(record.focused_pane(tab_id), Some(pane));
+    assert_eq!(record.viewport(), grown);
+    assert_eq!(record.active_tab(), tab_id);
+}
+
+#[test]
+fn cross_session_attach_detaches_the_client_from_its_old_session() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let small = Size { cols: 40, rows: 24 };
+
+    let client = rt
+        .bootstrap_local(big, SystemTime::now())
+        .expect("first session");
+    let (sid_1, _tab_1, pane_1) = only_slot(&rt);
+
+    // A second, independent session with its own live pane.
+    rt.bootstrap_local(big, SystemTime::now())
+        .expect("second session");
+    let sid_2 = *rt
+        .sessions
+        .keys()
+        .find(|&&s| s != sid_1)
+        .expect("the second session");
+    let session_2 = &rt.sessions[&sid_2];
+    let tab_2 = *session_2.tabs.keys().next().expect("its tab");
+    let pane_2 = session_2
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .next()
+        .expect("its pane");
+    let pane_1_resizes_before = fake.resizes(pane_1).expect("pane spawned").len();
+
+    // Move `client` from session 1 into session 2 at a smaller viewport.
+    let events = rt.handle_client_attach(sid_2, client, small, tab_2, SystemTime::now());
+
+    // It left session 1 entirely and is now the 40x24 co-viewer of session 2.
+    assert!(rt.sessions[&sid_1].clients.get(client).is_none());
+    assert_eq!(
+        rt.sessions[&sid_2]
+            .clients
+            .get(client)
+            .expect("moved into session 2")
+            .active_tab(),
+        tab_2
+    );
+
+    // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
+    // size (its tab lost its only viewer).
+    let expected = size_root_pane(pane_2, small);
+    assert_eq!(*fake.resizes(pane_2).unwrap().last().unwrap(), expected);
+    assert_eq!(fake.resizes(pane_1).unwrap().len(), pane_1_resizes_before);
+    assert_eq!(
+        events,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: pane_2,
+            size: expected,
+        })]
+    );
+}

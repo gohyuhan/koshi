@@ -201,6 +201,24 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         RuntimeEvent::OuterInput { client_id, bytes } => {
             runtime.handle_outer_input(client_id, &bytes);
         }
+        RuntimeEvent::ClientAttached {
+            session_id,
+            client_id,
+            viewport,
+            active_tab,
+            attached_at,
+        } => {
+            let _ = runtime.handle_client_attach(
+                session_id,
+                client_id,
+                viewport,
+                active_tab,
+                attached_at,
+            );
+        }
+        RuntimeEvent::ClientDetached { client_id } => {
+            let _ = runtime.handle_client_detach(client_id);
+        }
         // Timer drives time-based refreshes; resize/IPC/plugin are not wired in
         // this slice.
         RuntimeEvent::Resize { .. }
