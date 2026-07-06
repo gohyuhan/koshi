@@ -50,6 +50,11 @@ pub struct Scrollback {
     /// Running sum of every retained row's byte size, kept incrementally so an
     /// overflow check costs O(1) rather than rescanning the buffer.
     byte_total: usize,
+    /// Cumulative count of rows ever pushed into the buffer; monotonic — a
+    /// [`clear`](Self::clear) does not reset it. The runtime diffs it across a
+    /// chunk to learn how many lines entered scrollback, re-anchoring
+    /// scrolled-back views by exactly that many.
+    total_pushed: u64,
     /// Cumulative count of rows ever dropped to honor the caps; monotonic.
     dropped_lines: u64,
     /// Cumulative bytes ever dropped to honor the caps; monotonic.
@@ -64,6 +69,7 @@ impl Scrollback {
             max_lines: limit.max_lines,
             max_bytes: limit.max_bytes,
             byte_total: 0,
+            total_pushed: 0,
             dropped_lines: 0,
             dropped_bytes: 0,
         }
@@ -101,6 +107,7 @@ impl Scrollback {
         let new_bytes = self.line_bytes(&line);
         self.lines.push_back(line);
         self.byte_total += new_bytes;
+        self.total_pushed += 1;
 
         while self.lines.len() > self.max_lines
             || (self.byte_total > self.max_bytes && self.lines.len() > 1)
@@ -115,8 +122,9 @@ impl Scrollback {
     }
 
     /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines"). The
-    /// cumulative drop tallies are left intact: an explicit erase is not a
-    /// cap-driven truncation, so it must not perturb the truncation reporting.
+    /// cumulative tallies are left intact: an explicit erase is not a cap-driven
+    /// truncation, so it must not perturb the truncation reporting, and
+    /// [`total_pushed`](Self::total_pushed) stays monotonic across it.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.byte_total = 0;
@@ -136,6 +144,13 @@ impl Scrollback {
     /// scrolled-back view above the live grid.
     pub fn lines(&self) -> &VecDeque<Vec<Cell>> {
         &self.lines
+    }
+
+    /// Cumulative count of rows ever pushed into the buffer; monotonic — never
+    /// reset, not even by [`clear`](Self::clear). Diffing it across a chunk gives
+    /// the exact number of lines that entered scrollback in that chunk.
+    pub fn total_pushed(&self) -> u64 {
+        self.total_pushed
     }
 
     /// Cumulative count of rows dropped to honor the caps, for the runtime's

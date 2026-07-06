@@ -209,3 +209,118 @@ fn new_starts_with_an_empty_scrollback() {
     assert_eq!(state.scrollback().dropped_lines(), 0);
     assert_eq!(state.scrollback().dropped_bytes(), 0);
 }
+
+/// A row of `s`, one default-styled cell per char — a scrollback line fixture.
+fn line(s: &str) -> Vec<Cell> {
+    s.chars()
+        .map(|ch| Cell::new(ch, 1, Style::default()))
+        .collect()
+}
+
+/// Read `row` of `grid` as a string; blank cells read as spaces.
+fn grid_row(grid: &Grid, row: u16) -> String {
+    let (_, cols) = grid.dimensions();
+    (0..cols)
+        .map(|c| grid.cell(row, c).map(Cell::ch).unwrap_or(' '))
+        .collect()
+}
+
+/// A 3-wide, 2-row primary screen with live rows `L0`/`L1` and three retained
+/// history rows `h0`/`h1`/`h2` (oldest first).
+fn state_with_history() -> TerminalState {
+    let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
+    for (col, ch) in "L0.".chars().enumerate() {
+        *state.active_grid_mut().cell_mut(0, col as u16).unwrap() =
+            Cell::new(ch, 1, Style::default());
+    }
+    for (col, ch) in "L1.".chars().enumerate() {
+        *state.active_grid_mut().cell_mut(1, col as u16).unwrap() =
+            Cell::new(ch, 1, Style::default());
+    }
+    state.scrollback.push_line(line("h0."));
+    state.scrollback.push_line(line("h1."));
+    state.scrollback.push_line(line("h2."));
+    state
+}
+
+#[test]
+fn scrolled_view_at_offset_zero_shares_the_live_buffer() {
+    let state = state_with_history();
+    // Offset 0 follows live: the same Arc (no compose, no copy) and effective 0.
+    let (grid, effective) = state.scrolled_view(0);
+    assert!(Arc::ptr_eq(&grid, &state.active_grid_arc()));
+    assert_eq!(effective, 0);
+}
+
+#[test]
+fn scrolled_view_composes_history_above_the_live_screen() {
+    let state = state_with_history();
+    // Offset 1: newest history row on top, top live row below.
+    let (grid, effective) = state.scrolled_view(1);
+    assert_eq!(grid.dimensions(), (2, 3));
+    assert_eq!(grid_row(&grid, 0), "h2.");
+    assert_eq!(grid_row(&grid, 1), "L0.");
+    assert_eq!(effective, 1);
+}
+
+#[test]
+fn scrolled_view_at_the_screen_height_shows_only_history() {
+    let state = state_with_history();
+    // Offset 2 == the 2-row screen height: both rows come from history.
+    let (grid, effective) = state.scrolled_view(2);
+    assert_eq!(grid_row(&grid, 0), "h1.");
+    assert_eq!(grid_row(&grid, 1), "h2.");
+    assert_eq!(effective, 2);
+}
+
+#[test]
+fn scrolled_view_clamps_an_over_scroll_to_the_oldest_line() {
+    let state = state_with_history();
+    // Three history rows, screen height 2: offset 3 shows the oldest window,
+    // and any larger offset clamps — grid and effective offset both — to that
+    // same window rather than reading past.
+    let (grid, effective) = state.scrolled_view(3);
+    assert_eq!(grid_row(&grid, 0), "h0.");
+    assert_eq!(grid_row(&grid, 1), "h1.");
+    assert_eq!(effective, 3);
+
+    let (over, over_effective) = state.scrolled_view(99);
+    assert_eq!(grid_row(&over, 0), "h0.");
+    assert_eq!(grid_row(&over, 1), "h1.");
+    assert_eq!(over_effective, 3); // clamped to the retained count
+}
+
+#[test]
+fn scrolled_view_on_the_alternate_screen_reports_a_live_zero_offset() {
+    let mut state = state_with_history();
+    state.active = Screen::Alternate; // full-screen apps keep no scrollback
+    let (grid, effective) = state.scrolled_view(5);
+    // The alternate screen always shows live: the live Arc and a zero effective
+    // offset, so the indicator and cursor never treat it as scrolled.
+    assert!(Arc::ptr_eq(&grid, &state.active_grid_arc()));
+    assert_eq!(effective, 0);
+}
+
+#[test]
+fn scrolled_view_with_empty_history_follows_live() {
+    let state = TerminalState::new(PtySize { cols: 3, rows: 2 });
+    let (grid, effective) = state.scrolled_view(5);
+    assert!(Arc::ptr_eq(&grid, &state.active_grid_arc()));
+    assert_eq!(effective, 0);
+}
+
+#[test]
+fn scrolled_view_pads_narrow_history_rows_with_the_live_background() {
+    // A history row captured 2 wide on a now-3-wide screen; the app has set a
+    // background pen (SGR 48), so the padding carries it, not the default.
+    let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
+    state.primary_render.style.set_bg(Color::Indexed(4));
+    state.scrollback.push_line(line("ab"));
+
+    let (grid, _) = state.scrolled_view(1);
+    let padded = grid.cell(0, 2).unwrap();
+    let mut expected = Style::default();
+    expected.set_bg(Color::Indexed(4)); // bg-only fill: fg and attrs stay default
+    assert_eq!(padded.ch(), ' ');
+    assert_eq!(padded.style(), expected);
+}

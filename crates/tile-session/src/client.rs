@@ -27,6 +27,12 @@ pub struct Client {
     lock_mode: LockMode,
     mouse_state: MouseState,
     pending_resize_drag: Option<ResizeDragState>,
+    /// This client's scrollback view offset per pane: lines scrolled up from the
+    /// live bottom. A pane absent from the map (the default) follows live output;
+    /// only scrolled-back panes have an entry, always with a non-zero offset. It
+    /// lives on the client because scrolling is per-view — two clients scroll a
+    /// shared pane independently.
+    scroll_by_pane: HashMap<PaneId, usize>,
 }
 
 impl Client {
@@ -52,6 +58,7 @@ impl Client {
             lock_mode: LockMode::Normal,
             mouse_state: MouseState,
             pending_resize_drag: None,
+            scroll_by_pane: HashMap::new(),
         }
     }
 
@@ -114,6 +121,25 @@ impl Client {
     #[must_use]
     pub fn pending_resize_drag(&self) -> Option<&ResizeDragState> {
         self.pending_resize_drag.as_ref()
+    }
+
+    /// This client's scrollback view offset for `pane_id`: lines scrolled up from
+    /// the live bottom. `0` — the default for any pane not scrolled back — means
+    /// the view follows live output.
+    #[must_use]
+    pub fn scroll_offset(&self, pane_id: PaneId) -> usize {
+        self.scroll_by_pane.get(&pane_id).copied().unwrap_or(0)
+    }
+
+    /// Set this client's scrollback view offset for `pane_id`. An offset of `0`
+    /// removes the entry, restoring live-following, so the map holds only
+    /// scrolled-back panes.
+    pub fn set_scroll_offset(&mut self, pane_id: PaneId, offset: usize) {
+        if offset == 0 {
+            self.scroll_by_pane.remove(&pane_id);
+        } else {
+            self.scroll_by_pane.insert(pane_id, offset);
+        }
     }
 
     /// Update this client's lock mode.
@@ -203,6 +229,12 @@ impl ClientRegistry {
     /// all clients viewing it and to fan out per-client work.
     pub fn list_attached(&self) -> impl Iterator<Item = &Client> {
         self.records.values()
+    }
+
+    /// Mutable access to every attached client, to fan out per-client view-state
+    /// updates — e.g. re-anchoring scrolled-back panes as new output arrives.
+    pub fn list_attached_mut(&mut self) -> impl Iterator<Item = &mut Client> {
+        self.records.values_mut()
     }
 
     /// How many clients are attached.

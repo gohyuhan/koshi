@@ -290,3 +290,56 @@ fn tabs_metadata_covers_every_tab_in_index_order_with_the_viewed_tab_active() {
     assert_eq!(active, vec![tab0]);
     assert_eq!(snap.session.active_tab.id, tab0);
 }
+
+#[test]
+fn snapshot_follows_live_output_when_the_client_has_not_scrolled() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+    rt.terminal_engines
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 1 }));
+    rt.handle_pty_output(pane_id, b"\n\n\n"); // three retained lines
+
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    let pane = snap.panes.iter().find(|p| p.id == pane_id).expect("pane");
+    assert_eq!(pane.grid_view.as_ref().unwrap().view_offset, 0);
+    assert_eq!(pane.scrollback.retained_lines, 3);
+}
+
+#[test]
+fn snapshot_carries_the_clients_scrolled_back_offset() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+    rt.terminal_engines
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 1 }));
+    rt.handle_pty_output(pane_id, b"\n\n\n");
+    rt.scroll_up(client_id, pane_id, 2);
+
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    let pane = snap.panes.iter().find(|p| p.id == pane_id).expect("pane");
+    // The scrolled offset reaches the renderer as the view offset.
+    assert_eq!(pane.grid_view.as_ref().unwrap().view_offset, 2);
+    assert_eq!(pane.scrollback.retained_lines, 3);
+}
+
+#[test]
+fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+    rt.terminal_engines
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 1 }));
+    rt.handle_pty_output(pane_id, b"\n\n\n");
+    rt.scroll_up(client_id, pane_id, 2);
+    rt.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter the alternate screen
+
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    let pane = snap.panes.iter().find(|p| p.id == pane_id).expect("pane");
+    // The alternate screen keeps no scrollback: the parked offset does not apply,
+    // so the view follows live and the renderer sees offset 0.
+    assert_eq!(pane.grid_view.as_ref().unwrap().view_offset, 0);
+}

@@ -43,6 +43,7 @@ use tile_layout::{
 use tile_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy};
 use tile_pty::backend::state::{PtyBackend, PtyHandle};
 use tile_pty::resize::{compute_pty_size, resize_for_layout_change};
+use tile_session::client::ClientRegistry;
 use tile_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
@@ -604,11 +605,33 @@ impl Runtime {
         scope.commit(command_id)
     }
 
+    /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
+    /// size cache, terminal engine, and each client's parked scrollback offset
+    /// for it (so the per-view map holds no dead entries over the session's
+    /// life). The one release point for pane bookkeeping — every path that
+    /// removes a pane funnels through here. Explicit field refs so a caller can
+    /// hold the owning session borrowed alongside.
+    fn release_pane_bookkeeping(
+        pty_handles: &mut HashMap<PaneId, PtyHandle>,
+        pty_sizes: &mut HashMap<PaneId, PtySize>,
+        terminal_engines: &mut HashMap<PaneId, TerminalEngine>,
+        clients: &mut ClientRegistry,
+        pane_id: PaneId,
+    ) {
+        pty_handles.remove(&pane_id);
+        pty_sizes.remove(&pane_id);
+        terminal_engines.remove(&pane_id);
+        for client in clients.list_attached_mut() {
+            client.set_scroll_offset(pane_id, 0);
+        }
+    }
+
     /// Drop a removed pane's runtime bookkeeping and reflow the survivors into
     /// the space it freed.
     ///
     /// Removes the pane's PTY handle, size cache, and terminal engine — output
-    /// bytes still in flight for it now find no engine and are dropped — then
+    /// bytes still in flight for it now find no engine and are dropped — and
+    /// clears any parked scrollback offset each client held for it, then
     /// re-solves and resizes the tab that reclaims the space: the pane's own tab
     /// when it survives, else the tab its viewers moved to (the cascade's
     /// `TabFocused`). A tab left with no viewer has no viewport and keeps its
@@ -630,9 +653,13 @@ impl Runtime {
             return;
         };
 
-        self.pty_handles.remove(&pane_id);
-        self.pty_sizes.remove(&pane_id);
-        self.terminal_engines.remove(&pane_id);
+        Self::release_pane_bookkeeping(
+            &mut self.pty_handles,
+            &mut self.pty_sizes,
+            &mut self.terminal_engines,
+            &mut session.clients,
+            pane_id,
+        );
 
         let reflow_tab = if session.tabs.contains_key(&tab_id) {
             Some(tab_id)
@@ -692,12 +719,7 @@ impl Runtime {
 
         // Find the session that owns the pane. An exit for a pane already gone
         // (closed while the exit waited in the inbox) is dropped.
-        let Some(session_id) = self
-            .sessions
-            .iter()
-            .find(|(_, session)| session.panes.get(pane_id).is_some())
-            .map(|(id, _)| *id)
-        else {
+        let Some(session_id) = self.session_for_pane(pane_id).map(|session| session.id) else {
             return Vec::new();
         };
 
@@ -1212,12 +1234,16 @@ impl Runtime {
         let mut events = tab_ops::close_tab(session, tab_id);
 
         // The panes are gone from state; drop their runtime bookkeeping — PTY
-        // handle, size cache, and terminal engine. Keyed off the layout's own
-        // leaf list — the exact set the op removed.
+        // handle, size cache, terminal engine, and parked scroll offsets. Keyed
+        // off the layout's own leaf list — the exact set the op removed.
         for pane_id in &pane_ids {
-            self.pty_handles.remove(pane_id);
-            self.pty_sizes.remove(pane_id);
-            self.terminal_engines.remove(pane_id);
+            Self::release_pane_bookkeeping(
+                &mut self.pty_handles,
+                &mut self.pty_sizes,
+                &mut self.terminal_engines,
+                &mut session.clients,
+                *pane_id,
+            );
         }
 
         // Displaced viewers landed on the nearest surviving tab (the
@@ -2146,9 +2172,7 @@ impl Runtime {
         match args.source {
             Some(source_pane) => {
                 let owner = self
-                    .sessions()
-                    .values()
-                    .find(|session| session.panes.get(source_pane).is_some())
+                    .session_for_pane(source_pane)
                     .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
                 if Self::is_winding_down(owner) {
                     return Err(Rejection::new(
@@ -2232,9 +2256,7 @@ impl Runtime {
         match pane {
             Some(pane_id) => {
                 let owner = self
-                    .sessions()
-                    .values()
-                    .find(|session| session.panes.get(pane_id).is_some())
+                    .session_for_pane(pane_id)
                     .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
                 if Self::is_winding_down(owner) {
                     return Err(Rejection::new(
@@ -2692,11 +2714,7 @@ impl Runtime {
     /// is [`RejectReason::InvalidState`], so a cross-session target cannot slip
     /// past the owning session's admission check.
     fn resolve_pane_global(&self, pane: PaneId) -> Result<(), Rejection> {
-        match self
-            .sessions()
-            .values()
-            .find(|session| session.panes.get(pane).is_some())
-        {
+        match self.session_for_pane(pane) {
             None => Err(Rejection::bare(RejectReason::TargetNotFound)),
             Some(session) if Self::is_winding_down(session) => Err(Rejection::new(
                 RejectReason::InvalidState,

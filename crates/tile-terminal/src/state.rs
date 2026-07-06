@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use tile_core::process::PtySize;
 
-use crate::grid::state::Grid;
+use crate::grid::state::{Cell, Grid};
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::style::Style;
 
@@ -196,6 +196,60 @@ impl TerminalState {
             Screen::Primary => Arc::clone(&self.primary),
             Screen::Alternate => Arc::clone(&self.alternate),
         }
+    }
+
+    /// The active screen buffer the renderer should draw at scrollback view
+    /// `offset` — lines scrolled up from the live bottom, `0` following live
+    /// output — paired with the *effective* offset actually shown.
+    ///
+    /// The effective offset is the single source of truth for how far the view is
+    /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
+    /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
+    /// with empty history; otherwise it is `offset` clamped to the retained line
+    /// count, so an over-scrolled or stale value stops at the oldest line rather
+    /// than reading out of bounds. Returning it here keeps the composed grid, the
+    /// scroll indicator, and cursor suppression from ever disagreeing about
+    /// whether the view is scrolled.
+    ///
+    /// A non-zero effective offset composes a fresh window `rows` tall from the
+    /// primary screen: its top rows are the newest scrollback lines, its lower
+    /// rows the top of the live grid, so a view scrolled that many lines up shows
+    /// that much history with the rest of the live screen below. History rows
+    /// captured at a narrower width are padded to the current width with the
+    /// primary screen's background ([`Style::bg_fill`]), the same fill every
+    /// erase and scroll uses.
+    pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
+        if offset == 0 || !matches!(self.active, Screen::Primary) {
+            return (self.active_grid_arc(), 0);
+        }
+
+        let grid = self.primary.as_ref();
+        let (rows, cols) = grid.dimensions();
+        let history = self.scrollback.lines();
+        let retained = history.len();
+        let scrolled = offset.min(retained);
+        if scrolled == 0 {
+            return (self.active_grid_arc(), 0);
+        }
+
+        // The visible window: the `scrolled` newest history rows, then the live
+        // rows, capped at the screen height. The live grid alone is `rows` tall,
+        // so the chain always yields a full window.
+        let window: Vec<Vec<Cell>> = history
+            .iter()
+            .skip(retained - scrolled)
+            .chain(grid.rows())
+            .take(rows as usize)
+            .cloned()
+            .collect();
+        (
+            Arc::new(Grid::from_rows(
+                window,
+                cols,
+                self.primary_render.style.bg_fill(),
+            )),
+            scrolled,
+        )
     }
 
     /// The window/tab title set by OSC 0/1/2, or `None` if the app has not set

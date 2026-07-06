@@ -352,3 +352,29 @@ fn line_ops_with_an_inverted_or_oob_band_are_no_ops() {
     assert_eq!(row_text(&grid, 1), "BB");
     assert_eq!(row_text(&grid, 2), "CC");
 }
+
+/// A row of `s`, one default-styled cell per char.
+fn text_row(s: &str) -> Vec<Cell> {
+    s.chars()
+        .map(|ch| Cell::new(ch, 1, Style::default()))
+        .collect()
+}
+
+#[test]
+fn from_rows_normalizes_each_row_to_the_given_width() {
+    // Row 0 is short (padded to 3), row 1 is long (truncated to 3).
+    let grid = Grid::from_rows(vec![text_row("ab"), text_row("abcd")], 3, Style::default());
+    assert_eq!(grid.dimensions(), (2, 3));
+    assert_eq!(row_text(&grid, 0), "ab ");
+    assert_eq!(row_text(&grid, 1), "abc");
+}
+
+#[test]
+fn from_rows_pads_short_rows_with_the_fill_style() {
+    let fill = bg(Color::Indexed(4));
+    let grid = Grid::from_rows(vec![text_row("x")], 3, fill);
+    // The base char keeps its own (default) style; the two padded cells carry the fill.
+    assert_eq!(grid.cell(0, 0).unwrap().style(), Style::default());
+    assert_eq!(grid.cell(0, 1).unwrap().style(), fill);
+    assert_eq!(grid.cell(0, 2).unwrap().style(), fill);
+}

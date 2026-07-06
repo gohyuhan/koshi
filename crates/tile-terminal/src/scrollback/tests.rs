@@ -179,3 +179,18 @@ fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
     assert_eq!(sb.dropped_lines(), 1);
     assert_eq!(sb.dropped_bytes(), 2);
 }
+
+#[test]
+fn total_pushed_counts_every_push_and_survives_a_clear() {
+    let mut sb = bounded(2, 1000); // line cap 2: a push that drops still counts
+    sb.push_line(line("a"));
+    sb.push_line(line("b"));
+    sb.push_line(line("c")); // drops "a"; the push itself still counts
+    assert_eq!(sb.total_pushed(), 3);
+
+    sb.clear();
+    assert_eq!(sb.total_pushed(), 3); // an erase never rewinds the counter
+
+    sb.push_line(line("d"));
+    assert_eq!(sb.total_pushed(), 4);
+}

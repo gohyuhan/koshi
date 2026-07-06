@@ -712,6 +712,21 @@ fn hidden_cursor_places_nothing() {
 }
 
 #[test]
+fn a_scrolled_back_view_places_no_cursor() {
+    // The app's cursor is visible, but the view is scrolled into history, so the
+    // live cursor cell is off-screen and no hardware cursor is placed.
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    assert!(snap.panes[0].cursor.visible);
+    snap.panes[0].grid_view.as_mut().unwrap().view_offset = 3;
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+}
+
+#[test]
 fn no_focused_pane_places_no_cursor() {
     let pane = PaneId::new();
     let snap = build(
