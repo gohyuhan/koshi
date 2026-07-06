@@ -1,13 +1,16 @@
 //! OS-specific child termination, kept behind one cross-platform type.
 //!
-//! [`crate::kill::PtyChildKillControl`] exposes the same three operations on every platform —
+//! [`crate::kill::PtyChildKillControl`] exposes the same four operations on every platform —
 //! [`force`](crate::kill::PtyChildKillControl::force), [`tree`](crate::kill::PtyChildKillControl::tree),
-//! and [`request_stop`](crate::kill::PtyChildKillControl::request_stop) — so the backend's
-//! `kill` path stays platform-agnostic. The signal/Job-Object names that make
-//! them work are confined to this module.
+//! [`request_stop`](crate::kill::PtyChildKillControl::request_stop), and
+//! [`request_stop_tree`](crate::kill::PtyChildKillControl::request_stop_tree) —
+//! so the backend's `kill` path stays platform-agnostic. The signal/Job-Object
+//! names that make them work are confined to this module.
 //!
 //! `force` targets only the child process (`kill(pid)` / `TerminateProcess`);
-//! `tree` targets the whole group (`killpg` / `TerminateJobObject`).
+//! `tree` targets the whole group (`killpg` / `TerminateJobObject`). The stop
+//! requests split the same way: `request_stop` asks the child to exit
+//! (`SIGTERM` / Ctrl-Break), `request_stop_tree` asks the whole group.
 
 #[cfg(unix)]
 use nix::{
@@ -59,6 +62,14 @@ impl PtyChildKillControl {
     /// SIGTERM the child, asking it to exit on its own.
     pub fn request_stop(&self) -> Result<(), PtyError> {
         kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM).map_err(|e| PtyError::Signal {
+            detail: e.to_string(),
+        })
+    }
+
+    /// SIGTERM the child's whole process group, asking every member to exit on
+    /// its own.
+    pub fn request_stop_tree(&self) -> Result<(), PtyError> {
+        killpg(Pid::from_raw(self.pid as i32), Signal::SIGTERM).map_err(|e| PtyError::Signal {
             detail: e.to_string(),
         })
     }
@@ -213,6 +224,16 @@ impl PtyChildKillControl {
             });
         }
         Ok(())
+    }
+
+    /// Best-effort Ctrl-Break to the child's process group; callers escalate to
+    /// [`tree`](Self::tree) if members do not exit.
+    ///
+    /// `GenerateConsoleCtrlEvent` already addresses a process group, so this
+    /// shares [`request_stop`](Self::request_stop)'s delivery — including its
+    /// NOTE about children not spawned with `CREATE_NEW_PROCESS_GROUP`.
+    pub fn request_stop_tree(&self) -> Result<(), PtyError> {
+        self.request_stop()
     }
 
     pub fn pid(&self) -> u32 {

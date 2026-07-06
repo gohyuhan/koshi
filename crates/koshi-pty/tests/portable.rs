@@ -541,3 +541,177 @@ fn graceful_escalation_does_not_hang_when_a_descendant_keeps_the_pty_open() {
         .args(["-9", &descendant])
         .status();
 }
+
+#[test]
+fn graceful_tree_reaps_a_descendant_after_the_leader_exits() {
+    let backend = PortablePtyBackend::new();
+    // Same shape as `tree_reaps_a_descendant_even_after_the_leader_has_exited`,
+    // but through `GracefulTree`: the leader traps SIGHUP, backgrounds a `sleep`
+    // that inherits the ignore, prints its pid, and exits (no `wait`), so by kill
+    // time the leader is already reaped yet the sleep lives on in the leaderless
+    // group. The leader's exit skips the grace phase; the closing group-kill
+    // still reaps the descendant.
+    let handle = spawn_pane(
+        &backend,
+        spec(
+            "/bin/sh",
+            &["-c", r#"trap "" HUP; sleep 300 & echo "$! READY""#],
+        ),
+    );
+    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
+    assert!(
+        !descendant.is_empty(),
+        "expected the child pid, got {out:?}"
+    );
+
+    let status = wait_exit(&handle, Duration::from_secs(5));
+    assert!(
+        status.is_some(),
+        "the leader should exit on its own, got {status:?}"
+    );
+    assert!(
+        process_alive(&descendant),
+        "the SIGHUP-ignoring child should outlive the leader"
+    );
+
+    backend
+        .kill(
+            handle.pane_id(),
+            KillPolicy::GracefulTree {
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .expect("graceful-tree kill");
+
+    // Reparent-and-reap of the orphan is asynchronous; poll briefly for it to go.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_alive(&descendant) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_alive(&descendant),
+        "GracefulTree must killpg the group and reap the descendant (pid {descendant})"
+    );
+}
+
+#[test]
+fn graceful_tree_stop_request_reaches_a_descendant_in_the_grace_window() {
+    let backend = PortablePtyBackend::new();
+    // The stop request is group-wide: the `sleep` is backgrounded BEFORE the
+    // leader traps SIGTERM (an ignore installed first would be inherited), so
+    // it keeps the default disposition while the leader turns TERM-immune and
+    // loops forever. `READY` prints after the trap, so by kill time the leader
+    // is proven immune and only the `sleep` can react to the stop request —
+    // it must die during the grace window, while the leader still holds the
+    // kill in its wait phase, before the closing group-kill can fire.
+    let handle = spawn_pane(
+        &backend,
+        spec(
+            "/bin/sh",
+            &[
+                "-c",
+                r#"sleep 300 & pid=$!; trap "" TERM; echo "$pid READY"; while :; do sleep 1; done"#,
+            ],
+        ),
+    );
+    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
+    assert!(
+        !descendant.is_empty(),
+        "expected the child pid, got {out:?}"
+    );
+    assert!(process_alive(&descendant), "the sleep should be running");
+
+    // Kill on a helper thread: the graceful phase blocks for its full window
+    // because the leader never exits on its own.
+    let pane_id = handle.pane_id();
+    let killer = thread::spawn(move || {
+        backend.kill(
+            pane_id,
+            KillPolicy::GracefulTree {
+                timeout: Duration::from_secs(3),
+            },
+        )
+    });
+
+    // The descendant dies well inside the 3s window, while the leader still
+    // lives: at this point only the group-wide SIGTERM can have reached it.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while process_alive(&descendant) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_alive(&descendant),
+        "the group-wide stop request must reach the descendant (pid {descendant})"
+    );
+
+    killer
+        .join()
+        .expect("kill thread")
+        .expect("graceful-tree kill");
+}
+
+#[test]
+fn graceful_tree_lets_a_finished_child_exit_cleanly() {
+    let backend = PortablePtyBackend::new();
+    let handle = spawn_pane(&backend, spec("/bin/echo", &["done"]));
+    // Echo exits on its own; confirm that before issuing the kill.
+    let status = wait_exit(&handle, Duration::from_secs(5));
+    assert_eq!(status, Some(ExitStatus::ExitCode(0)));
+    // The child is already gone: GracefulTree skips the wait and the group-kill
+    // is a harmless no-op on the empty group, returning promptly.
+    backend
+        .kill(
+            handle.pane_id(),
+            KillPolicy::GracefulTree {
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .expect("graceful-tree kill");
+}
+
+#[test]
+fn graceful_tree_does_not_hang_when_a_descendant_keeps_the_pty_open() {
+    let backend = PortablePtyBackend::new();
+    // Leader and descendant both ignore SIGTERM — the group-wide stop request
+    // leaves them running, so the graceful phase waits out its window — and the
+    // descendant also ignores SIGHUP and blocks holding the slave open. The
+    // final `killpg` reaps the whole group, but kill() must still detach the
+    // reader or it blocks while the descendant holds the pty. Prints pid then
+    // `READY` last, so parsing on `READY` finds the pid already buffered.
+    let handle = spawn_pane(
+        &backend,
+        spec(
+            "/bin/sh",
+            &[
+                "-c",
+                r#"trap "" TERM; sh -c 'trap "" TERM HUP; echo "$$ READY"; while :; do sleep 1; done' & wait"#,
+            ],
+        ),
+    );
+    let out = read_until(&handle, "READY", Duration::from_secs(5));
+    let descendant: String = out.chars().filter(char::is_ascii_digit).collect();
+    assert!(
+        !descendant.is_empty(),
+        "expected the child pid, got {out:?}"
+    );
+    assert!(
+        process_alive(&descendant),
+        "the descendant should hold the pty open"
+    );
+
+    assert_kill_returns(
+        backend,
+        handle.pane_id(),
+        KillPolicy::GracefulTree {
+            timeout: Duration::from_millis(300),
+        },
+        Duration::from_secs(10),
+    );
+
+    // The group-kill should already have reaped it; belt-and-braces cleanup.
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &descendant])
+        .status();
+}

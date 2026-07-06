@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Size;
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -179,14 +180,46 @@ fn trailing_output_is_forwarded_before_the_exit() {
 }
 
 #[test]
-fn kill_all_panes_force_kills_the_shell() {
+fn kill_all_panes_group_kills_the_shell() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
     rt.bootstrap_local(VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
+    // The panic-path teardown group-kills so no descendant is orphaned.
     rt.kill_all_panes();
 
-    assert_eq!(fake.kills(pane_id).expect("kills"), vec![KillPolicy::Force]);
+    assert_eq!(fake.kills(pane_id).expect("kills"), vec![KillPolicy::Tree]);
+}
+
+#[test]
+fn shutdown_drains_and_graceful_group_kills_each_pane() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let mut rt = runtime_with(fake.clone());
+    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+        .expect("bootstrap");
+    let pane_id = fake.spawned_panes()[0];
+
+    rt.shutdown();
+
+    assert!(rt.is_draining(), "stage 1 must enter draining mode");
+    assert_eq!(
+        fake.kills(pane_id).expect("kills"),
+        vec![KillPolicy::GracefulTree {
+            timeout: GRACEFUL_TIMEOUT_DURATION,
+        }],
+        "each pane's child is graceful-then-group-killed on shutdown",
+    );
+}
+
+#[test]
+fn shutdown_with_no_panes_drains_without_hanging() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let mut rt = runtime_with(fake);
+    // No bootstrap: no panes are parked. Shutdown must still drain and return.
+    rt.shutdown();
+
+    assert!(rt.is_draining());
+    assert!(!rt.has_active_panes());
 }

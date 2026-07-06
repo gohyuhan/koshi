@@ -354,11 +354,12 @@ impl PtyBackend for PortablePtyBackend {
 
         // `Force`/`Graceful` signal the leader PID, so skip them once the watcher
         // has reaped it — a recycled PID could belong to an unrelated process.
-        // `Tree` signals the whole group/job (`killpg` / `TerminateJobObject`),
-        // which stays valid while any member lives, so it fires unconditionally:
-        // the leader can exit while a same-group descendant keeps running, and
-        // `Tree` must still reap it (the `exited` flag tracks only the leader, not
-        // whether the group is empty).
+        // `Tree` and `GracefulTree`'s closing group-kill signal the whole
+        // group/job (`killpg` / `TerminateJobObject`), which stays valid while
+        // any member lives, so they fire unconditionally: the leader can exit
+        // while a same-group descendant keeps running, and the group-kill must
+        // still reap it (the `exited` flag tracks only the leader, not whether
+        // the group is empty).
         match kill_policy {
             KillPolicy::Force => {
                 if !target_panes.exited.load(Ordering::SeqCst) {
@@ -370,24 +371,26 @@ impl PtyBackend for PortablePtyBackend {
             }
             KillPolicy::Graceful { timeout } => {
                 if !target_panes.exited.load(Ordering::SeqCst) {
-                    // Give the child the grace window to exit on its own, polling the
-                    // watcher's `exited` flag; SIGKILL only if it overstays the deadline.
-
-                    // Request a process termination first.
+                    // Ask the leader to exit, give it the grace window; SIGKILL
+                    // only if it overstays the deadline.
                     let _ = target_panes.killer.request_stop();
-                    let deadline = Instant::now() + timeout;
-                    while Instant::now() < deadline {
-                        if target_panes.exited.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(25));
-                    }
-
-                    // If the deadline passes and the child has not exited, force kill it.
-                    if !target_panes.exited.load(Ordering::SeqCst) {
+                    if !wait_for_exit(&target_panes.exited, timeout) {
                         let _ = target_panes.killer.force();
                     }
                 }
+            }
+            KillPolicy::GracefulTree { timeout } => {
+                if !target_panes.exited.load(Ordering::SeqCst) {
+                    // Ask the whole group to exit — every member gets the stop
+                    // request and the grace window — then wait for the leader.
+                    let _ = target_panes.killer.request_stop_tree();
+                    wait_for_exit(&target_panes.exited, timeout);
+                }
+
+                // Group-kill even when the leader already exited: a disowned
+                // descendant can keep the group alive past its leader, and
+                // `killpg`/`TerminateJobObject` reaps it with the rest.
+                let _ = target_panes.killer.tree();
             }
         }
 
@@ -396,6 +399,20 @@ impl PtyBackend for PortablePtyBackend {
 
         Ok(())
     }
+}
+
+/// Poll the watcher's `exited` flag every 25ms until it flips or `timeout`
+/// elapses, returning whether the child exited within the window. The shared
+/// grace-window wait of the `Graceful` and `GracefulTree` kill policies.
+fn wait_for_exit(exited: &AtomicBool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if exited.load(Ordering::SeqCst) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    exited.load(Ordering::SeqCst)
 }
 
 fn to_pp_size(s: PtySize) -> portable_pty::PtySize {

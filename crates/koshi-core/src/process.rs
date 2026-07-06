@@ -14,7 +14,9 @@ use std::time::Duration;
 ///
 /// `Graceful` asks the process to exit and waits up to `timeout` before the
 /// caller escalates; `Force` kills it immediately; `Tree` kills the whole
-/// process group/job so orphaned grandchildren do not linger.
+/// process group/job so orphaned grandchildren do not linger; `GracefulTree`
+/// combines the last two — it asks the whole group to exit, waits up to
+/// `timeout`, then group-kills so no descendant is left orphaned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KillPolicy {
     /// Request a clean shutdown, allowing up to `timeout` to comply.
@@ -27,6 +29,15 @@ pub enum KillPolicy {
     Force,
     /// Kill the entire process tree (group/job), not just the leader.
     Tree,
+    /// Request a clean shutdown of the whole process group, allowing up to
+    /// `timeout`, then group-kill (`killpg` / `TerminateJobObject`) so no
+    /// descendant is orphaned.
+    GracefulTree {
+        /// How long to wait for the process to exit on its own before the
+        /// group-kill.
+        #[serde(with = "duration_secs")]
+        timeout: Duration,
+    },
 }
 
 /// The known shells, used to pick shell-specific launch behaviour.

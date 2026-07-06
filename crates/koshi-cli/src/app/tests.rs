@@ -9,8 +9,9 @@ use super::*;
 
 use ratatui::backend::TestBackend;
 
+use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::ids::PaneId;
-use koshi_core::process::ExitStatus;
+use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
@@ -139,6 +140,74 @@ fn run_loop_exits_when_the_shell_exits() {
     run_loop(&mut runtime, &mut terminal, client_id).expect("loop");
 
     assert!(!runtime.has_active_panes());
+}
+
+#[test]
+fn teardown_runs_the_staged_shutdown_on_a_normal_exit() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, _tx, _client_id, pane_id) = boot(&fake);
+
+    // The loop returned normally: teardown runs the staged shutdown.
+    let outcome: thread::Result<Result<(), <TestBackend as Backend>::Error>> = Ok(Ok(()));
+    teardown(&mut runtime, outcome).expect("teardown");
+
+    assert!(
+        runtime.is_draining(),
+        "a normal exit runs the staged shutdown"
+    );
+    assert_eq!(
+        fake.kills(pane_id).expect("kills"),
+        vec![KillPolicy::GracefulTree {
+            timeout: GRACEFUL_TIMEOUT_DURATION,
+        }],
+    );
+}
+
+#[test]
+fn teardown_propagates_a_loop_error_after_the_staged_shutdown() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, _tx, _client_id, pane_id) = boot(&fake);
+
+    // The loop returned its own I/O error (the crossterm backend's error
+    // type): teardown still runs the staged shutdown, then hands the error
+    // back for `run` to propagate.
+    let outcome: thread::Result<Result<(), io::Error>> = Ok(Err(io::Error::other("draw failed")));
+    let err = teardown(&mut runtime, outcome).expect_err("the loop error propagates");
+
+    assert_eq!(err.to_string(), "draw failed");
+    assert!(
+        runtime.is_draining(),
+        "a loop error still runs the staged shutdown"
+    );
+    assert_eq!(
+        fake.kills(pane_id).expect("kills"),
+        vec![KillPolicy::GracefulTree {
+            timeout: GRACEFUL_TIMEOUT_DURATION,
+        }],
+    );
+}
+
+#[test]
+fn teardown_group_kills_and_reraises_on_a_panic() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, _tx, _client_id, pane_id) = boot(&fake);
+
+    // The loop panicked: teardown takes the abrupt path — immediate group-kill,
+    // no staged shutdown, and the panic re-raised.
+    let outcome: thread::Result<Result<(), <TestBackend as Backend>::Error>> =
+        Err(Box::new("boom"));
+    let reraised = catch_unwind(AssertUnwindSafe(|| teardown(&mut runtime, outcome)));
+
+    assert!(reraised.is_err(), "the original panic is re-raised");
+    assert!(
+        !runtime.is_draining(),
+        "the panic path skips the staged shutdown"
+    );
+    assert_eq!(
+        fake.kills(pane_id).expect("kills"),
+        vec![KillPolicy::Tree],
+        "the panic path immediately group-kills",
+    );
 }
 
 #[test]

@@ -36,6 +36,16 @@ fn kill_policy_serializes_timeout_as_seconds() {
 }
 
 #[test]
+fn kill_policy_graceful_tree_serializes_timeout_as_seconds() {
+    let policy = KillPolicy::GracefulTree {
+        timeout: Duration::from_secs(3),
+    };
+    let json = serde_json::to_string(&policy).expect("serialize");
+    // Timeout is a bare integer count of seconds, not a struct.
+    assert_eq!(json, r#"{"GracefulTree":{"timeout":3}}"#);
+}
+
+#[test]
 fn kill_policy_roundtrips() {
     for policy in [
         KillPolicy::Graceful {
@@ -43,6 +53,9 @@ fn kill_policy_roundtrips() {
         },
         KillPolicy::Force,
         KillPolicy::Tree,
+        KillPolicy::GracefulTree {
+            timeout: Duration::from_secs(5),
+        },
     ] {
         let json = serde_json::to_string(&policy).expect("serialize");
         let back: KillPolicy = serde_json::from_str(&json).expect("deserialize");

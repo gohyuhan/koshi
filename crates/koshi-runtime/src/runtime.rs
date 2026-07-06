@@ -11,6 +11,7 @@ pub mod pty_forward;
 pub mod pty_output;
 pub mod render_schedule;
 pub mod scroll;
+pub mod shutdown;
 pub mod snapshot;
 pub mod state;
 pub mod transaction;

@@ -65,7 +65,7 @@ use crate::runtime::{
 /// Shared by the new-tab path and genesis so both size the root pane identically.
 ///
 /// Callers that gate on minimum size (the new-tab command) check
-/// [`fits`](koshi_layout::solver::fits) first; genesis has no gate, and the
+/// [`fits`] first; genesis has no gate, and the
 /// solver always places a single leaf, so the `unwrap_or` fallback is a floor,
 /// not a real path.
 pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size) -> PtySize {

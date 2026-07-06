@@ -1,7 +1,8 @@
 //! The loop-facing surface: the thin methods the binary's event loop calls to
 //! time renders, decide when to repaint, tell whether any pane is still live,
-//! and force-kill every child on shutdown. They wrap the render scheduler and
-//! PTY maps, which are crate-private, so the loop can live outside this crate.
+//! and group-kill every child when the loop panics (the normal quit path takes
+//! the staged [`Runtime::shutdown`]). They wrap the render scheduler and PTY
+//! maps, which are crate-private, so the loop can live outside this crate.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,12 +30,14 @@ impl Runtime {
         !self.pty_handles.is_empty()
     }
 
-    /// Force-kill every live pane's child. Minimal shutdown teardown, called as
-    /// the loop exits so no shell outlives the process.
+    /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),
+    /// reaping any descendants so none is orphaned. The abrupt teardown for the
+    /// panic path — no grace window while unwinding; the normal quit path takes
+    /// the staged [`Runtime::shutdown`].
     pub fn kill_all_panes(&mut self) {
         let backend = Arc::clone(self.pty_backend());
         for pane_id in self.pty_handles.keys().copied() {
-            let _ = backend.kill(pane_id, KillPolicy::Force);
+            let _ = backend.kill(pane_id, KillPolicy::Tree);
         }
     }
 }
