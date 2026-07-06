@@ -63,6 +63,10 @@ pub struct Runtime {
     pub(crate) inbox_tx: Sender<RuntimeEvent>,
     /// Restores the outer terminal when the process ends or panics.
     cleanup_guard: TerminalCleanupGuard,
+    /// Set once shutdown begins, so that — once IPC/plugin command intake
+    /// exists — newly-arriving commands will be rejected rather than mutate
+    /// state mid-teardown. One-way; nothing reads it yet.
+    pub(crate) draining: bool,
 }
 
 impl Runtime {
@@ -91,6 +95,7 @@ impl Runtime {
             inbox_rx,
             inbox_tx,
             cleanup_guard,
+            draining: false,
         }
     }
 
@@ -129,6 +134,11 @@ impl Runtime {
     /// Borrow the terminal cleanup guard.
     pub fn cleanup_guard(&self) -> &TerminalCleanupGuard {
         &self.cleanup_guard
+    }
+    /// Whether shutdown has begun. Once command intake exists it will gate new
+    /// commands; today it only records that teardown started.
+    pub fn is_draining(&self) -> bool {
+        self.draining
     }
 }
 

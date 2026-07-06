@@ -95,19 +95,36 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
 
-    // Run the loop, then kill any surviving child on EVERY exit path — normal,
-    // I/O error, or panic — so no shell outlives the process. A panic is caught,
-    // the children are killed, and the panic is re-raised to unwind as usual (the
-    // cleanup guard still restores the terminal when `runtime` drops).
+    // Run the loop, then tear down however it ended — see [`teardown`].
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         run_loop(&mut runtime, &mut terminal, client_id)
     }));
-    runtime.kill_all_panes();
-    match outcome {
-        Ok(result) => result?,
-        Err(panic) => resume_unwind(panic),
-    }
+    teardown(&mut runtime, outcome)?;
     Ok(())
+}
+
+/// Tear the runtime down for whichever way the loop ended. A normal return —
+/// a clean quit or the loop's own I/O error, whose children's state is intact
+/// either way — runs the staged [`Runtime::shutdown`] (drain → graceful
+/// group-kill → persist), then hands back the loop's own result for [`run`] to
+/// propagate. A caught panic takes the abrupt path — immediately group-kill
+/// every child so none is orphaned, then re-raise, so the panic still unwinds
+/// `runtime` and its cleanup guard restores the terminal (and the tracing
+/// guard flushes logs) as before.
+///
+/// Generic over the loop's error type so it threads through unchanged and a
+/// test can drive it with any backend.
+fn teardown<E>(runtime: &mut Runtime, outcome: thread::Result<Result<(), E>>) -> Result<(), E> {
+    match outcome {
+        Ok(result) => {
+            runtime.shutdown();
+            result
+        }
+        Err(panic) => {
+            runtime.kill_all_panes();
+            resume_unwind(panic);
+        }
+    }
 }
 
 /// Block on crossterm key events, forwarding each to the inbox as outer input.
