@@ -217,3 +217,43 @@ fn re_attaching_the_same_id_replaces_and_returns_the_prior() {
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.get(id).map(Client::active_tab), Some(tab_second));
 }
+
+#[test]
+fn scroll_offset_defaults_to_zero_for_an_unscrolled_pane() {
+    let client = a_client(TabId::new());
+    assert_eq!(client.scroll_offset(PaneId::new()), 0);
+}
+
+#[test]
+fn set_scroll_offset_records_and_reads_back_per_pane() {
+    let mut client = a_client(TabId::new());
+    let (first, second) = (PaneId::new(), PaneId::new());
+
+    client.set_scroll_offset(first, 7);
+    // Panes scroll independently; the second is untouched.
+    assert_eq!(client.scroll_offset(first), 7);
+    assert_eq!(client.scroll_offset(second), 0);
+}
+
+#[test]
+fn set_scroll_offset_zero_clears_the_entry_restoring_live_following() {
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+
+    client.set_scroll_offset(pane, 3);
+    client.set_scroll_offset(pane, 0);
+    assert_eq!(client.scroll_offset(pane), 0);
+}
+
+#[test]
+fn list_attached_mut_reaches_every_client_for_in_place_updates() {
+    let mut registry = ClientRegistry::new();
+    let pane = PaneId::new();
+    registry.attach(a_client(TabId::new()));
+    registry.attach(a_client(TabId::new()));
+
+    for client in registry.list_attached_mut() {
+        client.set_scroll_offset(pane, 4);
+    }
+    assert!(registry.list_attached().all(|c| c.scroll_offset(pane) == 4));
+}

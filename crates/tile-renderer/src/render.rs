@@ -107,8 +107,9 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
 /// Returns `None` when the client has no focused pane; that pane has no placed
 /// slot or no content snapshot; it is not visible or has no content area
 /// (suppressed, hidden, or a collapsed stack member); it has no terminal grid
-/// (a plugin pane, or a slot showing nothing this frame); or the application has
-/// hidden its cursor.
+/// (a plugin pane, or a slot showing nothing this frame); its view is scrolled
+/// back into history (no hardware cursor is placed while scrolled); or the
+/// application has hidden its cursor.
 pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<Position> {
     let focused = snapshot.client.focused_pane?;
 
@@ -125,7 +126,12 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
 
     let pane = find_pane(snapshot, focused)?;
     // A plugin pane (no grid) gets a cursor only when the plugin asks for one.
-    pane.grid_view.as_ref()?;
+    let view = pane.grid_view.as_ref()?;
+    // A view scrolled back into history shows no hardware cursor: the cursor
+    // belongs to the live tail the view has scrolled away from.
+    if view.view_offset > 0 {
+        return None;
+    }
     if !pane.cursor.visible {
         return None;
     }

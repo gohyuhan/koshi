@@ -106,6 +106,18 @@ impl Grid {
         }
     }
 
+    /// Build a grid from ready-made `rows`, normalizing each to exactly `cols`
+    /// cells: a longer row is truncated, a shorter one padded with blank spaces
+    /// in `fill` (both via [`Vec::resize`]). Used to assemble a scrolled-back
+    /// view window from a mix of scrollback and live-screen rows captured at
+    /// possibly differing widths.
+    pub fn from_rows(mut rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
+        for row in &mut rows {
+            row.resize(cols as usize, Cell::blank_with(fill));
+        }
+        Grid { rows }
+    }
+
     /// The grid's dimensions as `(rows, cols)`.
     pub fn dimensions(&self) -> (u16, u16) {
         (

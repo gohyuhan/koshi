@@ -4866,6 +4866,99 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
 }
 
 #[test]
+fn close_pane_clears_only_the_gone_panes_parked_scroll_offset() {
+    let (mut rt, _tx) = new_runtime();
+    let client = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Split so the tab survives closing one pane; the split takes focus.
+    let env = envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let split = other_pane(&rt, sid, root);
+
+    // Park a scroll offset in both panes.
+    {
+        let parked = rt
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .clients
+            .get_mut(client)
+            .unwrap();
+        parked.set_scroll_offset(split, 5);
+        parked.set_scroll_offset(root, 3);
+    }
+
+    // Close the focused (split) pane.
+    let env = envelope_from(
+        CommandSource::key_binding(client),
+        Command::ClosePane(ClosePaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let after = rt.sessions[&sid].clients.get(client).unwrap();
+    // The closed pane's parked offset is dropped; the survivor's is untouched.
+    assert_eq!(after.scroll_offset(split), 0);
+    assert_eq!(after.scroll_offset(root), 3);
+}
+
+#[test]
+fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let pane_a = PaneId::new();
+    let pane_b = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_pane(&mut session, pane_b);
+    add_tab(&mut session, tab_a, pane_a);
+    add_tab(&mut session, tab_b, pane_b);
+    add_client(&mut session, client_id, tab_b, Some(pane_b));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Park an offset in the doomed tab's pane and one in the survivor's.
+    {
+        let client = rt
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .clients
+            .get_mut(client_id)
+            .unwrap();
+        client.set_scroll_offset(pane_b, 5);
+        client.set_scroll_offset(pane_a, 3);
+    }
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab_b),
+            force: false,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let client = rt.sessions[&sid].clients.get(client_id).unwrap();
+    // Every pane of the closed tab loses its parked offset; the surviving
+    // tab's pane keeps its own.
+    assert_eq!(client.scroll_offset(pane_b), 0);
+    assert_eq!(client.scroll_offset(pane_a), 3);
+}
+
+#[test]
 fn close_pane_stacked_member_collapses_the_stack() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();

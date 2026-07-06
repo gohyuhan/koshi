@@ -79,7 +79,7 @@ impl Runtime {
         let panes: Vec<PaneSnapshot> = solve
             .panes
             .iter()
-            .map(|&(pane_id, _)| self.pane_snapshot(pane_id))
+            .map(|&(pane_id, _)| self.pane_snapshot(pane_id, client.scroll_offset(pane_id)))
             .collect();
 
         let active_tab = TabSnapshot {
@@ -124,13 +124,17 @@ impl Runtime {
         })
     }
 
-    /// Content snapshot for one pane: its terminal grid (by reference), cursor,
-    /// title, reverse-video mode, and scrollback tallies.
+    /// Content snapshot for one pane at scrollback view `view_offset` — lines the
+    /// viewing client has scrolled up from the live bottom, `0` following live
+    /// output. The offset is clamped to the pane's retained line count, and that
+    /// clamped value drives both the composed grid and the scroll indicator, so
+    /// the two never disagree. At `0` the grid travels by reference (no copy); a
+    /// scrolled-back offset composes a window of history over the live screen.
     ///
     /// A pane with no terminal engine — a plugin pane, or one not yet spawned —
     /// gets `grid_view = None` and a hidden cursor; the renderer draws no cells
     /// for it.
-    fn pane_snapshot(&self, pane_id: PaneId) -> PaneSnapshot {
+    fn pane_snapshot(&self, pane_id: PaneId, view_offset: usize) -> PaneSnapshot {
         let Some(engine) = self.terminal_engines.get(&pane_id) else {
             return PaneSnapshot {
                 id: pane_id,
@@ -153,6 +157,11 @@ impl Runtime {
         let state = engine.state();
         let (row, col) = state.active_cursor_position();
         let scrollback = state.scrollback();
+        // The engine resolves the requested offset to the grid actually shown and
+        // its effective offset (0 while following live or on the alternate
+        // screen), so the composed grid, the indicator, and cursor suppression
+        // all agree on how far the view is scrolled.
+        let (grid, view_offset) = state.scrolled_view(view_offset);
         PaneSnapshot {
             id: pane_id,
             // OSC 0/1/2 title only; an explicit `rename-pane` does not feed the
@@ -164,12 +173,7 @@ impl Runtime {
                 visible: state.cursor_visible(),
                 blink: state.cursor_blink(),
             },
-            // `view_offset` is always 0 (follow live output); a non-zero
-            // scrolled-back offset arrives with the scrollback-view feature.
-            grid_view: Some(GridView {
-                grid: state.active_grid_arc(),
-                view_offset: 0,
-            }),
+            grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),
             scrollback: ScrollbackMeta {
                 truncated: scrollback.dropped_lines() > 0,
@@ -185,6 +189,32 @@ impl Runtime {
         self.sessions()
             .values()
             .find(|session| session.clients.get(client_id).is_some())
+    }
+
+    /// Mutable twin of [`session_for_client`](Self::session_for_client): the same
+    /// client→session lookup, for callers that edit the client's view state (e.g.
+    /// the scroll handlers).
+    pub(crate) fn session_for_client_mut(&mut self, client_id: ClientId) -> Option<&mut Session> {
+        self.sessions
+            .values_mut()
+            .find(|session| session.clients.get(client_id).is_some())
+    }
+
+    /// The session that owns `pane_id`, or `None` if no session's registry holds
+    /// that pane. The single pane→session lookup, shared by pane-target
+    /// resolution, child-exit routing, and the scroll re-anchor.
+    pub(crate) fn session_for_pane(&self, pane_id: PaneId) -> Option<&Session> {
+        self.sessions()
+            .values()
+            .find(|session| session.panes.get(pane_id).is_some())
+    }
+
+    /// Mutable twin of [`session_for_pane`](Self::session_for_pane), for callers
+    /// that edit the owning session's state.
+    pub(crate) fn session_for_pane_mut(&mut self, pane_id: PaneId) -> Option<&mut Session> {
+        self.sessions
+            .values_mut()
+            .find(|session| session.panes.get(pane_id).is_some())
     }
 }
 
