@@ -1,9 +1,0 @@
-[package]
-name = "tile-config"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-thiserror = "2.0.18"
-tile-core = { version = "0.1.0", path = "../tile-core" }

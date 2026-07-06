@@ -4,15 +4,15 @@
 //! architecture's load-bearing invariants. These four hold regardless of how
 //! the crates evolve, so the guard needs no per-crate allow-list to maintain:
 //!
-//! - `tile-core` has zero internal `tile-*` dependencies (it is the foundation).
-//! - `tile-plugin-manager` does not depend on `tile-runtime`, `tile-ipc`, or
-//!   `tile-plugin-host` (one-way arrow: runtime/cli depend on the manager).
-//! - `wasmtime` is a direct dependency of `tile-plugin-host` only.
-//! - `portable-pty` is a direct dependency of `tile-pty` only.
+//! - `koshi-core` has zero internal `koshi-*` dependencies (it is the foundation).
+//! - `koshi-plugin-manager` does not depend on `koshi-runtime`, `koshi-ipc`, or
+//!   `koshi-plugin-host` (one-way arrow: runtime/cli depend on the manager).
+//! - `wasmtime` is a direct dependency of `koshi-plugin-host` only.
+//! - `portable-pty` is a direct dependency of `koshi-pty` only.
 //!
 //! Containment is checked on *direct* dependencies, not transitively: crates
 //! legitimately reach the heavy dependency through its rightful owner (e.g.
-//! `tile-runtime` -> `tile-plugin-host` -> `wasmtime`), and the real failure
+//! `koshi-runtime` -> `koshi-plugin-host` -> `wasmtime`), and the real failure
 //! mode this guards against is a stray `cargo add` in the wrong crate.
 //!
 //! The architecture's full per-crate dependency matrix is intentionally *not*
@@ -82,37 +82,37 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
 
     for (krate, deps) in graph {
         for dep in deps {
-            // tile-core is the foundation: no internal dependencies.
-            if krate == "tile-core" && is_internal_crate(dep) {
+            // koshi-core is the foundation: no internal dependencies.
+            if krate == "koshi-core" && is_internal_crate(dep) {
                 violations.insert(edge(
                     krate,
                     dep,
-                    "tile-core must not depend on internal crates",
+                    "koshi-core must not depend on internal crates",
                 ));
             }
             // Plugin manager arrow is one-way: runtime/cli depend on it, never the reverse.
-            if krate == "tile-plugin-manager"
+            if krate == "koshi-plugin-manager"
                 && matches!(
                     dep.as_str(),
-                    "tile-runtime" | "tile-ipc" | "tile-plugin-host"
+                    "koshi-runtime" | "koshi-ipc" | "koshi-plugin-host"
                 )
             {
                 violations.insert(edge(
                     krate,
                     dep,
-                    "tile-plugin-manager must not depend on runtime/ipc/host",
+                    "koshi-plugin-manager must not depend on runtime/ipc/host",
                 ));
             }
             // Heavy dependencies are owned by exactly one crate.
-            if dep == "wasmtime" && krate != "tile-plugin-host" {
+            if dep == "wasmtime" && krate != "koshi-plugin-host" {
                 violations.insert(edge(
                     krate,
                     dep,
-                    "wasmtime is owned only by tile-plugin-host",
+                    "wasmtime is owned only by koshi-plugin-host",
                 ));
             }
-            if dep == "portable-pty" && krate != "tile-pty" {
-                violations.insert(edge(krate, dep, "portable-pty is owned only by tile-pty"));
+            if dep == "portable-pty" && krate != "koshi-pty" {
+                violations.insert(edge(krate, dep, "portable-pty is owned only by koshi-pty"));
             }
         }
     }
@@ -121,7 +121,7 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
 }
 
 fn is_internal_crate(name: &str) -> bool {
-    name.starts_with("tile-")
+    name.starts_with("koshi-")
 }
 
 fn edge(from: &str, to: &str, why: &str) -> String {

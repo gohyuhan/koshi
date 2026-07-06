@@ -1,0 +1,16 @@
+[package]
+name = "koshi-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
+koshi-pane = { version = "0.1.0", path = "../koshi-pane" }
+
+[dev-dependencies]
+serde_json = "1.0.150"
+koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

@@ -1,0 +1,17 @@
+[package]
+name = "koshi-error"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
+koshi-cli = { version = "0.1.0", path = "../koshi-cli" }
+koshi-config = { version = "0.1.0", path = "../koshi-config" }
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-ipc = { version = "0.1.0", path = "../koshi-ipc" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
+koshi-plugin-host = { version = "0.1.0", path = "../koshi-plugin-host" }
+koshi-pty = { version = "0.1.0", path = "../koshi-pty" }
+koshi-storage = { version = "0.1.0", path = "../koshi-storage" }
+koshi-terminal = { version = "0.1.0", path = "../koshi-terminal" }

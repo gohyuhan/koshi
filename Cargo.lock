@@ -548,6 +548,196 @@ dependencies = [
 ]
 
 [[package]]
+name = "koshi-cli"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-observability",
+ "koshi-pty",
+ "koshi-renderer",
+ "koshi-runtime",
+ "koshi-test-support",
+ "ratatui",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "koshi-config"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "koshi-error"
+version = "0.1.0"
+dependencies = [
+ "koshi-cli",
+ "koshi-config",
+ "koshi-core",
+ "koshi-ipc",
+ "koshi-layout",
+ "koshi-plugin-host",
+ "koshi-pty",
+ "koshi-storage",
+ "koshi-terminal",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-input"
+version = "0.1.0"
+
+[[package]]
+name = "koshi-ipc"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-layout"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-test-support",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-observability"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "koshi-core",
+ "miette",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "koshi-pane"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-plugin-api"
+version = "0.1.0"
+
+[[package]]
+name = "koshi-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-plugin-manager"
+version = "0.1.0"
+
+[[package]]
+name = "koshi-pty"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "nix",
+ "portable-pty",
+ "thiserror 2.0.18",
+ "windows-sys",
+]
+
+[[package]]
+name = "koshi-renderer"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-layout",
+ "koshi-pane",
+ "koshi-terminal",
+ "ratatui",
+]
+
+[[package]]
+name = "koshi-runtime"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-layout",
+ "koshi-observability",
+ "koshi-pane",
+ "koshi-pty",
+ "koshi-renderer",
+ "koshi-session",
+ "koshi-terminal",
+ "koshi-test-support",
+]
+
+[[package]]
+name = "koshi-session"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-layout",
+ "koshi-pane",
+ "koshi-test-support",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-storage"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-terminal"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "percent-encoding",
+ "thiserror 2.0.18",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
+ "vte",
+]
+
+[[package]]
+name = "koshi-test-support"
+version = "0.1.0"
+dependencies = [
+ "koshi-core",
+ "koshi-pty",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1332,196 +1522,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "tile-cli"
-version = "0.1.0"
-dependencies = [
- "ratatui",
- "thiserror 2.0.18",
- "tile-core",
- "tile-observability",
- "tile-pty",
- "tile-renderer",
- "tile-runtime",
- "tile-test-support",
- "tracing",
-]
-
-[[package]]
-name = "tile-config"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tile-core",
-]
-
-[[package]]
-name = "tile-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "tile-error"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tile-cli",
- "tile-config",
- "tile-core",
- "tile-ipc",
- "tile-layout",
- "tile-plugin-host",
- "tile-pty",
- "tile-storage",
- "tile-terminal",
-]
-
-[[package]]
-name = "tile-input"
-version = "0.1.0"
-
-[[package]]
-name = "tile-ipc"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tile-core",
-]
-
-[[package]]
-name = "tile-layout"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tile-core",
- "tile-test-support",
-]
-
-[[package]]
-name = "tile-observability"
-version = "0.1.0"
-dependencies = [
- "directories",
- "miette",
- "thiserror 2.0.18",
- "tile-core",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tile-pane"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tile-core",
-]
-
-[[package]]
-name = "tile-plugin-api"
-version = "0.1.0"
-
-[[package]]
-name = "tile-plugin-host"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tile-core",
-]
-
-[[package]]
-name = "tile-plugin-manager"
-version = "0.1.0"
-
-[[package]]
-name = "tile-pty"
-version = "0.1.0"
-dependencies = [
- "nix",
- "portable-pty",
- "thiserror 2.0.18",
- "tile-core",
- "windows-sys",
-]
-
-[[package]]
-name = "tile-renderer"
-version = "0.1.0"
-dependencies = [
- "ratatui",
- "tile-core",
- "tile-layout",
- "tile-pane",
- "tile-terminal",
-]
-
-[[package]]
-name = "tile-runtime"
-version = "0.1.0"
-dependencies = [
- "tile-core",
- "tile-layout",
- "tile-observability",
- "tile-pane",
- "tile-pty",
- "tile-renderer",
- "tile-session",
- "tile-terminal",
- "tile-test-support",
-]
-
-[[package]]
-name = "tile-session"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tile-core",
- "tile-layout",
- "tile-pane",
- "tile-test-support",
-]
-
-[[package]]
-name = "tile-storage"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tile-core",
-]
-
-[[package]]
-name = "tile-terminal"
-version = "0.1.0"
-dependencies = [
- "percent-encoding",
- "thiserror 2.0.18",
- "tile-core",
- "tracing",
- "unicode-segmentation",
- "unicode-width 0.2.2",
- "vte",
-]
-
-[[package]]
-name = "tile-test-support"
-version = "0.1.0"
-dependencies = [
- "tile-core",
- "tile-pty",
 ]
 
 [[package]]

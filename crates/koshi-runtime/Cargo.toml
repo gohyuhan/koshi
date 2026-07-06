@@ -1,0 +1,18 @@
+[package]
+name = "koshi-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
+koshi-observability = { version = "0.1.0", path = "../koshi-observability" }
+koshi-pane = { version = "0.1.0", path = "../koshi-pane" }
+koshi-pty = { version = "0.1.0", path = "../koshi-pty" }
+koshi-renderer = { version = "0.1.0", path = "../koshi-renderer" }
+koshi-session = { version = "0.1.0", path = "../koshi-session" }
+koshi-terminal = { version = "0.1.0", path = "../koshi-terminal" }
+
+[dev-dependencies]
+koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

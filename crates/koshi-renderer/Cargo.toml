@@ -1,0 +1,12 @@
+[package]
+name = "koshi-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false }
+koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
+koshi-pane = { version = "0.1.0", path = "../koshi-pane" }
+koshi-terminal = { version = "0.1.0", path = "../koshi-terminal" }
