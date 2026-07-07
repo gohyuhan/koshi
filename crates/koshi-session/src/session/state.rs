@@ -2,6 +2,7 @@
 //! running session.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::SystemTime;
 
 use koshi_core::{
     constant::MAX_TAB_FOCUS_MRU,
@@ -157,6 +158,9 @@ pub struct Session {
     pub id: SessionId,
     /// Human-facing name; attach and list address sessions by it.
     pub name: String,
+    /// When the session was created. Supplied by the caller at the creation
+    /// boundary, not read from the clock here, so it stays controllable.
+    pub created_at: SystemTime,
     /// The session's tabs, keyed by id. Display order is not the map
     /// order — it lives on each tab, so reordering tabs never moves map
     /// entries.
@@ -176,12 +180,19 @@ pub struct Session {
 
 impl Session {
     /// A session with no tabs, no panes, and no plugin runtime yet, holding the
-    /// supplied client registry.
+    /// supplied client registry. `created_at` is supplied by the caller at the
+    /// creation boundary, not read from the clock here.
     #[must_use]
-    pub fn new(id: SessionId, name: String, client_registry: ClientRegistry) -> Self {
+    pub fn new(
+        id: SessionId,
+        name: String,
+        created_at: SystemTime,
+        client_registry: ClientRegistry,
+    ) -> Self {
         Self {
             id,
             name,
+            created_at,
             tabs: BTreeMap::new(),
             panes: PaneRegistry::new(),
             clients: client_registry,

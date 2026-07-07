@@ -68,7 +68,12 @@ fn holds_one_session_with_one_tab_and_pane() {
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
 
-    let mut session = Session::new(session_id, "main".to_string(), ClientRegistry::new());
+    let mut session = Session::new(
+        session_id,
+        "main".to_string(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     session
         .panes
         .insert(PaneRecord::new(pane_id, SystemTime::now()))

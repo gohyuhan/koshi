@@ -5,6 +5,7 @@
 pub mod action;
 pub mod command;
 pub mod constant;
+pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod geometry;

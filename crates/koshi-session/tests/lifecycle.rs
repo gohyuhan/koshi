@@ -127,7 +127,12 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
 /// `session.id` via [`focused_client`], so client and session never disagree on
 /// the session id.
 fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     for tab in tabs {
         session.tabs.insert(tab.id(), tab);
     }

@@ -46,7 +46,12 @@ fn session_with_client(viewport: Size) -> (Session, SessionId, TabId, PaneId, Cl
     let pane_id = PaneId::new();
     let client_id = ClientId::new();
 
-    let mut session = Session::new(session_id, "s".to_string(), ClientRegistry::new());
+    let mut session = Session::new(
+        session_id,
+        "s".to_string(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     session
         .panes
         .insert(PaneRecord::new(pane_id, SystemTime::now()))

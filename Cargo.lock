@@ -661,6 +661,8 @@ dependencies = [
  "koshi-runtime",
  "koshi-test-support",
  "ratatui",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
