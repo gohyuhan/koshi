@@ -266,6 +266,33 @@ impl Runtime {
         }
     }
 
+    /// Seal `events` as one committed transaction keyed to `command_id`: emit
+    /// each event into a fresh [`TransactionScope`] in order, then commit.
+    fn commit_events(command_id: CommandId, events: Vec<Event>) -> CommandResult {
+        let mut scope = TransactionScope::new();
+        for event in events {
+            scope.emit(event);
+        }
+        scope.commit(command_id)
+    }
+
+    /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
+    /// its command is required (never the default shell), it splits the default
+    /// anchor pane rightward into the tiled view, and carries the working
+    /// directory through. Shared by [`Self::dispatch`] and
+    /// [`Self::resolve_target`] so the validate pre-check and the handler resolve
+    /// the same anchor pane.
+    fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
+        NewPaneArgs {
+            source: None,
+            direction: None,
+            stacked: false,
+            cwd: args.cwd.clone(),
+            command: Some(args.command.clone()),
+            client: None,
+        }
+    }
+
     /// Handle [`Command::NewPane`]: grow the source pane's tab by one pane —
     /// stacked onto the source or split from it — and spawn it, in
     /// launch-then-commit order — no session state changes until the child
@@ -285,23 +312,6 @@ impl Runtime {
     /// fullscreen tab drops its fullscreen at the commit, so the new pane
     /// lands in the tiled view it was sized against. All events seal in one
     /// transaction.
-    /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
-    /// its command is required (never the default shell), it splits the default
-    /// anchor pane rightward into the tiled view, and carries the working
-    /// directory through. Shared by [`Self::dispatch`] and
-    /// [`Self::resolve_target`] so the validate pre-check and the handler resolve
-    /// the same anchor pane.
-    fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
-        NewPaneArgs {
-            source: None,
-            direction: None,
-            stacked: false,
-            cwd: args.cwd.clone(),
-            command: Some(args.command.clone()),
-            client: None,
-        }
-    }
-
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -481,11 +491,7 @@ impl Runtime {
             );
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::ClosePane`]: tear the pane out of its session and
@@ -595,11 +601,7 @@ impl Runtime {
             let _ = backend.kill(pane_id, kill_policy);
         });
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
@@ -1035,11 +1037,7 @@ impl Runtime {
             &mut events,
         );
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::FocusPane`]: move the target client's focus to the
@@ -1167,11 +1165,7 @@ impl Runtime {
             }));
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::NewTab`]: create a tab holding one fresh shell pane
@@ -1307,11 +1301,7 @@ impl Runtime {
             );
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::CloseTab`]: tear the tab and every pane in it out of
@@ -1442,11 +1432,7 @@ impl Runtime {
             });
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::RenameTab`]: update the tab's display name.
@@ -1483,11 +1469,7 @@ impl Runtime {
 
         let events = tab_ops::rename_tab(session, tab_id, new_name);
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::FocusTab`]: switch the designated client's view to
@@ -1553,11 +1535,7 @@ impl Runtime {
             );
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
@@ -1593,11 +1571,7 @@ impl Runtime {
 
         let events = tab_ops::move_tab(session, tab_id, args.index);
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::RenameSession`]: assign the session a fresh
@@ -1635,11 +1609,7 @@ impl Runtime {
 
         let events = session_ops::rename_session(session, new_name);
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::TogglePaneFullscreen`]: switch the target pane's tab
@@ -1754,11 +1724,7 @@ impl Runtime {
             }
         }
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::ToggleLockMode`]: flip the acting client between
@@ -1890,11 +1856,7 @@ impl Runtime {
 
         let events = pane_ops::rename_pane(session, target.pane_id, new_name);
 
-        let mut scope = TransactionScope::new();
-        for event in events {
-            scope.emit(event);
-        }
-        scope.commit(command_id)
+        Self::commit_events(command_id, events)
     }
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
