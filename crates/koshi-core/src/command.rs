@@ -292,10 +292,12 @@ pub struct RunCommandPaneArgs {
     pub command: SpawnSpec,
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
+    /// Pane to split from; `None` uses the focused pane.
+    pub source: Option<PaneId>,
     /// Split direction for the new pane; `None` defaults to a rightward
     /// split. Unused when `stacked` is set — a stack has no direction.
     pub direction: Option<Direction>,
-    /// Stack the new pane onto the anchor pane instead of splitting space.
+    /// Stack the new pane onto the source pane instead of splitting space.
     pub stacked: bool,
 }
 

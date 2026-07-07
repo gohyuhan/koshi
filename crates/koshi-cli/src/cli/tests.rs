@@ -166,8 +166,8 @@ fn flagless_subcommands_parse_to_their_variants() {
         ("action", CliCommand::Action),
         ("toggle-pane-fullscreen", CliCommand::TogglePaneFullscreen),
         ("new-tab", CliCommand::NewTab),
-        ("next-tab", CliCommand::NextTab),
-        ("previous-tab", CliCommand::PreviousTab),
+        ("next-tab", CliCommand::NextTab { client: None }),
+        ("previous-tab", CliCommand::PreviousTab { client: None }),
         ("lock", CliCommand::Lock),
         ("unlock", CliCommand::Unlock),
         ("toggle-lock", CliCommand::ToggleLock),
@@ -456,6 +456,7 @@ fn focus_tab_takes_exactly_one_of_index_or_tab() {
         CliCommand::FocusTab {
             index: Some(1),
             tab: None,
+            client: None,
         }
     );
     let tab_flag = format!("tab-{}", fixed_uuid());
@@ -464,6 +465,7 @@ fn focus_tab_takes_exactly_one_of_index_or_tab() {
         CliCommand::FocusTab {
             index: None,
             tab: Some(TabId::from_uuid(fixed_uuid())),
+            client: None,
         }
     );
 
@@ -471,6 +473,64 @@ fn focus_tab_takes_exactly_one_of_index_or_tab() {
     assert_eq!(both.kind(), ErrorKind::ArgumentConflict);
     let neither = parse_err(&["koshi", "focus-tab"]);
     assert_eq!(neither.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn tab_focus_commands_take_an_optional_client() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    let client = ClientId::from_uuid(fixed_uuid());
+    assert_eq!(
+        command(&[
+            "koshi",
+            "focus-tab",
+            "--index",
+            "1",
+            "--client",
+            &client_flag
+        ]),
+        CliCommand::FocusTab {
+            index: Some(1),
+            tab: None,
+            client: Some(client),
+        }
+    );
+    assert_eq!(
+        command(&["koshi", "next-tab", "--client", &client_flag]),
+        CliCommand::NextTab {
+            client: Some(client),
+        }
+    );
+    assert_eq!(
+        command(&["koshi", "previous-tab", "--client", &client_flag]),
+        CliCommand::PreviousTab {
+            client: Some(client),
+        }
+    );
+
+    // The client rides into the mapped command for all three verbs.
+    let (_, mapped) = action_of(&["koshi", "next-tab", "--client", &client_flag]);
+    assert_eq!(
+        mapped,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Next,
+            client: Some(client),
+        })
+    );
+    let (_, mapped) = action_of(&[
+        "koshi",
+        "focus-tab",
+        "--tab",
+        &format!("tab-{}", fixed_uuid()),
+        "--client",
+        &client_flag,
+    ]);
+    assert_eq!(
+        mapped,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(TabId::from_uuid(fixed_uuid())),
+            client: Some(client),
+        })
+    );
 }
 
 #[test]
@@ -518,6 +578,7 @@ fn run_takes_its_command_after_the_separator() {
         CliCommand::Run {
             direction: None,
             stacked: false,
+            pane: None,
             command: vec!["htop".to_string(), "-d".to_string(), "5".to_string()],
         }
     );
@@ -526,8 +587,42 @@ fn run_takes_its_command_after_the_separator() {
         CliCommand::Run {
             direction: Some(DirectionArg::Down),
             stacked: false,
+            pane: None,
             command: vec!["htop".to_string()],
         }
+    );
+}
+
+#[test]
+fn run_takes_an_optional_source_pane() {
+    let pane_flag = format!("pane-{}", fixed_uuid());
+    assert_eq!(
+        command(&["koshi", "run", "--pane", &pane_flag, "--", "htop"]),
+        CliCommand::Run {
+            direction: None,
+            stacked: false,
+            pane: Some(PaneId::from_uuid(fixed_uuid())),
+            command: vec!["htop".to_string()],
+        }
+    );
+
+    // The source pane rides into the mapped command.
+    let (_, mapped) = action_of(&["koshi", "run", "--pane", &pane_flag, "--", "htop"]);
+    assert_eq!(
+        mapped,
+        Command::RunCommandPane(RunCommandPaneArgs {
+            command: SpawnSpec {
+                program: PathBuf::from("htop"),
+                args: vec![],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell_kind: ShellKind::Other("htop".to_string()),
+            },
+            cwd: None,
+            source: Some(PaneId::from_uuid(fixed_uuid())),
+            direction: None,
+            stacked: false,
+        })
     );
 }
 
@@ -766,6 +861,7 @@ fn action_subcommands_map_to_their_exact_commands() {
                     shell_kind: ShellKind::Other("htop".to_string()),
                 },
                 cwd: None,
+                source: None,
                 direction: None,
                 stacked: true,
             }),

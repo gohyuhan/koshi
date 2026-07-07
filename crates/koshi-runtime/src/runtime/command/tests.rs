@@ -600,6 +600,7 @@ fn session_scoped_command_without_session_is_not_found() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            source: None,
             direction: None,
             stacked: false,
         }),
@@ -2412,6 +2413,7 @@ fn run_command_pane_requires_a_pane_anchor() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            source: None,
             direction: None,
             stacked: false,
         }),
@@ -2446,6 +2448,7 @@ fn run_command_pane_spawns_and_records_the_command() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            source: None,
             direction: None,
             stacked: false,
         }),
@@ -2491,6 +2494,7 @@ fn run_command_pane_carries_cwd_into_the_command() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: Some(PathBuf::from("/work")),
+            source: None,
             direction: None,
             stacked: false,
         }),
@@ -2510,18 +2514,20 @@ fn run_command_pane_carries_cwd_into_the_command() {
 
 #[test]
 fn run_command_pane_args_carry_placement_into_the_new_pane_mapping() {
-    // The run → new-pane mapping forwards every placement field verbatim;
-    // only the command is made mandatory and the anchor stays defaulted.
+    // The run → new-pane mapping forwards the source pane and every
+    // placement field verbatim; only the command is made mandatory.
+    let source = PaneId::new();
     let args = RunCommandPaneArgs {
         command: spawn_spec(),
         cwd: Some(PathBuf::from("/work")),
+        source: Some(source),
         direction: Some(Direction::Down),
         stacked: true,
     };
     assert_eq!(
         Runtime::run_command_new_pane_args(&args),
         NewPaneArgs {
-            source: None,
+            source: Some(source),
             direction: Some(Direction::Down),
             stacked: true,
             cwd: Some(PathBuf::from("/work")),

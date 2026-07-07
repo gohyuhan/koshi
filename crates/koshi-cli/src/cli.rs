@@ -172,9 +172,17 @@ pub enum CliCommand {
         force: bool,
     },
     /// Focus the next tab.
-    NextTab,
+    NextTab {
+        /// Client whose view switches; defaults to the issuing client.
+        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: Option<ClientId>,
+    },
     /// Focus the previous tab.
-    PreviousTab,
+    PreviousTab {
+        /// Client whose view switches; defaults to the issuing client.
+        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: Option<ClientId>,
+    },
     /// Re-roll a tab's generated name.
     RenameTab {
         /// Tab to rename; defaults to the focused tab.
@@ -203,6 +211,9 @@ pub enum CliCommand {
         /// Id of the tab to focus.
         #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
         tab: Option<TabId>,
+        /// Client whose view switches; defaults to the issuing client.
+        #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: Option<ClientId>,
     },
     /// Focus a pane by id.
     FocusPane {
@@ -248,6 +259,9 @@ pub enum CliCommand {
         /// Stack the new pane onto the source pane instead of splitting.
         #[arg(long)]
         stacked: bool,
+        /// Pane to split from; defaults to the focused pane.
+        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane: Option<PaneId>,
         /// The command and its arguments, given after `--`.
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -316,18 +330,18 @@ impl CliCommand {
                     force: *force,
                 }),
             ),
-            CliCommand::NextTab => (
+            CliCommand::NextTab { client } => (
                 "next-tab",
                 Command::FocusTab(FocusTabArgs {
                     target: TabTarget::Next,
-                    client: None,
+                    client: *client,
                 }),
             ),
-            CliCommand::PreviousTab => (
+            CliCommand::PreviousTab { client } => (
                 "previous-tab",
                 Command::FocusTab(FocusTabArgs {
                     target: TabTarget::Prev,
-                    client: None,
+                    client: *client,
                 }),
             ),
             CliCommand::RenameTab { tab } => (
@@ -341,7 +355,7 @@ impl CliCommand {
                     index: *index,
                 }),
             ),
-            CliCommand::FocusTab { index, tab } => {
+            CliCommand::FocusTab { index, tab, client } => {
                 // The parser enforces exactly one of the two flags.
                 let target = match (index, tab) {
                     (Some(index), None) => TabTarget::Index(*index),
@@ -352,7 +366,7 @@ impl CliCommand {
                     "focus-tab",
                     Command::FocusTab(FocusTabArgs {
                         target,
-                        client: None,
+                        client: *client,
                     }),
                 )
             }
@@ -376,12 +390,14 @@ impl CliCommand {
             CliCommand::Run {
                 direction,
                 stacked,
+                pane,
                 command,
             } => (
                 "run",
                 Command::RunCommandPane(RunCommandPaneArgs {
                     command: spawn_spec_from_argv(command),
                     cwd: None,
+                    source: *pane,
                     direction: direction.map(Direction::from),
                     stacked: *stacked,
                 }),

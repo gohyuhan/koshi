@@ -54,6 +54,7 @@ fn pane_commands_roundtrip() {
             shell_kind: crate::process::ShellKind::Other("htop".to_string()),
         },
         cwd: None,
+        source: Some(PaneId::new()),
         direction: Some(Direction::Down),
         stacked: false,
     }));
@@ -194,6 +195,7 @@ fn command_variant_names_are_canonical() {
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
                 cwd: None,
+                source: None,
                 direction: None,
                 stacked: false,
             }),
@@ -338,6 +340,7 @@ fn command_kind_mirrors_command() {
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
                 cwd: None,
+                source: None,
                 direction: None,
                 stacked: false,
             }),

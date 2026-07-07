@@ -277,14 +277,14 @@ impl Runtime {
     }
 
     /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
-    /// its command is required (never the default shell), and its placement —
-    /// split direction or stacking — and working directory carry through to
-    /// the new-pane transaction on the default anchor pane. Shared by
+    /// its command is required (never the default shell), and its source
+    /// pane, placement — split direction or stacking — and working directory
+    /// carry through to the new-pane transaction. Shared by
     /// [`Self::dispatch`] and [`Self::resolve_target`] so the validate
     /// pre-check and the handler resolve the same anchor pane.
     fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
         NewPaneArgs {
-            source: None,
+            source: args.source,
             direction: args.direction,
             stacked: args.stacked,
             cwd: args.cwd.clone(),
