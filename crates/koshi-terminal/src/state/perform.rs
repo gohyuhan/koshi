@@ -766,28 +766,31 @@ impl vte::Perform for TerminalState {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
-        // OSC 0/1/2 set the window/icon title. `params[0]` is the command
-        // number. vte splits the payload on every `;`, but for a title only the
-        // first `;` is the command/text separator, so rejoin `params[1..]` with
-        // `;` to keep a title that itself contains one. Decode lossily so a
-        // non-UTF-8 title still shows. OSC 7 (the working directory) is handled
-        // by its own arm below.
+        // `params[0]` is the command number. vte splits the payload on every
+        // `;`, but only the first `;` is the command/payload separator, so each
+        // arm rejoins `params[1..]` with `;` to keep a payload that itself
+        // contains one.
         let Some(&command) = params.first() else {
             return;
         };
-        if matches!(std::str::from_utf8(command), Ok("0" | "1" | "2")) && params.len() > 1 {
-            let title = params[1..].join(&b';');
-            self.title = Some(String::from_utf8_lossy(&title).into_owned());
-        }
-        // OSC 7 reports the shell's working directory as a `file://host/path`
-        // URI. Rejoin `params[1..]` on `;` like the title (a path may carry a
-        // literal `;`), then parse; an unparseable URI leaves the last cwd
-        // unchanged so a bad emit does not erase a good value.
-        if matches!(std::str::from_utf8(command), Ok("7")) && params.len() > 1 {
-            let uri = params[1..].join(&b';');
-            if let Some(cwd) = parse_osc7_cwd(&uri) {
-                self.reported_cwd = Some(cwd);
+        match std::str::from_utf8(command) {
+            // OSC 0/1/2 — set the window/icon title. Decode lossily so a
+            // non-UTF-8 title still shows.
+            Ok("0" | "1" | "2") if params.len() > 1 => {
+                let title = params[1..].join(&b';');
+                self.title = Some(String::from_utf8_lossy(&title).into_owned());
             }
+            // OSC 7 — the shell's working directory as a `file://host/path`
+            // URI. An unparseable URI leaves the last cwd unchanged so a bad
+            // emit does not erase a good value.
+            Ok("7") if params.len() > 1 => {
+                let uri = params[1..].join(&b';');
+                if let Some(cwd) = parse_osc7_cwd(&uri) {
+                    self.reported_cwd = Some(cwd);
+                }
+            }
+            // Any other OSC command is not handled yet.
+            _ => {}
         }
     }
 
