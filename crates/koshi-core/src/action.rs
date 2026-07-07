@@ -415,8 +415,8 @@ fn core_seed(
 #[must_use]
 pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionHandlerRef::CoreCommand;
-    use ActionScope::{Global, PaneSession, Tab};
-    use TargetKind::{Pane, Session, Tab as TabTarget};
+    use ActionScope::{Client, Global, PaneSession, Tab};
+    use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
     vec![
         // --- Panes ---
@@ -447,9 +447,9 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "focus-pane",
             "Focus Pane",
-            "Move focus to another pane",
-            PaneSession,
-            vec![Pane],
+            "Move the issuing client's focus to a pane",
+            Client,
+            vec![Pane, ClientTarget],
             CoreCommand(CommandKind::FocusPane),
         ),
         core_seed(
@@ -488,25 +488,25 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "focus-tab",
             "Focus Tab",
-            "Move focus to a specific tab",
-            Tab,
-            vec![TabTarget],
+            "Switch the issuing client's view to a specific tab",
+            Client,
+            vec![TabTarget, ClientTarget],
             CoreCommand(CommandKind::FocusTab),
         ),
         core_seed(
             "next-tab",
             "Next Tab",
-            "Move focus to the next tab",
-            Tab,
-            vec![TabTarget],
+            "Switch the issuing client's view to the next tab",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
         ),
         core_seed(
             "previous-tab",
             "Previous Tab",
-            "Move focus to the previous tab",
-            Tab,
-            vec![TabTarget],
+            "Switch the issuing client's view to the previous tab",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
         ),
         core_seed(
@@ -538,25 +538,25 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "toggle-lock",
             "Toggle Lock",
-            "Toggle pass-through lock mode for the focused pane",
-            PaneSession,
-            vec![Pane],
+            "Toggle pass-through lock mode for the issuing client",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::ToggleLockMode),
         ),
         core_seed(
             "lock",
             "Lock",
-            "Enable pass-through lock mode for the focused pane",
-            PaneSession,
-            vec![Pane],
+            "Enable pass-through lock mode for the issuing client",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
         ),
         core_seed(
             "unlock",
             "Unlock",
-            "Disable pass-through lock mode for the focused pane",
-            PaneSession,
-            vec![Pane],
+            "Disable pass-through lock mode for the issuing client",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
         ),
         // --- Run ---

@@ -197,6 +197,37 @@ fn core_seeds_are_well_formed() {
     }
 }
 
+/// Pins the client-scoped seeds: lock mode and focus are per-client state, so
+/// their actions carry the `Client` scope and accept a client target.
+#[test]
+fn lock_and_focus_seeds_are_client_scoped() {
+    let seeds = core_action_seeds();
+    let metadata_of = |name: &str| {
+        let action = ActionRef::core(name).expect("valid seed name");
+        seeds
+            .iter()
+            .find(|(seeded, _)| *seeded == action)
+            .unwrap_or_else(|| panic!("{name} must be seeded"))
+            .1
+            .clone()
+    };
+
+    let cases: &[(&str, Vec<TargetKind>)] = &[
+        ("focus-pane", vec![TargetKind::Pane, TargetKind::Client]),
+        ("focus-tab", vec![TargetKind::Tab, TargetKind::Client]),
+        ("next-tab", vec![TargetKind::Client]),
+        ("previous-tab", vec![TargetKind::Client]),
+        ("lock", vec![TargetKind::Client]),
+        ("unlock", vec![TargetKind::Client]),
+        ("toggle-lock", vec![TargetKind::Client]),
+    ];
+    for (name, targets) in cases {
+        let metadata = metadata_of(name);
+        assert_eq!(metadata.scope_class, ActionScope::Client, "for {name}");
+        assert_eq!(metadata.target_compat, *targets, "for {name}");
+    }
+}
+
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
 /// changes this list and fails the assert — a deliberate gate so the stable
 /// user-facing surface never shifts silently.

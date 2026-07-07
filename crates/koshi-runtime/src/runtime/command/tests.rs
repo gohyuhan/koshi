@@ -539,7 +539,7 @@ fn resize_pane_default_target_without_context_is_not_found() {
     let env = envelope(Command::ResizePane(ResizePaneArgs {
         pane: None,
         direction: koshi_core::geometry::Direction::Left,
-        amount: 1,
+        size: 1,
     }));
     let command_id = env.id;
 
@@ -600,6 +600,8 @@ fn session_scoped_command_without_session_is_not_found() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            direction: None,
+            stacked: false,
         }),
     ];
 
@@ -2410,6 +2412,8 @@ fn run_command_pane_requires_a_pane_anchor() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            direction: None,
+            stacked: false,
         }),
     );
     let command_id = env.id;
@@ -2442,6 +2446,8 @@ fn run_command_pane_spawns_and_records_the_command() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: None,
+            direction: None,
+            stacked: false,
         }),
     )) {
         CommandResult::Ok { .. } => {}
@@ -2485,6 +2491,8 @@ fn run_command_pane_carries_cwd_into_the_command() {
         Command::RunCommandPane(RunCommandPaneArgs {
             command: spawn_spec(),
             cwd: Some(PathBuf::from("/work")),
+            direction: None,
+            stacked: false,
         }),
     ));
 
@@ -2497,6 +2505,29 @@ fn run_command_pane_carries_cwd_into_the_command() {
     assert_eq!(
         rt.sessions[&sid].panes.get(new_pane).unwrap().cwd,
         Some(PathBuf::from("/work"))
+    );
+}
+
+#[test]
+fn run_command_pane_args_carry_placement_into_the_new_pane_mapping() {
+    // The run → new-pane mapping forwards every placement field verbatim;
+    // only the command is made mandatory and the anchor stays defaulted.
+    let args = RunCommandPaneArgs {
+        command: spawn_spec(),
+        cwd: Some(PathBuf::from("/work")),
+        direction: Some(Direction::Down),
+        stacked: true,
+    };
+    assert_eq!(
+        Runtime::run_command_new_pane_args(&args),
+        NewPaneArgs {
+            source: None,
+            direction: Some(Direction::Down),
+            stacked: true,
+            cwd: Some(PathBuf::from("/work")),
+            command: Some(spawn_spec()),
+            client: None,
+        }
     );
 }
 
@@ -5229,7 +5260,7 @@ fn resize_pane_grows_the_focused_pane_and_reflows_its_pty() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Left,
-            amount: 5,
+            size: 5,
         }),
     );
     let command_id = env.id;
@@ -5253,6 +5284,40 @@ fn resize_pane_grows_the_focused_pane_and_reflows_its_pty() {
 }
 
 #[test]
+fn resize_pane_negative_size_shrinks_the_focused_pane() {
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    // The client focuses A. A negative size moves A's left border inward:
+    // A gives 5 columns to root across that border.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Left,
+            size: -5,
+        }),
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 2);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let expected = PtySize {
+        cols: size_a.cols - 5,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+    assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), expected);
+}
+
+#[test]
 fn resize_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
     let (mut rt, _fake, _tx, sid, client_id, root, pane_a, size_a) = resize_fixture();
 
@@ -5264,7 +5329,7 @@ fn resize_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Right,
-            amount: 3,
+            size: 3,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -5285,7 +5350,7 @@ fn resize_pane_explicit_target_resolves_its_owning_session() {
     let env = envelope(Command::ResizePane(ResizePaneArgs {
         pane: Some(pane_a),
         direction: Direction::Left,
-        amount: 2,
+        size: 2,
     }));
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -5316,7 +5381,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Left,
-            amount: 100,
+            size: 100,
         }),
     );
     let command_id = env.id;
@@ -5325,7 +5390,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinSize,
-            help: Some("neighbor has only 36 spare cells to give".to_string()),
+            help: Some("the donating pane has only 36 spare cells to give".to_string()),
         }
     );
 
@@ -5351,7 +5416,7 @@ fn resize_pane_without_a_border_on_that_side_is_rejected() {
             Command::ResizePane(ResizePaneArgs {
                 pane: None,
                 direction,
-                amount: 1,
+                size: 1,
             }),
         );
         let command_id = env.id;
@@ -5367,7 +5432,7 @@ fn resize_pane_without_a_border_on_that_side_is_rejected() {
 }
 
 #[test]
-fn resize_pane_amount_zero_is_rejected() {
+fn resize_pane_size_zero_is_rejected() {
     let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
 
     let env = envelope_from(
@@ -5375,7 +5440,7 @@ fn resize_pane_amount_zero_is_rejected() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Left,
-            amount: 0,
+            size: 0,
         }),
     );
     let command_id = env.id;
@@ -5384,7 +5449,7 @@ fn resize_pane_amount_zero_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("resize amount must be at least 1".to_string()),
+            help: Some("resize size must be non-zero".to_string()),
         }
     );
     assert_eq!(rt.pty_sizes[&pane_a], size_a);
@@ -5415,7 +5480,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
     let env = envelope(Command::ResizePane(ResizePaneArgs {
         pane: Some(pane_left),
         direction: Direction::Right,
-        amount: 1,
+        size: 1,
     }));
     let command_id = env.id;
     assert_eq!(
@@ -5465,7 +5530,7 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
         Command::ResizePane(ResizePaneArgs {
             pane: Some(pane_left),
             direction: Direction::Right,
-            amount: 4,
+            size: 4,
         }),
     );
     let command_id = env.id;
@@ -5513,7 +5578,7 @@ fn resize_pane_in_a_nested_split_moves_the_enclosing_border() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Right,
-            amount: 4,
+            size: 4,
         }),
     );
     let command_id = env.id;
@@ -7968,7 +8033,7 @@ fn resize_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Left,
-            amount: 5,
+            size: 5,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -8141,7 +8206,7 @@ fn resize_pane_resizes_the_terminal_engine_with_its_pty() {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction: Direction::Left,
-            amount: 5,
+            size: 5,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));

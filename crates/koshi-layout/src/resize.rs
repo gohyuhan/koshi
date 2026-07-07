@@ -6,10 +6,10 @@
 //! through this one function, so there is no second geometry-mutation path
 //! to drift out of sync.
 //!
-//! Growing is the only primitive: `resize(pane, Right, n)` moves the pane's
-//! right border outward. The same border moved the other way is the
-//! neighbor's grow (`resize(neighbor, Left, n)`), so shrink commands need no
-//! separate signed form.
+//! The size is signed and names the border by direction: `resize(pane,
+//! Right, 5)` moves the pane's right border outward (the pane grows,
+//! the right neighbor donates), and `resize(pane, Right, -5)` moves the
+//! same border inward (the pane donates, the right neighbor gains).
 //!
 //! Panes inside a stack resize as a unit: the stack's outer border is the
 //! one that moves, because collapsed children have no independent size.
@@ -33,9 +33,10 @@ pub enum ResizeError {
     /// at every level of the tree.
     #[error("pane {pane} has no {direction:?} border to adjust")]
     NoAdjacentBorder { pane: PaneId, direction: Direction },
-    /// The neighbor on that side cannot give that many cells without going
-    /// below its minimum size.
-    #[error("resize of {requested} cells exceeds the neighbor's {spare} spare cells")]
+    /// The pane giving up the cells — the neighbor on a grow, the pane
+    /// itself on a shrink — cannot give that many without going below its
+    /// minimum size.
+    #[error("resize of {requested} cells exceeds the donating pane's {spare} spare cells")]
     MinSize { requested: u16, spare: u16 },
 }
 
@@ -49,8 +50,10 @@ impl DomainError for ResizeError {
     }
 }
 
-/// Grow `pane` by `amount` cells toward `direction`, taking them from the
-/// adjacent sibling on that side.
+/// Move `pane`'s border on the `direction` side by `size` cells: positive
+/// moves it outward (the pane grows and the adjacent sibling on that side
+/// donates the cells), negative moves it inward (the pane donates and that
+/// sibling gains them). Zero moves nothing and returns the tree unchanged.
 ///
 /// The border that moves is the nearest one to the pane: walking up the
 /// pane's ancestors, the first split that runs on the matching axis
@@ -59,20 +62,21 @@ impl DomainError for ResizeError {
 /// layouts behave: if the pane touches its inner split's edge, the border
 /// that actually moves is the enclosing split's — exactly the line the
 /// user sees next to the pane. `tab_rect` is the rect the tree currently
-/// solves into; the neighbor's solved size bounds how much it can give.
+/// solves into; the donating side's solved size bounds how much it can give.
 ///
 /// # Errors
 ///
 /// - [`ResizeError::PaneNotFound`] when `pane` is not in the tree.
 /// - [`ResizeError::NoAdjacentBorder`] when no ancestor has a neighbor on
 ///   that side.
-/// - [`ResizeError::MinSize`] when the neighbor would drop below its floor.
+/// - [`ResizeError::MinSize`] when the donating side would drop below its
+///   floor.
 pub fn resize(
     tree: &LayoutNode,
     tab_rect: Rect,
     pane: PaneId,
     direction: Direction,
-    amount: u16,
+    size: i16,
 ) -> Result<LayoutNode, ResizeError> {
     let Some(path) = tree.path_to(pane) else {
         return Err(ResizeError::PaneNotFound { pane });
@@ -87,8 +91,18 @@ pub fn resize(
 
     // Deepest ancestor split on the right axis with a neighbor on the
     // resize side — that split owns the border being moved.
-    let Some((depth, receiver, donor)) = find_border(tree, &path, wanted, direction) else {
+    let Some((depth, pane_slot, neighbor)) = find_border(tree, &path, wanted, direction) else {
         return Err(ResizeError::NoAdjacentBorder { pane, direction });
+    };
+
+    // The sign picks who donates the cells across the border: on a grow the
+    // neighbor gives them to the pane, on a shrink the pane gives them to
+    // the neighbor.
+    let amount = size.unsigned_abs();
+    let (receiver, donor) = if size < 0 {
+        (neighbor, pane_slot)
+    } else {
+        (pane_slot, neighbor)
     };
 
     // The donor can give only what its solved size holds above its floor.

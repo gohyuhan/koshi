@@ -1,4 +1,5 @@
-//! Tests for resize transactions: moving pane borders by exact cell counts.
+//! Tests for resize transactions: moving pane borders by exact signed cell
+//! counts — outward grows the pane, inward shrinks it toward the neighbor.
 
 use koshi_core::geometry::{Point, Size};
 use koshi_test_support::layout_assert::{
@@ -77,6 +78,83 @@ fn growing_down_and_up_move_rows() {
     let up = resize(&tree, tab(), b, Direction::Up, 2).unwrap();
     assert_eq!(solved_size(&up, tab(), a).rows, 10);
     assert_eq!(solved_size(&up, tab(), b).rows, 14);
+}
+
+#[test]
+fn shrinking_right_gives_the_cells_to_the_right_neighbor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let resized = resize(&tree, tab(), a, Direction::Right, -3).unwrap();
+    assert_eq!(solved_size(&resized, tab(), a).cols, 37);
+    assert_eq!(solved_size(&resized, tab(), b).cols, 43);
+    assert_tiles(&resized, tab());
+}
+
+#[test]
+fn shrinking_left_gives_the_cells_to_the_left_neighbor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let resized = resize(&tree, tab(), b, Direction::Left, -2).unwrap();
+    assert_eq!(solved_size(&resized, tab(), a).cols, 42);
+    assert_eq!(solved_size(&resized, tab(), b).cols, 38);
+}
+
+#[test]
+fn a_shrink_mirrors_the_neighbors_grow_on_the_same_border() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let shrunk = resize(&tree, tab(), a, Direction::Right, -3).unwrap();
+    let grown = resize(&tree, tab(), b, Direction::Left, 3).unwrap();
+    assert_eq!(shrunk, grown);
+}
+
+#[test]
+fn shrink_blocked_by_the_panes_own_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
+
+    // a solves to five columns and must keep its border-inclusive four: one
+    // is spare — on a shrink, a itself is the donor.
+    let err = resize(&tree, narrow, a, Direction::Right, -4).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 4,
+            spare: 1,
+        }
+    );
+
+    let allowed = resize(&tree, narrow, a, Direction::Right, -1).unwrap();
+    assert_eq!(solved_size(&allowed, narrow, a).cols, 4);
+    assert_eq!(solved_size(&allowed, narrow, b).cols, 6);
+}
+
+#[test]
+fn shrink_on_a_tab_edge_has_no_border_either() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let err = resize(&tree, tab(), a, Direction::Left, -1).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::NoAdjacentBorder {
+            pane: a,
+            direction: Direction::Left,
+        }
+    );
+}
+
+#[test]
+fn zero_size_returns_the_tree_unchanged() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    let resized = resize(&tree, tab(), a, Direction::Right, 0).unwrap();
+    assert_eq!(resized, tree);
 }
 
 #[test]

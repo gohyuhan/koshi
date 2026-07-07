@@ -49,7 +49,7 @@ enum Op {
     Resize {
         target: usize,
         direction: u8,
-        amount: u16,
+        size: i16,
     },
     Normalize,
 }
@@ -65,11 +65,11 @@ fn op_strategy() -> BoxedStrategy<Op> {
         (0..16usize)
             .prop_map(|target| Op::Remove { target })
             .boxed(),
-        (0..16usize, 0..4u8, 1..4u16)
-            .prop_map(|(target, direction, amount)| Op::Resize {
+        (0..16usize, 0..4u8, -3..4i16)
+            .prop_map(|(target, direction, size)| Op::Resize {
                 target,
                 direction,
-                amount,
+                size,
             })
             .boxed(),
         Just(Op::Normalize).boxed(),
@@ -160,9 +160,9 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
         Op::Resize {
             target,
             direction: d,
-            amount,
+            size,
         } => {
-            if let Ok(next) = resize(tree, tab, pick(target), direction(d), amount) {
+            if let Ok(next) = resize(tree, tab, pick(target), direction(d), size) {
                 *tree = next;
             }
         }

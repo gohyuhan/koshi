@@ -277,16 +277,16 @@ impl Runtime {
     }
 
     /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
-    /// its command is required (never the default shell), it splits the default
-    /// anchor pane rightward into the tiled view, and carries the working
-    /// directory through. Shared by [`Self::dispatch`] and
-    /// [`Self::resolve_target`] so the validate pre-check and the handler resolve
-    /// the same anchor pane.
+    /// its command is required (never the default shell), and its placement —
+    /// split direction or stacking — and working directory carry through to
+    /// the new-pane transaction on the default anchor pane. Shared by
+    /// [`Self::dispatch`] and [`Self::resolve_target`] so the validate
+    /// pre-check and the handler resolve the same anchor pane.
     fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
         NewPaneArgs {
             source: None,
-            direction: None,
-            stacked: false,
+            direction: args.direction,
+            stacked: args.stacked,
             cwd: args.cwd.clone(),
             command: Some(args.command.clone()),
             client: None,
@@ -946,31 +946,33 @@ impl Runtime {
         events
     }
 
-    /// Move one border of a pane by an exact cell count, then resize the
-    /// affected PTYs.
+    /// Move one border of a pane by an exact signed cell count, then resize
+    /// the affected PTYs.
     ///
     /// The border that moves is resolved by the layout crate's resize
-    /// transaction: the pane grows toward `args.direction`, and the adjacent
-    /// sibling on that side donates the cells. The target pane's tab must be
-    /// viewed by at least one attached client: the tab is solved against that
-    /// real viewport ([`Session::tab_viewport`]), so the donor's spare cells
-    /// are measured against the exact terminal displaying the result, and a
-    /// tab no client currently views rejects. On success the tab's tree is
-    /// swapped in — a fullscreen tab drops its fullscreen, making the moved
-    /// border visible — [`Event::LayoutChanged`] is emitted, and every live
-    /// PTY whose solved size changed is resized through the shared reflow
-    /// path, one [`Event::PtyResized`] each.
+    /// transaction: a positive `args.size` grows the pane toward
+    /// `args.direction` with the adjacent sibling donating the cells, a
+    /// negative one shrinks it with that sibling gaining them. The target
+    /// pane's tab must be viewed by at least one attached client: the tab is
+    /// solved against that real viewport ([`Session::tab_viewport`]), so the
+    /// donating side's spare cells are measured against the exact terminal
+    /// displaying the result, and a tab no client currently views rejects.
+    /// On success the tab's tree is swapped in — a fullscreen tab drops its
+    /// fullscreen, making the moved border visible —
+    /// [`Event::LayoutChanged`] is emitted, and every live PTY whose solved
+    /// size changed is resized through the shared reflow path, one
+    /// [`Event::PtyResized`] each.
     fn handle_resize_pane(
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
         args: &ResizePaneArgs,
     ) -> CommandResult {
-        if args.amount == 0 {
+        if args.size == 0 {
             return CommandResult::Rejected {
                 command_id,
                 reason: RejectReason::InvalidState,
-                help: Some("resize amount must be at least 1".to_string()),
+                help: Some("resize size must be non-zero".to_string()),
             };
         }
         let acting = match self.acting_session(source) {
@@ -1008,7 +1010,7 @@ impl Runtime {
             tab_rect,
             target.pane_id,
             args.direction,
-            args.amount,
+            args.size,
         ) {
             Ok(resized) => resized,
             Err(error) => return Self::rejected(command_id, Self::resize_rejection(&error)),
@@ -1938,7 +1940,7 @@ impl Runtime {
             ),
             ResizeError::MinSize { spare, .. } => Rejection::new(
                 RejectReason::MinSize,
-                &format!("neighbor has only {spare} spare cells to give"),
+                &format!("the donating pane has only {spare} spare cells to give"),
             ),
         }
     }
