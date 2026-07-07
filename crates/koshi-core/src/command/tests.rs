@@ -38,7 +38,25 @@ fn pane_commands_roundtrip() {
     roundtrip(&Command::ResizePane(ResizePaneArgs {
         pane: None,
         direction: Direction::Up,
-        amount: 4,
+        size: 4,
+    }));
+    roundtrip(&Command::ResizePane(ResizePaneArgs {
+        pane: Some(PaneId::new()),
+        direction: Direction::Left,
+        size: -3,
+    }));
+    roundtrip(&Command::RunCommandPane(RunCommandPaneArgs {
+        command: SpawnSpec {
+            program: std::path::PathBuf::from("htop"),
+            args: vec!["-d".to_string()],
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            shell_kind: crate::process::ShellKind::Other("htop".to_string()),
+        },
+        cwd: None,
+        source: Some(PaneId::new()),
+        direction: Some(Direction::Down),
+        stacked: false,
     }));
     roundtrip(&Command::FocusPane(FocusPaneArgs {
         pane: PaneId::new(),
@@ -137,7 +155,7 @@ fn command_variant_names_are_canonical() {
             Command::ResizePane(ResizePaneArgs {
                 pane: None,
                 direction: Direction::Up,
-                amount: 1,
+                size: 1,
             }),
             "ResizePane",
         ),
@@ -177,6 +195,9 @@ fn command_variant_names_are_canonical() {
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
                 cwd: None,
+                source: None,
+                direction: None,
+                stacked: false,
             }),
             "RunCommandPane",
         ),
@@ -273,7 +294,7 @@ fn command_kind_mirrors_command() {
             Command::ResizePane(ResizePaneArgs {
                 pane: None,
                 direction: Direction::Up,
-                amount: 1,
+                size: 1,
             }),
             CommandKind::ResizePane,
         ),
@@ -319,6 +340,9 @@ fn command_kind_mirrors_command() {
                     shell_kind: crate::process::ShellKind::Other("x".to_string()),
                 },
                 cwd: None,
+                source: None,
+                direction: None,
+                stacked: false,
             }),
             CommandKind::RunCommandPane,
         ),

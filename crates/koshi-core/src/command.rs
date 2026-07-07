@@ -30,9 +30,9 @@ pub enum Command {
     NewPane(NewPaneArgs),
     /// Close a pane (defaults to the focused one).
     ClosePane(ClosePaneArgs),
-    /// Move one of a pane's borders outward, growing it by whole cells.
-    /// Shrinking is expressed as the neighbor's grow on the shared border,
-    /// so amounts are always positive.
+    /// Move one of a pane's borders by whole cells: a positive size moves
+    /// it outward (the pane grows), a negative size moves it inward (the
+    /// pane shrinks and the neighbor gains the cells).
     ResizePane(ResizePaneArgs),
     /// Move focus to a pane.
     FocusPane(FocusPaneArgs),
@@ -184,12 +184,13 @@ pub struct ClosePaneArgs {
 pub struct ResizePaneArgs {
     /// Pane to resize; `None` resizes the focused pane.
     pub pane: Option<PaneId>,
-    /// Which of the pane's borders moves, outward: the pane grows toward
-    /// this direction and the neighbor on that side donates the cells.
+    /// Which of the pane's borders moves.
     pub direction: Direction,
-    /// Number of cells the border moves. Always positive — a shrink is the
-    /// neighboring pane's grow on the same border.
-    pub amount: u16,
+    /// Signed number of cells the border moves. Positive moves it outward —
+    /// the pane grows toward `direction` and the neighbor on that side
+    /// donates the cells; negative moves it inward — the pane shrinks and
+    /// that neighbor gains the cells. Zero is rejected at dispatch.
+    pub size: i16,
 }
 
 /// Arguments for [`Command::FocusPane`].
@@ -291,6 +292,13 @@ pub struct RunCommandPaneArgs {
     pub command: SpawnSpec,
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
+    /// Pane to split from; `None` uses the focused pane.
+    pub source: Option<PaneId>,
+    /// Split direction for the new pane; `None` defaults to a rightward
+    /// split. Unused when `stacked` is set — a stack has no direction.
+    pub direction: Option<Direction>,
+    /// Stack the new pane onto the source pane instead of splitting space.
+    pub stacked: bool,
 }
 
 /// Arguments for [`Command::RenamePane`]. The new name is not supplied by the
