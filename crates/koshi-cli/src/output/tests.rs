@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use koshi_core::action::{core_action_seeds, ActionStatus};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -320,4 +321,179 @@ focused_pane: -
 lock: Normal
 ";
     assert_eq!(render_client(&client_info(), FormatArg::Table), expected);
+}
+
+// --- Action introspection ---
+
+/// The count of seeded actions the runtime supports today.
+fn available_seed_count() -> usize {
+    core_action_seeds()
+        .iter()
+        .filter(|(_, metadata)| metadata.status == ActionStatus::Available)
+        .count()
+}
+
+#[test]
+fn actions_list_table_shows_only_supported_actions() {
+    let rendered = render_actions_list(FormatArg::Table);
+    let lines: Vec<&str> = rendered.lines().collect();
+    assert_eq!(lines.len(), available_seed_count() + 1);
+    assert_eq!(
+        lines[0].split_whitespace().collect::<Vec<_>>(),
+        vec!["action", "command", "scope"]
+    );
+    // The first supported action is new-pane.
+    assert_eq!(
+        lines[1].split_whitespace().collect::<Vec<_>>(),
+        vec!["core:new-pane", "NewPane", "pane-session"]
+    );
+    // Coming-soon families never appear.
+    assert!(
+        !rendered.contains("copy-mode") && !rendered.contains("plugin-"),
+        "coming-soon actions leaked into the list:\n{rendered}"
+    );
+}
+
+#[test]
+fn actions_list_json_is_an_array_of_supported_summaries() {
+    let rendered = render_actions_list(FormatArg::Json);
+    assert!(rendered.starts_with("[\n"), "not an array: {rendered}");
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    let array = value.as_array().expect("a JSON array");
+    assert_eq!(array.len(), available_seed_count());
+    assert_eq!(array[0]["action"], "core:new-pane");
+    assert_eq!(array[0]["command"], "NewPane");
+    assert_eq!(array[0]["scope"], "pane-session");
+    assert!(
+        !rendered.contains("copy-mode") && !rendered.contains("plugin-"),
+        "coming-soon actions leaked into JSON:\n{rendered}"
+    );
+}
+
+#[test]
+fn explain_new_pane_fields_are_exact() {
+    let expected = "\
+action: core:new-pane
+display_name: New Pane
+description: Split the focused pane and start a shell in the new one
+scope: pane-session
+targets: pane
+command: NewPane
+examples: core:new-pane, koshi new-pane
+";
+    assert_eq!(
+        render_action_explain("new-pane", FormatArg::Table),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn explain_new_pane_json_is_exact() {
+    let expected = r#"{
+  "action": "core:new-pane",
+  "display_name": "New Pane",
+  "description": "Split the focused pane and start a shell in the new one",
+  "scope": "pane-session",
+  "targets": [
+    "pane"
+  ],
+  "command": "NewPane",
+  "examples": [
+    "core:new-pane",
+    "koshi new-pane"
+  ]
+}
+"#;
+    assert_eq!(
+        render_action_explain("new-pane", FormatArg::Json),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn explain_accepts_a_full_core_ref() {
+    assert_eq!(
+        render_action_explain("core:new-pane", FormatArg::Json),
+        render_action_explain("new-pane", FormatArg::Json),
+    );
+}
+
+#[test]
+fn explain_run_omits_the_koshi_example() {
+    // run is supported but `koshi run` needs a command, so no CLI example is
+    // shown — only the config reference.
+    let expected = r#"{
+  "action": "core:run",
+  "display_name": "Run Command",
+  "description": "Spawn a command in a new pane",
+  "scope": "pane-session",
+  "targets": [
+    "pane"
+  ],
+  "command": "RunCommandPane",
+  "examples": [
+    "core:run"
+  ]
+}
+"#;
+    assert_eq!(
+        render_action_explain("run", FormatArg::Json),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn explain_of_a_coming_soon_action_is_hidden() {
+    // copy-mode and plugin actions have no runtime handler yet, so explain
+    // treats them as unknown — by bare name and by full ref.
+    assert_eq!(
+        render_action_explain("copy-mode-enter", FormatArg::Json),
+        None
+    );
+    assert_eq!(
+        render_action_explain("core:copy-mode-enter", FormatArg::Json),
+        None
+    );
+    assert_eq!(
+        render_action_explain("plugin-install", FormatArg::Json),
+        None
+    );
+}
+
+#[test]
+fn explain_of_an_unknown_action_is_none() {
+    assert_eq!(
+        render_action_explain("does-not-exist", FormatArg::Json),
+        None
+    );
+}
+
+#[test]
+fn explain_renders_multiple_targets_joined() {
+    // focus-pane targets a pane and a client; both join into one cell. It needs
+    // a --pane flag, so no bare CLI example is shown.
+    let expected = "\
+action: core:focus-pane
+display_name: Focus Pane
+description: Move the issuing client's focus to a pane
+scope: client
+targets: pane, client
+command: FocusPane
+examples: core:focus-pane
+";
+    assert_eq!(
+        render_action_explain("focus-pane", FormatArg::Table),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn an_empty_target_list_renders_as_a_dash() {
+    // Every supported action has at least one target today, so exercise the
+    // join helper directly to keep the empty branch covered.
+    assert_eq!(join_cell(&[]), "-");
+    assert_eq!(
+        join_cell(&["pane".to_string(), "client".to_string()]),
+        "pane, client"
+    );
 }

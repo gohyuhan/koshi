@@ -168,6 +168,7 @@ fn action_metadata_roundtrips() {
         target_compat: vec![TargetKind::Pane],
         args_schema: Some(ActionArgsSchema::default()),
         handler: ActionHandlerRef::CoreCommand(CommandKind::NewPane),
+        status: ActionStatus::Available,
     };
     roundtrip(&metadata);
 }
@@ -226,6 +227,43 @@ fn lock_and_focus_seeds_are_client_scoped() {
         assert_eq!(metadata.scope_class, ActionScope::Client, "for {name}");
         assert_eq!(metadata.target_compat, *targets, "for {name}");
     }
+}
+
+/// Pins which seeds are coming-soon: the copy-mode and plugin command families
+/// have no runtime handler yet, so every action dispatched through them is
+/// seeded `ComingSoon` and every other action is `Available`. When a family
+/// lands, its `core_seed` derivation flips and this list shrinks.
+#[test]
+fn coming_soon_seeds_are_the_copy_mode_and_plugin_families() {
+    let mut coming_soon: Vec<String> = core_action_seeds()
+        .iter()
+        .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
+        .map(|(action, _)| action.to_string())
+        .collect();
+    coming_soon.sort();
+
+    let mut expected = [
+        "core:copy-mode-clear-selection",
+        "core:copy-mode-copy",
+        "core:copy-mode-enter",
+        "core:copy-mode-exit",
+        "core:copy-mode-move-cursor",
+        "core:copy-mode-search",
+        "core:copy-mode-search-next",
+        "core:copy-mode-search-prev",
+        "core:copy-mode-set-selection",
+        "core:plugin-disable",
+        "core:plugin-enable",
+        "core:plugin-install",
+        "core:plugin-reload",
+        "core:plugin-uninstall",
+        "core:plugin-update",
+    ]
+    .map(String::from)
+    .to_vec();
+    expected.sort();
+
+    assert_eq!(coming_soon, expected);
 }
 
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed

@@ -103,8 +103,9 @@ pub enum FormatArg {
 /// map to core commands via [`CliCommand::to_action`]; execution arrives
 /// with the IPC client. The discovery queries (`inspect`, the `list-*`
 /// verbs) carry typed target and `--format` arguments; their answers are
-/// rendered by [`crate::output`]. The remaining verbs (`config`, `plugin`,
-/// `actions`, `keys`) are declared bare so the full grammar is visible in
+/// rendered by [`crate::output`]. `actions` introspects the action registry
+/// through its `list`/`explain` subcommands. The remaining verbs (`config`,
+/// `plugin`, `keys`) are declared bare so the full grammar is visible in
 /// `--help`; each gains its argument surface with the work that implements
 /// it.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
@@ -254,7 +255,11 @@ pub enum CliCommand {
         session: Option<SessionId>,
     },
     /// Introspect the action registry.
-    Actions,
+    Actions {
+        /// What to introspect.
+        #[command(subcommand)]
+        command: ActionsCommand,
+    },
     /// Inspect a session, tab, pane, or client.
     Inspect {
         /// What to inspect.
@@ -353,15 +358,38 @@ pub enum InspectTarget {
     },
 }
 
+/// The `koshi actions` introspection subcommands: list the supported actions or
+/// explain one. Both read the static action table and render through
+/// [`crate::output`]; neither needs a running session.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum ActionsCommand {
+    /// List every supported action with its internal command and scope.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Explain one action: its scope, target compatibility, internal command,
+    /// and usage examples.
+    Explain {
+        /// Action to explain, as a bare name (`new-pane`) or full ref
+        /// (`core:new-pane`).
+        action: String,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+}
+
 impl CliCommand {
     /// The typed action this subcommand requests: its `core:` action
     /// reference paired with the fully-built core [`Command`].
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
-    /// discovery queries (`inspect`, the `list-*` verbs), and the verbs whose
-    /// argument surfaces are not built yet (`config`, `plugin`, `actions`,
-    /// `keys`).
+    /// discovery and introspection queries (`inspect`, the `list-*` verbs,
+    /// `actions`), and the verbs whose argument surfaces are not built yet
+    /// (`config`, `plugin`, `keys`).
     #[must_use]
     pub fn to_action(&self) -> Option<(ActionRef, Command)> {
         let (name, command) = match self {
@@ -492,7 +520,7 @@ impl CliCommand {
             | CliCommand::Doctor
             | CliCommand::Config
             | CliCommand::Plugin
-            | CliCommand::Actions
+            | CliCommand::Actions { .. }
             | CliCommand::Inspect { .. }
             | CliCommand::ListTabs { .. }
             | CliCommand::ListPanes { .. }
