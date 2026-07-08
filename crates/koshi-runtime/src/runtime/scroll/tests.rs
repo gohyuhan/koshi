@@ -44,7 +44,12 @@ fn runtime_with_pane() -> (Runtime, PaneId, ClientId) {
     let pane_id = PaneId::new();
     let client_id = ClientId::new();
 
-    let mut session = Session::new(session_id, "s".to_string(), ClientRegistry::new());
+    let mut session = Session::new(
+        session_id,
+        "s".to_string(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     session
         .panes
         .insert(PaneRecord::new(pane_id, SystemTime::now()))

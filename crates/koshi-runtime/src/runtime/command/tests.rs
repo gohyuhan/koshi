@@ -117,7 +117,12 @@ fn envelope(command: Command) -> CommandEnvelope {
 
 /// A `Starting` session with the given id and no tabs, clients, or panes.
 fn bare_session(id: SessionId) -> Session {
-    Session::new(id, "s".to_string(), ClientRegistry::new())
+    Session::new(
+        id,
+        "s".to_string(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    )
 }
 
 /// A `Stopping` session: a tab takes it `Starting` -> `Running`, then a stop is

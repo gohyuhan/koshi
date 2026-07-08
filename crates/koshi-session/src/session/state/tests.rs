@@ -19,7 +19,12 @@ fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
 fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
     let tab = TabId::new();
     let other_tab = TabId::new();
-    let mut session = Session::new(SessionId::new(), "s".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
 
     // Two clients view `tab` with opposite aspect ratios.
     viewer(&mut session, tab, 80, 5);
@@ -36,7 +41,25 @@ fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
 #[test]
 fn tab_viewport_is_none_without_a_viewer() {
     let tab = TabId::new();
-    let session = Session::new(SessionId::new(), "s".to_owned(), ClientRegistry::new());
+    let session = Session::new(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
 
     assert_eq!(session.tab_viewport(tab), None);
+}
+
+#[test]
+fn a_new_session_stores_the_supplied_creation_time() {
+    let created_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1234);
+    let session = Session::new(
+        SessionId::new(),
+        "s".to_owned(),
+        created_at,
+        ClientRegistry::new(),
+    );
+
+    assert_eq!(session.created_at, created_at);
 }

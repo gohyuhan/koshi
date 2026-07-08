@@ -36,7 +36,12 @@ fn session_one_pane() -> (Session, TabId, PaneId, ClientId) {
     let pane = PaneId::new();
     let client_id = ClientId::new();
 
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     session
         .tabs
         .insert(tab_id, Tab::new(tab_id, "code".to_owned(), 0, pane));
@@ -148,7 +153,12 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
     let pane_a = PaneId::new();
     let pane_b = PaneId::new();
     let client_id = ClientId::new();
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     session
         .tabs
         .insert(tab_a, Tab::new(tab_a, "a".to_owned(), 0, pane_a));

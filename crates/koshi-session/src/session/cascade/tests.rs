@@ -130,7 +130,12 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
 /// Clients can be attached afterward with [`Session::attach_client`], using the
 /// session's own id to keep the fixture valid.
 fn session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     for tab in tabs {
         session.tabs.insert(tab.id(), tab);
     }

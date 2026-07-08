@@ -3,6 +3,8 @@
 //! [`rename_session`] tests assert the name write and the emitted event;
 //! name generation and cross-session uniqueness are the runtime's.
 
+use std::time::SystemTime;
+
 use koshi_core::event::{Event, SessionRenamed};
 use koshi_core::ids::SessionId;
 
@@ -12,7 +14,12 @@ use crate::session::state::Session;
 
 /// A session named `name` with no tabs, panes, or clients.
 fn bare_session(name: &str) -> Session {
-    Session::new(SessionId::new(), name.to_owned(), ClientRegistry::new())
+    Session::new(
+        SessionId::new(),
+        name.to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    )
 }
 
 #[test]

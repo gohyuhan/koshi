@@ -64,7 +64,12 @@ fn pane_record(id: PaneId) -> PaneRecord {
 /// attached yet. Attach clients afterward with [`Session::attach_client`] so
 /// each carries the session's own id.
 fn session_with(tabs: Vec<Tab>, panes: Vec<PaneId>) -> Session {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     for tab in tabs {
         session.tabs.insert(tab.id(), tab);
     }
@@ -150,7 +155,12 @@ fn commit_new_tab_registers_a_running_pane_and_emits_created_then_pane_created()
 
 #[test]
 fn commit_new_tab_first_tab_transitions_the_session_to_running() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     assert_eq!(*session.lifecycle(), SessionLifecycle::Starting);
 
     let _ = commit_new_tab(

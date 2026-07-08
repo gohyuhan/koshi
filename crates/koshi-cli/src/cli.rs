@@ -87,21 +87,36 @@ impl From<DirectionArg> for Direction {
     }
 }
 
+/// The output format of a discovery query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FormatArg {
+    /// Human-readable aligned columns.
+    Table,
+    /// Machine-readable JSON.
+    Json,
+}
+
 /// The `koshi` subcommand tree.
 ///
 /// Lifecycle commands (`new`, `list-sessions`, `kill-session`, `doctor`) run
 /// outside any session. Action subcommands carry their typed arguments and
 /// map to core commands via [`CliCommand::to_action`]; execution arrives
-/// with the IPC client. The remaining verbs (`action`, `config`, `plugin`,
-/// `actions`, `inspect`, the `list-*` queries, `keys`) are declared bare so
-/// the full grammar is visible in `--help`; each gains its argument surface
-/// with the work that implements it.
+/// with the IPC client. The discovery queries (`inspect`, the `list-*`
+/// verbs) carry typed target and `--format` arguments; their answers are
+/// rendered by [`crate::output`]. The remaining verbs (`config`, `plugin`,
+/// `actions`, `keys`) are declared bare so the full grammar is visible in
+/// `--help`; each gains its argument surface with the work that implements
+/// it.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// Create a new session (its name is system-generated).
     New,
     /// List running sessions.
-    ListSessions,
+    ListSessions {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// Kill a session; without a name, targets the only running session.
     KillSession {
         /// Session to kill.
@@ -109,8 +124,6 @@ pub enum CliCommand {
     },
     /// Check the local koshi installation and environment.
     Doctor,
-    /// Run a named action (explicit, script-friendly namespace).
-    Action,
     /// Open a new pane running a shell; its working directory and
     /// environment come from the issuing terminal.
     NewPane {
@@ -243,13 +256,41 @@ pub enum CliCommand {
     /// Introspect the action registry.
     Actions,
     /// Inspect a session, tab, pane, or client.
-    Inspect,
+    Inspect {
+        /// What to inspect.
+        #[command(subcommand)]
+        target: InspectTarget,
+    },
     /// List tabs in a session.
-    ListTabs,
+    ListTabs {
+        /// Session to list; defaults to the only running session.
+        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session: Option<SessionId>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// List panes in a session.
-    ListPanes,
+    ListPanes {
+        /// Session to list; defaults to the only running session.
+        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session: Option<SessionId>,
+        /// Limit the listing to one tab.
+        #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
+        tab: Option<TabId>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// List clients attached to a session.
-    ListClients,
+    ListClients {
+        /// Session to list; defaults to the only running session.
+        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session: Option<SessionId>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// Open a new pane running the command given after `--`; its working
     /// directory and environment come from the issuing terminal.
     Run {
@@ -270,14 +311,57 @@ pub enum CliCommand {
     Keys,
 }
 
+/// The entity kinds `koshi inspect` reports on. Each takes the id exactly as
+/// koshi prints it (`<kind>-<uuid>`) or as a bare UUID.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum InspectTarget {
+    /// Report a session: name, creation time, clients, and pane count.
+    Session {
+        /// Session to inspect.
+        #[arg(value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session: SessionId,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Report a tab: name, position, active pane, and pane count.
+    Tab {
+        /// Tab to inspect.
+        #[arg(value_parser = parse_tab_id, value_name = "TAB_ID")]
+        tab: TabId,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Report a pane: location, title, cwd, command, state, and rectangle.
+    Pane {
+        /// Pane to inspect.
+        #[arg(value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane: PaneId,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Report a client: session, attach time, viewport, focus, and lock state.
+    Client {
+        /// Client to inspect.
+        #[arg(value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client: ClientId,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+}
+
 impl CliCommand {
     /// The typed action this subcommand requests: its `core:` action
     /// reference paired with the fully-built core [`Command`].
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
-    /// (`new`, `list-sessions`, `kill-session`, `doctor`) and the verbs whose
-    /// argument surfaces are not built yet (`action`, `config`, `plugin`,
-    /// `actions`, `inspect`, the `list-*` queries, `keys`).
+    /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
+    /// discovery queries (`inspect`, the `list-*` verbs), and the verbs whose
+    /// argument surfaces are not built yet (`config`, `plugin`, `actions`,
+    /// `keys`).
     #[must_use]
     pub fn to_action(&self) -> Option<(ActionRef, Command)> {
         let (name, command) = match self {
@@ -403,17 +487,16 @@ impl CliCommand {
                 }),
             ),
             CliCommand::New
-            | CliCommand::ListSessions
+            | CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
             | CliCommand::Doctor
-            | CliCommand::Action
             | CliCommand::Config
             | CliCommand::Plugin
             | CliCommand::Actions
-            | CliCommand::Inspect
-            | CliCommand::ListTabs
-            | CliCommand::ListPanes
-            | CliCommand::ListClients
+            | CliCommand::Inspect { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
             | CliCommand::Keys => return None,
         };
         let action = ActionRef::core(name)

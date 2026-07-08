@@ -127,7 +127,9 @@ fn lifecycle_commands_parse() {
     assert_eq!(parse(&["koshi", "new"]).command, Some(CliCommand::New));
     assert_eq!(
         parse(&["koshi", "list-sessions"]).command,
-        Some(CliCommand::ListSessions)
+        Some(CliCommand::ListSessions {
+            format: FormatArg::Table
+        })
     );
     assert_eq!(
         parse(&["koshi", "doctor"]).command,
@@ -163,7 +165,6 @@ fn kill_session_rejects_a_second_positional() {
 #[test]
 fn flagless_subcommands_parse_to_their_variants() {
     let cases: &[(&str, CliCommand)] = &[
-        ("action", CliCommand::Action),
         ("toggle-pane-fullscreen", CliCommand::TogglePaneFullscreen),
         ("new-tab", CliCommand::NewTab),
         ("next-tab", CliCommand::NextTab { client: None }),
@@ -174,15 +175,161 @@ fn flagless_subcommands_parse_to_their_variants() {
         ("config", CliCommand::Config),
         ("plugin", CliCommand::Plugin),
         ("actions", CliCommand::Actions),
-        ("inspect", CliCommand::Inspect),
-        ("list-tabs", CliCommand::ListTabs),
-        ("list-panes", CliCommand::ListPanes),
-        ("list-clients", CliCommand::ListClients),
+        (
+            "list-tabs",
+            CliCommand::ListTabs {
+                session: None,
+                format: FormatArg::Table,
+            },
+        ),
+        (
+            "list-panes",
+            CliCommand::ListPanes {
+                session: None,
+                tab: None,
+                format: FormatArg::Table,
+            },
+        ),
+        (
+            "list-clients",
+            CliCommand::ListClients {
+                session: None,
+                format: FormatArg::Table,
+            },
+        ),
         ("keys", CliCommand::Keys),
     ];
     for (name, expected) in cases {
         assert_eq!(parse(&["koshi", name]).command.as_ref(), Some(expected));
     }
+}
+
+// --- Discovery queries ---
+
+#[test]
+fn list_tabs_parses_a_typed_session_and_a_format() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        parse(&[
+            "koshi",
+            "list-tabs",
+            "--session",
+            &session,
+            "--format",
+            "json"
+        ])
+        .command,
+        Some(CliCommand::ListTabs {
+            session: Some(SessionId::from_uuid(fixed_uuid())),
+            format: FormatArg::Json,
+        })
+    );
+}
+
+#[test]
+fn list_panes_parses_a_tab_filter() {
+    let tab = format!("tab-{}", fixed_uuid());
+    assert_eq!(
+        parse(&["koshi", "list-panes", "--tab", &tab]).command,
+        Some(CliCommand::ListPanes {
+            session: None,
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+            format: FormatArg::Table,
+        })
+    );
+}
+
+#[test]
+fn list_sessions_parses_the_json_format() {
+    assert_eq!(
+        parse(&["koshi", "list-sessions", "--format", "json"]).command,
+        Some(CliCommand::ListSessions {
+            format: FormatArg::Json,
+        })
+    );
+}
+
+#[test]
+fn format_rejects_an_unknown_value() {
+    let err = parse_err(&["koshi", "list-sessions", "--format", "yaml"]);
+    assert_eq!(err.kind(), ErrorKind::InvalidValue);
+}
+
+#[test]
+fn inspect_forms_parse_typed_ids() {
+    let uuid = fixed_uuid();
+    let cases: &[(&str, String, InspectTarget)] = &[
+        (
+            "session",
+            format!("session-{uuid}"),
+            InspectTarget::Session {
+                session: SessionId::from_uuid(uuid),
+                format: FormatArg::Table,
+            },
+        ),
+        (
+            "tab",
+            format!("tab-{uuid}"),
+            InspectTarget::Tab {
+                tab: TabId::from_uuid(uuid),
+                format: FormatArg::Table,
+            },
+        ),
+        (
+            "pane",
+            format!("pane-{uuid}"),
+            InspectTarget::Pane {
+                pane: PaneId::from_uuid(uuid),
+                format: FormatArg::Table,
+            },
+        ),
+        (
+            "client",
+            format!("client-{uuid}"),
+            InspectTarget::Client {
+                client: ClientId::from_uuid(uuid),
+                format: FormatArg::Table,
+            },
+        ),
+    ];
+    for (kind, id, expected) in cases {
+        let command = command(&["koshi", "inspect", kind, id]);
+        let CliCommand::Inspect { target } = command else {
+            panic!("expected an inspect command for {kind}, got {command:?}");
+        };
+        assert_eq!(&target, expected, "for {kind}");
+    }
+}
+
+#[test]
+fn inspect_parses_the_json_format() {
+    let pane = format!("pane-{}", fixed_uuid());
+    assert_eq!(
+        parse(&["koshi", "inspect", "pane", &pane, "--format", "json"]).command,
+        Some(CliCommand::Inspect {
+            target: InspectTarget::Pane {
+                pane: PaneId::from_uuid(fixed_uuid()),
+                format: FormatArg::Json,
+            }
+        })
+    );
+}
+
+#[test]
+fn inspect_requires_a_target() {
+    let err = parse_err(&["koshi", "inspect"]);
+    assert_eq!(
+        err.kind(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn inspect_rejects_an_id_of_the_wrong_kind() {
+    let tab_id = format!("tab-{}", fixed_uuid());
+    let err = parse_err(&["koshi", "inspect", "pane", &tab_id]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -193,7 +340,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         .collect();
     names.sort();
     let mut expected: Vec<String> = [
-        "action",
         "actions",
         "close-pane",
         "close-tab",
@@ -931,11 +1077,15 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "list-sessions"],
         &["koshi", "kill-session"],
         &["koshi", "doctor"],
-        &["koshi", "action"],
         &["koshi", "config"],
         &["koshi", "plugin"],
         &["koshi", "actions"],
-        &["koshi", "inspect"],
+        &[
+            "koshi",
+            "inspect",
+            "pane",
+            "pane-0192f0c1-2345-7000-8000-000000000001",
+        ],
         &["koshi", "list-tabs"],
         &["koshi", "list-panes"],
         &["koshi", "list-clients"],

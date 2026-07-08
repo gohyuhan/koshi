@@ -54,7 +54,7 @@ impl Runtime {
         // create, then commit the tab + root pane and focus the client on it.
         // This is the first session, so no existing name can collide.
         let session_name = generate_name(NameKind::Session, |_| false);
-        let mut session = Session::new(session_id, session_name, ClientRegistry::new());
+        let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
         let client = Client::new(client_id, session_id, now, viewport, tab_id);
         session.attach_client(client);
 

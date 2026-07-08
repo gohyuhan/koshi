@@ -65,7 +65,12 @@ fn created_tab_id(events: &[Event]) -> TabId {
 #[test]
 fn a_new_session_starts_empty() {
     let id = SessionId::new();
-    let session = Session::new(id, "main".to_owned(), ClientRegistry::new());
+    let session = Session::new(
+        id,
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
 
     assert_eq!(session.id, id);
     assert_eq!(session.name, "main");
@@ -171,14 +176,24 @@ fn a_tab_survives_a_serde_round_trip() {
 
 #[test]
 fn a_fresh_session_is_starting() {
-    let session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
 
     assert_eq!(*session.lifecycle(), SessionLifecycle::Starting);
 }
 
 #[test]
 fn the_first_tab_moves_the_session_to_running() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
 
     let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
@@ -190,7 +205,12 @@ fn the_first_tab_moves_the_session_to_running() {
 
 #[test]
 fn detaching_the_last_client_parks_the_session_without_destroying_state() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
 
@@ -209,7 +229,12 @@ fn detaching_the_last_client_parks_the_session_without_destroying_state() {
 
 #[test]
 fn re_attaching_resumes_a_detached_session() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
 
@@ -225,7 +250,12 @@ fn re_attaching_resumes_a_detached_session() {
 
 #[test]
 fn detaching_one_of_several_clients_keeps_the_session_running() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
 
@@ -246,7 +276,12 @@ fn detaching_one_of_several_clients_keeps_the_session_running() {
 
 #[test]
 fn requesting_then_completing_a_stop_walks_to_stopped() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     let _ = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
 
     session.request_stop();
@@ -258,7 +293,12 @@ fn requesting_then_completing_a_stop_walks_to_stopped() {
 
 #[test]
 fn closing_the_last_tab_requests_a_stop() {
-    let mut session = Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new());
+    let mut session = Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
     let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
     let tab = created_tab_id(&events);
 
@@ -270,7 +310,12 @@ fn closing_the_last_tab_requests_a_stop() {
 
 /// A fresh, empty session with a random id.
 fn empty_session() -> Session {
-    Session::new(SessionId::new(), "main".to_owned(), ClientRegistry::new())
+    Session::new(
+        SessionId::new(),
+        "main".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    )
 }
 
 /// A `Running` pane record registered in `session`, returned by id. Live and a
