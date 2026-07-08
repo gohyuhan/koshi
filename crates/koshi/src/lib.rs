@@ -1,4 +1,4 @@
-//! `koshi-cli` — binary entrypoint library: `clap` definitions, subcommands,
+//! `koshi` — binary entrypoint library: `clap` definitions, subcommands,
 //! startup mode, and IPC client calls. Must not contain core runtime behavior.
 
 /// Startup, the event loop, and terminal I/O for the interactive binary.

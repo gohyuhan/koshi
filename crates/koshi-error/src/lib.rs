@@ -7,7 +7,7 @@
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-use koshi_cli::error::CliError;
+use koshi::error::CliError;
 use koshi_config::error::ConfigError;
 use koshi_ipc::error::IpcError;
 use koshi_layout::error::LayoutError;
