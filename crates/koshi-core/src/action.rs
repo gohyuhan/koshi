@@ -335,6 +335,19 @@ pub enum TargetKind {
     Client,
 }
 
+/// Whether an action is usable today or still on the way.
+///
+/// The action vocabulary is seeded in full, but some actions have no runtime
+/// handler yet. Introspection hides `ComingSoon` actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActionStatus {
+    /// The runtime implements this action; it is safe to bind and invoke.
+    Available,
+    /// Seeded for completeness, but not yet implemented by the runtime.
+    ComingSoon,
+}
+
 /// Typed schema for an action's arguments.
 ///
 /// Placeholder: the full typed-argument model is owned by the keybinding
@@ -377,11 +390,15 @@ pub struct ActionMetadata {
     pub args_schema: Option<ActionArgsSchema>,
     /// How the action is dispatched.
     pub handler: ActionHandlerRef,
+    /// Whether the runtime implements the action yet.
+    pub status: ActionStatus,
 }
 
 /// Build one `core:` seed entry. Names here are compile-time constants known to
 /// satisfy the grammar; an invalid one is a bug in this table and is caught by
-/// the seed test rather than returned as an error.
+/// the seed test rather than returned as an error. Each entry declares its own
+/// [`ActionStatus`], so readiness is per-action: one member of a command family
+/// can be `Available` while its siblings are still `ComingSoon`.
 fn core_seed(
     name: &'static str,
     display_name: &str,
@@ -389,6 +406,7 @@ fn core_seed(
     scope_class: ActionScope,
     target_compat: Vec<TargetKind>,
     handler: ActionHandlerRef,
+    status: ActionStatus,
 ) -> (ActionRef, ActionMetadata) {
     let action =
         ActionRef::core(name).expect("core seed action name must satisfy the action-name grammar");
@@ -400,6 +418,7 @@ fn core_seed(
         target_compat,
         args_schema: None,
         handler,
+        status,
     };
     (action, metadata)
 }
@@ -412,10 +431,16 @@ fn core_seed(
 /// `focus-tab` all build `FocusTab`; the `copy-mode-*` actions all build
 /// `CopyMode`. Those presets are carried by the (currently deferred)
 /// [`ActionArgsSchema`], not duplicated into [`CommandKind`].
+///
+/// Each entry declares its own [`ActionStatus`]. The `copy-mode-*` and
+/// `plugin-*` actions have no runtime handler yet and are seeded `ComingSoon`,
+/// so introspection hides them; every other action is `Available`. Status is
+/// per-action, so a family lands one member at a time rather than all at once.
 #[must_use]
 pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionHandlerRef::CoreCommand;
     use ActionScope::{Client, Global, PaneSession, Tab};
+    use ActionStatus::{Available, ComingSoon};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
     vec![
@@ -427,6 +452,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
+            Available,
         ),
         core_seed(
             "close-pane",
@@ -435,6 +461,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ClosePane),
+            Available,
         ),
         core_seed(
             "resize-pane",
@@ -443,6 +470,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
+            Available,
         ),
         core_seed(
             "focus-pane",
@@ -451,6 +479,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![Pane, ClientTarget],
             CoreCommand(CommandKind::FocusPane),
+            Available,
         ),
         core_seed(
             "toggle-pane-fullscreen",
@@ -459,6 +488,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::TogglePaneFullscreen),
+            Available,
         ),
         core_seed(
             "rename-pane",
@@ -467,6 +497,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RenamePane),
+            Available,
         ),
         // --- Tabs ---
         core_seed(
@@ -476,6 +507,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::NewTab),
+            Available,
         ),
         core_seed(
             "close-tab",
@@ -484,6 +516,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::CloseTab),
+            Available,
         ),
         core_seed(
             "focus-tab",
@@ -492,6 +525,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![TabTarget, ClientTarget],
             CoreCommand(CommandKind::FocusTab),
+            Available,
         ),
         core_seed(
             "next-tab",
@@ -500,6 +534,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
+            Available,
         ),
         core_seed(
             "previous-tab",
@@ -508,6 +543,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
+            Available,
         ),
         core_seed(
             "rename-tab",
@@ -516,6 +552,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::RenameTab),
+            Available,
         ),
         core_seed(
             "move-tab",
@@ -524,6 +561,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::MoveTab),
+            Available,
         ),
         // --- Session ---
         core_seed(
@@ -533,6 +571,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![Session],
             CoreCommand(CommandKind::RenameSession),
+            Available,
         ),
         // --- Lock mode ---
         core_seed(
@@ -542,6 +581,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ToggleLockMode),
+            Available,
         ),
         core_seed(
             "lock",
@@ -550,6 +590,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
+            Available,
         ),
         core_seed(
             "unlock",
@@ -558,6 +599,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
+            Available,
         ),
         // --- Run ---
         core_seed(
@@ -567,6 +609,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RunCommandPane),
+            Available,
         ),
         // --- Copy mode ---
         core_seed(
@@ -576,6 +619,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-exit",
@@ -584,6 +628,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-move-cursor",
@@ -592,6 +637,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-set-selection",
@@ -600,6 +646,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-clear-selection",
@@ -608,6 +655,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-copy",
@@ -616,6 +664,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-search",
@@ -624,6 +673,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-search-next",
@@ -632,6 +682,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         core_seed(
             "copy-mode-search-prev",
@@ -640,6 +691,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
+            ComingSoon,
         ),
         // --- Plugin lifecycle ---
         core_seed(
@@ -649,6 +701,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
         core_seed(
             "plugin-uninstall",
@@ -657,6 +710,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
         core_seed(
             "plugin-enable",
@@ -665,6 +719,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
         core_seed(
             "plugin-disable",
@@ -673,6 +728,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
         core_seed(
             "plugin-update",
@@ -681,6 +737,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
         core_seed(
             "plugin-reload",
@@ -689,6 +746,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
+            ComingSoon,
         ),
     ]
 }

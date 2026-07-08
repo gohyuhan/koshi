@@ -174,7 +174,6 @@ fn flagless_subcommands_parse_to_their_variants() {
         ("toggle-lock", CliCommand::ToggleLock),
         ("config", CliCommand::Config),
         ("plugin", CliCommand::Plugin),
-        ("actions", CliCommand::Actions),
         (
             "list-tabs",
             CliCommand::ListTabs {
@@ -330,6 +329,74 @@ fn inspect_rejects_an_id_of_the_wrong_kind() {
     let tab_id = format!("tab-{}", fixed_uuid());
     let err = parse_err(&["koshi", "inspect", "pane", &tab_id]);
     assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+// --- Action introspection ---
+
+#[test]
+fn actions_list_parses_with_a_default_and_a_json_format() {
+    assert_eq!(
+        parse(&["koshi", "actions", "list"]).command,
+        Some(CliCommand::Actions {
+            command: ActionsCommand::List {
+                format: FormatArg::Table,
+            },
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "actions", "list", "--format", "json"]).command,
+        Some(CliCommand::Actions {
+            command: ActionsCommand::List {
+                format: FormatArg::Json,
+            },
+        })
+    );
+}
+
+#[test]
+fn actions_explain_takes_an_action_name_and_a_format() {
+    assert_eq!(
+        parse(&["koshi", "actions", "explain", "new-pane"]).command,
+        Some(CliCommand::Actions {
+            command: ActionsCommand::Explain {
+                action: "new-pane".to_string(),
+                format: FormatArg::Table,
+            },
+        })
+    );
+    assert_eq!(
+        parse(&[
+            "koshi",
+            "actions",
+            "explain",
+            "core:new-pane",
+            "--format",
+            "json"
+        ])
+        .command,
+        Some(CliCommand::Actions {
+            command: ActionsCommand::Explain {
+                action: "core:new-pane".to_string(),
+                format: FormatArg::Json,
+            },
+        })
+    );
+}
+
+#[test]
+fn actions_requires_a_subcommand() {
+    let err = parse_err(&["koshi", "actions"]);
+    assert_eq!(
+        err.kind(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn actions_explain_requires_an_action() {
+    let err = parse_err(&["koshi", "actions", "explain"]);
+    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -1079,7 +1146,7 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "doctor"],
         &["koshi", "config"],
         &["koshi", "plugin"],
-        &["koshi", "actions"],
+        &["koshi", "actions", "list"],
         &[
             "koshi",
             "inspect",
