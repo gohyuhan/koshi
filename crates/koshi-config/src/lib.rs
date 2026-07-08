@@ -2,6 +2,7 @@
 //! keybinding config, diagnostics, and migrations.
 
 pub mod error;
+pub mod parser;
 pub mod types;
 
 pub mod config;

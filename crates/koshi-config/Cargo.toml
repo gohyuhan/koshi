@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 thiserror = "2.0.18"
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
+kdl = "6.7.1"
+miette = "7.6.0"
