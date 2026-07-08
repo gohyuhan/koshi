@@ -650,7 +650,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "koshi-cli"
+name = "koshi"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -689,7 +689,7 @@ dependencies = [
 name = "koshi-error"
 version = "0.1.0"
 dependencies = [
- "koshi-cli",
+ "koshi",
  "koshi-config",
  "koshi-core",
  "koshi-ipc",

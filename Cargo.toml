@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/koshi-cli",
+    "crates/koshi",
     "crates/koshi-core",
     "crates/koshi-error",
     "crates/koshi-runtime",
