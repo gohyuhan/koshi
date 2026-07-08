@@ -2,7 +2,7 @@
 
 use super::*;
 
-use koshi_core::geometry::SplitDirection;
+use koshi_core::geometry::Direction;
 
 use crate::error::ColorParseError;
 
@@ -14,7 +14,6 @@ fn default_loads_with_expected_values() {
 
     assert_eq!(config.pane.min_cols, 2);
     assert_eq!(config.pane.min_rows, 1);
-    assert!(config.pane.frames);
 
     assert_eq!(config.scrollback.max_lines, 10_000);
     assert_eq!(config.scrollback.max_bytes, 32 * 1024 * 1024);
@@ -25,7 +24,7 @@ fn default_loads_with_expected_values() {
     assert_eq!(config.keybindings.leader, "Ctrl");
     assert!(config.keybindings.modes.is_empty());
 
-    assert_eq!(config.layout.default_split, SplitDirection::Vertical);
+    assert_eq!(config.layout.new_pane_direction, Direction::Right);
     assert_eq!(config.layout.default_layout, None);
 
     assert!(config.plugins.entries.is_empty());
@@ -37,7 +36,7 @@ fn default_loads_with_expected_values() {
 
     assert!(!config.copy.copy_on_select);
     assert!(config.copy.trim_trailing_whitespace);
-    assert_eq!(config.copy.clipboard, ClipboardBackend::Both);
+    assert_eq!(config.copy.clipboard, ClipboardBackend::Osc52);
 
     assert_eq!(config.terminal.term, "xterm-256color");
     assert_eq!(config.terminal.colorterm, "truecolor");

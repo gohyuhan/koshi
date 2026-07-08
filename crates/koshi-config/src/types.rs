@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use koshi_core::geometry::SplitDirection;
+use koshi_core::geometry::Direction;
 
 use crate::error::ColorParseError;
 
@@ -61,15 +61,13 @@ impl Default for KoshiConfig {
     }
 }
 
-/// Pane sizing floor and frame drawing.
+/// Pane sizing floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneConfig {
     /// Minimum pane width in columns.
     pub min_cols: u16,
     /// Minimum pane height in rows.
     pub min_rows: u16,
-    /// Whether panes draw a border frame.
-    pub frames: bool,
 }
 
 impl Default for PaneConfig {
@@ -77,7 +75,6 @@ impl Default for PaneConfig {
         Self {
             min_cols: 2,
             min_rows: 1,
-            frames: true,
         }
     }
 }
@@ -151,11 +148,12 @@ impl ModeName {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModeBindings {}
 
-/// Defaults applied when creating layouts.
+/// Defaults applied when creating panes and layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDefaults {
-    /// The split direction used when no direction is given.
-    pub default_split: SplitDirection,
+    /// Direction a new pane spawns relative to the focused pane when the command
+    /// omits one. The CLI new-pane command may override it per call.
+    pub new_pane_direction: Direction,
     /// A named layout to load at startup, if any.
     pub default_layout: Option<String>,
 }
@@ -163,7 +161,7 @@ pub struct LayoutDefaults {
 impl Default for LayoutDefaults {
     fn default() -> Self {
         Self {
-            default_split: SplitDirection::Vertical,
+            new_pane_direction: Direction::Right,
             default_layout: None,
         }
     }
@@ -262,7 +260,7 @@ impl Default for CopyConfig {
         Self {
             copy_on_select: false,
             trim_trailing_whitespace: true,
-            clipboard: ClipboardBackend::Both,
+            clipboard: ClipboardBackend::Osc52,
         }
     }
 }
@@ -271,11 +269,11 @@ impl Default for CopyConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClipboardBackend {
     /// Write to the outer terminal's clipboard via OSC 52.
+    #[default]
     Osc52,
     /// Write to the operating system clipboard.
     Native,
     /// Write to both the OSC 52 and the OS clipboard.
-    #[default]
     Both,
 }
 

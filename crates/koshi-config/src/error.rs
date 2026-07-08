@@ -101,7 +101,7 @@ impl From<ConfigParseDiagnostic> for ConfigError {
 #[error("config schema version {found} is newer than this koshi supports ({supported})")]
 #[diagnostic(
     code(koshi::config::version),
-    help("upgrade koshi to a build that understands this config, or run `koshi config migrate`")
+    help("upgrade koshi to a build that understands this config")
 )]
 pub struct ConfigVersionDiagnostic {
     /// The version declared in the config file.
