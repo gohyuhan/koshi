@@ -223,7 +223,7 @@ fn state_cell(state: PaneState) -> String {
 /// The pretty-printed JSON form of `value`, ending in a newline.
 fn json<T: Serialize>(value: &T) -> String {
     let mut rendered = serde_json::to_string_pretty(value)
-        .expect("discovery structs serialize without fallible map keys or non-string errors");
+        .expect("discovery structs serialize: paths render lossily and clocks are post-epoch");
     rendered.push('\n');
     rendered
 }

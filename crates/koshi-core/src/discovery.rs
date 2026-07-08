@@ -6,11 +6,14 @@
 //! renders them as a table or JSON. Every struct carries the stable ids
 //! printed by Koshi, usable directly as explicit `--session`/`--tab`/
 //! `--pane`/`--client` targets.
+//!
+//! Paths serialize as their lossy UTF-8 string, so a non-UTF-8 working
+//! directory never fails a render.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::geometry::{Rect, Size};
 use crate::ids::{ClientId, PaneId, SessionId, TabId};
@@ -75,7 +78,9 @@ pub struct PaneInfo {
     pub session_id: SessionId,
     /// The pane's display title, once the child or a rename has set one.
     pub title: Option<String>,
-    /// Working directory the pane started in, when known.
+    /// Working directory the pane started in, when known. Serializes as
+    /// the path's lossy UTF-8 string.
+    #[serde(serialize_with = "serialize_path_lossy")]
     pub cwd: Option<PathBuf>,
     /// The argv the pane was spawned to run — program first, then its
     /// arguments — for a command pane; `None` for a shell pane.
@@ -108,3 +113,18 @@ pub struct ClientInfo {
     /// The client's modal input state.
     pub lock_state: LockMode,
 }
+
+/// Serialize an optional path as its lossy UTF-8 string, so a path with
+/// non-UTF-8 bytes still serializes (invalid sequences become U+FFFD).
+fn serialize_path_lossy<S>(path: &Option<PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match path {
+        Some(path) => serializer.serialize_some(&path.to_string_lossy()),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests;

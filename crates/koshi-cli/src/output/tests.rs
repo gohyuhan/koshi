@@ -159,6 +159,57 @@ fn pane_json_schema_is_stable() {
 }
 
 #[test]
+fn non_utf8_cwd_renders_lossily_in_json() {
+    let mut pane = pane_info();
+    pane.cwd = Some(non_utf8_path());
+    let expected = r#"{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "tab_id": "00000000-0000-0000-0000-000000000001",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "title": "htop",
+  "cwd": "/tmp/f�oo",
+  "command": [
+    "htop",
+    "--tree"
+  ],
+  "state": "running",
+  "focused_by_clients": [
+    "00000000-0000-0000-0000-000000000001"
+  ],
+  "layout_rect": {
+    "origin": {
+      "x": 0,
+      "y": 1
+    },
+    "size": {
+      "cols": 80,
+      "rows": 23
+    }
+  }
+}
+"#;
+    assert_eq!(render_pane(&pane, FormatArg::Json), expected);
+}
+
+/// A path containing bytes that are not valid UTF-8; its lossy form is
+/// `/tmp/f\u{FFFD}oo` on every platform.
+fn non_utf8_path() -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/f\x80oo".to_vec()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        // `/tmp/f` + an unpaired surrogate (invalid UTF-16) + `oo`.
+        PathBuf::from(std::ffi::OsString::from_wide(&[
+            0x2F, 0x74, 0x6D, 0x70, 0x2F, 0x66, 0xD800, 0x6F, 0x6F,
+        ]))
+    }
+}
+
+#[test]
 fn exited_pane_state_json_carries_the_code() {
     let mut pane = pane_info();
     pane.state = PaneState::Exited { code: Some(0) };
