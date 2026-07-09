@@ -14,6 +14,7 @@ use std::str::FromStr;
 use koshi_core::geometry::Direction;
 
 use crate::error::ColorParseError;
+use crate::key::Leader;
 
 /// The config schema version written to and read from disk. Bumped when the
 /// on-disk shape changes so old files migrate forward instead of misparsing.
@@ -30,7 +31,7 @@ pub struct KoshiConfig {
     pub pane: PaneConfig,
     /// Per-pane scrollback history caps.
     pub scrollback: ScrollbackConfig,
-    /// Keybinding timing, chord depth, leader, and per-mode bindings.
+    /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
     pub keybindings: KeybindingsConfig,
     /// Defaults applied when creating layouts.
     pub layout: LayoutDefaults,
@@ -99,7 +100,7 @@ impl Default for ScrollbackConfig {
     }
 }
 
-/// Keybinding timing, chord depth, leader chord, and per-mode bindings.
+/// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingsConfig {
     /// Milliseconds to wait for the next chord in a multi-key sequence.
@@ -108,8 +109,9 @@ pub struct KeybindingsConfig {
     pub which_key_delay_ms: u32,
     /// Maximum number of chords in one key sequence.
     pub max_chord_depth: u8,
-    /// The leader chord that `<leader>` in a binding resolves to.
-    pub leader: String,
+    /// The prefix that `<leader>` in a binding resolves to. A modifier run
+    /// merges into the chord that follows it; a chord stands on its own.
+    pub leader: Leader,
     /// Bindings grouped by input mode. Populated by the default keybinding set
     /// and user config; empty here since binding values are parsed later.
     pub modes: BTreeMap<ModeName, ModeBindings>,
@@ -121,7 +123,7 @@ impl Default for KeybindingsConfig {
             chord_timeout_ms: 500,
             which_key_delay_ms: 300,
             max_chord_depth: 4,
-            leader: "Ctrl".to_string(),
+            leader: Leader::default(),
             modes: BTreeMap::new(),
         }
     }

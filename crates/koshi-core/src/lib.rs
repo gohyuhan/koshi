@@ -10,6 +10,7 @@ pub mod error;
 pub mod event;
 pub mod geometry;
 pub mod ids;
+pub mod key;
 pub mod lock;
 pub mod naming;
 pub mod process;
