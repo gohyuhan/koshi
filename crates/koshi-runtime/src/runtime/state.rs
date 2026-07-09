@@ -11,6 +11,7 @@ use std::{
 
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::PtySize;
+use koshi_core::registry::ActionRegistry;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_session::session::state::Session;
@@ -22,8 +23,9 @@ use crate::{
 };
 
 /// Owns all mutable state for one koshi process: the sessions and their layout
-/// trees, the per-pane terminal engines, the shared PTY backend, and the
-/// service handles the event loop drives. One process holds exactly one.
+/// trees, the per-pane terminal engines, the shared PTY backend, the action
+/// registry, and the service handles the event loop drives. One process holds
+/// exactly one.
 pub struct Runtime {
     /// Every session in this process, keyed by id. Each session owns its tabs,
     /// layout trees, pane registry, and clients.
@@ -53,6 +55,10 @@ pub struct Runtime {
     storage: Arc<dyn Storage>,
     /// Control-socket server, present once IPC is wired.
     ipc_server: Option<IpcServer>,
+    /// Every action this process can perform, seeded with the built-in `core:`
+    /// table and extended by plugins as they load. The dispatcher is its only
+    /// writer.
+    pub(crate) action_registry: ActionRegistry,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -70,9 +76,9 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Build a runtime with no sessions, no terminal engines, and a fresh
-    /// render scheduler, holding the given PTY backend, service handles,
-    /// event inbox, and cleanup guard.
+    /// Build a runtime with no sessions, no terminal engines, a fresh render
+    /// scheduler, and an action registry holding the built-in actions, holding
+    /// the given PTY backend, service handles, event inbox, and cleanup guard.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
         snapshot_provider: Arc<dyn SnapshotProvider>,
@@ -91,6 +97,7 @@ impl Runtime {
             snapshot_provider,
             storage,
             ipc_server: None,
+            action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
             inbox_tx,
@@ -126,6 +133,10 @@ impl Runtime {
     /// Borrow the IPC server, if one is wired.
     pub fn ipc_server(&self) -> Option<&IpcServer> {
         self.ipc_server.as_ref()
+    }
+    /// Borrow the action registry.
+    pub fn action_registry(&self) -> &ActionRegistry {
+        &self.action_registry
     }
     /// Borrow the runtime event inbox receiver.
     pub fn inbox_rx(&self) -> &Receiver<RuntimeEvent> {

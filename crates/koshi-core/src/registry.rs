@@ -1,0 +1,265 @@
+//! The live action registry — the runtime's mutable table of every action koshi
+//! can perform right now.
+//!
+//! [`action`](crate::action) ships the *vocabulary*: what an action reference
+//! looks like and what the built-in ones are. This module ships the *table* that
+//! holds them at run time. The two differ in one way that matters:
+//! [`core_action_seeds`] is a static table, fixed at compile time, while the
+//! registry changes while koshi runs — a plugin load adds `plugin:<id>:*`
+//! entries, an unload takes them away.
+//!
+//! # What lives here, and what does not
+//!
+//! The registry answers exactly one question: *"given this
+//! [`ActionRef`], what do we know about it?"* It does **not** map keys to actions
+//! (that is the keymap) and it does **not** turn an action into a
+//! [`Command`](crate::command::Command) (that is the resolver, which reads the
+//! [`ActionHandlerRef`] stored here and builds the command itself).
+//!
+//! # Ownership
+//!
+//! One koshi process holds exactly one registry, as a field on the runtime's
+//! state container, mutated only by the single dispatcher thread. Plugins never
+//! hold a reference: they ask the dispatcher to register or unregister on their
+//! behalf.
+//!
+//! # Namespaces
+//!
+//! `core:` entries are seeded once by [`ActionRegistry::new`] and are permanent.
+//! [`register`](ActionRegistry::register) accepts `plugin:` references only —
+//! `core:` is built-in and `user:` macros are a later feature — so a plugin
+//! cannot shadow or replace a built-in action.
+//!
+//! A registered entry must also agree with its own key: the metadata's namespace
+//! names the same plugin the reference does, and a
+//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall) handler
+//! routes back to that plugin. One plugin therefore cannot register an action
+//! that dispatches into another.
+//!
+//! # Version
+//!
+//! [`version`](ActionRegistry::version) counts the successful adds and removes
+//! since startup. A consumer that caches a derived view of the table (the
+//! which-key hint bar recomputing its action list) compares the counter it last
+//! saw against the current one and rebuilds only when they differ.
+
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::action::{
+    core_action_seeds, ActionHandlerRef, ActionMetadata, ActionNamespace, ActionRef,
+};
+use crate::error::{DomainCategory, DomainError, Severity};
+use crate::ids::PluginId;
+
+/// The number of actions a single plugin may hold in the registry at once.
+///
+/// Bounds the memory one plugin can claim in the shared table, and with it the
+/// per-registration scan that counts what the plugin already holds.
+pub const MAX_PLUGIN_ACTIONS: usize = 32;
+
+/// Why an [`ActionRegistry::register`] call was refused. Each variant carries
+/// the reference or plugin it rejected, so a diagnostic can name the offender.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// The reference is already in the table.
+    Duplicate {
+        /// The reference that is already registered.
+        action: ActionRef,
+    },
+    /// The reference is in a namespace only koshi itself may write to.
+    ReservedNamespace {
+        /// The reference whose namespace is not `plugin:`.
+        action: ActionRef,
+    },
+    /// The metadata's namespace names a different owner than the reference
+    /// does. The two restate one fact, so they must agree.
+    NamespaceMismatch {
+        /// The reference whose metadata disagreed with it.
+        action: ActionRef,
+    },
+    /// The metadata routes to a plugin other than the one that owns the
+    /// reference, which would dispatch one plugin's action into another.
+    ForeignHandler {
+        /// The reference whose handler pointed elsewhere.
+        action: ActionRef,
+        /// The plugin the handler pointed at.
+        handler: PluginId,
+    },
+    /// The plugin already holds [`MAX_PLUGIN_ACTIONS`] actions.
+    PluginCapExceeded {
+        /// The plugin that reached its cap.
+        plugin: PluginId,
+        /// The cap that was reached.
+        cap: usize,
+    },
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegistryError::Duplicate { action } => {
+                write!(f, "action {action} is already registered")
+            }
+            RegistryError::ReservedNamespace { action } => write!(
+                f,
+                "action {action} is in a reserved namespace; only plugin: actions may be registered"
+            ),
+            RegistryError::NamespaceMismatch { action } => write!(
+                f,
+                "action {action} carries metadata for a different namespace"
+            ),
+            RegistryError::ForeignHandler { action, handler } => write!(
+                f,
+                "action {action} routes to {handler}, which does not own it"
+            ),
+            RegistryError::PluginCapExceeded { plugin, cap } => {
+                write!(f, "{plugin} already holds the maximum of {cap} actions")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+impl DomainError for RegistryError {
+    fn category(&self) -> DomainCategory {
+        DomainCategory::Plugin
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Recoverable
+    }
+}
+
+/// Every action koshi can perform right now, keyed by reference.
+///
+/// Built with [`new`](ActionRegistry::new), which loads the built-in `core:`
+/// table. Plugins add and remove their own entries on top of it.
+#[derive(Debug)]
+pub struct ActionRegistry {
+    /// Each known action and what the runtime knows about it.
+    entries: HashMap<ActionRef, ActionMetadata>,
+    /// Successful adds and removes since startup. See the module docs.
+    version: u64,
+}
+
+impl ActionRegistry {
+    /// Build a registry holding the built-in `core:` actions, at version 0.
+    #[must_use]
+    pub fn new() -> Self {
+        ActionRegistry {
+            entries: core_action_seeds().into_iter().collect(),
+            version: 0,
+        }
+    }
+
+    /// Add a plugin's action to the table and bump [`version`](Self::version).
+    ///
+    /// `metadata` must describe the same plugin `action` names: its namespace
+    /// has to match, and a [`PluginHostCall`](ActionHandlerRef::PluginHostCall)
+    /// handler has to route back to the owning plugin. A
+    /// [`CoreCommand`](ActionHandlerRef::CoreCommand) or
+    /// [`Sequence`](ActionHandlerRef::Sequence) handler is accepted as-is: a
+    /// plugin action may alias a built-in command or fire a macro.
+    ///
+    /// # Errors
+    /// - [`RegistryError::ReservedNamespace`] if `action` is not a `plugin:`
+    ///   reference.
+    /// - [`RegistryError::NamespaceMismatch`] if `metadata.namespace` names a
+    ///   different owner than `action` does.
+    /// - [`RegistryError::ForeignHandler`] if `metadata.handler` routes to a
+    ///   plugin other than the one owning `action`.
+    /// - [`RegistryError::Duplicate`] if `action` is already registered.
+    /// - [`RegistryError::PluginCapExceeded`] if the owning plugin already holds
+    ///   [`MAX_PLUGIN_ACTIONS`] actions.
+    pub fn register(
+        &mut self,
+        action: ActionRef,
+        metadata: ActionMetadata,
+    ) -> Result<(), RegistryError> {
+        let ActionNamespace::Plugin(plugin) = action.namespace else {
+            return Err(RegistryError::ReservedNamespace { action });
+        };
+
+        if metadata.namespace != action.namespace {
+            return Err(RegistryError::NamespaceMismatch { action });
+        }
+
+        if let ActionHandlerRef::PluginHostCall(handler) = metadata.handler {
+            if handler != plugin {
+                return Err(RegistryError::ForeignHandler { action, handler });
+            }
+        }
+
+        if self.entries.contains_key(&action) {
+            return Err(RegistryError::Duplicate { action });
+        }
+
+        // ponytail: scan to count; a per-plugin counter is the upgrade once the
+        // table holds hundreds of entries.
+        let held = self
+            .entries
+            .keys()
+            .filter(|held| matches!(held.namespace, ActionNamespace::Plugin(id) if id == plugin))
+            .count();
+        if held >= MAX_PLUGIN_ACTIONS {
+            return Err(RegistryError::PluginCapExceeded {
+                plugin,
+                cap: MAX_PLUGIN_ACTIONS,
+            });
+        }
+
+        self.entries.insert(action, metadata);
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Remove a plugin's action, returning the metadata it held.
+    ///
+    /// `core:` and `user:` entries are permanent, mirroring
+    /// [`register`](Self::register): passing one leaves the table untouched.
+    /// Returns `None` whenever nothing was removed, and the version bumps only
+    /// when an entry was.
+    pub fn unregister(&mut self, action: &ActionRef) -> Option<ActionMetadata> {
+        if !matches!(action.namespace, ActionNamespace::Plugin(_)) {
+            return None;
+        }
+        let metadata = self.entries.remove(action)?;
+        self.version += 1;
+        Some(metadata)
+    }
+
+    /// Look an action up. `None` means the reference names no known action — a
+    /// binding pointing at it is an orphan, e.g. because its plugin unloaded.
+    #[must_use]
+    pub fn lookup(&self, action: &ActionRef) -> Option<&ActionMetadata> {
+        self.entries.get(action)
+    }
+
+    /// Every action in `namespace`, in unspecified order. A caller that renders
+    /// the result sorts it.
+    pub fn list_by_namespace(
+        &self,
+        namespace: ActionNamespace,
+    ) -> impl Iterator<Item = (&ActionRef, &ActionMetadata)> + '_ {
+        self.entries
+            .iter()
+            .filter(move |(action, _)| action.namespace == namespace)
+    }
+
+    /// How many adds and removes have succeeded since startup.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+impl Default for ActionRegistry {
+    fn default() -> Self {
+        ActionRegistry::new()
+    }
+}
+
+#[cfg(test)]
+mod tests;

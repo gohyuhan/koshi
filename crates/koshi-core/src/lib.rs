@@ -14,4 +14,5 @@ pub mod lock;
 pub mod naming;
 pub mod process;
 pub mod redact;
+pub mod registry;
 pub mod types;

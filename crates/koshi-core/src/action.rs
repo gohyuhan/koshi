@@ -12,10 +12,9 @@
 //! user-defined macros (a later feature; the namespace is claimed now so it
 //! cannot collide). This file ships the *primitives* — [`ActionRef`],
 //! [`ActionNamespace`], [`ActionMetadata`], [`ActionHandlerRef`], and the static
-//! [`core_action_seeds`] table. The mutable, runtime registry that loads those
-//! seeds and accepts plugin registrations is built later (it needs the plugin
-//! host and config layers); these types exist now so the command and event
-//! vocabularies can already reference actions by value.
+//! [`core_action_seeds`] table. The mutable, runtime table that loads those seeds
+//! and accepts plugin registrations is
+//! [`ActionRegistry`](crate::registry::ActionRegistry).
 //!
 //! Actions are not a fixed enum: the open design ensures plugins are
 //! first-class citizens on the keyboard surface, not locked out of the

@@ -218,7 +218,8 @@ pub enum KeymapOptIn {
     None,
     /// Adopt all of the plugin's recommended keymaps.
     Recommended,
-    /// Adopt only the listed key sequences.
+    /// Adopt only the recommendations for the listed local action names, at
+    /// whatever key the plugin currently recommends for each.
     Subset(Vec<String>),
 }
 
