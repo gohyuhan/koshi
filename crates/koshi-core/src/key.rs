@@ -89,8 +89,9 @@ impl fmt::Display for ModFlags {
     }
 }
 
-/// The modifiers that make a chord impossible to produce by ordinary typing.
-/// Shift is absent: shift plus a letter is just that letter's capital.
+/// The modifiers that lift a chord out of the focused pane's ordinary input
+/// stream. Shift is absent: shift plus a key is that key's capital or shifted
+/// variant, which the pane still expects to receive.
 const NON_TEXT: ModFlags = ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 /// A key that is not a printable character.
@@ -190,24 +191,15 @@ impl KeyChord {
         Self { mods, key }
     }
 
-    /// True when ordinary typing can produce this chord, so binding it as the
-    /// first chord of a sequence in a transparent mode would swallow input the
-    /// focused pane is waiting for. Control, Alt, and Super each make a chord
-    /// unreachable by typing; Shift does not, because Shift plus a letter is
-    /// that letter's capital. Space, Tab, Enter, Backspace, and Escape count as
-    /// typeable even though they are not characters: a program running in the
-    /// pane expects to receive them.
+    /// True when the focused pane expects to receive this chord as ordinary
+    /// input, so binding it as the first chord of a sequence in a transparent
+    /// mode would swallow input the pane is waiting for. A program running in
+    /// the pane may be reading any unmodified key — characters, Enter, arrows,
+    /// editing keys, function keys — and Shift only selects a key's capital or
+    /// shifted variant. Control, Alt, and Super each lift a chord out of the
+    /// pane's input stream.
     pub fn is_typeable(&self) -> bool {
         !self.mods.intersects(NON_TEXT)
-            && matches!(
-                self.key,
-                Key::Char(_)
-                    | Key::Named(NamedKey::Space)
-                    | Key::Named(NamedKey::Tab)
-                    | Key::Named(NamedKey::Enter)
-                    | Key::Named(NamedKey::Backspace)
-                    | Key::Named(NamedKey::Esc)
-            )
     }
 }
 

@@ -359,6 +359,55 @@ fn a_function_key_outside_the_range_is_refused() {
 }
 
 #[test]
+fn a_raw_whitespace_or_control_character_is_refused() {
+    // A KDL escape like "\t" reaches the parser as the literal character; the
+    // named spelling is the one representation of that key.
+    assert_eq!(
+        parse_chord("\t"),
+        Err(KeyParseError {
+            token: "\t".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\t' },
+        })
+    );
+    assert_eq!(
+        parse_chord(" "),
+        Err(KeyParseError {
+            token: " ".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: ' ' },
+        })
+    );
+    assert_eq!(
+        parse_chord("\r"),
+        Err(KeyParseError {
+            token: "\r".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\r' },
+        })
+    );
+    assert_eq!(
+        parse_chord("\u{1b}"),
+        Err(KeyParseError {
+            token: "\u{1b}".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\u{1b}' },
+        })
+    );
+    // The bracketed and modified positions go through the same fold.
+    assert_eq!(
+        parse_chord("< >"),
+        Err(KeyParseError {
+            token: "< >".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: ' ' },
+        })
+    );
+    assert_eq!(
+        parse_chord("<C-\t>"),
+        Err(KeyParseError {
+            token: "<C-\t>".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\t' },
+        })
+    );
+}
+
+#[test]
 fn leader_is_not_a_chord() {
     assert_eq!(
         parse_chord("<leader>"),
@@ -545,5 +594,9 @@ fn an_error_names_the_token_and_the_reason() {
     assert_eq!(
         parse_chord("<leader>").unwrap_err().to_string(),
         "invalid key `<leader>`: `<leader>` stands for a prefix, not a chord"
+    );
+    assert_eq!(
+        parse_chord("\t").unwrap_err().to_string(),
+        "invalid key `\t`: the character '\\t' is written by its key name, such as `<Space>` or `<Tab>`"
     );
 }

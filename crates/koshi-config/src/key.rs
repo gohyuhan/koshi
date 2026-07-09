@@ -12,7 +12,9 @@
 //! `ALT|SHIFT` plus `Char('h')`. `S-` is rejected on a non-letter character,
 //! because "shift plus `1`" names no character without knowing the keyboard
 //! layout — write `!` instead. A named key accepts `S-`: `<S-Tab>` is
-//! Shift+Tab.
+//! Shift+Tab. A raw whitespace or control character (a literal tab in the
+//! config text) is refused: those keys are written by name, keeping one
+//! representation per physical key.
 
 use std::fmt;
 
@@ -85,6 +87,12 @@ pub enum KeyParseErrorKind {
         /// The number as written.
         n: String,
     },
+    /// A raw whitespace or control character where a key was expected.
+    #[error("the character {ch:?} is written by its key name, such as `<Space>` or `<Tab>`")]
+    RawWhitespaceOrControl {
+        /// The character as written.
+        ch: char,
+    },
     /// `<leader>` where a single chord was expected.
     #[error("`<leader>` stands for a prefix, not a chord")]
     LeaderNotAChord,
@@ -140,8 +148,15 @@ fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyPar
 
 /// Folds a single-character key into canonical form: an uppercase letter becomes
 /// its lowercase plus [`ModFlags::SHIFT`]. Rejects a `SHIFT` that lands on a
-/// character with no capital form.
+/// character with no capital form, and a whitespace or control character, whose
+/// key has a named spelling.
 fn finish_char(token: &str, mods: ModFlags, c: char) -> Result<KeyChord, KeyParseError> {
+    if c.is_whitespace() || c.is_control() {
+        return Err(err(
+            token,
+            KeyParseErrorKind::RawWhitespaceOrControl { ch: c },
+        ));
+    }
     let mut mods = mods;
     let key_char = if c.is_uppercase() {
         let mut lower = c.to_lowercase();

@@ -146,13 +146,28 @@ fn characters_are_typeable_whatever_their_case() {
 }
 
 #[test]
-fn the_keys_a_running_program_expects_are_typeable() {
+fn every_unmodified_key_a_pane_reads_is_typeable() {
     assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space)).is_typeable());
     assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Tab)).is_typeable());
     assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Enter)).is_typeable());
     assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Backspace)).is_typeable());
     assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Home)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::End)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Delete)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Insert)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::PageUp)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::PageDown)).is_typeable());
+    assert!(KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::F(5))).is_typeable());
+}
+
+#[test]
+fn shift_keeps_a_chord_typeable() {
+    assert!(KeyChord::new(ModFlags::SHIFT, Key::Char('a')).is_typeable());
     assert!(KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Tab)).is_typeable());
+    assert!(KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Left)).is_typeable());
 }
 
 #[test]
@@ -161,16 +176,7 @@ fn control_alt_and_super_make_a_chord_untypeable() {
     assert!(!KeyChord::new(ModFlags::ALT, Key::Char('n')).is_typeable());
     assert!(!KeyChord::new(ModFlags::SUPER, Key::Char('x')).is_typeable());
     assert!(!KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Space)).is_typeable());
+    assert!(!KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Left)).is_typeable());
+    assert!(!KeyChord::new(ModFlags::ALT, Key::Named(NamedKey::F(5))).is_typeable());
     assert!(!KeyChord::new(ModFlags::ALT | ModFlags::SHIFT, Key::Char('h')).is_typeable());
-}
-
-#[test]
-fn keys_no_program_needs_verbatim_are_not_typeable() {
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::F(5))).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left)).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Delete)).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::PageUp)).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Insert)).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Home)).is_typeable());
-    assert!(!KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::End)).is_typeable());
 }
