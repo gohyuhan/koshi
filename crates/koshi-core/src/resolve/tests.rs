@@ -22,10 +22,16 @@ fn plugin_id(byte: u8) -> PluginId {
     PluginId::from_uuid(Uuid::from_bytes([byte; 16]))
 }
 
-/// The spawn spec `core:run` is exercised with.
+/// The program `core:run` is exercised with.
+fn run_program() -> PathBuf {
+    PathBuf::from("/usr/bin/lazygit")
+}
+
+/// The spawn spec `core:run` must build from [`run_program`]: no `cwd`, no
+/// `env`, and a shell kind derived from the program.
 fn spawn_spec() -> SpawnSpec {
     SpawnSpec {
-        program: PathBuf::from("/usr/bin/lazygit"),
+        program: run_program(),
         args: vec!["--all".to_string()],
         cwd: None,
         env: BTreeMap::new(),
@@ -149,7 +155,8 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
         (
             "run",
             ActionArgs::Run {
-                command: spawn_spec(),
+                program: run_program(),
+                args: vec!["--all".to_string()],
                 direction: Some(Direction::Down),
                 stacked: false,
             },
@@ -179,26 +186,56 @@ fn plugin_metadata(owner: PluginId) -> ActionMetadata {
     }
 }
 
+/// Metadata for a `user:` macro whose handler fires `steps` in order.
+fn macro_metadata(steps: Vec<ActionRef>) -> ActionMetadata {
+    ActionMetadata {
+        namespace: ActionNamespace::User,
+        display_name: "Macro".to_string(),
+        description: "A user macro".to_string(),
+        scope_class: ActionScope::Global,
+        target_compat: vec![TargetKind::Session],
+        args_schema: None,
+        handler: ActionHandlerRef::Sequence(steps),
+        status: ActionStatus::Available,
+    }
+}
+
+/// A `user:` reference for a name known to satisfy the grammar.
+fn user(name: &str) -> ActionRef {
+    ActionRef::user(name).expect("test macro name is valid")
+}
+
 /// A registry holding the core seeds plus one `user:` macro whose handler is the
 /// given sequence. `register` refuses `user:` references, so the entry goes in
 /// through [`insert_unchecked`].
 fn registry_with_macro(name: &str, steps: Vec<ActionRef>) -> ActionRegistry {
     let mut registry = ActionRegistry::new();
-    insert_unchecked(
-        &mut registry,
-        ActionRef::user(name).expect("test macro name is valid"),
-        ActionMetadata {
-            namespace: ActionNamespace::User,
-            display_name: "Macro".to_string(),
-            description: "A user macro".to_string(),
-            scope_class: ActionScope::Global,
-            target_compat: vec![TargetKind::Session],
-            args_schema: None,
-            handler: ActionHandlerRef::Sequence(steps),
-            status: ActionStatus::Available,
-        },
-    );
+    insert_unchecked(&mut registry, user(name), macro_metadata(steps));
     registry
+}
+
+/// A registry holding a chain of `levels` nested macros — `m0` names `m1`, which
+/// names `m2`, and so on — the innermost naming `core:lock`. Returns the
+/// registry and the outermost reference.
+///
+/// The chain is what distinguishes counting sequences from counting
+/// resolutions: it has `levels` sequence handlers and one leaf action beneath
+/// them.
+fn registry_with_macro_chain(levels: usize) -> (ActionRegistry, ActionRef) {
+    let mut registry = ActionRegistry::new();
+    for level in 0..levels {
+        let step = if level + 1 == levels {
+            core("lock")
+        } else {
+            user(&format!("m{}", level + 1))
+        };
+        insert_unchecked(
+            &mut registry,
+            user(&format!("m{level}")),
+            macro_metadata(vec![step]),
+        );
+    }
+    (registry, user("m0"))
 }
 
 #[test]
@@ -416,7 +453,7 @@ fn arguments_belonging_to_another_action_are_refused() {
 #[test]
 fn a_sequence_resolves_each_step_in_order() {
     let registry = registry_with_macro("split-and-lock", vec![core("new-pane"), core("lock")]);
-    let macro_ref = ActionRef::user("split-and-lock").expect("valid name");
+    let macro_ref = user("split-and-lock");
 
     assert_eq!(
         resolve_action(&macro_ref, &ActionArgs::None, &registry),
@@ -433,7 +470,7 @@ fn a_sequence_halts_on_the_first_failing_step() {
         "lock-then-copy",
         vec![core("lock"), core("copy-mode-enter"), core("unlock")],
     );
-    let macro_ref = ActionRef::user("lock-then-copy").expect("valid name");
+    let macro_ref = user("lock-then-copy");
 
     assert_eq!(
         resolve_action(&macro_ref, &ActionArgs::None, &registry),
@@ -446,7 +483,7 @@ fn a_sequence_halts_on_the_first_failing_step() {
 #[test]
 fn a_sequence_given_arguments_is_refused() {
     let registry = registry_with_macro("split-and-lock", vec![core("new-pane")]);
-    let macro_ref = ActionRef::user("split-and-lock").expect("valid name");
+    let macro_ref = user("split-and-lock");
 
     assert_eq!(
         resolve_action(
@@ -462,7 +499,7 @@ fn a_sequence_given_arguments_is_refused() {
 
 #[test]
 fn a_self_referencing_macro_exhausts_the_depth_budget() {
-    let macro_ref = ActionRef::user("loop").expect("valid name");
+    let macro_ref = user("loop");
     let registry = registry_with_macro("loop", vec![macro_ref.clone()]);
 
     assert_eq!(
@@ -470,6 +507,70 @@ fn a_self_referencing_macro_exhausts_the_depth_budget() {
         Err(ResolveError::SequenceTooDeep {
             action: macro_ref.clone()
         })
+    );
+}
+
+#[test]
+fn a_chain_of_exactly_max_depth_sequences_resolves() {
+    let (registry, outermost) = registry_with_macro_chain(MAX_SEQUENCE_DEPTH);
+
+    // The leaf action sits one level below the deepest sequence, and resolves:
+    // the budget counts the sequences entered, not the actions reached.
+    let mut plan = resolve_action(&outermost, &ActionArgs::None, &registry)
+        .expect("a chain at the documented limit must resolve");
+    for _ in 0..MAX_SEQUENCE_DEPTH - 1 {
+        let DispatchPlan::Sequence(mut steps) = plan else {
+            panic!("every level but the last is a sequence");
+        };
+        assert_eq!(steps.len(), 1);
+        plan = steps.remove(0);
+    }
+
+    assert_eq!(
+        plan,
+        DispatchPlan::Sequence(vec![DispatchPlan::Command(Command::SetLockMode(
+            LockModeArgs { locked: true }
+        ))])
+    );
+}
+
+#[test]
+fn a_chain_one_sequence_past_max_depth_is_refused() {
+    let (registry, outermost) = registry_with_macro_chain(MAX_SEQUENCE_DEPTH + 1);
+
+    assert_eq!(
+        resolve_action(&outermost, &ActionArgs::None, &registry),
+        Err(ResolveError::SequenceTooDeep {
+            // The macro at the deepest allowed level is the one refused.
+            action: user(&format!("m{MAX_SEQUENCE_DEPTH}")),
+        })
+    );
+}
+
+#[test]
+fn run_never_carries_a_cwd_or_env_from_its_caller() {
+    let registry = ActionRegistry::new();
+    let args = ActionArgs::Run {
+        program: run_program(),
+        args: vec!["--all".to_string()],
+        direction: None,
+        stacked: false,
+    };
+
+    let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
+        resolve_action(&core("run"), &args, &registry)
+    else {
+        panic!("core:run must resolve to a run-command-pane command");
+    };
+
+    assert_eq!(built.cwd, None);
+    assert_eq!(built.command.cwd, None);
+    assert_eq!(built.command.env, BTreeMap::new());
+    assert_eq!(built.command.program, run_program());
+    assert_eq!(built.command.args, vec!["--all".to_string()]);
+    assert_eq!(
+        built.command.shell_kind,
+        ShellKind::Other("lazygit".to_string())
     );
 }
 

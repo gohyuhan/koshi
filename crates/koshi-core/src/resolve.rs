@@ -33,7 +33,9 @@
 //! names, in order, halting on the first failure and bounded by
 //! [`MAX_SEQUENCE_DEPTH`].
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
@@ -44,22 +46,36 @@ use crate::command::{
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
 use crate::ids::{PaneId, PluginId};
-use crate::process::SpawnSpec;
+use crate::process::{ShellKind, SpawnSpec};
 use crate::registry::ActionRegistry;
 use serde::{Deserialize, Serialize};
 
-/// How many levels of [`ActionHandlerRef::Sequence`] nesting resolution follows
-/// before it gives up. A macro that names itself, directly or through a ring of
-/// other macros, exhausts the budget instead of recursing forever.
+/// How many [`ActionHandlerRef::Sequence`] handlers one chain may nest.
+///
+/// The budget is spent on sequences, not on the actions they name: a chain of
+/// eight macros ending in a real action resolves, and a ninth macro inside it
+/// does not. A macro that names itself, directly or through a ring of other
+/// macros, exhausts the budget instead of recursing forever.
 pub const MAX_SEQUENCE_DEPTH: usize = 8;
 
-/// The arguments bound to an action at its call site — a keymap entry, a plugin
-/// invocation, an IPC request.
+/// The arguments bound to an action at its call site — a keymap entry, or a step
+/// of a macro.
 ///
-/// Each variant carries only what the caller may choose. Targets are absent by
-/// design: a binding says *what* to do, and the runtime decides *to which pane*
-/// from the command's source. Fields the caller cannot supply either
-/// (`cwd`, `env`) are captured at the boundary that issues the command.
+/// # What a variant may carry
+///
+/// Exactly what the invoker chooses, which is three things and no others:
+///
+/// - **Non-target knobs** — a split direction, a resize amount, a force flag.
+/// - **Required targets** — a target the command has no default for, so the
+///   invoker must name it. [`FocusPaneArgs::pane`](crate::command::FocusPaneArgs)
+///   is a `PaneId`, not an `Option`, so [`ActionArgs::FocusPane`] carries one.
+/// - **Nothing else.**
+///
+/// An **optional** target is never here: `None` already reads as "the focused
+/// one" in each argument struct, and the runtime resolves it from the command's
+/// source. Nor is a field the issuing boundary owns: a pane's `cwd` and `env`
+/// are captured where the command is issued, which is why [`ActionArgs::Run`]
+/// names a program and its arguments rather than a whole [`SpawnSpec`].
 ///
 /// [`ActionArgs::None`] means no arguments were given. Actions whose every field
 /// is optional accept it and fall back to their defaults; actions with a
@@ -109,8 +125,10 @@ pub enum ActionArgs {
     },
     /// Arguments for `core:run`.
     Run {
-        /// The command to spawn.
-        command: SpawnSpec,
+        /// The program to execute.
+        program: PathBuf,
+        /// Arguments passed to the program, excluding `argv[0]`.
+        args: Vec<String>,
         /// Split direction for the new pane; `None` splits rightward.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
@@ -161,9 +179,9 @@ pub enum ResolveError {
         /// The reference whose arguments did not fit.
         action: ActionRef,
     },
-    /// A macro nests past [`MAX_SEQUENCE_DEPTH`].
+    /// A macro sits deeper than [`MAX_SEQUENCE_DEPTH`] nested sequences.
     SequenceTooDeep {
-        /// The reference resolution gave up on.
+        /// The macro resolution gave up on.
         action: ActionRef,
     },
 }
@@ -216,19 +234,13 @@ pub fn resolve_action(
     resolve_at_depth(action, args, registry, 0)
 }
 
-/// [`resolve_action`] carrying the sequence-nesting budget spent so far.
+/// [`resolve_action`] carrying the count of sequences entered to reach `action`.
 fn resolve_at_depth(
     action: &ActionRef,
     args: &ActionArgs,
     registry: &ActionRegistry,
     depth: usize,
 ) -> Result<DispatchPlan, ResolveError> {
-    if depth >= MAX_SEQUENCE_DEPTH {
-        return Err(ResolveError::SequenceTooDeep {
-            action: action.clone(),
-        });
-    }
-
     let metadata = registry
         .lookup(action)
         .ok_or_else(|| ResolveError::Unregistered {
@@ -249,8 +261,15 @@ fn resolve_at_depth(
             args: args.clone(),
         }),
         // A sequence names its steps and nothing else, so there is no argument
-        // for the macro itself to carry and each step resolves with none.
+        // for the macro itself to carry and each step resolves with none. The
+        // budget is spent here, where the nesting happens, so a leaf action at
+        // the deepest level still resolves.
         ActionHandlerRef::Sequence(steps) => {
+            if depth >= MAX_SEQUENCE_DEPTH {
+                return Err(ResolveError::SequenceTooDeep {
+                    action: action.clone(),
+                });
+            }
             if args != &ActionArgs::None {
                 return Err(ResolveError::ArgsMismatch {
                     action: action.clone(),
@@ -349,15 +368,25 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: false }),
 
         // --- Run ---
+        // The spawn spec is built here rather than accepted from the caller: a
+        // pane's `cwd` and `env` belong to the boundary that issues the command,
+        // and a spec supplied whole would carry both.
         (
             "run",
             ActionArgs::Run {
-                command,
+                program,
+                args,
                 direction,
                 stacked,
             },
         ) => Command::RunCommandPane(RunCommandPaneArgs {
-            command: command.clone(),
+            command: SpawnSpec {
+                program: program.clone(),
+                args: args.clone(),
+                cwd: None,
+                env: BTreeMap::new(),
+                shell_kind: ShellKind::from_program(program),
+            },
             cwd: None,
             source: None,
             direction: *direction,
