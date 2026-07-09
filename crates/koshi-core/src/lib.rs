@@ -15,4 +15,5 @@ pub mod naming;
 pub mod process;
 pub mod redact;
 pub mod registry;
+pub mod resolve;
 pub mod types;

@@ -1,6 +1,9 @@
 //! Unit tests for the action registry: the built-in seed load, the ownership
 //! checks that gate registration and removal, the handler restriction, the
 //! per-plugin cap, and the version counter.
+//!
+//! Also home to [`insert_unchecked`], the seam sibling test modules use to place
+//! an entry the public surface cannot build.
 
 use super::*;
 
@@ -9,6 +12,24 @@ use crate::action::{
 };
 use crate::command::CommandKind;
 use uuid::Uuid;
+
+/// Insert an entry with none of the ownership checks
+/// [`register`](ActionRegistry::register) makes, and bump the version.
+///
+/// `user:` macros are a later feature and have no registration path, and a
+/// plugin may not carry a [`Sequence`](ActionHandlerRef::Sequence) handler, so a
+/// sequence entry cannot be built through the public surface. Resolution tests
+/// need one to exercise the macro route. Reaching the private fields is what
+/// keeps this here rather than beside those tests: this module is a child of
+/// `registry`.
+pub(crate) fn insert_unchecked(
+    registry: &mut ActionRegistry,
+    action: ActionRef,
+    metadata: ActionMetadata,
+) {
+    registry.entries.insert(action, metadata);
+    registry.version += 1;
+}
 
 /// A plugin id built from a fixed uuid, so two calls with the same byte yield
 /// the same plugin and different bytes yield different plugins.

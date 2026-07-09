@@ -296,4 +296,4 @@ impl Default for ActionRegistry {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
