@@ -30,11 +30,22 @@
 //! `core:` is built-in and `user:` macros are a later feature — so a plugin
 //! cannot shadow or replace a built-in action.
 //!
-//! A registered entry must also agree with its own key: the metadata's namespace
-//! names the same plugin the reference does, and a
-//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall) handler
-//! routes back to that plugin. One plugin therefore cannot register an action
-//! that dispatches into another.
+//! # The caller is the only trusted input
+//!
+//! A registration request describes its own owner three times: the reference's
+//! namespace, the metadata's namespace, and the handler's target. All three
+//! arrive together, so agreeing with each other proves nothing. Both
+//! [`register`](ActionRegistry::register) and
+//! [`unregister`](ActionRegistry::unregister) therefore take the `caller` the
+//! host authenticated and check every one of those against it. A plugin cannot
+//! register into, or remove from, another plugin's namespace.
+//!
+//! A plugin action's handler must be that plugin's own
+//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall).
+//! [`CoreCommand`](crate::action::ActionHandlerRef::CoreCommand) is what the
+//! built-in seeds carry and [`Sequence`](crate::action::ActionHandlerRef::Sequence)
+//! belongs to `user:` macros; a plugin reaches the runtime through its host
+//! call, where the capability check for each command class happens.
 //!
 //! # Version
 //!
@@ -52,10 +63,12 @@ use crate::action::{
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::ids::PluginId;
 
-/// The number of actions a single plugin may hold in the registry at once.
+/// The number of entries a single plugin may hold in the registry at once.
+/// Registration past it is refused.
 ///
-/// Bounds the memory one plugin can claim in the shared table, and with it the
-/// per-registration scan that counts what the plugin already holds.
+/// This bounds the entry count, not the bytes: a plugin supplies its own
+/// `display_name` and `description`, whose lengths the host validates before it
+/// reaches the registry.
 pub const MAX_PLUGIN_ACTIONS: usize = 32;
 
 /// Why an [`ActionRegistry::register`] call was refused. Each variant carries
@@ -72,24 +85,31 @@ pub enum RegistryError {
         /// The reference whose namespace is not `plugin:`.
         action: ActionRef,
     },
+    /// The reference belongs to a plugin other than the caller, which would let
+    /// one plugin claim a name in another's namespace.
+    ForeignNamespace {
+        /// The reference the caller does not own.
+        action: ActionRef,
+        /// The plugin the caller was authenticated as.
+        caller: PluginId,
+    },
     /// The metadata's namespace names a different owner than the reference
     /// does. The two restate one fact, so they must agree.
     NamespaceMismatch {
         /// The reference whose metadata disagreed with it.
         action: ActionRef,
     },
-    /// The metadata routes to a plugin other than the one that owns the
-    /// reference, which would dispatch one plugin's action into another.
-    ForeignHandler {
-        /// The reference whose handler pointed elsewhere.
+    /// The metadata does not dispatch through the owning plugin's host call.
+    /// A plugin action reaches the runtime only that way, so every command it
+    /// performs passes the capability check the host makes on each host call.
+    InvalidHandler {
+        /// The reference whose handler was not its owner's host call.
         action: ActionRef,
-        /// The plugin the handler pointed at.
-        handler: PluginId,
     },
-    /// The plugin already holds [`MAX_PLUGIN_ACTIONS`] actions.
+    /// The caller already holds [`MAX_PLUGIN_ACTIONS`] actions.
     PluginCapExceeded {
-        /// The plugin that reached its cap.
-        plugin: PluginId,
+        /// The plugin the caller was authenticated as, which reached its cap.
+        caller: PluginId,
         /// The cap that was reached.
         cap: usize,
     },
@@ -105,16 +125,20 @@ impl fmt::Display for RegistryError {
                 f,
                 "action {action} is in a reserved namespace; only plugin: actions may be registered"
             ),
+            RegistryError::ForeignNamespace { action, caller } => write!(
+                f,
+                "action {action} is not owned by {caller}, which may only register in its own namespace"
+            ),
             RegistryError::NamespaceMismatch { action } => write!(
                 f,
                 "action {action} carries metadata for a different namespace"
             ),
-            RegistryError::ForeignHandler { action, handler } => write!(
+            RegistryError::InvalidHandler { action } => write!(
                 f,
-                "action {action} routes to {handler}, which does not own it"
+                "action {action} must dispatch through its owning plugin's host call"
             ),
-            RegistryError::PluginCapExceeded { plugin, cap } => {
-                write!(f, "{plugin} already holds the maximum of {cap} actions")
+            RegistryError::PluginCapExceeded { caller, cap } => {
+                write!(f, "{caller} already holds the maximum of {cap} actions")
             }
         }
     }
@@ -154,42 +178,51 @@ impl ActionRegistry {
         }
     }
 
-    /// Add a plugin's action to the table and bump [`version`](Self::version).
+    /// Add `caller`'s action to the table and bump [`version`](Self::version).
     ///
-    /// `metadata` must describe the same plugin `action` names: its namespace
-    /// has to match, and a [`PluginHostCall`](ActionHandlerRef::PluginHostCall)
-    /// handler has to route back to the owning plugin. A
-    /// [`CoreCommand`](ActionHandlerRef::CoreCommand) or
-    /// [`Sequence`](ActionHandlerRef::Sequence) handler is accepted as-is: a
-    /// plugin action may alias a built-in command or fire a macro.
+    /// `caller` is the plugin the host authenticated, and is the only fact here
+    /// the registry trusts. `action` and `metadata` arrive together from the
+    /// same request, so they are checked against `caller` rather than against
+    /// each other: the reference is in `caller`'s namespace, the metadata
+    /// repeats that namespace, and the handler is `caller`'s own
+    /// [`PluginHostCall`](ActionHandlerRef::PluginHostCall). Every command a
+    /// plugin action performs therefore passes through the host call the
+    /// runtime capability-checks.
     ///
     /// # Errors
-    /// - [`RegistryError::ReservedNamespace`] if `action` is not a `plugin:`
-    ///   reference.
+    /// - [`RegistryError::ReservedNamespace`] if `action` is a `core:` or
+    ///   `user:` reference.
+    /// - [`RegistryError::ForeignNamespace`] if `action` belongs to a plugin
+    ///   other than `caller`.
     /// - [`RegistryError::NamespaceMismatch`] if `metadata.namespace` names a
     ///   different owner than `action` does.
-    /// - [`RegistryError::ForeignHandler`] if `metadata.handler` routes to a
-    ///   plugin other than the one owning `action`.
+    /// - [`RegistryError::InvalidHandler`] if `metadata.handler` is anything
+    ///   other than `caller`'s own host call.
     /// - [`RegistryError::Duplicate`] if `action` is already registered.
-    /// - [`RegistryError::PluginCapExceeded`] if the owning plugin already holds
+    /// - [`RegistryError::PluginCapExceeded`] if `caller` already holds
     ///   [`MAX_PLUGIN_ACTIONS`] actions.
     pub fn register(
         &mut self,
+        caller: PluginId,
         action: ActionRef,
         metadata: ActionMetadata,
     ) -> Result<(), RegistryError> {
-        let ActionNamespace::Plugin(plugin) = action.namespace else {
-            return Err(RegistryError::ReservedNamespace { action });
-        };
+        match action.namespace {
+            ActionNamespace::Core | ActionNamespace::User => {
+                return Err(RegistryError::ReservedNamespace { action })
+            }
+            ActionNamespace::Plugin(owner) if owner != caller => {
+                return Err(RegistryError::ForeignNamespace { action, caller })
+            }
+            ActionNamespace::Plugin(_) => {}
+        }
 
         if metadata.namespace != action.namespace {
             return Err(RegistryError::NamespaceMismatch { action });
         }
 
-        if let ActionHandlerRef::PluginHostCall(handler) = metadata.handler {
-            if handler != plugin {
-                return Err(RegistryError::ForeignHandler { action, handler });
-            }
+        if metadata.handler != ActionHandlerRef::PluginHostCall(caller) {
+            return Err(RegistryError::InvalidHandler { action });
         }
 
         if self.entries.contains_key(&action) {
@@ -201,11 +234,11 @@ impl ActionRegistry {
         let held = self
             .entries
             .keys()
-            .filter(|held| matches!(held.namespace, ActionNamespace::Plugin(id) if id == plugin))
+            .filter(|held| matches!(held.namespace, ActionNamespace::Plugin(id) if id == caller))
             .count();
         if held >= MAX_PLUGIN_ACTIONS {
             return Err(RegistryError::PluginCapExceeded {
-                plugin,
+                caller,
                 cap: MAX_PLUGIN_ACTIONS,
             });
         }
@@ -215,14 +248,15 @@ impl ActionRegistry {
         Ok(())
     }
 
-    /// Remove a plugin's action, returning the metadata it held.
+    /// Remove one of `caller`'s actions, returning the metadata it held.
     ///
-    /// `core:` and `user:` entries are permanent, mirroring
-    /// [`register`](Self::register): passing one leaves the table untouched.
-    /// Returns `None` whenever nothing was removed, and the version bumps only
-    /// when an entry was.
-    pub fn unregister(&mut self, action: &ActionRef) -> Option<ActionMetadata> {
-        if !matches!(action.namespace, ActionNamespace::Plugin(_)) {
+    /// A plugin removes only what it owns, mirroring [`register`](Self::register):
+    /// `caller` is the authenticated owner, and an `action` in any other
+    /// namespace — `core:`, `user:`, or another plugin's — leaves the table
+    /// untouched. Returns `None` whenever nothing was removed, and the version
+    /// bumps only when an entry was.
+    pub fn unregister(&mut self, caller: PluginId, action: &ActionRef) -> Option<ActionMetadata> {
+        if action.namespace != ActionNamespace::Plugin(caller) {
             return None;
         }
         let metadata = self.entries.remove(action)?;
