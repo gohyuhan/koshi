@@ -3,8 +3,10 @@
 use super::*;
 
 use koshi_core::geometry::Direction;
+use koshi_core::key::ModFlags;
 
 use crate::error::ColorParseError;
+use crate::key::Leader;
 
 #[test]
 fn default_loads_with_expected_values() {
@@ -21,7 +23,7 @@ fn default_loads_with_expected_values() {
     assert_eq!(config.keybindings.chord_timeout_ms, 500);
     assert_eq!(config.keybindings.which_key_delay_ms, 300);
     assert_eq!(config.keybindings.max_chord_depth, 4);
-    assert_eq!(config.keybindings.leader, "Ctrl");
+    assert_eq!(config.keybindings.leader, Leader::Mods(ModFlags::CTRL));
     assert!(config.keybindings.modes.is_empty());
 
     assert_eq!(config.layout.new_pane_direction, Direction::Right);

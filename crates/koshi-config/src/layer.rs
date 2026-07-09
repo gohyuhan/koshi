@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use koshi_core::geometry::Direction;
 
+use crate::key::Leader;
 use crate::types::{
     ClipboardBackend, ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults,
     ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation, PluginActivationConfig,
@@ -149,8 +150,8 @@ pub struct PartialKeybindingsConfig {
     pub which_key_delay_ms: Option<u32>,
     /// Maximum number of chords in one key sequence.
     pub max_chord_depth: Option<u8>,
-    /// The leader chord that `<leader>` in a binding resolves to.
-    pub leader: Option<String>,
+    /// The prefix that `<leader>` in a binding resolves to.
+    pub leader: Option<Leader>,
     /// Per-mode bindings. When set, the whole map replaces the lower layer's;
     /// per-mode keymap merging is done by the keymap-merge pass.
     pub modes: Option<BTreeMap<ModeName, ModeBindings>>,

@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use koshi_core::geometry::Direction;
+use koshi_core::key::ModFlags;
 
 use super::*;
 use crate::types::{
@@ -195,14 +196,14 @@ fn modes_replaced_wholesale() {
 fn keybindings_scalars_keep_untouched_siblings() {
     let layer = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
-            leader: Some("Alt".to_string()),
+            leader: Some(Leader::Mods(ModFlags::ALT)),
             ..Default::default()
         }),
         ..Default::default()
     };
     let merged = merge(KoshiConfig::default(), vec![layer]);
 
-    assert_eq!(merged.keybindings.leader, "Alt");
+    assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
     assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
     assert_eq!(merged.keybindings.max_chord_depth, 4); // default kept
 }
