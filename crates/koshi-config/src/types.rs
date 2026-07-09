@@ -3,8 +3,10 @@
 //! [`KoshiConfig`] is the whole in-memory config tree the runtime reads. Every
 //! field has a default via [`Default`], so Koshi runs with zero user config;
 //! [`KoshiConfig::default`] is the baseline that user overrides layer onto. This
-//! module owns the schema and defaults only — parsing KDL into it, layering
-//! multiple files, validation, and migration live in later loader passes.
+//! module owns the schema and defaults only. The sibling [`layer`](crate::layer)
+//! module folds override layers onto these defaults; parsing KDL into a layer,
+//! discovering and reading config files, validation, and migration live in later
+//! loader passes.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
