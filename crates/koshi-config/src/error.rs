@@ -1,9 +1,15 @@
-//! Config domain errors. [`ConfigError`] is the flat, aggregate-wrapped failure
-//! (classifies into [`DomainCategory::Config`]); [`ConfigParseDiagnostic`] is the
-//! richer parse error that preserves KDL source spans for pretty rendering and
-//! flattens into [`ConfigError`] when it enters the aggregate.
-//! [`ConfigVersionDiagnostic`] reports a config schema version newer than this
-//! build; [`ColorParseError`] reports a malformed theme color value.
+//! Config domain errors.
+//!
+//! [`ConfigError`] is the plain error enum other code matches on; it
+//! classifies into [`DomainCategory::Config`] when it joins koshi's
+//! crate-wide aggregate error type. [`ConfigParseDiagnostic`] is a richer
+//! parse error that keeps the original KDL source text and the byte span of
+//! the failure, so it can be pretty-printed with a caret pointing at the bad
+//! line; it flattens down into a plain [`ConfigError::Parse`] once it joins
+//! the aggregate. [`ConfigVersionDiagnostic`] reports that a config file
+//! declares a schema version newer than this build understands.
+//! [`ColorParseError`] reports a theme color value that is not valid
+//! `#RRGGBB` hex.
 
 use std::path::Path;
 
@@ -65,14 +71,19 @@ impl ConfigParseDiagnostic {
 }
 
 impl Diagnostic for ConfigParseDiagnostic {
+    // Every instance of this type is a KDL syntax error, so the code is fixed.
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new("koshi::config::parse"))
     }
 
+    // Delegates to the inner `kdl` error, which holds the original source text
+    // that a pretty-printed report highlights.
     fn source_code(&self) -> Option<&dyn SourceCode> {
         self.err.source_code()
     }
 
+    // Delegates to the inner `kdl` error's own sub-diagnostics, so each one
+    // still renders at its own span.
     fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
         self.err.related()
     }
@@ -110,10 +121,12 @@ pub struct ConfigVersionDiagnostic {
     pub supported: u32,
 }
 
-/// Checks a config's declared schema `version` against [`SCHEMA_VERSION`].
-/// Returns a [`ConfigVersionDiagnostic`] when `found` is newer than this build
-/// supports; an equal or older version is accepted, since migration upgrades
-/// older files.
+/// Checks a config's declared schema `version` against [`SCHEMA_VERSION`]. An
+/// equal or older version is accepted, since migration upgrades older files.
+///
+/// # Errors
+/// Returns a [`ConfigVersionDiagnostic`] when `found` is newer than
+/// [`SCHEMA_VERSION`].
 pub fn check_version(found: u32) -> Result<(), ConfigVersionDiagnostic> {
     if found > SCHEMA_VERSION {
         Err(ConfigVersionDiagnostic {

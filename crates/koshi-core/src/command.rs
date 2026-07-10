@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// A requested mutation. The trailing group (`TogglePaneFullscreen`,
-/// `RenamePane`, `MoveTab`, `RenameSession`) is included now so the wire schema
-/// does not break when those land later.
+/// A requested mutation the runtime can apply. One variant exists per command
+/// the action registry can dispatch; [`Command::kind`] maps each variant to
+/// its payload-free [`CommandKind`] discriminant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     /// Split-create a pane; CLI `new-pane`.
@@ -284,8 +284,8 @@ pub struct LockModeArgs {
     pub locked: bool,
 }
 
-/// Arguments for [`Command::RunCommandPane`]. The pane's title is not
-/// supplied by the caller — titles are only ever system-generated.
+/// Arguments for [`Command::RunCommandPane`]. The pane's display name is not
+/// supplied by the caller — names are only ever system-generated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommandPaneArgs {
     /// The command to spawn.
@@ -413,7 +413,8 @@ pub struct SetSelectionArgs {
 /// Which clipboard a copy targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CopyTarget {
-    /// OSC 52 to the outer terminal (default, dependency-free).
+    /// OSC 52 (a terminal escape sequence for setting the clipboard) to the
+    /// outer terminal — the default, dependency-free option.
     Osc52,
     /// The native OS clipboard (behind the `native` feature).
     Native,
@@ -611,8 +612,9 @@ impl CommandSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandEnvelopeError {
     /// `client_id` does not match the client named by `source` (or names a
-    /// client for a source that has none). A malformed or hostile peer could
-    /// otherwise misattribute a command to another client.
+    /// client for a source that has none). This check stops a malformed or
+    /// hostile peer from misattributing a command to another client by
+    /// forging `client_id`.
     ClientIdMismatch,
 }
 

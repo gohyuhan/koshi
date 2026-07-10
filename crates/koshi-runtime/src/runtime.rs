@@ -1,5 +1,8 @@
-//! Core runtime components: command dispatch, the event inbox, PTY output
-//! routing, render scheduling, the render-snapshot builder, event
+//! Core runtime components: local-session bootstrap (genesis), the
+//! loop-facing driver surface, command dispatch, the event inbox, outer-input
+//! routing, PTY (pseudo-terminal, a child process's terminal connection)
+//! forwarding and output handling, render scheduling, per-client scrollback
+//! scrolling, staged shutdown, the render-snapshot builder, event
 //! transactions, and the runtime state container.
 
 pub mod bootstrap;

@@ -1,6 +1,9 @@
-//! Grapheme clustering and wide-glyph placement: fold continuations (combining
-//! marks, ZWJ emoji parts, variation selectors) onto a base cell, place narrow
-//! and wide glyphs, and keep wide-glyph pairs intact across edits.
+//! Grapheme clustering and wide-glyph placement. A grapheme cluster is what a
+//! reader sees as "one character" but that may be built from several Unicode
+//! code points — e.g. an emoji plus a skin-tone modifier. This module folds
+//! those continuations (combining marks, ZWJ — zero-width joiner — emoji
+//! parts, variation selectors) onto a base cell, places narrow and wide
+//! glyphs, and keeps wide-glyph pairs intact across edits.
 
 use crate::grid::state::Cell;
 use crate::state::TerminalState;
@@ -9,9 +12,9 @@ use unicode_width::UnicodeWidthStr;
 
 /// Upper bound on the number of continuation code points folded onto one cell's
 /// base (the `combining` tail). Real grapheme clusters — even a skin-toned ZWJ
-/// emoji family — stay well under this; the cap exists only to bound per-cell
-/// memory against pathological input (e.g. a flood of combining marks, "zalgo"
-/// text) that would otherwise grow a single cell without limit. Continuations
+/// (zero-width joiner) emoji family — stay well under this; the cap bounds
+/// per-cell memory against pathological input (e.g. a flood of combining
+/// marks, "zalgo" text) from growing a single cell without limit. Continuations
 /// past the cap are dropped.
 pub(super) const MAX_GRAPHEME_CONTINUATIONS: usize = 32;
 
@@ -33,10 +36,11 @@ impl TerminalState {
         self.cluster_base = None;
     }
 
-    /// Whether `c` continues the current grapheme cluster rather than starting a
-    /// new one — i.e. there is no grapheme-cluster boundary between the cluster
-    /// built so far and `c`. This is what folds combining marks, ZWJ emoji
-    /// sequences, variation selectors, skin-tone modifiers, and regional-
+    /// Whether `c` continues the current grapheme cluster, i.e. whether there is
+    /// no grapheme-cluster boundary between the cluster built so far and `c` — a
+    /// `false` result means `c` starts a new cluster. This is what folds
+    /// combining marks, ZWJ (zero-width joiner) emoji sequences, variation
+    /// selectors, skin-tone modifiers, and regional-
     /// indicator flags onto a single base. An ambiguous / incomplete result is
     /// treated as a boundary (start fresh) — the safe default.
     pub(super) fn continues_cluster(&self, c: char) -> bool {
@@ -119,7 +123,7 @@ impl TerminalState {
     /// right becomes a width-0 continuation, and the cursor advances over the
     /// newly claimed column. If the base sits in the last column — no room to
     /// its right — the whole cluster moves to the next line, the same way a wide
-    /// glyph wraps rather than straddling the edge.
+    /// glyph wraps to keep itself on one line.
     fn promote_cluster_to_wide(&mut self, row: u16, col: u16) {
         let (_, cols) = self.active_grid().dimensions();
         let last_col = cols.saturating_sub(1);
@@ -173,8 +177,8 @@ impl TerminalState {
             }
             // The destination row may already hold a wide glyph; `place_glyph`
             // clears any pair these writes would split before installing the
-            // promoted cluster — otherwise a wide base at col 1 would leave its
-            // width-0 continuation at col 2 orphaned.
+            // promoted cluster, so a wide base at col 1 never leaves its width-0
+            // continuation at col 2 orphaned.
             self.place_glyph(new_row, 0, widened);
             self.cluster_base = Some((new_row, 0));
             if 1 >= last_col {
@@ -227,11 +231,11 @@ impl TerminalState {
         let (_, cols) = self.active_grid().dimensions();
         // A wide glyph needs its continuation column in bounds. In a pane too
         // narrow to hold the pair (e.g. a 1-column split, where even col 0 is the
-        // last column) there is no room, so store the base as a single narrow
-        // cell instead of a width-2 base with no continuation — the latter breaks
-        // the wide-pair invariant, so a later erase / cell op would treat the lone
-        // cell as an orphan and blank it, and a renderer trusting widths would see
-        // an impossible row.
+        // last column) there is no room, so the base is stored as a single
+        // narrow cell, keeping the wide-pair invariant intact: a width-2 base
+        // with no continuation would let a later erase / cell op treat the lone
+        // cell as an orphan and blank it, and would let a renderer trusting
+        // widths draw an impossible row.
         let wide = base.width() == 2 && col + 1 < cols;
         let base = if base.width() == 2 && !wide {
             rebuilt_with_width(&base, 1)

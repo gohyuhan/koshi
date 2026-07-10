@@ -97,7 +97,7 @@ pub struct TabSnapshot {
     /// Whether the tab is tiled or a single pane is fullscreen.
     pub layout_mode: LayoutMode,
     /// True when every pane is suppressed because the tab has no room to draw —
-    /// the renderer shows the "terminal too small" overlay instead of panes.
+    /// the renderer fills the whole frame with the "terminal too small" overlay.
     pub all_suppressed: bool,
 }
 

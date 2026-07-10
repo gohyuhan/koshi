@@ -207,6 +207,8 @@ impl ActionRegistry {
         action: ActionRef,
         metadata: ActionMetadata,
     ) -> Result<(), RegistryError> {
+        // 1. The reference itself must sit in a `plugin:` namespace, and it
+        // must be `caller`'s own plugin, not another one's.
         match action.namespace {
             ActionNamespace::Core | ActionNamespace::User => {
                 return Err(RegistryError::ReservedNamespace { action })
@@ -217,18 +219,24 @@ impl ActionRegistry {
             ActionNamespace::Plugin(_) => {}
         }
 
+        // 2. The metadata must restate the same namespace as the reference.
         if metadata.namespace != action.namespace {
             return Err(RegistryError::NamespaceMismatch { action });
         }
 
+        // 3. The handler must route back through `caller`'s own host call, so
+        // every command the action performs passes that plugin's capability
+        // check.
         if metadata.handler != ActionHandlerRef::PluginHostCall(caller) {
             return Err(RegistryError::InvalidHandler { action });
         }
 
+        // 4. The reference must not already be registered.
         if self.entries.contains_key(&action) {
             return Err(RegistryError::Duplicate { action });
         }
 
+        // 5. `caller` must not already hold the maximum number of entries.
         // ponytail: scan to count; a per-plugin counter is the upgrade once the
         // table holds hundreds of entries.
         let held = self

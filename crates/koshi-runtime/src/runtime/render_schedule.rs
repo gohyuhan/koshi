@@ -20,10 +20,12 @@
 //!
 //! The scheduler never calls `Instant::now()`. The event loop passes the
 //! current [`Instant`] into every decision, so the gate is a pure function of
-//! its inputs: monotonic (immune to wall-clock/NTP/DST jumps that a
-//! `SystemTime` gate would suffer) and deterministic to test with a synthetic
-//! timeline. `last_render` is dispatcher-thread-local and never serialized, so
-//! `Instant` — not the boundary-only `SystemTime` — is the correct clock.
+//! its inputs: monotonic (only ever moves forward, immune to wall-clock jumps
+//! from clock-sync corrections (NTP, Network Time Protocol) or daylight-saving
+//! changes (DST) that a `SystemTime` gate would suffer) and deterministic to
+//! test with a synthetic timeline. `last_render` is dispatcher-thread-local
+//! and never serialized, so `Instant` — not the boundary-only `SystemTime` —
+//! is the correct clock.
 
 use std::time::{Duration, Instant};
 

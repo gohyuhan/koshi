@@ -1,4 +1,5 @@
-//! In-memory fake PTY backend.
+//! In-memory fake PTY (pseudo-terminal, the virtual terminal a shell process
+//! runs inside) backend.
 //!
 //! Layout, session, and runtime tests need to exercise pane spawning, writing,
 //! resizing, and child-exit handling without launching real shells: real

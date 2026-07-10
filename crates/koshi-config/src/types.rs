@@ -17,7 +17,8 @@ use crate::error::ColorParseError;
 use crate::key::Leader;
 
 /// The config schema version written to and read from disk. Bumped when the
-/// on-disk shape changes so old files migrate forward instead of misparsing.
+/// on-disk shape changes, so an older file can be recognized by its version
+/// number and migrated forward to the current shape.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The complete configuration tree. Each field is an independent section with
@@ -129,8 +130,9 @@ impl Default for KeybindingsConfig {
     }
 }
 
-/// The name of an input mode (`normal`, `locked`, `resize`, …). A dynamic string
-/// rather than a closed enum, so plugins may register additional modes.
+/// The name of an input mode (`normal`, `locked`, `resize`, …), stored as a
+/// plain string so plugins can register additional mode names beyond the
+/// built-in set.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModeName(String);
 
@@ -401,7 +403,14 @@ impl RgbColor {
     }
 
     /// Parses a `#RRGGBB` (or bare `RRGGBB`) hex string into a color.
+    ///
+    /// # Errors
+    /// - [`ColorParseError::BadLength`] if the value, after stripping a
+    ///   leading `#`, is not exactly six characters.
+    /// - [`ColorParseError::BadDigit`] if any of those six characters is not
+    ///   a hex digit (`0-9`, `a-f`, `A-F`).
     pub fn from_hex(s: &str) -> Result<Self, ColorParseError> {
+        // Accept the value with or without its leading `#`.
         let hex = s.strip_prefix('#').unwrap_or(s);
         let bytes = hex.as_bytes();
         if bytes.len() != 6 {

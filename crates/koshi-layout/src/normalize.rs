@@ -137,8 +137,9 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     if factors.iter().all(|&factor| factor == 1) {
         return entries;
     }
-    // Overflow occurs only on absurdly deep hostile trees. Nested splits are
-    // valid even unmerged, so we skip the merge rather than wrapping the product.
+    // Overflow occurs only on absurdly deep hostile trees. When it happens,
+    // the merge is skipped and the split stays nested; a nested split still
+    // solves correctly, it just isn't canonical.
     let product = factors
         .iter()
         .try_fold(1u128, |acc, &factor| acc.checked_mul(factor));

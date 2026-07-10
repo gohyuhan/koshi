@@ -81,7 +81,9 @@ pub enum SplitDirection {
     Horizontal,
     /// Top-bottom split.
     Vertical,
-    /// Overlaid split (z-axis).
+    /// The children overlay the same space instead of dividing it (a "stack"
+    /// of panes, one visible at a time), so there is no left-right or
+    /// top-bottom axis to divide.
     Stacked,
 }
 

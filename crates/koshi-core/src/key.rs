@@ -89,9 +89,9 @@ impl fmt::Display for ModFlags {
     }
 }
 
-/// The modifiers that lift a chord out of the focused pane's ordinary input
-/// stream. Shift is absent: shift plus a key is that key's capital or shifted
-/// variant, which the pane still expects to receive.
+/// The modifiers that make a chord something ordinary typing cannot produce.
+/// Shift is absent: Shift plus a key is still typing — it gives the key's
+/// capital or shifted variant.
 const NON_TEXT: ModFlags = ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 /// A key that is not a printable character.
@@ -191,13 +191,15 @@ impl KeyChord {
         Self { mods, key }
     }
 
-    /// True when the focused pane expects to receive this chord as ordinary
-    /// input, so binding it as the first chord of a sequence in a transparent
-    /// mode would swallow input the pane is waiting for. A program running in
-    /// the pane may be reading any unmodified key — characters, Enter, arrows,
-    /// editing keys, function keys — and Shift only selects a key's capital or
-    /// shifted variant. Control, Alt, and Super each lift a chord out of the
-    /// pane's input stream.
+    /// True when this chord is something ordinary typing produces: no
+    /// Control, Alt, or Super is held. Characters, Enter, arrows, editing
+    /// keys, and function keys all count, with or without Shift.
+    ///
+    /// This classifies, it does not forbid. Outside lock mode a key goes to
+    /// the keymap before the pane, so any binding — a typeable one included —
+    /// takes its key away from the pane until the client locks. The value
+    /// exists so the keybinding layer can keep shipped defaults and the
+    /// lock-mode unlock chord off keys that plain typing would hit.
     pub fn is_typeable(&self) -> bool {
         !self.mods.intersects(NON_TEXT)
     }
@@ -205,6 +207,12 @@ impl KeyChord {
 
 impl fmt::Display for KeyChord {
     /// Writes the canonical text form, which parses back to an equal chord.
+    ///
+    /// Wraps the chord in `<...>` whenever a modifier is held, the key is a
+    /// named key (e.g. `Tab`, `Left`), or the key is the literal `<`
+    /// character — bracketing a lone `<` keeps it from being misread as the
+    /// start of a bracketed chord. Anything else (a plain lowercase letter or
+    /// other character with no modifiers) is written unbracketed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bracketed = !self.mods.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
         if bracketed {

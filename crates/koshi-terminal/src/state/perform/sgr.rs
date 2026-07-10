@@ -1,5 +1,7 @@
-//! SGR (Select Graphic Rendition) handling: apply a `CSI … m` sequence to the
-//! pen [`Style`], including the 256-color and truecolor extended selectors.
+//! SGR (Select Graphic Rendition) handling — SGR is the CSI (`ESC [ …`) form
+//! that sets text color, bold, underline, and other display attributes:
+//! apply a `CSI … m` sequence to the pen [`Style`], including the 256-color
+//! and truecolor extended selectors (also used for the underline color).
 
 use crate::style::{Color, Style, UnderlineStyle};
 
@@ -93,8 +95,9 @@ fn next_val<'a>(iter: &mut impl Iterator<Item = &'a [u16]>) -> Option<u16> {
     iter.next().and_then(|p| p.first().copied())
 }
 
-/// Parse a `38` (foreground) or `48` (background) extended-color payload into a
-/// [`Color`], for whichever of the two wire forms `vte` produced:
+/// Parse a `38` (foreground), `48` (background), or `58` (underline color)
+/// extended-color payload into a [`Color`], for whichever of the two wire
+/// forms `vte` produced:
 ///
 /// - **colon** — `38:5:n` / `38:2:r:g:b`: the selector and values are
 ///   subparameters grouped into the single `first` slice (`first[0]` is the

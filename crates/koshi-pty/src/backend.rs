@@ -1,6 +1,7 @@
-//! Main PTY backend state, operations, and lifecycle management.
+//! The `PtyBackend` trait every backend implements, and the `PtyHandle` a
+//! spawned pane is polled through; see [`crate::backend::state`] for both.
 
-/// PTY backend state.
+/// The `PtyBackend` trait and the `PtyHandle` struct.
 pub mod state;
 
 #[cfg(test)]

@@ -1870,9 +1870,8 @@ impl Runtime {
     /// The write is a side effect that changes no session state, so a
     /// successful write commits no events; the child's response returns
     /// through the normal PTY output path. A backend write failure — the
-    /// child died between the liveness check and the write — is
-    /// [`RejectReason::InvalidState`], reported to the caller rather than
-    /// silently dropped.
+    /// child died between the liveness check and the write — is reported to
+    /// the caller as [`RejectReason::InvalidState`].
     fn handle_write_to_pane(
         &mut self,
         command_id: CommandId,
@@ -2213,10 +2212,10 @@ impl Runtime {
     /// source's client (when it names one) is still attached.
     ///
     /// An in-session CLI's own `session_id` is authoritative — the session is
-    /// looked up by it, and the named client must be attached *there*, so an
-    /// inconsistent envelope (client attached elsewhere) is rejected rather than
-    /// acting on the wrong session. A keybinding/mouse names only a client and is
-    /// located by it. An external CLI naming a session must match one. A missing
+    /// looked up by it, and the named client must be attached *there*; an
+    /// inconsistent envelope (client attached elsewhere) is rejected. A
+    /// keybinding/mouse names only a client and is located by it. An external
+    /// CLI naming a session must match one. A missing
     /// session is [`RejectReason::TargetNotFound`]; a client not attached where
     /// expected is [`RejectReason::SourceClientStale`]. Sources with no session
     /// context (`Plugin`, `Internal`, external with no session) resolve to `None`.
@@ -2637,7 +2636,7 @@ impl Runtime {
 
     /// Resolve the client's focused pane. A client with no focused pane is
     /// [`RejectReason::TargetNotFound`]; a focus pointing outside the active tab
-    /// is rejected too, rather than trusting the focus invariant.
+    /// is verified and rejected too, not assumed valid.
     fn resolve_focused_pane(session: &Session, client_id: ClientId) -> Result<PaneId, Rejection> {
         let client = session
             .clients

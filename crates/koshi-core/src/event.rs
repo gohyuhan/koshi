@@ -615,6 +615,10 @@ pub struct PluginMouseInput {
 // ============================================================================
 
 /// Payload for [`Event::PaneCommandStarted`].
+///
+/// Emitted when a shell reports it just ran a command via OSC 133;C, a
+/// terminal escape sequence shells emit around each command for prompt
+/// integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneCommandStarted {
     /// The pane whose shell reported a command starting.

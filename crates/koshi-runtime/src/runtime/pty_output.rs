@@ -5,10 +5,11 @@
 //! [`Runtime::handle_pty_output`] routes them into that pane's
 //! [`TerminalEngine`](koshi_terminal::engine::TerminalEngine) — updating its
 //! grid, cursor, and modes — writes the engine's device-query replies
-//! (DA/DSR/DECRQM answers) back into the pane's PTY, and marks the screen
-//! stale so the event loop schedules a repaint. Bytes for a pane with no
-//! engine (one closed while the event sat in the inbox) are dropped without
-//! touching any state.
+//! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
+//! terminal are you" / "what's your status" / "is this mode on") back into
+//! the pane's PTY, and marks the screen stale so the event loop schedules a
+//! repaint. Bytes for a pane with no engine (one closed while the event sat in
+//! the inbox) are dropped without touching any state.
 
 use koshi_core::ids::PaneId;
 

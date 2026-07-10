@@ -18,8 +18,10 @@ impl TerminalState {
     }
 
     /// Reset the alternate screen to a fresh, blank buffer:
-    /// - cells blanked to the current pen background (BCE),
-    /// - scroll region (DECSTBM) back to the full screen,
+    /// - cells blanked to the current pen background (BCE, background color
+    ///   erase — the blanked cells take the pen's current background color),
+    /// - scroll region (DECSTBM, the CSI sequence that sets the top/bottom
+    ///   scroll margins) back to the full screen,
     /// - cursor home, shown, no wrap latch, no DECSC stash.
     ///
     /// Leaves the alternate's [`RenderState`](crate::state::RenderState) alone;

@@ -57,9 +57,9 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         "snapshot builder must solve the client's active tab into session.active_tab"
     );
 
-    // Blank the viewport first: ratatui double-buffers without clearing, so a
-    // reused buffer would otherwise keep leftover cells in the tabline gap, the
-    // reserved hint row, and any pane interior not painted this frame.
+    // Blank the viewport first: ratatui reuses the previous frame's buffer, and
+    // this clears stale cells in the tabline gap, the reserved hint row, and any
+    // pane interior not painted this frame.
     Clear.render(area, buf);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
@@ -225,8 +225,8 @@ fn draw_pane_contents(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer
 
 /// Paint one terminal `grid` into `area`, one buffer cell per grid cell.
 ///
-/// Each grid cell is placed at its own column, so the on-screen columns follow
-/// the grid rather than a re-measured glyph width. The continuation half of a
+/// Each grid cell is placed at its own column, so on-screen column positions
+/// always match grid column positions. The continuation half of a
 /// wide glyph (width 0) is skipped — the wide base already covers it. A wide
 /// glyph whose second half falls outside the content area is replaced by a blank
 /// so no half-glyph bleeds past the edge. `reverse_video` (DECSCNM) toggles

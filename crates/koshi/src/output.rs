@@ -236,6 +236,8 @@ fn json<T: Serialize>(value: &T) -> String {
 /// Aligned columns: a header row, then one row per item, each column padded
 /// to its widest cell and separated by two spaces, with no trailing spaces.
 fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
+    // Each column's width is the widest cell in that column, starting from
+    // the header's own width.
     let mut widths: Vec<usize> = headers
         .iter()
         .map(|header| header.chars().count())
@@ -247,6 +249,7 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
     }
     let mut rendered = String::new();
     let header_cells: Vec<String> = headers.iter().map(|header| (*header).to_string()).collect();
+    // Render the header first, then every data row, using the same padding logic.
     for row in std::iter::once(&header_cells).chain(rows.iter()) {
         let mut line = String::new();
         for (index, (cell, width)) in row.iter().zip(&widths).enumerate() {
@@ -255,6 +258,8 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
             }
             line.push_str(cell);
             let padding = width.saturating_sub(cell.chars().count());
+            // Pad every cell except the last, whose trailing spaces get
+            // trimmed off the line below anyway.
             if index < row.len() - 1 {
                 line.extend(std::iter::repeat_n(' ', padding));
             }

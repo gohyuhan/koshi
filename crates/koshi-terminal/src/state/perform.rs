@@ -1,25 +1,34 @@
 //! [`vte::Perform`] implementation that drives [`TerminalState`] from parsed
 //! PTY output: printable glyphs land in the active grid at the cursor, and the
-//! basic C0 control bytes move the cursor and scroll.
+//! basic C0 control bytes — the raw single-byte control codes below `0x20`,
+//! e.g. newline, tab, backspace — move the cursor and scroll.
 //!
-//! Implemented so far: `print` (printable glyphs, translated through the active
-//! GL charset — DEC line-drawing, UK — then display-width aware: wide
-//! CJK/emoji span two cells; grapheme continuations — combining marks, ZWJ
-//! emoji sequences, variation selectors, skin-tone modifiers, flags — fold onto
-//! the base cell, with variation-selector width promotion), `execute` (C0 control
-//! bytes, including the `SI`/`SO` charset shifts), `csi_dispatch` (relative + absolute cursor moves, line-relative
-//! moves, forward/back tab stops, erase in display/line and erase-char, SGR,
-//! insert/delete char & line, scroll up/down, the DECSTBM scroll region,
-//! the DEC private modes for the alternate screen and cursor visibility, and
-//! the device queries — DA1/DA2/DA3, the DSR family, DECRQM — whose replies
-//! land on the state's reply queue),
-//! `esc_dispatch` (cursor save/restore,
-//! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (the OSC 0/1/2 window title and the
+//! Implemented so far: `print` (printable glyphs, translated through the
+//! active GL charset — the character set currently selected for printing, one
+//! of the four `G0`–`G3` slots — DEC line-drawing, UK — then display-width
+//! aware: wide CJK/emoji span two cells; grapheme continuations — combining
+//! marks, ZWJ (zero-width joiner) emoji sequences, variation selectors,
+//! skin-tone modifiers, flags — fold onto the base cell, with
+//! variation-selector width promotion), `execute` (C0 control bytes, including
+//! the `SI`/`SO` charset shifts), `csi_dispatch` (CSI — Control Sequence
+//! Introducer, the `ESC [ …` escape form used for cursor moves, colors, and
+//! mode switches: relative + absolute cursor moves, line-relative moves,
+//! forward/back tab stops, erase in display/line and erase-char, SGR (Select
+//! Graphic Rendition — sets text color, bold, underline, and other display
+//! attributes), insert/delete char & line, scroll up/down, the DECSTBM scroll
+//! region, the DEC private modes for the alternate screen and cursor
+//! visibility, and the device queries — DA1/DA2/DA3, the DSR family, DECRQM —
+//! whose replies land on the state's reply queue),
+//! `esc_dispatch` (plain ESC sequences: cursor save/restore,
+//! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (OSC
+//! — Operating System Command, the `ESC ] …` escape form that carries a text
+//! payload: the OSC 0/1/2 window title and the
 //! OSC 7 working-directory report). The
-//! device-control-string callbacks `hook`/`unhook` clear the in-progress
-//! grapheme cluster (a DCS ends a text run, like any non-printing event); their
-//! payload handling, and `put`, are otherwise left to a later task. `vte` decodes
-//! UTF-8 upstream, so `print` receives a ready `char`.
+//! device-control-string (DCS, `ESC P … ST`, an escape form whose payload
+//! arrives as a run of following bytes) callbacks `hook`/`unhook` clear the
+//! in-progress grapheme cluster (a DCS ends a text run, like any non-printing
+//! event); their payload handling, and `put`, are left to a later task. `vte`
+//! decodes UTF-8 upstream, so `print` receives a ready `char`.
 //!
 //! The performer's helpers are split across submodules by concern — charset
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
@@ -63,7 +72,7 @@ impl vte::Perform for TerminalState {
 
         // A continuation (combining mark, ZWJ-joined emoji part, variation
         // selector, skin-tone modifier, flag half) folds onto the current
-        // cluster's base instead of taking its own cell.
+        // cluster's base without occupying a cell of its own.
         if !self.cluster.is_empty() && self.continues_cluster(c) {
             self.extend_cluster(c);
             return;
@@ -110,9 +119,9 @@ impl vte::Perform for TerminalState {
 
         // A wide glyph needs two columns; when only the last column is free it
         // cannot fit. Blank that lone column and wrap, so the glyph begins the
-        // next line whole rather than straddling the edge. Skipped in a 1-column
-        // pane (`last_col == 0`), where wrapping cannot help — `place_glyph` then
-        // stores the glyph narrow in place instead of thrashing the screen.
+        // next line as one whole cell, not split across the edge. Skipped in a
+        // 1-column pane (`last_col == 0`), where wrapping cannot help —
+        // `place_glyph` then stores the glyph narrow in place there.
         if glyph_width == 2 && self.active_cursor().col == last_col && last_col > 0 {
             // A 2-cell glyph cannot fit in the lone last column. With autowrap off
             // there is no next line to move it onto, so drop it; the cursor rests
@@ -242,10 +251,11 @@ impl vte::Perform for TerminalState {
 
         // Device queries (DA1/DA2/DA3, DSR, DECRQM/RQM): each queues its
         // response bytes on the reply queue for the runtime to write back into
-        // the PTY. Dispatched on the exact (intermediates, action) pair —
-        // before the DEC private-mode block, which would otherwise consume the
-        // `?`-intermediate forms (`CSI ? Ps n`, `CSI ? Ps $ p`). The `$`-form
-        // pairs leave `CSI ! p` (DECSTR) untouched.
+        // the PTY. Dispatched on the exact (intermediates, action) pair, before
+        // the DEC private-mode block below: that block also matches on the `?`
+        // intermediate, so the device-query forms (`CSI ? Ps n`, `CSI ? Ps $ p`)
+        // must be caught here first. The `$`-form pairs leave `CSI ! p`
+        // (DECSTR) untouched.
         match (intermediates, action) {
             // DA1 — primary device attributes.
             (b"", 'c') => return self.device_attributes_primary(params),
@@ -281,10 +291,11 @@ impl vte::Perform for TerminalState {
             // primary's). The one exception is `?1049 h` entry, guarded on the
             // screen active at the *start* of the list (`screen_at_start`): it must
             // still save the primary cursor + freshen the alternate when the list
-            // began on the primary, even if an earlier `?47` already swapped (a
-            // deliberate, safer deviation from alacritty, which no-ops it). Entry
-            // re-firing is idempotent (no SGR can change the pen mid-`?`-list), so
-            // it needs no whichBuf guard; exit re-firing is not, so it does.
+            // began on the primary, even if an earlier `?47` already swapped
+            // within the same list (this differs from alacritty, which treats
+            // that case as a no-op). Entry re-firing is idempotent (no SGR can
+            // change the pen mid-`?`-list), so it needs no whichBuf guard; exit
+            // re-firing is not, so it does.
             let screen_at_start = self.active;
             for param in params.iter() {
                 let mode = param.first().copied().unwrap_or(0);
@@ -603,18 +614,20 @@ impl vte::Perform for TerminalState {
                 // Every EL mode (0/1/2) wipes the cursor's cell, un-filling the
                 // line, so clear the parked wrap latch — the cursor is a concrete
                 // column and its armed glyph is gone, so the next print overwrites
-                // it rather than wrapping. An unknown mode erases nothing and
-                // leaves the latch.
+                // that cell directly with no wrap pending. An unknown mode erases
+                // nothing and leaves the latch armed.
                 if matches!(mode, 0..=2) {
                     self.active_cursor_mut().pending_wrap = false;
                 }
                 self.normalize_wide_pairs(r);
             }
-            // ECH — erase n cells in place from the cursor (BCE background fill,
-            // no shift of the rest of the line), then repair any wide-glyph pair
-            // the erase split. The cursor is a concrete column, so erasing from it
-            // clears the parked last-column glyph and clears the wrap latch — the
-            // cell that armed the wrap is gone, so no wrap remains pending.
+            // ECH — erase n cells in place from the cursor (BCE, background color
+            // erase: the vacated cells fill with the pen's current background
+            // color, not a fixed default), no shift of the rest of the line, then
+            // repair any wide-glyph pair the erase split. The cursor is a concrete
+            // column, so erasing from it clears the parked last-column glyph and
+            // clears the wrap latch — the cell that armed the wrap is gone, so no
+            // wrap remains pending.
             'X' => {
                 let n = move_count(params);
                 let fill = self.active_render().style.bg_fill();
@@ -654,7 +667,9 @@ impl vte::Perform for TerminalState {
             // IL — insert n blank lines at the cursor row, scrolling the rest of
             // the region down. Ignored when the cursor is outside the region; the
             // cursor position (row, column, and wrap latch) is left unchanged,
-            // matching the DEC/xterm lineage that TUIs target.
+            // matching the DEC/xterm lineage that TUIs (text user interfaces —
+            // terminal apps like editors and file managers that draw with
+            // characters) target.
             'L' => {
                 let (top, bottom) = self.region_bounds();
                 if (top..=bottom).contains(&self.active_cursor().row) {
@@ -720,8 +735,7 @@ impl vte::Perform for TerminalState {
                     self.active_cursor_mut().pending_wrap = false;
                 }
             }
-            // Any other CSI final byte is not handled yet; ignored rather than
-            // mis-applied.
+            // Any other CSI final byte is not handled yet, so it is ignored.
             _ => {}
         }
     }
@@ -737,8 +751,8 @@ impl vte::Perform for TerminalState {
         }
         // Charset designation: `ESC (`/`)`/`*`/`+` Fc designates G0/G1/G2/G3.
         // vte collects the `(`/`)`/`*`/`+` into `intermediates`; the final `byte`
-        // names the set. Handled before the plain-ESC match below, which the
-        // intermediate would otherwise skip.
+        // names the set. Handled before the plain-ESC match below, since that
+        // match only fires for a byte with no intermediate.
         match intermediates {
             b"(" => return self.designate_charset(0, byte),
             b")" => return self.designate_charset(1, byte),

@@ -1,5 +1,10 @@
 //! `koshi-pty` — process/PTY backend: `portable-pty` wrapper, shell bootstrap,
 //! PTY read/write/resize, and child process exit detection.
+//!
+//! A PTY (pseudo-terminal) is an OS-level pair of linked file handles that
+//! makes a spawned program (a shell, for example) behave as if it were
+//! talking to a real terminal, so interactive behavior like line editing and
+//! colors works when koshi runs it.
 
 mod env;
 
@@ -18,5 +23,6 @@ pub mod resize;
 /// Shared type definitions.
 pub mod types;
 
-/// Main PTY backend implementation and state management.
+/// The `PtyBackend` trait and the `PtyHandle` a spawned pane is driven
+/// through; the concrete backend built on `portable-pty` lives in [`portable`].
 pub mod backend;

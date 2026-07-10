@@ -1,4 +1,5 @@
-//! PTY domain error. Classifies into [`koshi_core::error::DomainCategory::Pty`].
+//! PTY (pseudo-terminal — the OS channel a spawned shell or program runs
+//! inside) domain error. Classifies into [`koshi_core::error::DomainCategory::Pty`].
 
 use koshi_core::{
     error::{DomainCategory, DomainError, Severity},

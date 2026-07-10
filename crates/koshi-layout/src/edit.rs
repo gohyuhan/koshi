@@ -107,6 +107,8 @@ pub fn add_to_stack(
 
     let mut result = tree.clone();
     if let Some(stack) = result.stack_containing_mut(anchor) {
+        // anchor already sits inside a stack: append the new pane and make
+        // it the active (expanded) member, collapsing the rest.
         stack.children.push(LayoutChild {
             node: LayoutNode::Pane(new_pane),
             collapsed: false,
@@ -117,6 +119,8 @@ pub fn add_to_stack(
             child.collapsed = index != stack.active;
         }
     } else {
+        // anchor is a lone leaf: wrap it and the new pane in a fresh
+        // two-member stack, with the new pane active.
         let path = result.path_to(anchor).expect("presence checked above");
         let slot = result.node_at_mut(&path);
         *slot = LayoutNode::Split(SplitNode::stack(vec![anchor, new_pane], 1));
@@ -194,11 +198,14 @@ pub fn remove_pane(
     tab_rect: Rect,
     pane: PaneId,
 ) -> Result<(LayoutNode, RemovalInfo), RemoveError> {
+    // Solve once before the edit so the rect being freed is known exactly.
     let before = solve(tree, tab_rect);
     let Some(&(_, old_rect)) = before.panes.iter().find(|&&(id, _)| id == pane) else {
         return Err(RemoveError::PaneNotFound { pane });
     };
 
+    // Apply the structural edit; the same two failure cases the tree-walk
+    // can hit are surfaced as the matching errors.
     let mut result = tree.clone();
     match remove_leaf(&mut result, pane) {
         Removal::NotHere => return Err(RemoveError::PaneNotFound { pane }),
@@ -206,6 +213,8 @@ pub fn remove_pane(
         Removal::Done => {}
     }
 
+    // Solve again after the edit and collect every surviving, visible pane
+    // that either grew into the freed space or simply changed size.
     let after = solve(&result, tab_rect);
     let mut absorbers: Vec<(PaneId, u64)> = after
         .panes
@@ -223,6 +232,8 @@ pub fn remove_pane(
             (overlap > 0 || resized).then_some((id, overlap))
         })
         .collect();
+    // Largest absorbed area first; ties (including zero-overlap resizes)
+    // keep layout order because the sort is stable.
     absorbers.sort_by_key(|&(_, area)| std::cmp::Reverse(area));
 
     Ok((
@@ -234,6 +245,8 @@ pub fn remove_pane(
     ))
 }
 
+/// Cell count of `rect` (columns × rows), used to measure how much of the
+/// freed space each surviving pane absorbed.
 fn cell_area(rect: Rect) -> u64 {
     u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
@@ -248,8 +261,12 @@ enum Removal {
     NodeEmptied,
 }
 
+/// Walks `node` looking for the leaf holding `pane` and drops it, working
+/// depth-first through splits and stacks. Reports what happened so the
+/// caller one level up can prune an emptied child from its own split.
 fn remove_leaf(node: &mut LayoutNode, pane: PaneId) -> Removal {
     let LayoutNode::Split(split) = node else {
+        // A leaf: it's either the pane being removed or an unrelated pane.
         return if matches!(node, LayoutNode::Pane(id) if *id == pane) {
             Removal::NodeEmptied
         } else {
@@ -262,6 +279,8 @@ fn remove_leaf(node: &mut LayoutNode, pane: PaneId) -> Removal {
             Removal::NotHere => continue,
             Removal::Done => return Removal::Done,
             Removal::NodeEmptied => {
+                // That child's subtree lost its only pane; drop the child
+                // and its matching weight, then repair this split's shape.
                 split.children.remove(index);
                 if index < split.weights.len() {
                     split.weights.remove(index);

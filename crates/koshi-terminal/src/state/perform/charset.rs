@@ -1,6 +1,7 @@
 //! Charset translation: designate the `G0`–`G3` slots and map printed bytes
-//! through the active GL charset (DEC line drawing, UK), so a TUI's `lqqqk`
-//! renders `┌───┐`.
+//! through the active GL charset (DEC line drawing, UK), so a TUI's (text user
+//! interface — a terminal app, like an editor or file manager, that draws with
+//! characters) `lqqqk` renders `┌───┐`.
 
 use crate::state::{Charset, TerminalState};
 

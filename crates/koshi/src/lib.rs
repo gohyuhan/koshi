@@ -13,5 +13,6 @@ pub mod error;
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 
-/// Table and JSON rendering for discovery query answers.
+/// Table and JSON rendering for discovery query answers and action-registry
+/// introspection.
 pub mod output;

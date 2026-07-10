@@ -74,8 +74,9 @@ impl Drop for TerminalCleanupGuard {
 /// The process panic hook is a single global slot, so only one of these guards
 /// should be active at a time and they must be dropped in reverse install order
 /// (LIFO) — the natural lifetime of a nested scope. `Drop` restores the captured
-/// hook unconditionally, so dropping out of order would overwrite a hook some
-/// other component installed afterward.
+/// hook whenever the dropping thread is not itself panicking (see below), so
+/// dropping out of order would overwrite a hook some other component installed
+/// afterward.
 #[must_use = "dropping the returned guard immediately restores the previous panic hook"]
 pub struct PanicHookGuard {
     previous: Option<SharedPanicHook>,
@@ -84,14 +85,14 @@ pub struct PanicHookGuard {
 impl Drop for PanicHookGuard {
     fn drop(&mut self) {
         // `set_hook` itself panics if called from a panicking thread, which would
-        // turn the in-flight panic into a destructor abort — the exact opposite
-        // of this module's goal. When we are unwinding, the chained hook has
-        // already run; leave it installed rather than abort to restore it.
+        // turn the in-flight panic into a destructor abort. When we are
+        // unwinding, the chained hook has already run, so this returns
+        // immediately: the chained hook stays installed, and `set_hook` is not
+        // called to swap in the previous hook.
         //
         // If that unwind is later caught and the process continues, the chained
         // hook stays installed as an inert wrapper (its registry is already
-        // drained). This intentionally prefers preserving the original panic over
-        // restoring the previous hook here, since `set_hook` is illegal mid-panic.
+        // drained) until a later, non-panicking drop restores the previous hook.
         if std::thread::panicking() {
             return;
         }
@@ -102,8 +103,9 @@ impl Drop for PanicHookGuard {
 }
 
 /// Chain a panic hook that runs `guard`'s cleanup hooks before the previously
-/// installed hook. Terminal restoration happens first so the panic message and
-/// any crash report land on a sane screen rather than the alternate buffer.
+/// installed hook. Terminal restoration happens first, so by the time the panic
+/// message and any crash report print, the terminal is already back on its
+/// normal screen with raw mode disabled.
 ///
 /// The panic hook shares the guard's registry, so a panic and a later drop draw
 /// from the same set: whichever runs first drains it, and the other is a no-op.
@@ -150,9 +152,10 @@ fn run_hooks(hooks: &Registry) {
     }
 
     if std::thread::panicking() {
-        // Spawning may fail under resource exhaustion mid-panic; then the hooks
-        // are dropped unrun (the terminal may be left dirty) rather than risk the
-        // abort that running them inline here would invite.
+        // Spawning may fail under resource exhaustion mid-panic. If it does, the
+        // hooks are dropped unrun (the terminal may be left dirty): running them
+        // directly on this already-panicking thread risks the abort described
+        // above.
         if let Ok(handle) = std::thread::Builder::new().spawn(move || run_each(drained)) {
             let _ = handle.join();
         }

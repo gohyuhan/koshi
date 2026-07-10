@@ -1,4 +1,7 @@
 //! The `PtyBackend` trait and the `PtyHandle` struct that a spawned pane is driven through.
+//!
+//! A PTY (pseudo-terminal) is the OS-level channel a spawned shell or program
+//! runs inside; it makes the program behave as if attached to a real terminal.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 

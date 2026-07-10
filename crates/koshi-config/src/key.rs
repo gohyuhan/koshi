@@ -127,6 +127,8 @@ fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyPar
     loop {
         let mut chars = rest.chars();
         let (Some(c), Some('-')) = (chars.next(), chars.next()) else {
+            // Not an `X-` pair: too short, or the second character is not a
+            // dash. The modifier run is over.
             return Ok((mods, rest));
         };
         let Some(flag) = mod_flag(c) else {
@@ -142,6 +144,7 @@ fn split_mods<'a>(token: &str, s: &'a str) -> Result<(ModFlags, &'a str), KeyPar
             ));
         }
         mods = mods.union(flag);
+        // Drop the consumed `X-` pair and look for another one.
         rest = chars.as_str();
     }
 }
@@ -236,11 +239,18 @@ fn named_key(token: &str, name: &str) -> Result<NamedKey, KeyParseError> {
 /// optional modifier run (`<C-p>`, `<A-S-n>`, `<F5>`, `<Space>`). An uppercase
 /// letter folds to lowercase plus [`ModFlags::SHIFT`]. `<leader>` is refused: it
 /// stands for a prefix, which only the sequence parser can substitute.
+///
+/// # Errors
+/// Returns a [`KeyParseError`] naming the [`KeyParseErrorKind`] the token
+/// violates: empty input, unbalanced angle brackets, an unknown modifier or
+/// key name, a duplicated modifier, `<leader>` used as a chord, or similar
+/// malformed input.
 pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
     if s.is_empty() {
         return Err(err(s, KeyParseErrorKind::Empty));
     }
 
+    // No leading `<`: a single bare printable character.
     let Some(open) = s.strip_prefix('<') else {
         let mut chars = s.chars();
         let c = chars.next().expect("s is not empty");
@@ -250,6 +260,7 @@ pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
         return finish_char(s, ModFlags::NONE, c);
     };
 
+    // Bracketed form: must close with `>`.
     let Some(inner) = open.strip_suffix('>') else {
         return Err(err(s, KeyParseErrorKind::UnclosedBracket));
     };
@@ -260,11 +271,14 @@ pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
         return Err(err(s, KeyParseErrorKind::LeaderNotAChord));
     }
 
+    // Strip any `X-` modifier pairs, leaving the key itself.
     let (mods, rest) = split_mods(s, inner)?;
     if rest.is_empty() {
         return Err(err(s, KeyParseErrorKind::MissingKey));
     }
 
+    // One character left: a single (possibly modified) key. More than one:
+    // a bracketed name such as `Tab` or `F5`.
     let mut chars = rest.chars();
     let c = chars.next().expect("rest is not empty");
     if chars.next().is_none() {
@@ -281,9 +295,10 @@ pub fn parse_chord(s: &str) -> Result<KeyChord, KeyParseError> {
 /// alone, so with [`Leader::Chord`] holding Space, `<leader>l` is two chords,
 /// Space then `l`.
 ///
-/// A chord leader that [`KeyChord::is_typeable`] reports as typeable will swallow
-/// that key from every transparent mode, which is why the default is a modifier
-/// run.
+/// Every binding starts with the leader, so a leader on a key that
+/// [`KeyChord::is_typeable`] reports as typeable steals that key from the pane
+/// whenever the client is not locked. The default is a modifier run, which
+/// plain typing can never hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leader {
     /// Modifiers that merge into the following chord, written `C-`.
@@ -309,6 +324,10 @@ impl fmt::Display for Leader {
 
 /// Parses the configured leader: either a bare modifier run such as `C-`, or a
 /// single chord such as `<Space>` or `,`.
+///
+/// # Errors
+/// Returns a [`KeyParseError`] under the same conditions as [`parse_chord`]
+/// when the input is not a bare modifier run.
 pub fn parse_leader(s: &str) -> Result<Leader, KeyParseError> {
     if s.is_empty() {
         return Err(err(s, KeyParseErrorKind::Empty));

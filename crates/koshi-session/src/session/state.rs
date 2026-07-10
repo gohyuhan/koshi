@@ -255,7 +255,8 @@ impl Session {
     /// viewports of the clients viewing it (`cols` = the smallest width, `rows`
     /// = the smallest height, taken independently), or `None` when no client is.
     ///
-    /// A single pane is one PTY of one cell grid, so every client viewing it
+    /// A single pane is one PTY (pseudo-terminal — the OS handle its shell
+    /// process runs through) of one cell grid, so every client viewing it
     /// shares its dimensions. The per-axis minimum is the largest grid that
     /// fits inside *every* viewer on *both* axes; larger viewers letterbox the
     /// unused margin. It is independent of which client (if any) issued the

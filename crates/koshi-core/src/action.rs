@@ -97,6 +97,7 @@ impl ActionName {
     /// violates.
     pub fn new(name: &str) -> Result<Self, ActionNameError> {
         let mut chars = name.chars();
+        // The first character must be an ASCII lowercase letter.
         match chars.next() {
             None => return Err(ActionNameError::Empty),
             Some(first) if !first.is_ascii_lowercase() => {
@@ -104,6 +105,7 @@ impl ActionName {
             }
             Some(_) => {}
         }
+        // Every character after the first must be a lowercase letter, digit, or hyphen.
         for ch in chars {
             if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
                 return Err(ActionNameError::InvalidChar { ch });
@@ -271,6 +273,7 @@ impl FromStr for ActionRef {
     type Err = ActionRefParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Split off the "core"/"user"/"plugin" prefix from everything after its colon.
         let (namespace, rest) = s
             .split_once(':')
             .ok_or(ActionRefParseError::MissingNamespace)?;
@@ -278,6 +281,7 @@ impl FromStr for ActionRef {
             "core" => ActionRef::core(rest).map_err(ActionRefParseError::Name),
             "user" => ActionRef::user(rest).map_err(ActionRefParseError::Name),
             "plugin" => {
+                // A plugin ref has one more segment than core/user: "<uuid>:<name>".
                 let (id, name) = rest
                     .split_once(':')
                     .ok_or(ActionRefParseError::MissingPluginName)?;

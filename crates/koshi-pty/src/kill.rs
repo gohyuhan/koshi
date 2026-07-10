@@ -74,6 +74,7 @@ impl PtyChildKillControl {
         })
     }
 
+    /// The PID of the child process this control targets.
     pub fn pid(&self) -> u32 {
         self.pid
     }
@@ -236,6 +237,7 @@ impl PtyChildKillControl {
         self.request_stop()
     }
 
+    /// The PID of the child process this control targets.
     pub fn pid(&self) -> u32 {
         self.pid
     }
