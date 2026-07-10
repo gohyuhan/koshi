@@ -96,10 +96,25 @@ pub enum KeyParseErrorKind {
     /// `<leader>` where a single chord was expected.
     #[error("`<leader>` stands for a prefix, not a chord")]
     LeaderNotAChord,
+    /// `<leader>` in any sequence position other than the first.
+    #[error("`<leader>` may only open a sequence")]
+    LeaderNotFirst,
+    /// A modifier-run leader standing alone, with no chord after it to merge
+    /// into.
+    #[error("the leader's modifiers need a key after them")]
+    DanglingLeaderMods,
+    /// A sequence with more chords than the configured cap.
+    #[error("the sequence has {len} chords; the cap is {max}")]
+    SequenceTooLong {
+        /// The number of chords written.
+        len: usize,
+        /// The configured `max_chord_depth`.
+        max: u8,
+    },
 }
 
 /// Attaches the failing `token` to a `kind`.
-fn err(token: &str, kind: KeyParseErrorKind) -> KeyParseError {
+pub(crate) fn err(token: &str, kind: KeyParseErrorKind) -> KeyParseError {
     KeyParseError {
         token: token.to_string(),
         kind,
