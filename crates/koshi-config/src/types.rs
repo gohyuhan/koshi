@@ -121,6 +121,12 @@ pub struct KeybindingsConfig {
     /// set (`normal` plus the reserved unlock in `locked`); user layers
     /// override it at merge.
     pub modes: BTreeMap<ModeName, ModeBindings>,
+    /// Replacement chord for the reserved unlock. When set, this chord (not
+    /// [`RESERVED_UNLOCK`](Self::RESERVED_UNLOCK)) is the guaranteed
+    /// locked-mode escape: conflict detection requires it bound to
+    /// `core:unlock` in locked mode and refuses a typeable chord, and the
+    /// default unlock key becomes free to rebind.
+    pub unlock_alternative: Option<KeyChord>,
 }
 
 impl KeybindingsConfig {
@@ -139,6 +145,7 @@ impl Default for KeybindingsConfig {
             max_chord_depth: 4,
             leader: Leader::default(),
             modes: default_mode_bindings(),
+            unlock_alternative: None,
         }
     }
 }

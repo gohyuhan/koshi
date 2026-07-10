@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use koshi_core::geometry::Direction;
-use koshi_core::key::ModFlags;
+use koshi_core::key::{Key, KeyChord, ModFlags};
 
 use super::*;
 use crate::types::{
@@ -190,6 +190,39 @@ fn modes_replaced_wholesale() {
         .keybindings
         .modes
         .contains_key(&ModeName::new("normal")));
+}
+
+#[test]
+fn unlock_alternative_layers_as_a_nested_option() {
+    let alternative = KeyChord::new(ModFlags::CTRL, Key::Char('u'));
+    let set = PartialKoshiConfig {
+        keybindings: Some(PartialKeybindingsConfig {
+            unlock_alternative: Some(Some(alternative)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let merged = merge(KoshiConfig::default(), vec![set]);
+    assert_eq!(merged.keybindings.unlock_alternative, Some(alternative));
+
+    // A later layer can set the value back to "keep the built-in unlock key".
+    let clear = PartialKoshiConfig {
+        keybindings: Some(PartialKeybindingsConfig {
+            unlock_alternative: Some(None),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let cleared = merge(merged, vec![clear]);
+    assert_eq!(cleared.keybindings.unlock_alternative, None);
+
+    // A layer that leaves the field unset keeps the lower layer's value.
+    assert_eq!(
+        merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()])
+            .keybindings
+            .unlock_alternative,
+        None
+    );
 }
 
 #[test]
