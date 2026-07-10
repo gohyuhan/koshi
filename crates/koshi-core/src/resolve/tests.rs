@@ -376,7 +376,10 @@ fn plugin_action_routes_to_its_own_host_call() {
         .register(owner, action.clone(), plugin_metadata(owner))
         .expect("plugin registers its own action");
 
-    let args = ActionArgs::ClosePane { force: true };
+    let args = ActionArgs::ClosePane {
+        force: true,
+        tree: false,
+    };
     assert_eq!(
         resolve_action(&action, &args, &registry),
         Ok(DispatchPlan::PluginHostCall {
@@ -409,35 +412,73 @@ fn new_pane_takes_its_arguments() {
 }
 
 #[test]
-fn close_pane_takes_its_force_flag() {
+fn close_pane_takes_its_force_and_tree_flags() {
     let registry = ActionRegistry::new();
 
     assert_eq!(
         resolve_action(
             &core("close-pane"),
-            &ActionArgs::ClosePane { force: true },
+            &ActionArgs::ClosePane {
+                force: true,
+                tree: false,
+            },
             &registry
         ),
         Ok(DispatchPlan::Command(Command::ClosePane(ClosePaneArgs {
             pane: None,
             force: true,
+            tree: false,
+        })))
+    );
+    assert_eq!(
+        resolve_action(
+            &core("close-pane"),
+            &ActionArgs::ClosePane {
+                force: false,
+                tree: true,
+            },
+            &registry
+        ),
+        Ok(DispatchPlan::Command(Command::ClosePane(ClosePaneArgs {
+            pane: None,
+            force: false,
+            tree: true,
         })))
     );
 }
 
 #[test]
-fn close_tab_takes_its_force_flag() {
+fn close_tab_takes_its_force_and_tree_flags() {
     let registry = ActionRegistry::new();
 
     assert_eq!(
         resolve_action(
             &core("close-tab"),
-            &ActionArgs::CloseTab { force: true },
+            &ActionArgs::CloseTab {
+                force: true,
+                tree: false
+            },
             &registry
         ),
         Ok(DispatchPlan::Command(Command::CloseTab(CloseTabArgs {
             tab: None,
             force: true,
+            tree: false,
+        })))
+    );
+    assert_eq!(
+        resolve_action(
+            &core("close-tab"),
+            &ActionArgs::CloseTab {
+                force: false,
+                tree: true
+            },
+            &registry
+        ),
+        Ok(DispatchPlan::Command(Command::CloseTab(CloseTabArgs {
+            tab: None,
+            force: false,
+            tree: true,
         })))
     );
 }
@@ -463,7 +504,14 @@ fn arguments_belonging_to_another_action_are_refused() {
     let action = core("next-tab");
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::ClosePane { force: true }, &registry),
+        resolve_action(
+            &action,
+            &ActionArgs::ClosePane {
+                force: true,
+                tree: false,
+            },
+            &registry
+        ),
         Err(ResolveError::ArgsMismatch {
             action: action.clone()
         })
@@ -508,7 +556,10 @@ fn a_sequence_given_arguments_is_refused() {
     assert_eq!(
         resolve_action(
             &macro_ref,
-            &ActionArgs::ClosePane { force: true },
+            &ActionArgs::ClosePane {
+                force: true,
+                tree: false,
+            },
             &registry
         ),
         Err(ResolveError::ArgsMismatch {

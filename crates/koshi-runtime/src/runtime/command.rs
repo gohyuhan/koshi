@@ -547,7 +547,9 @@ impl Runtime {
 
         // Pick how the child dies. `--force` overrides the pane's own policy;
         // `ConfirmIfBusy` closes only a pane whose child provably ended
-        // (`Exited`) and otherwise rejects, pointing at `--force`.
+        // (`Exited`) and otherwise rejects, pointing at `--force`. `tree`
+        // widens whichever kill was picked to the child's whole process
+        // group.
         let kill_policy = if args.force {
             KillPolicy::Force
         } else {
@@ -566,6 +568,11 @@ impl Runtime {
                 },
                 policy => policy.kill_policy(),
             }
+        };
+        let kill_policy = if args.tree {
+            kill_policy.tree_scoped()
+        } else {
+            kill_policy
         };
 
         // Solve the tab against a deterministic viewport so focus candidates
@@ -1365,7 +1372,8 @@ impl Runtime {
         // Pick how every child dies before anything mutates — all-or-nothing.
         // `--force` overrides each pane's own policy; `ConfirmIfBusy` allows
         // the close only for a pane whose child provably ended (`Exited`) and
-        // otherwise rejects the whole tab.
+        // otherwise rejects the whole tab. `tree` widens each picked kill to
+        // that child's whole process group.
         let mut kills: Vec<(PaneId, KillPolicy)> = Vec::with_capacity(pane_ids.len());
         for &pane_id in &pane_ids {
             let Some(record) = session.panes.get(pane_id) else {
@@ -1390,6 +1398,11 @@ impl Runtime {
                     },
                     policy => policy.kill_policy(),
                 }
+            };
+            let kill_policy = if args.tree {
+                kill_policy.tree_scoped()
+            } else {
+                kill_policy
             };
             kills.push((pane_id, kill_policy));
         }

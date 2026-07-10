@@ -183,6 +183,11 @@ pub struct ClosePaneArgs {
     pub pane: Option<PaneId>,
     /// Kill the pane's child immediately, overriding its close policy.
     pub force: bool,
+    /// Widen the kill to the child's whole process group, so every
+    /// descendant it spawned stops with it. Changes kill scope only; a
+    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    #[serde(default)]
+    pub tree: bool,
 }
 
 /// Arguments for [`Command::ResizePane`].
@@ -246,6 +251,11 @@ pub struct CloseTabArgs {
     pub tab: Option<TabId>,
     /// Kill every pane's child immediately, overriding each close policy.
     pub force: bool,
+    /// Widen every kill to its child's whole process group, so every
+    /// descendant stops with its pane. Changes kill scope only; a
+    /// `ConfirmIfBusy` pane still rejects the close while busy.
+    #[serde(default)]
+    pub tree: bool,
 }
 
 /// Arguments for [`Command::RenameTab`]. The new name is not supplied by the

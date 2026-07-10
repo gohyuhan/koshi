@@ -155,3 +155,23 @@ fn exit_status_roundtrips() {
         assert_eq!(status, back);
     }
 }
+
+#[test]
+fn tree_scoped_widens_each_policy_to_its_group_flavor() {
+    let timeout = Duration::from_secs(3);
+    let cases = [
+        (
+            KillPolicy::Graceful { timeout },
+            KillPolicy::GracefulTree { timeout },
+        ),
+        (KillPolicy::Force, KillPolicy::Tree),
+        (KillPolicy::Tree, KillPolicy::Tree),
+        (
+            KillPolicy::GracefulTree { timeout },
+            KillPolicy::GracefulTree { timeout },
+        ),
+    ];
+    for (policy, widened) in cases {
+        assert_eq!(policy.tree_scoped(), widened, "{policy:?}");
+    }
+}

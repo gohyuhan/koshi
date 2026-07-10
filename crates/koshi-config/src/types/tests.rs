@@ -185,10 +185,14 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<C-p> x",
             "close-pane",
-            ActionArgs::None,
+            ActionArgs::ClosePane {
+                force: false,
+                tree: true,
+            },
             Ok(Command::ClosePane(ClosePaneArgs {
                 pane: None,
                 force: false,
+                tree: true,
             })),
         ),
         row(

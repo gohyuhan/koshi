@@ -170,6 +170,11 @@ impl ModeName {
 
 /// The action a key sequence triggers: the action reference plus the
 /// arguments bound at the binding site.
+///
+/// The arguments are a fixed preset authored by the binding table itself —
+/// the built-in defaults pair `focus-pane` with a direction, for example.
+/// User keybinding surfaces bind a key to an action reference only;
+/// arguments are reachable exclusively through CLI commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAction {
     /// The action to resolve when the sequence fires.
@@ -240,9 +245,18 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             ctrl_then('p', Key::Char('n')),
             bound("new-pane", ActionArgs::None),
         ),
+        // The close key kills the pane's whole process group — nothing the
+        // pane spawned survives it. The CLI close keeps the leader-only
+        // scope.
         (
             ctrl_then('p', Key::Char('x')),
-            bound("close-pane", ActionArgs::None),
+            bound(
+                "close-pane",
+                ActionArgs::ClosePane {
+                    force: false,
+                    tree: true,
+                },
+            ),
         ),
         (
             seq(ModFlags::ALT, Key::Char('f')),

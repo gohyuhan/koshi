@@ -98,6 +98,9 @@ pub enum ActionArgs {
     ClosePane {
         /// Kill the pane's child immediately, overriding its close policy.
         force: bool,
+        /// Widen the kill to the child's whole process group.
+        #[serde(default)]
+        tree: bool,
     },
     /// Arguments for `core:resize-pane`.
     ResizePane {
@@ -115,6 +118,9 @@ pub enum ActionArgs {
     CloseTab {
         /// Kill every pane's child immediately, overriding each close policy.
         force: bool,
+        /// Widen every kill to its child's whole process group.
+        #[serde(default)]
+        tree: bool,
     },
     /// Arguments for `core:focus-tab`.
     FocusTab {
@@ -318,10 +324,13 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             client: None,
         }),
         ("close-pane", ActionArgs::None) => Command::ClosePane(ClosePaneArgs::default()),
-        ("close-pane", ActionArgs::ClosePane { force }) => Command::ClosePane(ClosePaneArgs {
-            pane: None,
-            force: *force,
-        }),
+        ("close-pane", ActionArgs::ClosePane { force, tree }) => {
+            Command::ClosePane(ClosePaneArgs {
+                pane: None,
+                force: *force,
+                tree: *tree,
+            })
+        }
         ("resize-pane", ActionArgs::ResizePane { direction, size }) => {
             Command::ResizePane(ResizePaneArgs {
                 pane: None,
@@ -339,9 +348,10 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         // --- Tabs ---
         ("new-tab", ActionArgs::None) => Command::NewTab(NewTabArgs::default()),
         ("close-tab", ActionArgs::None) => Command::CloseTab(CloseTabArgs::default()),
-        ("close-tab", ActionArgs::CloseTab { force }) => Command::CloseTab(CloseTabArgs {
+        ("close-tab", ActionArgs::CloseTab { force, tree }) => Command::CloseTab(CloseTabArgs {
             tab: None,
             force: *force,
+            tree: *tree,
         }),
         ("focus-tab", ActionArgs::FocusTab { target }) => Command::FocusTab(FocusTabArgs {
             target: *target,

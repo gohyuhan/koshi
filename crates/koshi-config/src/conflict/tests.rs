@@ -81,6 +81,35 @@ fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
 }
 
 #[test]
+fn user_layer_args_are_stripped_to_the_action_mapping() {
+    // Even if a user file somehow smuggles arguments into a binding
+    // ("new-pane, direction left"), only the key → action mapping survives:
+    // the binding runs bare and the action falls back to its system preset
+    // (the configured default split direction).
+    let key = seq(ModFlags::ALT, 'n');
+    let smuggled = BoundAction {
+        action: core("new-pane"),
+        args: ActionArgs::NewPane {
+            direction: Some(Direction::Left),
+            stacked: false,
+        },
+    };
+    let stripped =
+        layer(LayerOrigin::User, "normal", vec![(key.clone(), smuggled)]).with_user_args_stripped();
+    assert_eq!(
+        stripped.modes[&mode("normal")].keys[&key],
+        bound("new-pane")
+    );
+}
+
+#[test]
+fn stripping_leaves_the_defaults_layer_presets_alone() {
+    // The defaults' arguments ARE the system presets (focus directions, the
+    // tree-scoped close); stripping is a user-surface guard only.
+    assert_eq!(defaults().with_user_args_stripped(), defaults());
+}
+
+#[test]
 fn defaults_alone_report_nothing() {
     let report = detect(&[defaults()]);
     assert_eq!(report.diagnostics, Vec::new());
@@ -194,6 +223,196 @@ fn same_action_with_different_args_collides() {
 }
 
 #[test]
+fn orphan_actions_on_a_shared_key_do_not_collide() {
+    // Both claims name unregistered actions: inactive bindings, warned as
+    // orphans, re-judged when detection re-runs at registration.
+    let key = seq(ModFlags::CTRL, 't');
+    let ghost = |name: &str| BoundAction {
+        action: ActionRef::user(name).expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(LayerOrigin::User, "normal", vec![(key.clone(), ghost("a"))]),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), ghost("b"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::OrphanAction {
+                origin: LayerOrigin::User,
+                mode: mode("normal"),
+                key: key.clone(),
+                action: ghost("a").action,
+            },
+            ConflictDiagnostic::OrphanAction {
+                origin: LayerOrigin::Project,
+                mode: mode("normal"),
+                key,
+                action: ghost("b").action,
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn one_orphan_claim_does_not_collide_with_a_live_one() {
+    let key = seq(ModFlags::CTRL, 't');
+    let ghost = BoundAction {
+        action: ActionRef::user("ghost").expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), ghost.clone())],
+        ),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanAction {
+            origin: LayerOrigin::User,
+            mode: mode("normal"),
+            key,
+            action: ghost.action,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn bindings_in_an_orphan_mode_do_not_collide() {
+    let key = seq(ModFlags::ALT, 's');
+    let report = detect(&[
+        defaults(),
+        layer(LayerOrigin::User, "git", vec![(key.clone(), bound("lock"))]),
+        layer(LayerOrigin::Project, "git", vec![(key, bound("new-tab"))]),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::OrphanMode {
+                origin: LayerOrigin::User,
+                mode: mode("git"),
+            },
+            ConflictDiagnostic::OrphanMode {
+                origin: LayerOrigin::Project,
+                mode: mode("git"),
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn coming_soon_binding_warns_without_revert() {
+    // `core:quit` is seeded but not implemented; the binding cannot fire.
+    let key = seq(ModFlags::CTRL, 'y');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("quit"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::ComingSoonAction {
+            origin: LayerOrigin::User,
+            mode: mode("normal"),
+            key,
+            action: core("quit"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn coming_soon_claims_do_not_collide() {
+    // Neither binding can fire in this build, so nothing is unreachable;
+    // the collision surfaces at the first load of the build that
+    // implements the actions.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("quit"))],
+        ),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("copy-mode-enter"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::ComingSoonAction {
+                origin: LayerOrigin::User,
+                mode: mode("normal"),
+                key: key.clone(),
+                action: core("quit"),
+            },
+            ConflictDiagnostic::ComingSoonAction {
+                origin: LayerOrigin::Project,
+                mode: mode("normal"),
+                key,
+                action: core("copy-mode-enter"),
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn unresolvable_args_binding_warns_and_does_not_collide() {
+    // The user layer's binding carries arguments `core:lock` cannot take,
+    // so it can never fire; it must not escalate the project layer's
+    // working binding into the all-or-nothing revert.
+    let key = seq(ModFlags::CTRL, 't');
+    let broken = BoundAction {
+        action: core("lock"),
+        args: ActionArgs::FocusPane {
+            target: koshi_core::command::FocusTarget::Direction(Direction::Left),
+        },
+    };
+    let report = detect(&[
+        defaults(),
+        layer(LayerOrigin::User, "normal", vec![(key.clone(), broken)]),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::UnresolvableArgs {
+            origin: LayerOrigin::User,
+            mode: mode("normal"),
+            key,
+            action: core("lock"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
 fn rebinding_the_reserved_unlock_is_fatal() {
     let report = detect(&[
         defaults(),
@@ -217,16 +436,18 @@ fn rebinding_the_reserved_unlock_is_fatal() {
 }
 
 #[test]
-fn unlock_bound_with_arguments_is_fatal() {
-    // `core:unlock` fires only with no arguments; a reserved-chord binding
-    // carrying any is a shadow — the escape would refuse to resolve.
+fn unlock_with_wrong_arguments_is_dead_not_a_shadow() {
+    // `core:unlock` fires only with no arguments, so this binding can never
+    // fire — it is transparent, the default unlock beneath it still wins
+    // the reserved chord, and the escape stays intact.
+    let key = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     let report = detect(&[
         defaults(),
         layer(
             LayerOrigin::User,
             "locked",
             vec![(
-                KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
+                key.clone(),
                 BoundAction {
                     action: core("unlock"),
                     args: ActionArgs::FocusPane {
@@ -238,12 +459,180 @@ fn unlock_bound_with_arguments_is_fatal() {
     ]);
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::ReservedUnlockShadowed {
+        vec![ConflictDiagnostic::UnresolvableArgs {
             origin: LayerOrigin::User,
+            mode: mode("locked"),
+            key,
             action: core("unlock"),
         }]
     );
-    assert_eq!(report.verdict(), KeymapVerdict::Reject);
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn reserved_led_claims_do_not_collide() {
+    // Both layers bind a locked-mode sequence the reserved chord swallows;
+    // neither can ever fire, so they must not trigger the revert. Each is
+    // warned dead instead.
+    let key = seq2(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        chord(ModFlags::NONE, 'x'),
+    );
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer(
+            LayerOrigin::Project,
+            "locked",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::DeadUnderReservedUnlock {
+                origin: LayerOrigin::User,
+                key: key.clone(),
+                action: core("lock"),
+            },
+            ConflictDiagnostic::DeadUnderReservedUnlock {
+                origin: LayerOrigin::Project,
+                key,
+                action: core("new-tab"),
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn reserved_led_sequences_do_not_pair_as_prefixes() {
+    // `<C-g> x` is a strict prefix of `<C-g> x y`, but both are swallowed
+    // by the reserved chord: two dead warnings, no ambiguous-prefix pair.
+    let short = seq2(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        chord(ModFlags::NONE, 'x'),
+    );
+    let long = KeySequence::new(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        vec![chord(ModFlags::NONE, 'x'), chord(ModFlags::NONE, 'y')],
+    );
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![
+                (short.clone(), bound("lock")),
+                (long.clone(), bound("new-tab")),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::DeadUnderReservedUnlock {
+                origin: LayerOrigin::User,
+                key: short,
+                action: core("lock"),
+            },
+            ConflictDiagnostic::DeadUnderReservedUnlock {
+                origin: LayerOrigin::User,
+                key: long,
+                action: core("new-tab"),
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn dead_binding_does_not_warn_typeable() {
+    // `g` opens typeable, but the binding is orphaned and steals nothing;
+    // it gets exactly the orphan warning, not a stealing warning on top.
+    let key = seq(ModFlags::NONE, 'g');
+    let ghost = BoundAction {
+        action: ActionRef::user("ghost").expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), ghost.clone())],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanAction {
+            origin: LayerOrigin::User,
+            mode: mode("normal"),
+            key,
+            action: ghost.action,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn orphan_mode_bindings_skip_per_binding_warns() {
+    // The whole overlay is inactive: one mode warning, no orphan-action or
+    // typeable warnings for the bindings inside it.
+    let ghost = BoundAction {
+        action: ActionRef::user("ghost").expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "git",
+            vec![(seq(ModFlags::NONE, 'g'), ghost)],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanMode {
+            origin: LayerOrigin::User,
+            mode: mode("git"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn orphan_on_the_reserved_chord_does_not_shadow() {
+    // The higher layer's binding names an unregistered action: inactive,
+    // transparent, and the default unlock beneath it still fires. Only the
+    // orphan warning is reported; the keymap is not rejected.
+    let key = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let ghost = BoundAction {
+        action: ActionRef::user("ghost").expect("valid user action name"),
+        args: ActionArgs::None,
+    };
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "locked",
+            vec![(key.clone(), ghost.clone())],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanAction {
+            origin: LayerOrigin::Project,
+            mode: mode("locked"),
+            key,
+            action: ghost.action,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
 }
 
 #[test]
@@ -544,7 +933,7 @@ fn a_fatal_finding_outranks_a_collision() {
             "locked",
             vec![(
                 KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-                bound("quit"),
+                bound("lock"),
             )],
         ),
     ]);
@@ -610,6 +999,24 @@ fn severity_table() {
                     KeybindingsConfig::RESERVED_UNLOCK,
                     chord(ModFlags::NONE, 'x'),
                 ),
+                action: core("lock"),
+            },
+            ConflictSeverity::Warning,
+        ),
+        (
+            ConflictDiagnostic::ComingSoonAction {
+                origin: LayerOrigin::User,
+                mode: mode("normal"),
+                key: seq(ModFlags::CTRL, 'y'),
+                action: core("quit"),
+            },
+            ConflictSeverity::Warning,
+        ),
+        (
+            ConflictDiagnostic::UnresolvableArgs {
+                origin: LayerOrigin::User,
+                mode: mode("normal"),
+                key: seq(ModFlags::CTRL, 't'),
                 action: core("lock"),
             },
             ConflictSeverity::Warning,
@@ -719,6 +1126,63 @@ fn display_messages_are_exact() {
         dead.to_string(),
         "`<C-g> x` (user, `core:lock`) in locked mode can never fire: its first chord \
          is the reserved unlock, which resolves instantly"
+    );
+
+    let same_action_collision = ConflictDiagnostic::KeyCollision {
+        mode: mode("normal"),
+        key: seq(ModFlags::CTRL, 'e'),
+        claims: vec![
+            (
+                LayerOrigin::User,
+                BoundAction {
+                    action: core("resize-pane"),
+                    args: ActionArgs::ResizePane {
+                        direction: Direction::Left,
+                        size: 1,
+                    },
+                },
+            ),
+            (
+                LayerOrigin::Layout,
+                BoundAction {
+                    action: core("resize-pane"),
+                    args: ActionArgs::ResizePane {
+                        direction: Direction::Right,
+                        size: 1,
+                    },
+                },
+            ),
+        ],
+    };
+    assert_eq!(
+        same_action_collision.to_string(),
+        "key `<C-e>` in mode `normal` is bound by user to `core:resize-pane` and by \
+         layout to `core:resize-pane` with different arguments; all user keybindings \
+         revert to defaults"
+    );
+
+    let unresolvable = ConflictDiagnostic::UnresolvableArgs {
+        origin: LayerOrigin::User,
+        mode: mode("normal"),
+        key: seq(ModFlags::CTRL, 't'),
+        action: core("lock"),
+    };
+    assert_eq!(
+        unresolvable.to_string(),
+        "`<C-t>` in mode `normal` (user) binds `core:lock` with arguments it cannot \
+         take; the binding can never fire as written"
+    );
+
+    let coming_soon = ConflictDiagnostic::ComingSoonAction {
+        origin: LayerOrigin::User,
+        mode: mode("normal"),
+        key: seq(ModFlags::CTRL, 'y'),
+        action: core("quit"),
+    };
+    assert_eq!(
+        coming_soon.to_string(),
+        "`<C-y>` in mode `normal` (user) binds `core:quit`, which is not implemented \
+         yet; the binding cannot fire until it is"
     );
 
     let orphan_action = ConflictDiagnostic::OrphanAction {
