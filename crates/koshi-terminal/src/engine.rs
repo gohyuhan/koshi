@@ -1,4 +1,5 @@
-//! The per-pane terminal engine: a VTE parser paired with the
+//! The per-pane terminal engine: a VTE parser — the state machine that decodes
+//! raw terminal escape-sequence bytes into actions — paired with the
 //! [`TerminalState`] it drives.
 //!
 //! One [`TerminalEngine`] backs one pane. PTY output arrives in read-sized
@@ -35,9 +36,10 @@ impl TerminalEngine {
     }
 
     /// Feed one chunk of PTY output through the parser into the state, and
-    /// return the reply bytes any device queries in the chunk produced
-    /// (DA/DSR/DECRQM answers — empty when the chunk held no query). The
-    /// caller writes the replies back into the pane's PTY.
+    /// return the reply bytes any device queries in the chunk produced —
+    /// answers to DA (Device Attributes), DSR (Device Status Report), and
+    /// DECRQM (Request Mode) queries the app sent; empty when the chunk held
+    /// no query. The caller writes the replies back into the pane's PTY.
     ///
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
     /// the parser resumes the partial decode on the next call.

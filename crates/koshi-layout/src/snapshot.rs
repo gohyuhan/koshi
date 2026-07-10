@@ -1,11 +1,13 @@
-//! Persistence DTOs for layout state that outlives a process.
+//! Persistence data types for layout state that outlives a process: plain
+//! structs meant to be serialized to disk and read back, as opposed to the
+//! live tree types the solver works on.
 //!
 //! A stack's identity is its membership, its active member, and which
 //! members are collapsed. That is exactly what survives a detach/attach or
-//! a daemon restart — live PTY state does not. The snapshot stores pane ids
-//! and flags only; weights are not part of it because collapsed members
-//! have no independent size and the active member takes whatever the stack
-//! gets.
+//! a daemon restart — a pane's live PTY (the pseudo-terminal process feeding
+//! its content) does not. The snapshot stores pane ids and flags only;
+//! weights are not part of it because collapsed members have no independent
+//! size and the active member takes whatever the stack gets.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
@@ -20,9 +22,9 @@ pub struct StackSnapshot {
     pub members: Vec<PaneId>,
     /// Index of the expanded member.
     pub active: usize,
-    /// Per-member collapsed flags, parallel to `members`. Stored explicitly
-    /// rather than derived from `active`, so a snapshot restores exactly
-    /// the flags it captured.
+    /// Per-member collapsed flags, parallel to `members`. This is the exact
+    /// set of flags captured at snapshot time, so restoring reproduces them
+    /// as-is rather than recomputing them from `active`.
     pub collapsed_states: Vec<bool>,
 }
 

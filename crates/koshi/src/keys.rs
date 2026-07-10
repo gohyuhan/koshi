@@ -68,6 +68,8 @@ pub fn decode_key(key: KeyEvent) -> KeyAction {
 }
 
 /// A `CSI <final>` sequence (`ESC [ x`), used for the arrow and Home/End keys.
+/// CSI (Control Sequence Introducer) is the `ESC [` prefix terminals use to
+/// start a control sequence; the final byte says which key it represents.
 fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
 }
@@ -81,6 +83,9 @@ fn tilde(n: u8) -> Vec<u8> {
 /// character has no control mapping.
 fn control_byte(c: char) -> Option<u8> {
     match c {
+        // Ctrl-<letter> clears the top three bits of the character's ASCII
+        // code (mask with 0x1f); this is the standard mapping terminals use,
+        // so Ctrl-A produces 0x01, Ctrl-C produces 0x03, and so on.
         '@'..='_' => Some((c as u8) & 0x1f),
         'a'..='z' => Some((c.to_ascii_uppercase() as u8) & 0x1f),
         ' ' => Some(0),

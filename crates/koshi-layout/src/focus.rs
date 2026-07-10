@@ -168,6 +168,8 @@ fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange
     }
     let count = stack.children.len() as i64;
     let active = current_active(stack) as i64;
+    // Try each member one step further away (wrapping with rem_euclid),
+    // skipping any that hold no pane, and stop at the first real one.
     for offset in 1..count {
         let candidate = (active + step * offset).rem_euclid(count) as usize;
         if !stack.children[candidate].node.leaf_panes().is_empty() {

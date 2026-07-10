@@ -289,6 +289,9 @@ fn generate_name_from(kind: NameKind, is_taken: impl Fn(&str) -> bool, start: us
             let pair = index / LANGUAGES.len();
             let adjective = adjectives[pair / WORDS_PER_LIST];
             let noun = nouns[pair % WORDS_PER_LIST];
+            // The first round tries the plain name; once a full round finds
+            // every combination taken, later rounds append a wrap number
+            // (round 1 appends "-2", round 2 appends "-3", and so on).
             let candidate = if round == 0 {
                 format!("{}-{adjective}-{noun}", kind.prefix())
             } else {
@@ -298,6 +301,8 @@ fn generate_name_from(kind: NameKind, is_taken: impl Fn(&str) -> bool, start: us
                 return candidate;
             }
         }
+        // Every combination in this round was taken; walk the whole space
+        // again with the next wrap number.
         round += 1;
     }
 }

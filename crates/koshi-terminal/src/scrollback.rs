@@ -48,7 +48,7 @@ pub struct Scrollback {
     /// are dropped.
     max_bytes: usize,
     /// Running sum of every retained row's byte size, kept incrementally so an
-    /// overflow check costs O(1) rather than rescanning the buffer.
+    /// overflow check is an O(1) comparison against this field.
     byte_total: usize,
     /// Cumulative count of rows ever pushed into the buffer; monotonic — a
     /// [`clear`](Self::clear) does not reset it. The runtime diffs it across a
@@ -100,15 +100,18 @@ impl Scrollback {
 
     /// Append `line` as the newest row, then drop oldest rows from the front
     /// until both caps hold, tallying each drop. The byte cap never drops the
-    /// sole remaining row (`lines.len() > 1` guard), so a single row larger than
-    /// `max_bytes` is retained rather than discarded the instant it arrives; the
-    /// line cap has no such guard.
+    /// sole remaining row (`lines.len() > 1` guard): a single row larger than
+    /// `max_bytes` is still retained on arrival. The line cap has no such
+    /// guard — the row count is always brought back under `max_lines`.
     pub fn push_line(&mut self, line: Vec<Cell>) {
         let new_bytes = self.line_bytes(&line);
         self.lines.push_back(line);
         self.byte_total += new_bytes;
         self.total_pushed += 1;
 
+        // Evict oldest rows one at a time, updating the running byte total and
+        // the truncation tallies, until both caps hold (or only one row is
+        // left, which the byte cap alone cannot evict).
         while self.lines.len() > self.max_lines
             || (self.byte_total > self.max_bytes && self.lines.len() > 1)
         {

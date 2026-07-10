@@ -1,6 +1,11 @@
 //! `koshi-core` — shared dependency-light types: IDs, commands, events, geometry,
 //! lifecycle states, protocol DTOs, input-privacy DTOs, error categories, and
 //! redaction helpers.
+//!
+//! Also home to keyboard chords and the client lock mode they interact with,
+//! generated names for sessions/tabs/panes, process spawn and exit types, and
+//! the action vocabulary's live registry plus its resolution into runtime
+//! commands.
 
 pub mod action;
 pub mod command;

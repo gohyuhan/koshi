@@ -1,5 +1,9 @@
-//! `koshi-terminal` — terminal emulation: VTE performer, grid, scrollback,
-//! alternate screen, cursor state, modes, and terminal operations.
+//! `koshi-terminal` — terminal emulation: decodes raw PTY output through a
+//! VTE parser (a state machine that turns terminal escape-sequence bytes into
+//! actions) and applies those actions to a per-pane screen model — the cell
+//! grid, scrollback (lines that scrolled off the top, kept for viewing), the
+//! alternate screen (the separate buffer full-screen apps like `vim` draw
+//! to), cursor state, terminal modes, and the operations that mutate them.
 
 pub mod engine;
 pub mod error;

@@ -13,7 +13,8 @@ use crate::session::state::Session;
 /// A no-op (no event) when the name is unchanged. Session names address
 /// sessions in attach and list, so they must be unique across the runtime;
 /// the runtime supplies a generated name it has confirmed free. Tabs,
-/// layout, focus, and PTYs are untouched. Returns
+/// layout, focus, and PTYs (pseudo-terminals — the OS handles each pane's
+/// shell process runs through) are untouched. Returns
 /// [`Event::SessionRenamed`].
 #[must_use]
 pub fn rename_session(session: &mut Session, new_name: String) -> Vec<Event> {

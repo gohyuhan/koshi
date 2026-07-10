@@ -37,7 +37,8 @@ impl Runtime {
     /// gone — the caller skips the frame. On success, `session.active_tab` is the
     /// client's own viewed tab, solved over the tab's effective size (the
     /// per-axis-minimum viewport across every client viewing it), so the renderer
-    /// letterboxes it into this client's larger viewport.
+    /// letterboxes it (centers it with padding) into this client's larger
+    /// viewport.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;

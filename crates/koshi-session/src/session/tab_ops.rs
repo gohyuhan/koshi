@@ -6,7 +6,8 @@
 //! events and edit state only — never spawning or killing a process or touching
 //! a terminal. That work is the runtime's, driven by the events returned here:
 //! a [`close_tab`] emits [`Event::PaneClosing`]/[`Event::PaneRemoved`] and the
-//! runtime tears down the real PTYs off them.
+//! runtime tears down the real PTYs (pseudo-terminals — the OS handles each
+//! pane's shell process runs through) off them.
 //!
 //! Tab display order is a dense `0..len` index on each [`Tab`]: a tab's index
 //! *is* its position. Every operation that changes the tab set keeps it dense —
@@ -110,6 +111,9 @@ pub fn commit_new_tab(
     // remembering the tab it left for the caller to reflow.
     let mut previous_tab = None;
     if let Some(client_id) = focus {
+        // `focus` was already filtered to attached clients above, so this
+        // lookup should always succeed; the early return is a defensive
+        // fallback rather than an expected path.
         let Some(client) = session.clients.get_mut(client_id) else {
             return (previous_tab, events);
         };

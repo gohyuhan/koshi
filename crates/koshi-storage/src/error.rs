@@ -1,4 +1,6 @@
-//! Storage domain error. Classifies into [`DomainCategory::Storage`].
+//! Storage domain error. Defines [`StorageError`], the error type returned by
+//! persistence operations, and its [`DomainError`] impl that classifies every
+//! variant into [`DomainCategory::Storage`].
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;

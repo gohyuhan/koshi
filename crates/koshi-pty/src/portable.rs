@@ -109,6 +109,10 @@ pub struct PaneEntry {
 /// a kernel PTY plus three helper threads (reader, writer, watcher); the backend
 /// owns them all through the [`PaneEntry`] map.
 pub struct PortablePtyBackend {
+    /// Every live pane's PTY, threads, and kill handle, keyed by [`PaneId`].
+    /// Locked because [`spawn`](PtyBackend::spawn), [`resize`](PtyBackend::resize),
+    /// [`write`](PtyBackend::write), and [`kill`](PtyBackend::kill) can all be
+    /// called from different dispatcher calls.
     panes: Mutex<HashMap<PaneId, PaneEntry>>,
 }
 
@@ -415,6 +419,8 @@ fn wait_for_exit(exited: &AtomicBool, timeout: Duration) -> bool {
     exited.load(Ordering::SeqCst)
 }
 
+/// Convert koshi's [`PtySize`] into `portable-pty`'s own size type, zeroing
+/// the pixel dimensions `portable-pty` accepts but this crate does not track.
 fn to_pp_size(s: PtySize) -> portable_pty::PtySize {
     portable_pty::PtySize {
         rows: s.rows,
@@ -424,6 +430,9 @@ fn to_pp_size(s: PtySize) -> portable_pty::PtySize {
     }
 }
 
+/// Convert `portable-pty`'s exit status into koshi's own [`ExitStatus`]:
+/// a signal name (Unix only) maps to [`ExitStatus::Signaled`] via [`sig_no`],
+/// anything else maps to [`ExitStatus::ExitCode`].
 fn map_status(s: portable_pty::ExitStatus) -> ExitStatus {
     match s.signal() {
         Some(name) => ExitStatus::Signaled(sig_no(name)),

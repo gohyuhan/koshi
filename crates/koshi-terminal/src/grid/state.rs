@@ -8,12 +8,14 @@ use std::cmp::min;
 pub struct Cell {
     /// The base character occupying the cell.
     ch: char,
-    /// The rest of the grapheme cluster layered over the base [`ch`](Cell::ch),
-    /// in arrival order: combining accents, variation selectors, and the joined
-    /// parts of a multi-codepoint emoji (ZWJ-joined glyphs, skin-tone modifiers,
-    /// the second half of a flag). Empty for a plain cell; the renderer draws
-    /// `ch` followed by these as one glyph. Named for the common case (combining
-    /// marks) though it also carries non-zero-width emoji continuations.
+    /// The rest of the grapheme cluster layered over the base [`ch`](Cell::ch)
+    /// — a grapheme cluster is the run of code points a person perceives as
+    /// one visual character — in arrival order: combining accents, variation
+    /// selectors, and the joined parts of a multi-codepoint emoji (ZWJ-joined
+    /// glyphs, skin-tone modifiers, the second half of a flag). Empty for a
+    /// plain cell; the renderer draws `ch` followed by these as one glyph.
+    /// Named for the common case (combining marks) though it also carries
+    /// non-zero-width emoji continuations.
     combining: Vec<char>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
@@ -30,7 +32,8 @@ impl Cell {
 
     /// A blank cell — a single space — in the given `style`. Used to carry the
     /// current background into erased and scrolled cells (background-color
-    /// erase); `style` is typically the pen's background only.
+    /// erase); `style` is typically just the pen's background — the pen is
+    /// the color/attribute state applied to newly written text.
     pub fn blank_with(style: Style) -> Self {
         Cell {
             ch: ' ',
@@ -161,7 +164,7 @@ impl Grid {
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
     /// each to a blank space in `fill`. Coordinates outside the grid are skipped via
     /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
-    /// (`from >= to`), or an empty grid is a safe no-op rather than a panic.
+    /// (`from >= to`), or an empty grid never panics — it is simply a no-op.
     pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
         for i in from..to {
             if let Some(cell) = self.cell_mut(row, i) {
@@ -217,8 +220,12 @@ impl Grid {
 
         let blank_row = vec![Cell::blank_with(fill); cols as usize];
 
+        // Never remove more lines than the band actually holds.
         let remove_count = min(n, last - first + 1);
 
+        // Each iteration removes the band's top line — the lines below it slide
+        // up to fill the gap — then re-inserts a blank line at the band's
+        // bottom, so the band keeps its original height after every step.
         for _ in 0..remove_count as usize {
             self.rows.remove(first as usize);
             self.rows.insert(last as usize, blank_row.clone());
@@ -237,8 +244,13 @@ impl Grid {
 
         let blank_row = vec![Cell::blank_with(fill); cols as usize];
 
+        // Never insert more lines than the band can hold.
         let insert_count = min(n, last - first + 1);
 
+        // Each iteration inserts a blank line at the band's top — the lines
+        // below it slide down — then removes the line pushed just past the
+        // band's bottom, so the band keeps its original height after every
+        // step.
         for _ in 0..insert_count as usize {
             self.rows.insert(first as usize, blank_row.clone());
             self.rows.remove(last as usize + 1);

@@ -3,10 +3,11 @@
 //! The geometry solver ([`crate::solver`]) produces *outer* pane rects — the
 //! full cell box a pane occupies, including the one-cell border drawn around
 //! it. Subtracting that border to obtain the **content rect** (the cells a
-//! child PTY draws into, and the cells the renderer fills) happens in exactly
-//! one place: here. Both PTY sizing and the render snapshot consume this
-//! output, so the size a child is given can never drift from the box drawn
-//! around it on screen.
+//! child PTY — the pseudo-terminal process running inside the pane — draws
+//! into, and the cells the renderer fills) happens in exactly one place:
+//! here. Both PTY sizing and the render snapshot consume this output, so the
+//! size a child is given can never drift from the box drawn around it on
+//! screen.
 
 use std::collections::HashSet;
 

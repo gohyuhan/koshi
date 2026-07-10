@@ -30,7 +30,7 @@ impl TerminalState {
     /// starts at row 0, or a DL with the cursor on row 0. The alternate screen
     /// never feeds history, and an interior delete (`first > 0`, e.g. DL below
     /// the top or a scroll region whose top margin is below row 0) discards its
-    /// removed lines rather than retaining them. This matches xterm/alacritty,
+    /// removed lines without retaining them. This matches xterm/alacritty,
     /// where history is fed only when the scrolled region begins at row 0.
     ///
     /// The departing rows — `rows[0..min(n, bottom + 1)]`, exactly the rows
@@ -57,9 +57,10 @@ impl TerminalState {
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
-    /// region scrolls up instead of the cursor advancing; below the margin the
-    /// cursor just descends to the last grid row. The column is left unchanged
-    /// (LNM is off, so a line feed is a pure vertical move).
+    /// cursor does not advance — the region scrolls up so the bottom line stays
+    /// on screen; below the margin the cursor just descends to the last grid
+    /// row. The column is left unchanged (LNM is off, so a line feed is a pure
+    /// vertical move).
     pub(super) fn linefeed(&mut self) {
         let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();

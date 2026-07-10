@@ -21,7 +21,8 @@ use koshi_pane::pane::state::PaneRecord;
 use crate::session::state::Session;
 
 /// What to record on a freshly created pane: the spawn request (working
-/// directory and command) the PTY layer later honors. Bundled so the
+/// directory and command) the PTY (pseudo-terminal — the OS handle a shell
+/// process runs its input/output through) layer later honors. Bundled so the
 /// requested program and cwd are never silently dropped — the new pane's
 /// record is self-describing for restore and respawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

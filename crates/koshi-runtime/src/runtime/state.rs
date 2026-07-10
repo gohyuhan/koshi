@@ -71,7 +71,8 @@ pub struct Runtime {
     cleanup_guard: TerminalCleanupGuard,
     /// Set once shutdown begins, so that — once IPC/plugin command intake
     /// exists — newly-arriving commands will be rejected rather than mutate
-    /// state mid-teardown. One-way; nothing reads it yet.
+    /// state mid-teardown. One-way; no command-dispatch path checks it yet —
+    /// [`is_draining`](Self::is_draining) exposes the raw flag today.
     pub(crate) draining: bool,
 }
 

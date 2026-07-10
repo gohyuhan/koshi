@@ -20,9 +20,11 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
-    // Universal terminal identity. `xterm-256color` is a *compatibility
-    // bootstrap*: safe today because no terminfo entry for `koshi` is shipped yet.
-    // Only revisit once a terminfo is published.
+    // Universal terminal identity. `TERM` tells the child program which
+    // terminal's feature set to assume; `xterm-256color` is a *compatibility
+    // bootstrap* naming a widely-supported terminal type, safe today because no
+    // terminfo entry (a per-terminal-type capability database the OS consults)
+    // for `koshi` is shipped yet. Only revisit once a terminfo is published.
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 

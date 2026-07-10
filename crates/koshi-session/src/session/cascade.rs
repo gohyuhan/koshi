@@ -99,7 +99,7 @@ pub fn remove_pane_cascade(
         }
         Err(RemoveError::LastPane { .. }) => None,
         // The pane was in the registry but not the layout: a registry/layout
-        // desync that the removal pipeline upholds against. Nothing left to
+        // desync that should not happen in practice. Nothing left to
         // collapse; the removal events already emitted stand.
         Err(RemoveError::PaneNotFound { .. }) => return events,
     };

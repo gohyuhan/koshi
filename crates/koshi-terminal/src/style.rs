@@ -1,4 +1,7 @@
-//! Cell styling: foreground and background color plus boolean text attributes.
+//! Cell styling: foreground and background color plus boolean text attributes,
+//! set by SGR (Select Graphic Rendition) escape codes such as `ESC[1m` for
+//! bold. `Style` also serves as the "pen": the color/attribute state an app
+//! sets that then applies to every character printed until changed again.
 
 /// The visual style of a single cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

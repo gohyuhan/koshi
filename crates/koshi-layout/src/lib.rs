@@ -1,6 +1,6 @@
 //! `koshi-layout` — pure layout engine: split tree, geometry solver, resize
-//! transactions, pane removal cleanup, and layout normalization. No PTY or
-//! rendering knowledge.
+//! transactions, pane removal cleanup, and layout normalization. No PTY
+//! (pseudo-terminal process) or rendering knowledge.
 
 pub mod content;
 pub mod edit;

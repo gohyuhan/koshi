@@ -106,10 +106,12 @@ pub fn resize_min_size_diagnostic(
     }
 }
 
-/// Turn any rejected command into a user-facing report, even without a known
-/// action context. This is a free function rather than `From<RejectReason> for
-/// miette::Report` because both types are foreign here: the orphan rule forbids
-/// that impl, and `koshi-core` must not depend on miette to host it.
+/// Build a user-facing [`miette::Report`] for a rejected command when no
+/// specific action name is known; the action is reported generically as
+/// `"complete command"`. This is a plain function: `RejectReason` and
+/// `miette::Report` are both types defined outside this crate, so Rust's orphan
+/// rule blocks a `From` impl between them here, and `koshi-core` must not take a
+/// dependency on miette.
 pub fn reject_report(reason: RejectReason) -> miette::Report {
     command_reject_diagnostic(reason, "complete command").into()
 }

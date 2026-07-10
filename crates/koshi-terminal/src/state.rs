@@ -1,12 +1,15 @@
-//! Per-pane terminal state: screen buffers, cursor, pen style, modes, title,
-//! reported working directory, scrollback, and the device-reply queue.
+//! Per-pane terminal state: screen buffers, cursor, pen style (the
+//! foreground/background color and attributes applied to newly written
+//! text), modes, title, reported working directory, scrollback, and the
+//! device-reply queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
 //! [`TerminalEngine`](crate::engine::TerminalEngine) — the runtime owns the
 //! `PaneId → TerminalEngine` map — so the state itself carries no identity.
 //! The VTE performer (see the `perform` submodule) mutates this model as PTY
-//! output arrives; device queries in that output (DA/DSR/DECRQM) queue their
+//! output arrives; device queries in that output (DA/DSR/DECRQM — Device
+//! Attributes, Device Status Report, and Request Mode queries) queue their
 //! answer bytes on the state, which the runtime drains back into the PTY.
 //!
 //! The state's component types live in sibling submodules — the active
@@ -205,11 +208,11 @@ impl TerminalState {
     /// The effective offset is the single source of truth for how far the view is
     /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
     /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
-    /// with empty history; otherwise it is `offset` clamped to the retained line
-    /// count, so an over-scrolled or stale value stops at the oldest line rather
-    /// than reading out of bounds. Returning it here keeps the composed grid, the
-    /// scroll indicator, and cursor suppression from ever disagreeing about
-    /// whether the view is scrolled.
+    /// with empty history. In every other case it is `offset` clamped to the
+    /// retained line count, so an over-scrolled or stale value stops at the
+    /// oldest line and never indexes past it. Returning it here keeps the
+    /// composed grid, the scroll indicator, and cursor suppression from ever
+    /// disagreeing about whether the view is scrolled.
     ///
     /// A non-zero effective offset composes a fresh window `rows` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
@@ -396,10 +399,10 @@ impl TerminalState {
     /// Returns the visible cells plus a `right_pad` flag. When the last visible
     /// column holds the left half of a wide glyph (its continuation falls
     /// outside the inner rect), that base is dropped from the returned cells and
-    /// `right_pad` is set so the renderer blanks the freed column rather than
-    /// drawing half a glyph. An out-of-range `row`, a zero `inner_width`, or an
-    /// empty row yields no cells and no pad. `inner_width` is clamped to the
-    /// row length, so a width past the grid is harmless.
+    /// `right_pad` is set, telling the renderer to blank the freed column
+    /// so it never draws a half glyph. An out-of-range `row`, a zero
+    /// `inner_width`, or an empty row yields no cells and no pad. `inner_width`
+    /// is clamped to the row length, so a width past the grid is harmless.
     pub fn clip_row(&self, row: u16, inner_width: u16) -> ClippedRow<'_> {
         let rows = self.active_grid().rows();
         let Some(r) = rows.get(row as usize) else {

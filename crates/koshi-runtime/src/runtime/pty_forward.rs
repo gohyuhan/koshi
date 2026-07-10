@@ -1,9 +1,10 @@
 //! Per-pane PTY forwarding: parking a freshly spawned pane's handle and
 //! relaying its child output and exit into the runtime event inbox.
 //!
-//! A spawned pane's [`PtyHandle`] carries blocking receivers for the child's
-//! output and exit. Rather than the event loop polling them, each pane gets two
-//! forwarder threads that block on those receivers and push
+//! A spawned pane's [`PtyHandle`] carries blocking receivers (channel endpoints
+//! that block the thread until a value arrives) for the child's output and
+//! exit. Rather than the event loop polling them, each pane gets one forwarder
+//! thread that blocks on those receivers and pushes
 //! [`RuntimeEvent::PtyOutput`] / [`RuntimeEvent::ChildExit`] into the single
 //! inbox — so the child's I/O reaches the dispatcher the same way every other
 //! event does.
@@ -49,10 +50,10 @@ impl Runtime {
 
     /// Spawn the single relay thread for one pane. It forwards every output
     /// chunk, then — once the output channel closes (the child's PTY reached
-    /// EOF, so all output is drained) — forwards the exit, stamping the time it
-    /// observed it. Draining output before the exit preserves the order the user
-    /// sees: all of the child's output, then the pane closes. The thread stops
-    /// when the inbox drops (shutdown).
+    /// EOF, end of file, so all output is drained) — forwards the exit,
+    /// stamping the time it observed it. Draining output before the exit
+    /// preserves the order the user sees: all of the child's output, then the
+    /// pane closes. The thread stops when the inbox drops (shutdown).
     fn spawn_pty_forwarder(
         inbox_tx: &Sender<RuntimeEvent>,
         pane_id: PaneId,

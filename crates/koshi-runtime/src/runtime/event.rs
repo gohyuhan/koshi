@@ -3,8 +3,8 @@
 //! [`RuntimeEvent`] is the single typed channel the dispatcher thread drains.
 //! Every asynchronous trigger the runtime must react to — child output, child
 //! exit, a client resize, a periodic tick, terminal input, an IPC command, a
-//! plugin command — arrives as one variant, so the dispatcher consumes one
-//! `std::sync::mpsc` inbox instead of a separate channel per source.
+//! plugin command — arrives as one variant, so the dispatcher consumes every
+//! trigger from one shared `std::sync::mpsc` inbox.
 //!
 //! These are *input* triggers, distinct from the *output* facts the dispatcher
 //! emits ([`koshi_core::event::Event`]): a [`RuntimeEvent::ChildExit`] is the raw

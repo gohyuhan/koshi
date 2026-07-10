@@ -35,8 +35,9 @@ use crate::size::SizeConstraint;
 use crate::size::SizeWeight;
 use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
-/// The smallest useful terminal pane: two columns by one row. A pane PTY is
-/// never sized below this floor.
+/// The smallest useful terminal pane: two columns by one row. A pane's PTY
+/// (the pseudo-terminal process feeding its content) is never sized below
+/// this floor.
 pub const MIN_PANE_SIZE: Size = Size { cols: 2, rows: 1 };
 
 /// The solved placement for one tree over one tab rectangle.
