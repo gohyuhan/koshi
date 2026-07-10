@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
@@ -33,6 +33,7 @@ fn runtime_with(fake: Arc<FakePtyBackend>) -> Runtime {
         rx,
         tx,
         TerminalCleanupGuard::new(),
+        Direction::Right,
     )
 }
 

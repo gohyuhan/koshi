@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
+use koshi_core::geometry::Direction;
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
@@ -36,6 +37,7 @@ fn new_runtime() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
     (runtime, fake, tx)
 }

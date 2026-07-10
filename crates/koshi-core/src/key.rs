@@ -1,9 +1,10 @@
 //! Keyboard chord model: a modifier bitmap plus one key.
 //!
-//! A [`KeyChord`] is the unit a keybinding matches on. Config text parses into
-//! chords, terminal input events normalize into chords, and the keymap compares
-//! the two. This module owns the value type and its canonical string form; it
-//! does no parsing.
+//! A [`KeyChord`] is the unit a keybinding matches on, and a [`KeySequence`]
+//! is the ordered run of chords one binding triggers on. Config text parses
+//! into chords, terminal input events normalize into chords, and the keymap
+//! compares the two. This module owns the value types and their canonical
+//! string form; it does no parsing.
 //!
 //! # Canonical form
 //!
@@ -220,6 +221,54 @@ impl fmt::Display for KeyChord {
         } else {
             write!(f, "{}", self.key)
         }
+    }
+}
+
+/// An ordered run of chords pressed one after another to trigger one binding.
+///
+/// Most bindings are a single chord; leader- and prefix-style bindings
+/// (`<C-p> n`) run several. A sequence holds at least one chord by
+/// construction: `new` takes the first chord separately from the rest. The
+/// configured chord-depth cap is enforced where sequences are parsed and
+/// validated, not by this type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeySequence(Vec<KeyChord>);
+
+impl KeySequence {
+    /// Builds a sequence from its chords in press order: the first chord,
+    /// then any that follow it.
+    pub fn new(first: KeyChord, rest: Vec<KeyChord>) -> Self {
+        let mut chords = Vec::with_capacity(1 + rest.len());
+        chords.push(first);
+        chords.extend(rest);
+        Self(chords)
+    }
+
+    /// The chords in press order; never empty.
+    pub fn chords(&self) -> &[KeyChord] {
+        &self.0
+    }
+}
+
+impl From<KeyChord> for KeySequence {
+    /// Wraps a single chord as a one-chord sequence.
+    fn from(chord: KeyChord) -> Self {
+        Self(vec![chord])
+    }
+}
+
+impl fmt::Display for KeySequence {
+    /// Writes each chord's canonical text form, space-separated.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for chord in &self.0 {
+            if !first {
+                f.write_str(" ")?;
+            }
+            write!(f, "{chord}")?;
+            first = false;
+        }
+        Ok(())
     }
 }
 

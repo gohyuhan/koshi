@@ -39,13 +39,13 @@ use std::path::PathBuf;
 
 use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
-    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs,
-    NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-    RunCommandPaneArgs, TabTarget,
+    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
+    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
-use crate::ids::{PaneId, PluginId};
+use crate::ids::PluginId;
 use crate::process::{ShellKind, SpawnSpec};
 use crate::registry::ActionRegistry;
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,10 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 ///
 /// - **Non-target knobs** — a split direction, a resize amount, a force flag.
 /// - **Required targets** — a target the command has no default for, so the
-///   invoker must name it. [`FocusPaneArgs::pane`](crate::command::FocusPaneArgs)
-///   is a `PaneId`, not an `Option`, so [`ActionArgs::FocusPane`] carries one.
+///   invoker must name it. [`FocusPaneArgs::target`](crate::command::FocusPaneArgs)
+///   is a [`FocusTarget`], not an `Option`, so [`ActionArgs::FocusPane`]
+///   carries one — a pane id, or a direction the runtime resolves against
+///   the layout.
 /// - **Nothing else.**
 ///
 /// An **optional** target is never here: `None` already reads as "the focused
@@ -86,7 +88,8 @@ pub enum ActionArgs {
     None,
     /// Arguments for `core:new-pane`.
     NewPane {
-        /// Split direction; `None` splits rightward. Ignored when `stacked`.
+        /// Split direction; `None` uses the runtime's default split
+        /// direction. Ignored when `stacked`.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
         stacked: bool,
@@ -105,8 +108,8 @@ pub enum ActionArgs {
     },
     /// Arguments for `core:focus-pane`.
     FocusPane {
-        /// The pane to focus.
-        pane: PaneId,
+        /// The pane to focus, by id or by direction from the focused pane.
+        target: FocusTarget,
     },
     /// Arguments for `core:close-tab`.
     CloseTab {
@@ -129,7 +132,8 @@ pub enum ActionArgs {
         program: PathBuf,
         /// Arguments passed to the program, excluding `argv[0]`.
         args: Vec<String>,
-        /// Split direction for the new pane; `None` splits rightward.
+        /// Split direction for the new pane; `None` uses the runtime's
+        /// default split direction.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
         stacked: bool,
@@ -325,8 +329,8 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
                 size: *size,
             })
         }
-        ("focus-pane", ActionArgs::FocusPane { pane }) => Command::FocusPane(FocusPaneArgs {
-            pane: *pane,
+        ("focus-pane", ActionArgs::FocusPane { target }) => Command::FocusPane(FocusPaneArgs {
+            target: *target,
             client: None,
         }),
         ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,

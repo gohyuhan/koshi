@@ -5,6 +5,7 @@
 use std::sync::mpsc;
 use std::time::SystemTime;
 
+use koshi_core::geometry::Direction;
 use koshi_core::ids::TabId;
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
@@ -27,6 +28,7 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
     (runtime, tx)
 }

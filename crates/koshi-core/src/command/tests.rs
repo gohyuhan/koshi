@@ -22,6 +22,7 @@ where
 fn unit_commands_roundtrip() {
     roundtrip(&Command::ToggleLockMode);
     roundtrip(&Command::TogglePaneFullscreen);
+    roundtrip(&Command::Quit);
 }
 
 #[test]
@@ -59,12 +60,16 @@ fn pane_commands_roundtrip() {
         stacked: false,
     }));
     roundtrip(&Command::FocusPane(FocusPaneArgs {
-        pane: PaneId::new(),
+        target: FocusTarget::Pane(PaneId::new()),
         client: None,
     }));
     roundtrip(&Command::FocusPane(FocusPaneArgs {
-        pane: PaneId::new(),
+        target: FocusTarget::Pane(PaneId::new()),
         client: Some(ClientId::new()),
+    }));
+    roundtrip(&Command::FocusPane(FocusPaneArgs {
+        target: FocusTarget::Direction(Direction::Left),
+        client: None,
     }));
     roundtrip(&Command::RenamePane(RenamePaneArgs { pane: None }));
 }
@@ -161,7 +166,7 @@ fn command_variant_names_are_canonical() {
         ),
         (
             Command::FocusPane(FocusPaneArgs {
-                pane: PaneId::new(),
+                target: FocusTarget::Pane(PaneId::new()),
                 client: None,
             }),
             "FocusPane",
@@ -224,8 +229,9 @@ fn command_variant_names_are_canonical() {
             Command::RenameSession(RenameSessionArgs { session: None }),
             "RenameSession",
         ),
+        (Command::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 18);
+    assert_eq!(cases.len(), 19);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
@@ -300,7 +306,7 @@ fn command_kind_mirrors_command() {
         ),
         (
             Command::FocusPane(FocusPaneArgs {
-                pane: PaneId::new(),
+                target: FocusTarget::Pane(PaneId::new()),
                 client: None,
             }),
             CommandKind::FocusPane,
@@ -375,8 +381,9 @@ fn command_kind_mirrors_command() {
             Command::RenameSession(RenameSessionArgs { session: None }),
             CommandKind::RenameSession,
         ),
+        (Command::Quit, CommandKind::Quit),
     ];
-    assert_eq!(cases.len(), 18);
+    assert_eq!(cases.len(), 19);
     for (command, kind) in &cases {
         assert_eq!(command.kind(), *kind);
         roundtrip(kind);

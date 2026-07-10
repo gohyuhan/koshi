@@ -11,7 +11,11 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+use koshi_core::action::ActionRef;
+use koshi_core::command::FocusTarget;
 use koshi_core::geometry::Direction;
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::resolve::ActionArgs;
 
 use crate::error::ColorParseError;
 use crate::key::Leader;
@@ -113,9 +117,18 @@ pub struct KeybindingsConfig {
     /// The prefix that `<leader>` in a binding resolves to. A modifier run
     /// merges into the chord that follows it; a chord stands on its own.
     pub leader: Leader,
-    /// Bindings grouped by input mode. Populated by the default keybinding set
-    /// and user config; empty here since binding values are parsed later.
+    /// Bindings grouped by input mode. `Default` ships the built-in binding
+    /// set (`normal` plus the reserved unlock in `locked`); user layers
+    /// override it at merge.
     pub modes: BTreeMap<ModeName, ModeBindings>,
+}
+
+impl KeybindingsConfig {
+    /// The reserved unlock chord. In `locked` mode this chord fires
+    /// `core:unlock` and is intercepted ahead of pane pass-through;
+    /// validation refuses a config that removes it without naming an
+    /// explicit alternative.
+    pub const RESERVED_UNLOCK: KeyChord = KeyChord::new(ModFlags::CTRL, Key::Char('g'));
 }
 
 impl Default for KeybindingsConfig {
@@ -125,7 +138,7 @@ impl Default for KeybindingsConfig {
             which_key_delay_ms: 300,
             max_chord_depth: 4,
             leader: Leader::default(),
-            modes: BTreeMap::new(),
+            modes: default_mode_bindings(),
         }
     }
 }
@@ -148,11 +161,174 @@ impl ModeName {
     }
 }
 
-/// The bindings for one input mode. The binding value type (key sequence to
-/// action) is added by the chord parser and action registry passes; this stub
-/// carries the map slot so the schema shape exists.
+/// The action a key sequence triggers: the action reference plus the
+/// arguments bound at the binding site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundAction {
+    /// The action to resolve when the sequence fires.
+    pub action: ActionRef,
+    /// The arguments handed to action resolution alongside it.
+    pub args: ActionArgs,
+}
+
+/// The bindings for one input mode, keyed by the key sequence pressed.
+///
+/// The map key is the sequence, so one sequence resolves to exactly one
+/// action by construction — the hard binding invariant. Several sequences
+/// may name the same action (`<C-Left>` and `<A-h>` both focus the left
+/// neighbor in the defaults).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModeBindings {}
+pub struct ModeBindings {
+    /// Key sequence → the action it triggers.
+    pub keys: BTreeMap<KeySequence, BoundAction>,
+}
+
+/// The built-in default binding table: the `normal`-mode set plus the
+/// reserved unlock in `locked` mode.
+///
+/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held), so no
+/// default steals a key plain typing produces; a later chord in a sequence
+/// may be a plain key, since it is only read while the pending sequence is
+/// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
+/// unix terminals without the kitty keyboard protocol cannot tell apart from
+/// Tab, Enter, Esc, and Backspace. Pane lifecycle operations live under the
+/// `<C-p>` prefix and resize under the `<C-s>` prefix; tab switching has a
+/// `<C-Tab>`-style pair plus an `<A-]>`/`<A-[>` pair for terminals that
+/// cannot encode Ctrl+Tab. Action names here are compile-time constants
+/// known to satisfy the action-name grammar; an invalid one is a bug in this
+/// table and is caught by its tests.
+fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
+    let seq = |mods: ModFlags, key: Key| KeySequence::from(KeyChord::new(mods, key));
+    let ctrl_then = |prefix: char, key: Key| {
+        KeySequence::new(
+            KeyChord::new(ModFlags::CTRL, Key::Char(prefix)),
+            vec![KeyChord::new(ModFlags::NONE, key)],
+        )
+    };
+    let bound = |name: &str, args: ActionArgs| BoundAction {
+        action: ActionRef::core(name)
+            .expect("default binding action name must satisfy the action-name grammar"),
+        args,
+    };
+    let focus = |direction: Direction| ActionArgs::FocusPane {
+        target: FocusTarget::Direction(direction),
+    };
+    let resize = |direction: Direction| ActionArgs::ResizePane { direction, size: 1 };
+
+    const CTRL_SHIFT: ModFlags = ModFlags::CTRL.union(ModFlags::SHIFT);
+
+    let normal: BTreeMap<KeySequence, BoundAction> = [
+        // Lock and quit.
+        (
+            seq(ModFlags::CTRL, Key::Char('l')),
+            bound("lock", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Char('q')),
+            bound("quit", ActionArgs::None),
+        ),
+        // Pane lifecycle, under the pane prefix. New panes split in the
+        // configured default direction; directional splits are CLI-only.
+        (
+            ctrl_then('p', Key::Char('n')),
+            bound("new-pane", ActionArgs::None),
+        ),
+        (
+            ctrl_then('p', Key::Char('x')),
+            bound("close-pane", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('f')),
+            bound("toggle-pane-fullscreen", ActionArgs::None),
+        ),
+        // Directional focus: arrow style and vim style.
+        (
+            seq(ModFlags::CTRL, Key::Named(NamedKey::Left)),
+            bound("focus-pane", focus(Direction::Left)),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Named(NamedKey::Down)),
+            bound("focus-pane", focus(Direction::Down)),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Named(NamedKey::Up)),
+            bound("focus-pane", focus(Direction::Up)),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Named(NamedKey::Right)),
+            bound("focus-pane", focus(Direction::Right)),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('h')),
+            bound("focus-pane", focus(Direction::Left)),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('j')),
+            bound("focus-pane", focus(Direction::Down)),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('k')),
+            bound("focus-pane", focus(Direction::Up)),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('l')),
+            bound("focus-pane", focus(Direction::Right)),
+        ),
+        // Resize: one cell per press, under the resize prefix.
+        (
+            ctrl_then('s', Key::Char('h')),
+            bound("resize-pane", resize(Direction::Left)),
+        ),
+        (
+            ctrl_then('s', Key::Char('j')),
+            bound("resize-pane", resize(Direction::Down)),
+        ),
+        (
+            ctrl_then('s', Key::Char('k')),
+            bound("resize-pane", resize(Direction::Up)),
+        ),
+        (
+            ctrl_then('s', Key::Char('l')),
+            bound("resize-pane", resize(Direction::Right)),
+        ),
+        // Tabs. Switching gets a Ctrl+Tab-style pair and an Alt-bracket
+        // pair, since legacy unix terminals cannot encode Ctrl+Tab.
+        (
+            seq(ModFlags::ALT, Key::Char('t')),
+            bound("new-tab", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Named(NamedKey::Tab)),
+            bound("next-tab", ActionArgs::None),
+        ),
+        (
+            seq(CTRL_SHIFT, Key::Named(NamedKey::Tab)),
+            bound("previous-tab", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char(']')),
+            bound("next-tab", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::ALT, Key::Char('[')),
+            bound("previous-tab", ActionArgs::None),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let locked: BTreeMap<KeySequence, BoundAction> = [(
+        KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
+        bound("unlock", ActionArgs::None),
+    )]
+    .into_iter()
+    .collect();
+
+    BTreeMap::from([
+        (ModeName::new("normal"), ModeBindings { keys: normal }),
+        (ModeName::new("locked"), ModeBindings { keys: locked }),
+    ])
+}
 
 /// Defaults applied when creating panes and layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]

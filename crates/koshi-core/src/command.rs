@@ -64,6 +64,8 @@ pub enum Command {
     MoveTab(MoveTabArgs),
     /// Rename the current session.
     RenameSession(RenameSessionArgs),
+    /// Prompt the issuing client to quit the client or session.
+    Quit,
 }
 
 /// The payload-free discriminant of a [`Command`] — one unit variant per
@@ -114,6 +116,8 @@ pub enum CommandKind {
     MoveTab,
     /// Discriminant of [`Command::RenameSession`].
     RenameSession,
+    /// Discriminant of [`Command::Quit`].
+    Quit,
 }
 
 impl Command {
@@ -139,6 +143,7 @@ impl Command {
             Command::RenamePane(_) => CommandKind::RenamePane,
             Command::MoveTab(_) => CommandKind::MoveTab,
             Command::RenameSession(_) => CommandKind::RenameSession,
+            Command::Quit => CommandKind::Quit,
         }
     }
 }
@@ -152,8 +157,9 @@ impl Command {
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
-    /// Split direction; `None` defaults to a rightward split. Unused when
-    /// `stacked` is set — a stack has no direction.
+    /// Split direction; `None` uses the runtime's default split direction,
+    /// which the layout config seeds. Unused when `stacked` is set — a stack
+    /// has no direction.
     pub direction: Option<Direction>,
     /// Stack the new pane onto the source instead of splitting space.
     pub stacked: bool,
@@ -193,11 +199,21 @@ pub struct ResizePaneArgs {
     pub size: i16,
 }
 
+/// The pane a [`Command::FocusPane`] moves focus to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FocusTarget {
+    /// A pane named by id.
+    Pane(PaneId),
+    /// The nearest pane in a direction from the client's focused pane,
+    /// resolved geometrically against the solved layout.
+    Direction(Direction),
+}
+
 /// Arguments for [`Command::FocusPane`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusPaneArgs {
-    /// Pane to focus.
-    pub pane: PaneId,
+    /// Pane to focus, by id or by direction from the focused pane.
+    pub target: FocusTarget,
     /// Client whose focus moves. When set, that client is targeted and takes
     /// priority even over an in-session issuer; a client not attached to the
     /// acting session is rejected outright (no fallback). `None` targets the

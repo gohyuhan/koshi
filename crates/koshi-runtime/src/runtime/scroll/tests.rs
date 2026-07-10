@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -37,6 +37,7 @@ fn runtime_with_pane() -> (Runtime, PaneId, ClientId) {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
 
     let session_id = SessionId::new();

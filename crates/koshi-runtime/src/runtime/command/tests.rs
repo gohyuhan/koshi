@@ -24,6 +24,7 @@ use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::naming;
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
+use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutChild, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -57,6 +58,7 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
     (runtime, tx)
 }
@@ -77,6 +79,7 @@ fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<Runtim
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
     (runtime, fake, tx)
 }
@@ -712,6 +715,50 @@ fn new_pane_defaults_to_the_focused_pane() {
     }
     // The split registered a second pane in the tab.
     assert_eq!(rt.sessions[&session_id].panes.len(), 2);
+}
+
+#[test]
+fn new_pane_without_direction_splits_in_the_runtime_default() {
+    // A runtime seeded with a Down default; a directionless new-pane must
+    // split downward, not rightward.
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
+    let (tx, inbox_rx) = mpsc::channel();
+    let mut rt = Runtime::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        tx.clone(),
+        TerminalCleanupGuard::new(),
+        Direction::Down,
+    );
+
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let before = rt.sessions[&sid].tabs[&tab].layout().clone();
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    match rt.dispatch(env) {
+        CommandResult::Ok { .. } => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let new_pane = other_pane(&rt, sid, pane);
+    let expected =
+        split_leaf(&before, pane, new_pane, Direction::Down).expect("split on the source leaf");
+    assert_eq!(rt.sessions[&sid].tabs[&tab].layout(), &expected);
 }
 
 #[test]
@@ -1601,7 +1648,10 @@ fn focus_pane_in_the_active_tab_resolves() {
     // completes as a no-op: applied, zero events.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(pane),
+            client: None,
+        }),
     );
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -1614,6 +1664,54 @@ fn focus_pane_in_the_active_tab_resolves() {
         }
         other => panic!("expected Ok, got {other:?}"),
     }
+}
+
+#[test]
+fn focus_pane_by_direction_is_rejected_until_neighbor_lookup_lands() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab_id, pane);
+    add_client(&mut session, client_id, tab_id, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // A fully valid session context, so the rejection is the Direction
+    // target itself, not a missing session or client.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Direction(Direction::Left),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("directional focus not yet implemented".to_string()),
+        }
+    );
+}
+
+#[test]
+fn quit_is_rejected_as_not_yet_implemented() {
+    let (mut rt, _tx) = new_runtime();
+
+    let env = envelope(Command::Quit);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("quit not yet implemented".to_string()),
+        }
+    );
 }
 
 #[test]
@@ -1635,7 +1733,7 @@ fn focus_pane_outside_the_active_tab_is_not_found() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: outside,
+            target: FocusTarget::Pane(outside),
             client: None,
         }),
     );
@@ -1657,7 +1755,7 @@ fn focus_from_a_sessionless_source_has_no_session_context() {
     // An internal source names neither client nor session; the resolver has
     // no session to find a target client in.
     let env = envelope(Command::FocusPane(FocusPaneArgs {
-        pane: PaneId::new(),
+        target: FocusTarget::Pane(PaneId::new()),
         client: None,
     }));
     let command_id = env.id;
@@ -1699,7 +1797,7 @@ fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -1765,7 +1863,7 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -1814,7 +1912,7 @@ fn focus_collapsed_stack_member_activates_the_stack() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -1878,7 +1976,7 @@ fn focus_active_stack_member_changes_no_layout() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -1925,7 +2023,7 @@ fn focus_already_focused_collapsed_member_reactivates_without_a_focus_event() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -1987,7 +2085,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
     let env = envelope_from(
         CommandSource::key_binding(issuer),
         Command::FocusPane(FocusPaneArgs {
-            pane: r,
+            target: FocusTarget::Pane(r),
             client: Some(target),
         }),
     );
@@ -2034,7 +2132,7 @@ fn focus_unattached_explicit_client_is_rejected_without_fallback() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane,
+            target: FocusTarget::Pane(pane),
             client: Some(ClientId::new()),
         }),
     );
@@ -2088,7 +2186,7 @@ fn focus_from_a_clientless_source_defaults_to_the_sole_client() {
             session_id: Some(sid),
         },
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -2125,7 +2223,10 @@ fn focus_from_a_clientless_source_with_two_clients_is_ambiguous() {
         CommandSource::ExternalCli {
             session_id: Some(sid),
         },
-        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(pane),
+            client: None,
+        }),
     );
     let command_id = env.id;
     assert_eq!(
@@ -2153,7 +2254,10 @@ fn focus_with_no_attached_client_at_all_is_invalid() {
         CommandSource::ExternalCli {
             session_id: Some(sid),
         },
-        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(pane),
+            client: None,
+        }),
     );
     let command_id = env.id;
     assert_eq!(
@@ -2211,7 +2315,7 @@ fn focus_an_exited_pane_succeeds() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -2284,7 +2388,7 @@ fn focus_activation_reflows_the_expanded_member_pty() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );
@@ -2657,7 +2761,10 @@ fn focus_target_with_removed_registry_record_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::FocusPane(FocusPaneArgs { pane, client: None }),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(pane),
+            client: None,
+        }),
     );
     let command_id = env.id;
     assert_eq!(
@@ -6121,6 +6228,7 @@ fn close_tab_kills_every_pane_concurrently() {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
 
     let client_id = ClientId::new();
@@ -7870,7 +7978,7 @@ fn focus_pane_under_fullscreen_retargets_the_zoom() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: root,
+            target: FocusTarget::Pane(root),
             client: None,
         }),
     );
@@ -7904,7 +8012,10 @@ fn focus_pane_retargeting_back_skips_the_unchanged_pty() {
     let focus = |pane: PaneId| {
         envelope_from(
             CommandSource::key_binding(client_id),
-            Command::FocusPane(FocusPaneArgs { pane, client: None }),
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Pane(pane),
+                client: None,
+            }),
         )
     };
     assert!(matches!(rt.dispatch(focus(root)), CommandResult::Ok { .. }));
@@ -7935,7 +8046,7 @@ fn focus_pane_on_the_promoted_pane_is_a_no_op() {
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            pane: pane_a,
+            target: FocusTarget::Pane(pane_a),
             client: None,
         }),
     );
@@ -7984,7 +8095,7 @@ fn focus_pane_refocusing_a_hidden_current_pane_retargets_without_a_focus_event()
     let env = envelope_from(
         CommandSource::key_binding(client_b),
         Command::FocusPane(FocusPaneArgs {
-            pane: b,
+            target: FocusTarget::Pane(b),
             client: None,
         }),
     );

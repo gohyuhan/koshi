@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -35,6 +35,7 @@ fn new_runtime() -> Runtime {
         inbox_rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     )
 }
 
