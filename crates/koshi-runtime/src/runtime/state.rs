@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
@@ -74,12 +75,17 @@ pub struct Runtime {
     /// state mid-teardown. One-way; no command-dispatch path checks it yet —
     /// [`is_draining`](Self::is_draining) exposes the raw flag today.
     pub(crate) draining: bool,
+    /// Direction a new pane splits in when the command names none. Seeded at
+    /// construction from the layout config's default; the caller that loads
+    /// config hands the value over.
+    pub(crate) default_new_pane_direction: Direction,
 }
 
 impl Runtime {
     /// Build a runtime with no sessions, no terminal engines, a fresh render
     /// scheduler, and an action registry holding the built-in actions, holding
-    /// the given PTY backend, service handles, event inbox, and cleanup guard.
+    /// the given PTY backend, service handles, event inbox, cleanup guard,
+    /// and the default split direction for new panes.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
         snapshot_provider: Arc<dyn SnapshotProvider>,
@@ -87,6 +93,7 @@ impl Runtime {
         inbox_rx: Receiver<RuntimeEvent>,
         inbox_tx: Sender<RuntimeEvent>,
         cleanup_guard: TerminalCleanupGuard,
+        default_new_pane_direction: Direction,
     ) -> Self {
         Runtime {
             sessions: HashMap::new(),
@@ -104,6 +111,7 @@ impl Runtime {
             inbox_tx,
             cleanup_guard,
             draining: false,
+            default_new_pane_direction,
         }
     }
 

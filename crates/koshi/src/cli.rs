@@ -20,9 +20,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, LockModeArgs, MoveTabArgs,
-    NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-    RunCommandPaneArgs, TabTarget,
+    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
+    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -485,7 +485,7 @@ impl CliCommand {
             CliCommand::FocusPane { pane, client } => (
                 "focus-pane",
                 Command::FocusPane(FocusPaneArgs {
-                    pane: *pane,
+                    target: FocusTarget::Pane(*pane),
                     client: *client,
                 }),
             ),

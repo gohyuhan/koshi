@@ -25,7 +25,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::ClientId;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, TracingOptions};
@@ -78,6 +78,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         inbox_rx,
         inbox_tx.clone(),
         cleanup,
+        // The stock default split direction; a loaded config supplies its own.
+        Direction::Right,
     );
 
     let (cols, rows) = size()?;

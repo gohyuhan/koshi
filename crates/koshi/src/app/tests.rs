@@ -30,6 +30,7 @@ fn test_runtime(fake: Arc<FakePtyBackend>) -> (Runtime, mpsc::Sender<RuntimeEven
         rx,
         tx.clone(),
         TerminalCleanupGuard::new(),
+        Direction::Right,
     );
     (runtime, tx)
 }

@@ -180,3 +180,35 @@ fn control_alt_and_super_make_a_chord_untypeable() {
     assert!(!KeyChord::new(ModFlags::ALT, Key::Named(NamedKey::F(5))).is_typeable());
     assert!(!KeyChord::new(ModFlags::ALT | ModFlags::SHIFT, Key::Char('h')).is_typeable());
 }
+
+#[test]
+fn key_sequence_exposes_chords_in_press_order() {
+    let first = KeyChord::new(ModFlags::CTRL, Key::Char('p'));
+    let second = KeyChord::new(ModFlags::NONE, Key::Char('n'));
+    let sequence = KeySequence::new(first, vec![second]);
+    assert_eq!(sequence.chords(), &[first, second]);
+}
+
+#[test]
+fn key_sequence_from_a_single_chord_holds_that_chord() {
+    let chord = KeyChord::new(ModFlags::ALT, Key::Char('t'));
+    assert_eq!(KeySequence::from(chord).chords(), &[chord]);
+}
+
+#[test]
+fn key_sequence_displays_chords_space_separated() {
+    let sequence = KeySequence::new(
+        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+        vec![
+            KeyChord::new(ModFlags::NONE, Key::Char('n')),
+            KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Enter)),
+        ],
+    );
+    assert_eq!(sequence.to_string(), "<C-p> n <CR>");
+}
+
+#[test]
+fn key_sequence_display_of_one_chord_is_that_chord() {
+    let sequence = KeySequence::from(KeyChord::new(ModFlags::NONE, Key::Char('g')));
+    assert_eq!(sequence.to_string(), "g");
+}

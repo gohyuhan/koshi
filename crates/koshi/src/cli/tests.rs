@@ -1038,7 +1038,10 @@ fn action_subcommands_map_to_their_exact_commands() {
         (
             vec!["koshi", "focus-pane", "--pane", &pane_flag],
             "focus-pane",
-            Command::FocusPane(FocusPaneArgs { pane, client: None }),
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Pane(pane),
+                client: None,
+            }),
         ),
         (
             vec!["koshi", "lock"],

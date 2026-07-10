@@ -6,6 +6,7 @@ use super::*;
 
 use crate::action::{core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, TargetKind};
 use crate::command::CommandKind;
+use crate::ids::PaneId;
 use crate::process::ShellKind;
 use crate::registry::tests::insert_unchecked;
 use std::collections::BTreeMap;
@@ -70,10 +71,10 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
         (
             "focus-pane",
             ActionArgs::FocusPane {
-                pane: PaneId::from_uuid(Uuid::from_bytes([7; 16])),
+                target: FocusTarget::Pane(PaneId::from_uuid(Uuid::from_bytes([7; 16]))),
             },
             Command::FocusPane(FocusPaneArgs {
-                pane: PaneId::from_uuid(Uuid::from_bytes([7; 16])),
+                target: FocusTarget::Pane(PaneId::from_uuid(Uuid::from_bytes([7; 16]))),
                 client: None,
             }),
         ),
@@ -291,7 +292,7 @@ fn coming_soon_actions_are_refused() {
         .map(|(action, _)| action)
         .collect();
 
-    assert_eq!(coming_soon.len(), 15);
+    assert_eq!(coming_soon.len(), 16);
     for action in coming_soon {
         assert_eq!(
             resolve_action(&action, &ActionArgs::None, &registry),
@@ -304,7 +305,7 @@ fn coming_soon_actions_are_refused() {
 }
 
 #[test]
-fn coming_soon_names_are_copy_mode_and_plugin() {
+fn coming_soon_names_are_pinned() {
     let mut names: Vec<String> = core_action_seeds()
         .into_iter()
         .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
@@ -330,7 +331,26 @@ fn coming_soon_names_are_copy_mode_and_plugin() {
             "plugin-reload",
             "plugin-uninstall",
             "plugin-update",
+            "quit",
         ]
+    );
+}
+
+#[test]
+fn focus_pane_resolves_a_direction_target() {
+    let registry = ActionRegistry::new();
+    assert_eq!(
+        resolve_action(
+            &core("focus-pane"),
+            &ActionArgs::FocusPane {
+                target: FocusTarget::Direction(Direction::Down),
+            },
+            &registry,
+        ),
+        Ok(DispatchPlan::Command(Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Direction(Direction::Down),
+            client: None,
+        })))
     );
 }
 

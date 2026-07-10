@@ -230,11 +230,11 @@ fn lock_and_focus_seeds_are_client_scoped() {
 }
 
 /// Pins which seeds are coming-soon: the copy-mode and plugin command families
-/// have no runtime handler yet, so every action dispatched through them is
-/// seeded `ComingSoon` and every other action is `Available`. When a family
-/// lands, its `core_seed` derivation flips and this list shrinks.
+/// and `quit` have no runtime handler yet, so each is seeded `ComingSoon` and
+/// every other action is `Available`. When one lands, its `core_seed`
+/// declaration flips and this list shrinks.
 #[test]
-fn coming_soon_seeds_are_the_copy_mode_and_plugin_families() {
+fn coming_soon_seeds_are_pinned() {
     let mut coming_soon: Vec<String> = core_action_seeds()
         .iter()
         .filter(|(_, metadata)| metadata.status == ActionStatus::ComingSoon)
@@ -258,6 +258,7 @@ fn coming_soon_seeds_are_the_copy_mode_and_plugin_families() {
         "core:plugin-reload",
         "core:plugin-uninstall",
         "core:plugin-update",
+        "core:quit",
     ]
     .map(String::from)
     .to_vec();
@@ -303,6 +304,7 @@ fn core_seed_snapshot_is_stable() {
         "core:plugin-uninstall",
         "core:plugin-update",
         "core:previous-tab",
+        "core:quit",
         "core:rename-pane",
         "core:rename-session",
         "core:rename-tab",

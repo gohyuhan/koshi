@@ -436,9 +436,10 @@ fn core_seed(
 /// [`ActionArgsSchema`], not duplicated into [`CommandKind`].
 ///
 /// Each entry declares its own [`ActionStatus`]. The `copy-mode-*` and
-/// `plugin-*` actions have no runtime handler yet and are seeded `ComingSoon`,
-/// so introspection hides them; every other action is `Available`. Status is
-/// per-action, so a family lands one member at a time rather than all at once.
+/// `plugin-*` actions and `quit` have no runtime handler yet and are seeded
+/// `ComingSoon`, so introspection hides them; every other action is
+/// `Available`. Status is per-action, so a family lands one member at a time
+/// rather than all at once.
 #[must_use]
 pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionHandlerRef::CoreCommand;
@@ -575,6 +576,15 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             vec![Session],
             CoreCommand(CommandKind::RenameSession),
             Available,
+        ),
+        core_seed(
+            "quit",
+            "Quit",
+            "Prompt the issuing client to quit the client or session",
+            Client,
+            vec![ClientTarget, Session],
+            CoreCommand(CommandKind::Quit),
+            ComingSoon,
         ),
         // --- Lock mode ---
         core_seed(
