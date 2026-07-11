@@ -1,7 +1,7 @@
 //! Unit tests for per-pane terminal state.
 
 use super::*;
-use crate::grid::state::{Cell, Grid};
+use crate::grid::state::{Cell, Grid, RowEnd};
 use crate::style::{Color, Style};
 
 /// Overwrite the cell at (`row`, `col`) of the active grid with `ch` of the
@@ -70,20 +70,43 @@ fn resize_reallocs_both_grids_to_new_size() {
 }
 
 #[test]
-fn resize_fills_each_grid_with_its_own_screen_background() {
-    // Each screen's grid is filled with that screen's own render background color,
-    // not the other screen's background.
-    let mut state = TerminalState::new(PtySize { cols: 80, rows: 24 });
+fn resize_pads_each_grid_with_its_own_screen_background() {
+    // Padding a resize creates is filled with that screen's own render
+    // background, never the other screen's. On the reflowed primary,
+    // fully-default blanks count as padding, so they re-fill too — the same
+    // background-color-erase fill every erase and scroll uses. Content cells
+    // (anything non-default) keep their own styles.
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
+    put(&mut state, 0, 0, 'x', 1);
     state.primary_render.style.set_bg(Color::Indexed(4)); // primary: blue
     state.alternate_render.style.set_bg(Color::Indexed(1)); // alternate: red
-    state.resize(PtySize { cols: 4, rows: 2 });
+    state.resize(PtySize { cols: 6, rows: 3 });
 
     let mut blue_fill = Style::default();
     blue_fill.set_bg(Color::Indexed(4)); // bg-only: fg + attrs stay default
     let mut red_fill = Style::default();
     red_fill.set_bg(Color::Indexed(1));
-    assert_eq!(*state.primary, Grid::blank(2, 4, blue_fill)); // primary keeps its own blue
-    assert_eq!(*state.alternate, Grid::blank(2, 4, red_fill)); // alternate keeps its own red
+
+    // Content keeps its own style.
+    assert_eq!(
+        state.primary.cell(0, 0),
+        Some(&Cell::new('x', 1, Style::default()))
+    );
+    // Primary padding — re-created row tails and the new bottom row — takes
+    // the primary fill.
+    assert_eq!(state.primary.cell(0, 5), Some(&Cell::blank_with(blue_fill)));
+    assert_eq!(state.primary.cell(2, 3), Some(&Cell::blank_with(blue_fill)));
+    // The alternate crops in place: its untouched cells stay default and
+    // only the grown region takes the alternate fill.
+    assert_eq!(state.alternate.cell(0, 0), Some(&Cell::blank()));
+    assert_eq!(
+        state.alternate.cell(0, 5),
+        Some(&Cell::blank_with(red_fill))
+    );
+    assert_eq!(
+        state.alternate.cell(2, 3),
+        Some(&Cell::blank_with(red_fill))
+    );
 }
 
 #[test]
@@ -112,6 +135,91 @@ fn resize_clears_a_pending_wrap_latched_to_the_old_edge() {
     state.primary_cursor.pending_wrap = true;
     state.resize(PtySize { cols: 10, rows: 5 });
     assert!(!state.primary_cursor.pending_wrap);
+}
+
+#[test]
+fn resize_preserves_cell_contents_across_width_and_height_changes() {
+    let mut state = TerminalState::new(PtySize { cols: 6, rows: 4 });
+    put(&mut state, 0, 0, 'h', 1);
+    put(&mut state, 0, 1, 'i', 1);
+    put(&mut state, 1, 0, '!', 1);
+    state.primary_cursor.row = 1;
+
+    // Shrink: trailing blank rows go first, the written rows stay put.
+    state.resize(PtySize { cols: 4, rows: 2 });
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'h');
+    assert_eq!(state.primary.cell(0, 1).unwrap().ch(), 'i');
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), '!');
+    assert_eq!(state.scrollback.len(), 0);
+
+    // Grow back: the content is still where it was, new space is blank.
+    state.resize(PtySize { cols: 6, rows: 4 });
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'h');
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), '!');
+    assert_eq!(state.primary.cell(3, 5), Some(&Cell::blank()));
+}
+
+#[test]
+fn resize_shrink_pushes_top_rows_to_scrollback_and_grow_pulls_them_back() {
+    // Every row written, cursor on the last row: nothing blank to trim, so a
+    // 2-row shrink scrolls the top two rows into history.
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 4 });
+    for row in 0..4 {
+        put(&mut state, row, 0, char::from(b'a' + row as u8), 1);
+    }
+    state.primary_cursor.row = 3;
+
+    state.resize(PtySize { cols: 4, rows: 2 });
+    assert_eq!(state.scrollback.len(), 2);
+    assert_eq!(state.scrollback.lines()[0].0[0].ch(), 'a');
+    assert_eq!(state.scrollback.lines()[1].0[0].ch(), 'b');
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'c');
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), 'd');
+    // The cursor followed its row up.
+    assert_eq!(state.primary_cursor.row, 1);
+
+    // Growing pulls the same rows back in at the top, newest first.
+    state.resize(PtySize { cols: 4, rows: 4 });
+    assert_eq!(state.scrollback.len(), 0);
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'a');
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), 'b');
+    assert_eq!(state.primary.cell(2, 0).unwrap().ch(), 'c');
+    assert_eq!(state.primary.cell(3, 0).unwrap().ch(), 'd');
+    assert_eq!(state.primary_cursor.row, 3);
+}
+
+#[test]
+fn resize_width_shrink_wraps_a_wide_glyph_whole() {
+    // 世 occupies cols 2–3; at width 3 its base would land in the last
+    // column, so the reflow leaves a spacer there and wraps the glyph whole
+    // onto the next row — never a dangling half.
+    let mut state = TerminalState::new(PtySize { cols: 5, rows: 2 });
+    put(&mut state, 0, 0, 'a', 1);
+    put(&mut state, 0, 2, '世', 2);
+    put(&mut state, 0, 3, ' ', 0);
+
+    state.resize(PtySize { cols: 3, rows: 2 });
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'a');
+    assert_eq!(state.primary.cell(0, 2), Some(&Cell::blank()));
+    assert_eq!(state.primary.row_end(0), RowEnd::SoftWide);
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), '世');
+    assert_eq!(state.primary.cell(1, 0).unwrap().width(), 2);
+    assert_eq!(state.primary.cell(1, 1).unwrap().width(), 0);
+}
+
+#[test]
+fn resize_alternate_screen_crops_without_touching_scrollback() {
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 3 });
+    state.active = Screen::Alternate;
+    for row in 0..3 {
+        put(&mut state, row, 0, char::from(b'x' + row as u8), 1);
+    }
+
+    state.resize(PtySize { cols: 4, rows: 2 });
+    // The top row is cropped away — the alternate screen has no history.
+    assert_eq!(state.scrollback.len(), 0);
+    assert_eq!(state.alternate.cell(0, 0).unwrap().ch(), 'y');
+    assert_eq!(state.alternate.cell(1, 0).unwrap().ch(), 'z');
 }
 
 #[test]
@@ -237,9 +345,9 @@ fn state_with_history() -> TerminalState {
         *state.active_grid_mut().cell_mut(1, col as u16).unwrap() =
             Cell::new(ch, 1, Style::default());
     }
-    state.scrollback.push_line(line("h0."));
-    state.scrollback.push_line(line("h1."));
-    state.scrollback.push_line(line("h2."));
+    state.scrollback.push_line(line("h0."), RowEnd::Hard);
+    state.scrollback.push_line(line("h1."), RowEnd::Hard);
+    state.scrollback.push_line(line("h2."), RowEnd::Hard);
     state
 }
 
@@ -315,7 +423,7 @@ fn scrolled_view_pads_narrow_history_rows_with_the_live_background() {
     // background pen (SGR 48), so the padding carries it, not the default.
     let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
     state.primary_render.style.set_bg(Color::Indexed(4));
-    state.scrollback.push_line(line("ab"));
+    state.scrollback.push_line(line("ab"), RowEnd::Hard);
 
     let (grid, _) = state.scrolled_view(1);
     let padded = grid.cell(0, 2).unwrap();

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
-use koshi_core::key::{Key, KeySequence, ModFlags};
+use koshi_core::key::{Key, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
@@ -142,13 +142,102 @@ fn pane_fixture(user_close: bool) -> KeymapHints {
 #[test]
 fn idle_shows_leaf_hints_and_labeled_default_group() {
     let snapshot = snap(pane_fixture(false), None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-l> Lock  <C-p> PANE");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  l  Lock  p  PANE");
+}
+
+#[test]
+fn modifier_key_and_action_ribbons_use_the_group_ramp_stop() {
+    let snapshot = snap(pane_fixture(false), None);
+    let buf = draw(&snapshot, 80);
+    // One modifier group → the ramp's purple end everywhere in it: the
+    // header as text color, the key block as background, the label block as
+    // the dimmed background.
+    let purple = Color::Rgb(0x58, 0x1c, 0x87);
+    let purple_dim = Color::Rgb(0x30, 0x0f, 0x4a);
+    assert_eq!(buf[(1, 0)].fg, purple);
+    assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
+    assert_eq!(buf[(9, 0)].bg, purple);
+    assert_eq!(buf[(9, 0)].fg, Color::Rgb(0xf4, 0xf1, 0xfa));
+    assert_eq!(buf[(12, 0)].bg, purple_dim);
+    assert_eq!(buf[(12, 0)].fg, Color::Rgb(0xc9, 0xc4, 0xd4));
+}
+
+#[test]
+fn human_modifier_groups_fold_same_action_keys() {
+    let keymap = hints(
+        vec![
+            binding(
+                seq(&[KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Left))]),
+                "Focus Pane",
+                false,
+                false,
+            ),
+            binding(
+                seq(&[KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Down))]),
+                "Focus Pane",
+                false,
+                false,
+            ),
+            binding(
+                seq(&[KeyChord::new(ModFlags::ALT, Key::Char('h'))]),
+                "Focus Pane",
+                false,
+                false,
+            ),
+            binding(
+                seq(&[KeyChord::new(ModFlags::ALT, Key::Char('j'))]),
+                "Focus Pane",
+                false,
+                false,
+            ),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    let snapshot = snap(keymap, None);
+    assert_eq!(
+        row_text(&draw(&snapshot, 80)),
+        " Ctrl +  ←↓  Focus Pane  Alt +  hj  Focus Pane"
+    );
+}
+
+#[test]
+fn bare_key_wears_the_header_style_not_a_key_block() {
+    let shift_tab = KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Tab));
+    let bare_tab = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Tab));
+    let keymap = hints(
+        vec![
+            binding(seq(&[ctrl('l')]), "Lock", false, false),
+            binding(seq(&[shift_tab]), "Previous Tab", false, false),
+            binding(seq(&[bare_tab]), "Next Tab", false, false),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    let snapshot = snap(keymap, None);
+    let buf = draw(&snapshot, 80);
+    assert_eq!(
+        row_text(&buf),
+        " Ctrl +  l  Lock  Shift +  Tab  Previous Tab  Tab  Next Tab"
+    );
+    // The Shift group's key is a block: light text on the mid ramp stop.
+    assert_eq!(buf[(27, 0)].bg, Color::Rgb(0x4a, 0x4f, 0xbe));
+    assert_eq!(buf[(27, 0)].fg, Color::Rgb(0xf4, 0xf1, 0xfa));
+    // The bare Tab is its own opener: header-styled text on the bar itself —
+    // the blue ramp end as foreground, no block behind it.
+    assert_eq!(buf[(46, 0)].fg, Color::Rgb(0x3b, 0x82, 0xf6));
+    assert_eq!(buf[(46, 0)].bg, Color::Reset);
+    assert!(buf[(46, 0)].modifier.contains(Modifier::BOLD));
+    // Its action label keeps the dimmed block, same as any other ribbon.
+    assert_eq!(buf[(51, 0)].bg, Color::Rgb(0x20, 0x47, 0x87));
 }
 
 #[test]
 fn user_entry_under_prefix_swaps_label_for_count() {
     let snapshot = snap(pane_fixture(true), None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-l> Lock  <C-p> +2");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  l  Lock  p  +2");
 }
 
 #[test]
@@ -165,7 +254,7 @@ fn removal_under_prefix_swaps_label_for_count() {
         false,
     );
     let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-p> +1");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  +1");
 }
 
 #[test]
@@ -180,7 +269,7 @@ fn unlabeled_group_shows_count() {
         false,
     );
     let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-t> +2");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  t  +2");
 }
 
 #[test]
@@ -188,12 +277,21 @@ fn pending_prefix_shows_breadcrumb_and_continuations() {
     let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
     assert_eq!(
         row_text(&draw(&snapshot, 80)),
-        "<C-p> PANE ▸ n New Pane  x Close Pane"
+        " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane"
     );
 }
 
 #[test]
-fn pending_prefix_without_label_shows_bare_breadcrumb() {
+fn customized_pending_prefix_uses_count_not_shipped_label() {
+    let snapshot = snap(pane_fixture(true), Some(seq(&[ctrl('p')])));
+    assert_eq!(
+        row_text(&draw(&snapshot, 80)),
+        " Ctrl +  p  +2  ▶  n  New Pane  x  Close Pane"
+    );
+}
+
+#[test]
+fn pending_prefix_without_label_shows_derived_count() {
     let keymap = hints(
         vec![binding(
             seq(&[ctrl('t'), plain('n')]),
@@ -206,7 +304,10 @@ fn pending_prefix_without_label_shows_bare_breadcrumb() {
         false,
     );
     let snapshot = snap(keymap, Some(seq(&[ctrl('t')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-t> ▸ n New Tab");
+    assert_eq!(
+        row_text(&draw(&snapshot, 80)),
+        " Ctrl +  t  +1  ▶  n  New Tab"
+    );
 }
 
 #[test]
@@ -231,7 +332,7 @@ fn nested_group_inside_pending_shows_count() {
         false,
     );
     let snapshot = snap(keymap, Some(seq(&[ctrl('p')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-p> PANE ▸ n +2");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  PANE  ▶  n  +2");
 }
 
 #[test]
@@ -246,7 +347,7 @@ fn chord_bound_and_extended_shows_action_with_count() {
         false,
     );
     let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), "<C-p> Pane Menu +1");
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  Pane Menu +1");
 }
 
 #[test]
@@ -264,19 +365,19 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
     // Wide: pinned first despite `<C-a>` sorting lower.
     assert_eq!(
         row_text(&draw(&snapshot, 80)),
-        "<C-g> Unlock  <C-a> Aardvark"
+        " Ctrl +  g  Unlock  a  Aardvark"
     );
-    // Narrow: only the pinned hint fits; the other is dropped whole.
-    assert_eq!(row_text(&draw(&snapshot, 14)), "<C-g> Unlock");
+    // Narrow: only the pinned hint fits; the dropped one leaves a `…`.
+    assert_eq!(row_text(&draw(&snapshot, 19)), " Ctrl +  g  Unlock…");
 }
 
 #[test]
 fn truncation_drops_whole_trailing_hints() {
     let snapshot = snap(pane_fixture(false), None);
-    // `<C-l> Lock` is 10 cells; the next hint would start at 12 and needs 10
-    // more, so any width under 22 keeps only the first.
-    assert_eq!(row_text(&draw(&snapshot, 21)), "<C-l> Lock");
-    assert_eq!(row_text(&draw(&snapshot, 22)), "<C-l> Lock  <C-p> PANE");
+    // Shared `Ctrl +` header plus the first ribbon is 17 cells; the second
+    // ribbon needs 9 more, so below 26 it is dropped whole behind a `…`.
+    assert_eq!(row_text(&draw(&snapshot, 25)), " Ctrl +  l  Lock …");
+    assert_eq!(row_text(&draw(&snapshot, 26)), " Ctrl +  l  Lock  p  PANE");
 }
 
 #[test]
@@ -288,9 +389,9 @@ fn revert_marker_holds_right_edge_and_hints_stop_short() {
     let snapshot = snap(keymap, None);
     let buf = draw(&snapshot, 30);
     let row = row_text(&buf);
-    assert_eq!(row, "<C-l> Lock  <C-p> PANE [keys!]");
-    // The marker's last cell is the row's last cell.
-    assert_eq!(buf[(29, 0)].symbol(), "]");
+    assert_eq!(row, " Ctrl +  l  Lock …      keys!");
+    // Marker text holds the right edge, with one background-padding cell.
+    assert_eq!(buf[(28, 0)].symbol(), "!");
 }
 
 #[test]

@@ -35,6 +35,7 @@ use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineSty
 
 use crate::snapshot::{PaneSnapshot, RenderSnapshot};
 use crate::statusline_hints::draw_hint_bar;
+use crate::theme;
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
@@ -83,27 +84,27 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
     draw_pane_contents(snapshot, offset, buf);
     draw_stack_headers(snapshot, offset, buf);
 
+    // Fill multi-client margins before chrome; the tabline and hint bar own
+    // the outer rows and must remain visible over the letterbox.
+    draw_letterbox(area, content, buf);
+
     let tabline = RatatuiRect {
-        x: content.x,
-        y: content.y,
-        width: content.width,
+        x: area.x,
+        y: area.y,
+        width: area.width,
         height: 1,
     };
     draw_tabline(snapshot, tabline, buf);
 
-    // The hint bar owns the bottom row, painted over the frame like the
-    // tabline. A one-row content area is the tabline's; no hint bar fits.
-    if content.height >= 2 {
+    if area.height >= 2 {
         let hint_bar = RatatuiRect {
-            x: content.x,
-            y: content.bottom() - 1,
-            width: content.width,
+            x: area.x,
+            y: area.bottom() - 1,
+            width: area.width,
             height: 1,
         };
         draw_hint_bar(snapshot, hint_bar, buf);
     }
-
-    draw_letterbox(area, content, buf);
 }
 
 /// The buffer cell where the client's focused pane wants the hardware cursor, or
@@ -175,8 +176,9 @@ fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
 }
 
 /// Draw a bordered box for every visible pane in the active tab, highlighting
-/// the client's focused pane's border. `offset` shifts each pane into the
-/// centered content rect.
+/// the client's focused pane's border and writing the pane's resolved title
+/// into its top border line. `offset` shifts each pane into the centered
+/// content rect.
 fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
     let focused = snapshot.client.focused_pane;
     for slot in &snapshot.session.active_tab.layout_solved {
@@ -188,10 +190,23 @@ fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
         } else {
             border_unfocused_style()
         };
+        let rect = place(slot.rect, offset);
         Block::new()
             .borders(Borders::ALL)
             .border_style(style)
-            .render(place(slot.rect, offset), buf);
+            .render(rect, buf);
+
+        // The pane's title sits in the top border, zellij-style: ` title `
+        // over the line, clipped so the corner glyphs always survive.
+        let Some(title) = find_pane(snapshot, slot.pane_id).and_then(|pane| pane.title.as_deref())
+        else {
+            continue;
+        };
+        if title.is_empty() || rect.width <= 4 {
+            continue;
+        }
+        let line = Line::from(Span::styled(format!(" {title} "), style));
+        set_line_clipped(buf, rect.x + 2, rect.y, &line, rect.width - 4);
     }
 }
 
@@ -372,41 +387,65 @@ fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> String {
         .unwrap_or_default()
 }
 
-/// Draw the tabline: session name and tab list on the left, an optional scroll
-/// indicator and the mode tag right-aligned.
+/// Draw the tabline: the session name on the left and the scroll indicator
+/// plus mode tag on the right are always shown whole, as colored text on the
+/// terminal's own background; only the tab list between them carries
+/// backgrounds — each tab a hint-bar-style ribbon on its own stop of the
+/// koshi purple→blue ramp. Tabs that don't fit are dropped whole with a
+/// trailing `…`.
 fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
-    let mut left = vec![Span::raw(snapshot.session.name.clone()), Span::raw(" │ ")];
-    for (i, meta) in snapshot.session.tabs_metadata.iter().enumerate() {
-        if i > 0 {
-            left.push(Span::raw(" "));
-        }
-        let label = format!("{}:{}", meta.index + 1, meta.name);
-        let style = if meta.active {
-            tab_active_style()
-        } else {
-            Style::default()
-        };
-        left.push(Span::styled(label, style));
-    }
-    set_line_clipped(buf, area.x, area.y, &Line::from(left), area.width);
+    // The row is koshi-owned chrome: reset it first so its unused space keeps
+    // the terminal's own background — never letterbox fill or stale cells.
+    Clear.render(area, buf);
 
+    // Right block first: it owns the right edge whole.
     let mut right = Vec::new();
     if let Some((offset, total)) = focused_scroll(snapshot) {
         right.push(Span::raw(format!("SCROLL {offset}/{total} ")));
     }
     right.push(Span::styled(
-        format!("[{}]", mode_tag(snapshot.client.lock_mode)),
+        format!(" {} ", mode_tag(snapshot.client.lock_mode)),
         mode_style(),
     ));
     let right = Line::from(right);
-    let width = right.width() as u16;
-    set_line_clipped(
-        buf,
-        area.right().saturating_sub(width),
-        area.y,
-        &right,
-        width,
-    );
+    let right_width = right.width() as u16;
+    let right_x = area.right().saturating_sub(right_width).max(area.x);
+    set_line_clipped(buf, right_x, area.y, &right, area.right() - right_x);
+
+    // Left block: the session name, always whole (clipped only by the row).
+    let session = Line::from(Span::styled(
+        format!(" {} ", snapshot.session.name),
+        session_style(),
+    ));
+    let session_width = (session.width() as u16).min(right_x.saturating_sub(area.x));
+    set_line_clipped(buf, area.x, area.y, &session, session_width);
+
+    // Tab list in the leftover middle: each tab is a two-block ribbon like a
+    // hint-bar entry (`#N` block + name block) on its own ramp stop, the
+    // active tab bright and the others dimmed. Whole tabs only; `…` when any
+    // drop.
+    let mut x = area.x.saturating_add(session_width).saturating_add(1);
+    let count = snapshot.session.tabs_metadata.len();
+    for (i, meta) in snapshot.session.tabs_metadata.iter().enumerate() {
+        let tab = Line::from(vec![
+            Span::styled(
+                format!(" #{} ", meta.index + 1),
+                tab_index_style(meta.active, i, count),
+            ),
+            Span::styled(
+                format!(" {} ", meta.name),
+                tab_name_style(meta.active, i, count),
+            ),
+        ]);
+        let width = tab.width() as u16;
+        if x + width + 1 > right_x {
+            let marker = Line::from(Span::styled("…", tab_overflow_style()));
+            set_line_clipped(buf, x.min(right_x.saturating_sub(1)), area.y, &marker, 1);
+            break;
+        }
+        set_line_clipped(buf, x, area.y, &tab, width);
+        x += width + 1;
+    }
 }
 
 /// The short mode tag shown in the tabline for each input mode.
@@ -526,9 +565,47 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, buf: &mut Buffer) {
     }
 }
 
-/// Inverted style marking the active tab in the tab list.
-fn tab_active_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+/// A tab's `#N` block. The active tab is inverted — its ramp stop as the
+/// TEXT color on the terminal's own background; an inactive tab paints the
+/// dimmed stop as the block background with quiet text.
+fn tab_index_style(active: bool, index: usize, count: usize) -> Style {
+    if active {
+        Style::default()
+            .fg(theme::ramp(index, count))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme::ON_RAMP_DIM)
+            .bg(theme::ramp_dim(index, count))
+    }
+}
+
+/// A tab's name block: same inversion as the `#N` block — the active tab's
+/// name is its ramp stop as text on the terminal background, an inactive
+/// tab's sits on the dimmed stop.
+fn tab_name_style(active: bool, index: usize, count: usize) -> Style {
+    if active {
+        Style::default().fg(theme::ramp(index, count))
+    } else {
+        Style::default()
+            .fg(theme::ON_RAMP_DIM)
+            .bg(theme::ramp_dim(index, count))
+    }
+}
+
+/// The session name anchoring the tabline's left edge: the ramp's purple end
+/// as the text color on the terminal's own background.
+fn session_style() -> Style {
+    Style::default()
+        .fg(theme::ramp(0, 2))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The `…` marking tabs dropped for width.
+fn tab_overflow_style() -> Style {
+    Style::default()
+        .fg(theme::ON_RAMP_DIM)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Inverted style marking a collapsed stack member's koshi-owned header strip.
@@ -536,9 +613,12 @@ fn stack_header_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
-/// Bold style for the tabline mode tag.
+/// The mode tag anchoring the tabline's right edge: the ramp's blue end as
+/// the text color on the terminal's own background.
 fn mode_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(theme::ramp(1, 2))
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Bold style for the terminal-too-small overlay message.

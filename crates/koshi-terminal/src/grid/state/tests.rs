@@ -378,3 +378,63 @@ fn from_rows_pads_short_rows_with_the_fill_style() {
     assert_eq!(grid.cell(0, 1).unwrap().style(), fill);
     assert_eq!(grid.cell(0, 2).unwrap().style(), fill);
 }
+
+#[test]
+fn row_ends_travel_with_scrolled_rows() {
+    let mut grid = Grid::blank(3, 4, Style::default());
+    grid.set_row_end(1, RowEnd::Soft);
+    // Scroll the whole grid up one line: old row 1 lands on row 0 with its
+    // continuation state; the fresh bottom row is a hard end.
+    grid.delete_lines(0, 2, 1, Style::default());
+    assert_eq!(grid.row_end(0), RowEnd::Soft);
+    assert_eq!(grid.row_end(2), RowEnd::Hard);
+}
+
+#[test]
+fn delete_lines_breaks_the_continuation_above_the_band() {
+    let mut grid = Grid::blank(3, 4, Style::default());
+    grid.set_row_end(0, RowEnd::Soft); // row 0 wrapped into row 1
+    grid.delete_lines(1, 2, 1, Style::default());
+    // Row 0's continuation row is gone: the wrap no longer holds.
+    assert_eq!(grid.row_end(0), RowEnd::Hard);
+}
+
+#[test]
+fn insert_lines_breaks_continuations_at_the_band_edges() {
+    let mut grid = Grid::blank(3, 4, Style::default());
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.set_row_end(1, RowEnd::Soft);
+    grid.insert_lines(1, 2, 1, Style::default());
+    // Row 0 now precedes an inserted blank; the row shifted to the band's
+    // bottom precedes a row it never wrapped into.
+    assert_eq!(grid.row_end(0), RowEnd::Hard);
+    assert_eq!(grid.row_end(2), RowEnd::Hard);
+}
+
+#[test]
+fn tail_edits_reset_the_row_end() {
+    let mut grid = Grid::blank(1, 4, Style::default());
+
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.clear_line(0, 2, 4, Style::default()); // reaches the last column
+    assert_eq!(grid.row_end(0), RowEnd::Hard);
+
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.clear_line(0, 0, 2, Style::default()); // stops short of it
+    assert_eq!(grid.row_end(0), RowEnd::Soft);
+
+    grid.insert_cells(0, 1, 1, Style::default()); // shifts the tail
+    assert_eq!(grid.row_end(0), RowEnd::Hard);
+
+    grid.set_row_end(0, RowEnd::Soft);
+    grid.delete_cells(0, 1, 1, Style::default()); // shifts the tail
+    assert_eq!(grid.row_end(0), RowEnd::Hard);
+}
+
+#[test]
+fn row_end_out_of_bounds_reads_hard_and_ignores_writes() {
+    let mut grid = Grid::blank(2, 2, Style::default());
+    assert_eq!(grid.row_end(9), RowEnd::Hard);
+    grid.set_row_end(9, RowEnd::Soft); // no-op, no panic
+    assert_eq!(grid.row_end(9), RowEnd::Hard);
+}

@@ -94,9 +94,8 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge(&[defaults()]);
     let normal = &merged.modes[&mode("normal")];
 
-    // 22 shipped normal-mode defaults minus the dead `<C-q>` → `core:quit`
-    // (not implemented in this build).
-    assert_eq!(normal.defaults.len(), 21);
+    // All 20 shipped normal-mode defaults fire in this build.
+    assert_eq!(normal.defaults.len(), 20);
     assert_eq!(normal.defaults[&default_new_tab_key()], bound("new-tab"));
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.removed_keys, BTreeSet::new());
@@ -107,20 +106,28 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
         locked.defaults[&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
         bound("unlock")
     );
-    assert_eq!(locked.defaults.len(), 1);
+    assert_eq!(locked.defaults[&seq(ModFlags::CTRL, 'q')], bound("quit"));
+    assert_eq!(locked.defaults.len(), 2);
 }
 
 #[test]
 fn dead_default_is_absent_not_unbound() {
-    // `<C-q>` binds `core:quit`, which the resolver refuses this build. A
-    // dead default enters no map: the key falls through to the pane, and it
-    // is not "unbound" — the user displaced nothing.
-    let merged = merge(&[defaults()]);
+    // `core:copy-mode-enter` is ComingSoon: the resolver refuses it, so a
+    // defaults-layer binding to it enters no map — the key falls through to
+    // the pane, and it is not "unbound" since the user displaced nothing.
+    let dead_key = seq(ModFlags::ALT, 'c');
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::Defaults,
+            "normal",
+            vec![(dead_key.clone(), bound("copy-mode-enter"))],
+        ),
+    ]);
     let normal = &merged.modes[&mode("normal")];
-    let quit_key = seq(ModFlags::CTRL, 'q');
 
-    assert_eq!(normal.defaults.get(&quit_key), None);
-    assert_eq!(normal.unbound_defaults.get(&quit_key), None);
+    assert_eq!(normal.defaults.get(&dead_key), None);
+    assert_eq!(normal.unbound_defaults.get(&dead_key), None);
 }
 
 #[test]
@@ -143,7 +150,7 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             source: LayerOrigin::User,
         }
     );
-    assert_eq!(normal.defaults.len(), 21);
+    assert_eq!(normal.defaults.len(), 20);
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
@@ -170,7 +177,7 @@ fn user_binding_steals_a_defaulted_key() {
     assert_eq!(normal.defaults.get(&key), None);
     assert_eq!(normal.unbound_defaults[&key], bound("new-tab"));
     // Sibling defaults untouched.
-    assert_eq!(normal.defaults.len(), 20);
+    assert_eq!(normal.defaults.len(), 19);
     assert_eq!(normal.defaults[&seq(ModFlags::CTRL, 'l')], bound("lock"));
 }
 
@@ -290,7 +297,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.removed_keys, BTreeSet::from([key]));
-    assert_eq!(normal.defaults.len(), 21);
+    assert_eq!(normal.defaults.len(), 20);
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
@@ -461,8 +468,10 @@ fn named_key_defaults_survive_untouched() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(
-        normal.defaults
-            [&KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Left)))],
+        normal.defaults[&KeySequence::new(
+            KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+            vec![KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left))],
+        )],
         BoundAction {
             action: core("focus-pane"),
             args: ActionArgs::FocusPane {
@@ -476,12 +485,17 @@ fn named_key_defaults_survive_untouched() {
 
 #[test]
 fn stealing_a_dead_defaults_key_unbinds_nothing() {
-    // `<C-q>` ships bound to the dead `core:quit`; a user binding takes the
-    // key. The dead default was never firing, so nothing was displaced:
-    // `unbound_defaults` stays empty.
-    let key = seq(ModFlags::CTRL, 'q');
+    // A defaults-layer key bound to the dead `core:copy-mode-enter`; a user
+    // binding takes the key. The dead default was never firing, so nothing
+    // was displaced: `unbound_defaults` stays empty.
+    let key = seq(ModFlags::ALT, 'c');
     let merged = merge(&[
         defaults(),
+        layer(
+            LayerOrigin::Defaults,
+            "normal",
+            vec![(key.clone(), bound("copy-mode-enter"))],
+        ),
         layer(
             LayerOrigin::User,
             "normal",

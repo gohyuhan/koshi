@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use koshi_core::action::ActionRef;
 use koshi_core::geometry::Direction;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::ActionArgs;
 
@@ -330,14 +330,14 @@ fn bindings_in_an_orphan_mode_do_not_collide() {
 
 #[test]
 fn coming_soon_binding_warns_without_revert() {
-    // `core:quit` is seeded but not implemented; the binding cannot fire.
+    // `core:copy-mode-enter` is seeded but not implemented; the binding cannot fire.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
             LayerOrigin::User,
             "normal",
-            vec![(key.clone(), bound("quit"))],
+            vec![(key.clone(), bound("copy-mode-enter"))],
         ),
     ]);
     assert_eq!(
@@ -346,7 +346,7 @@ fn coming_soon_binding_warns_without_revert() {
             origin: LayerOrigin::User,
             mode: mode("normal"),
             key,
-            action: core("quit"),
+            action: core("copy-mode-enter"),
         }]
     );
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -363,12 +363,12 @@ fn coming_soon_claims_do_not_collide() {
         layer(
             LayerOrigin::User,
             "normal",
-            vec![(key.clone(), bound("quit"))],
+            vec![(key.clone(), bound("copy-mode-enter"))],
         ),
         layer(
             LayerOrigin::Project,
             "normal",
-            vec![(key.clone(), bound("copy-mode-enter"))],
+            vec![(key.clone(), bound("copy-mode-exit"))],
         ),
     ]);
     assert_eq!(
@@ -378,13 +378,13 @@ fn coming_soon_claims_do_not_collide() {
                 origin: LayerOrigin::User,
                 mode: mode("normal"),
                 key: key.clone(),
-                action: core("quit"),
+                action: core("copy-mode-enter"),
             },
             ConflictDiagnostic::ComingSoonAction {
                 origin: LayerOrigin::Project,
                 mode: mode("normal"),
                 key,
-                action: core("copy-mode-enter"),
+                action: core("copy-mode-exit"),
             },
         ]
     );
@@ -730,7 +730,8 @@ fn no_layers_report_the_unlock_missing() {
 
 #[test]
 fn user_prefix_of_default_sequences_warns_without_revert() {
-    // The defaults bind `<C-p> n` and `<C-p> x`; the user binds bare `<C-p>`.
+    // The defaults bind `<C-p> n`, `<C-p> x`, and the four `<C-p>` arrow
+    // focus sequences; the user binds bare `<C-p>`.
     let prefix = seq(ModFlags::CTRL, 'p');
     let report = detect(&[
         defaults(),
@@ -740,23 +741,25 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
             vec![(prefix.clone(), bound("lock"))],
         ),
     ]);
+    let ambiguous = |longer_key: Key, longer_action: &str| ConflictDiagnostic::AmbiguousPrefix {
+        mode: mode("normal"),
+        prefix: prefix.clone(),
+        prefix_action: core("lock"),
+        longer: seq2(
+            chord(ModFlags::CTRL, 'p'),
+            KeyChord::new(ModFlags::NONE, longer_key),
+        ),
+        longer_action: core(longer_action),
+    };
     assert_eq!(
         report.diagnostics,
         vec![
-            ConflictDiagnostic::AmbiguousPrefix {
-                mode: mode("normal"),
-                prefix: prefix.clone(),
-                prefix_action: core("lock"),
-                longer: seq2(chord(ModFlags::CTRL, 'p'), chord(ModFlags::NONE, 'n')),
-                longer_action: core("new-pane"),
-            },
-            ConflictDiagnostic::AmbiguousPrefix {
-                mode: mode("normal"),
-                prefix,
-                prefix_action: core("lock"),
-                longer: seq2(chord(ModFlags::CTRL, 'p'), chord(ModFlags::NONE, 'x')),
-                longer_action: core("close-pane"),
-            },
+            ambiguous(Key::Char('n'), "new-pane"),
+            ambiguous(Key::Char('x'), "close-pane"),
+            ambiguous(Key::Named(NamedKey::Left), "focus-pane"),
+            ambiguous(Key::Named(NamedKey::Right), "focus-pane"),
+            ambiguous(Key::Named(NamedKey::Up), "focus-pane"),
+            ambiguous(Key::Named(NamedKey::Down), "focus-pane"),
         ]
     );
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -1020,7 +1023,7 @@ fn severity_table() {
                 origin: LayerOrigin::User,
                 mode: mode("normal"),
                 key: seq(ModFlags::CTRL, 'y'),
-                action: core("quit"),
+                action: core("copy-mode-enter"),
             },
             ConflictSeverity::Warning,
         ),
@@ -1114,7 +1117,7 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         missing.to_string(),
-        "locked mode has no binding from `<C-g>` to `core:unlock`; the unlock escape \
+        "locked mode has no binding from `<C-l>` to `core:unlock`; the unlock escape \
          would be unreachable"
     );
 
@@ -1136,7 +1139,7 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         dead.to_string(),
-        "`<C-g> x` (user, `core:lock`) in locked mode can never fire: its first chord \
+        "`<C-l> x` (user, `core:lock`) in locked mode can never fire: its first chord \
          is the reserved unlock, which resolves instantly"
     );
 
@@ -1189,11 +1192,11 @@ fn display_messages_are_exact() {
         origin: LayerOrigin::User,
         mode: mode("normal"),
         key: seq(ModFlags::CTRL, 'y'),
-        action: core("quit"),
+        action: core("copy-mode-enter"),
     };
     assert_eq!(
         coming_soon.to_string(),
-        "`<C-y>` in mode `normal` (user) binds `core:quit`, which is not implemented \
+        "`<C-y>` in mode `normal` (user) binds `core:copy-mode-enter`, which is not implemented \
          yet; the binding cannot fire until it is"
     );
 

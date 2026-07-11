@@ -3,6 +3,7 @@
 //! and group-kill every child when the loop panics (the normal quit path takes
 //! the staged [`Runtime::shutdown`]). They wrap the render scheduler and PTY
 //! maps, which are crate-private, so the loop can live outside this crate.
+//! Explicit quit marks zero-grace teardown before the loop exits.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,11 @@ impl Runtime {
     /// Whether any pane's PTY is still live — the loop exits once none remain.
     pub fn has_active_panes(&self) -> bool {
         !self.pty_handles.is_empty()
+    }
+
+    /// Mark explicit user quit for immediate process-group teardown.
+    pub fn request_immediate_shutdown(&mut self) {
+        self.immediate_shutdown = true;
     }
 
     /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),

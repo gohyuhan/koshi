@@ -376,6 +376,9 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             Command::RenameSession(RenameSessionArgs { session: None })
         }
 
+        // --- Quit ---
+        ("quit", ActionArgs::None) => Command::Quit,
+
         // --- Lock ---
         ("toggle-lock", ActionArgs::None) => Command::ToggleLockMode,
         ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: true }),

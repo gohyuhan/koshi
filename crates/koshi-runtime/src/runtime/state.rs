@@ -80,6 +80,11 @@ pub struct Runtime {
     /// state mid-teardown. One-way; no command-dispatch path checks it yet —
     /// [`is_draining`](Self::is_draining) exposes the raw flag today.
     pub(crate) draining: bool,
+    /// True when an explicit quit chord requested zero-grace process teardown.
+    pub(crate) immediate_shutdown: bool,
+    /// True once a `core:quit` command was applied. The event loop polls it
+    /// after each event batch and exits; the flag never resets.
+    pub(crate) quit_requested: bool,
     /// Direction a new pane splits in when the command names none. Seeded at
     /// construction from the layout config's default; the caller that loads
     /// config hands the value over.
@@ -118,8 +123,17 @@ impl Runtime {
             inbox_tx,
             cleanup_guard,
             draining: false,
+            immediate_shutdown: false,
+            quit_requested: false,
             default_new_pane_direction,
         }
+    }
+
+    /// Whether a `core:quit` command was applied; the event loop exits when
+    /// this turns true.
+    #[must_use]
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested
     }
 
     /// Borrow the session map.

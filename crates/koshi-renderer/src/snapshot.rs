@@ -14,9 +14,9 @@
 //! process (the terminal `Grid`/`Cursor` types are not serializable); a
 //! detached client is served by the separate session-persistence path.
 //!
-//! This module defines the *shape*. The runtime-side builder that fills a
-//! snapshot from live state, and the renderer code that draws each field, live
-//! in later tasks; the fields carried here are the contract between them.
+//! This module defines the *shape*. The runtime-side builder fills it from
+//! live state; renderer modules draw only these fields. This DTO is their
+//! contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -146,7 +146,10 @@ pub struct PaneSlot {
 pub struct PaneSnapshot {
     /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
     pub id: PaneId,
-    /// The pane's title (from the terminal's title sequence), if any.
+    /// The pane's resolved display title: on the alternate screen the running
+    /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working
+    /// directory (`~`-shortened), falling back to the OSC title. `None` when
+    /// the pane has reported neither.
     pub title: Option<String>,
     /// The cursor's position and visibility within the content area.
     pub cursor: CursorSnapshot,
@@ -220,8 +223,7 @@ pub struct ClientSnapshot {
     pub lock_mode: LockMode,
     /// The chords of a multi-chord binding pressed so far, or `None` when no
     /// sequence is pending. The hint bar switches from the mode's top-level
-    /// hints to the continuations of this prefix while it is `Some`. Filled by
-    /// the input pipeline's sequence matcher; `None` until that lands.
+    /// hints to the continuations of this prefix while it is `Some`.
     pub pending_sequence: Option<KeySequence>,
 }
 

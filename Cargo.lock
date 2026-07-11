@@ -667,6 +667,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "koshi-core",
+ "koshi-input",
  "koshi-observability",
  "koshi-pty",
  "koshi-renderer",
@@ -718,6 +719,10 @@ dependencies = [
 [[package]]
 name = "koshi-input"
 version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "koshi-core",
+]
 
 [[package]]
 name = "koshi-ipc"

@@ -84,11 +84,32 @@ impl Cell {
     }
 }
 
+/// How a row ends relative to the row directly below it. This is row state,
+/// not cell state: it records whether the two rows hold one logical line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowEnd {
+    /// The row ends its logical line: the next row starts a new one.
+    #[default]
+    Hard,
+    /// The row soft-wrapped under autowrap: the next row continues this
+    /// row's logical line, and a resize reflow re-joins them.
+    Soft,
+    /// The row soft-wrapped because a wide glyph did not fit its last
+    /// column: the final cell is a blank spacer, dropped when a reflow
+    /// re-joins the line, so the wide glyph rejoins the text with no
+    /// phantom space.
+    SoftWide,
+}
+
 /// A fixed-size grid of cells, addressed `rows[row][col]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grid {
     /// Row-major cell storage: `rows[row][col]`.
     rows: Vec<Vec<Cell>>,
+    /// Per-row line-continuation state, parallel to `rows`: `row_ends[row]`
+    /// says whether `rows[row]` and `rows[row + 1]` hold one logical line.
+    /// Every operation that adds, removes, or reorders rows maintains it.
+    row_ends: Vec<RowEnd>,
 }
 
 impl Grid {
@@ -96,19 +117,40 @@ impl Grid {
     pub fn blank(rows: u16, cols: u16, fill: Style) -> Self {
         Grid {
             rows: vec![vec![Cell::blank_with(fill); cols as usize]; rows as usize],
+            row_ends: vec![RowEnd::Hard; rows as usize],
         }
     }
 
     /// Build a grid from ready-made `rows`, normalizing each to exactly `cols`
     /// cells: a longer row is truncated, a shorter one padded with blank spaces
-    /// in `fill` (both via [`Vec::resize`]). Used to assemble a scrolled-back
+    /// in `fill` (both via [`Vec::resize`]). Every row end starts [`RowEnd::Hard`];
+    /// a caller carrying real continuation state sets it afterwards with
+    /// [`set_row_end`](Grid::set_row_end). Used to assemble a scrolled-back
     /// view window from a mix of scrollback and live-screen rows captured at
     /// possibly differing widths.
     pub fn from_rows(mut rows: Vec<Vec<Cell>>, cols: u16, fill: Style) -> Self {
         for row in &mut rows {
             row.resize(cols as usize, Cell::blank_with(fill));
         }
-        Grid { rows }
+        let row_ends = vec![RowEnd::Hard; rows.len()];
+        Grid { rows, row_ends }
+    }
+
+    /// How `row` ends relative to the row below it; out of bounds reads as
+    /// [`RowEnd::Hard`].
+    pub fn row_end(&self, row: u16) -> RowEnd {
+        self.row_ends
+            .get(row as usize)
+            .copied()
+            .unwrap_or(RowEnd::Hard)
+    }
+
+    /// Record how `row` ends relative to the row below it. Out of bounds is a
+    /// no-op.
+    pub fn set_row_end(&mut self, row: u16, end: RowEnd) {
+        if let Some(slot) = self.row_ends.get_mut(row as usize) {
+            *slot = end;
+        }
     }
 
     /// The grid's dimensions as `(rows, cols)`.
@@ -136,7 +178,9 @@ impl Grid {
     }
 
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
-    /// each to a blank space in `fill`. Coordinates outside the grid are skipped via
+    /// each to a blank space in `fill`. An erase that reaches the row's last
+    /// column breaks the row's continuation into the next row, so its end
+    /// resets to [`RowEnd::Hard`]. Coordinates outside the grid are skipped via
     /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
     /// (`from >= to`), or an empty grid never panics — it is simply a no-op.
     pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
@@ -144,6 +188,10 @@ impl Grid {
             if let Some(cell) = self.cell_mut(row, i) {
                 *cell = Cell::blank_with(fill);
             }
+        }
+        let (_, cols) = self.dimensions();
+        if to >= cols && from < cols {
+            self.set_row_end(row, RowEnd::Hard);
         }
     }
 
@@ -162,6 +210,9 @@ impl Grid {
 
         r.splice(col as usize..col as usize, blanks);
         r.truncate(cols as usize);
+        // The shift replaced the row's tail, so any continuation into the
+        // next row is broken.
+        self.set_row_end(row, RowEnd::Hard);
     }
 
     /// Delete `n` cells starting at column `col` of `row`, shifting existing
@@ -180,6 +231,9 @@ impl Grid {
 
         r.drain(col as usize..(col + del) as usize);
         r.extend(blanks);
+        // The shift replaced the row's tail, so any continuation into the
+        // next row is broken.
+        self.set_row_end(row, RowEnd::Hard);
     }
 
     /// Delete `n` lines from the band `[first, last]` (both inclusive), shifting
@@ -199,10 +253,25 @@ impl Grid {
 
         // Each iteration removes the band's top line — the lines below it slide
         // up to fill the gap — then re-inserts a blank line at the band's
-        // bottom, so the band keeps its original height after every step.
+        // bottom, so the band keeps its original height after every step. Row
+        // ends travel with their rows, so a soft-wrapped row scrolled off the
+        // top keeps its continuation state.
         for _ in 0..remove_count as usize {
             self.rows.remove(first as usize);
             self.rows.insert(last as usize, blank_row.clone());
+            self.row_ends.remove(first as usize);
+            self.row_ends.insert(last as usize, RowEnd::Hard);
+        }
+        if remove_count > 0 {
+            // The removed rows broke two continuations: the row above the
+            // band lost the neighbor it wrapped into, and the row that slid
+            // into the band's bottom now precedes a row it never wrapped into.
+            if first > 0 {
+                self.set_row_end(first - 1, RowEnd::Hard);
+            }
+            if let Some(slid_last) = last.checked_sub(remove_count) {
+                self.set_row_end(slid_last, RowEnd::Hard);
+            }
         }
     }
 
@@ -224,11 +293,20 @@ impl Grid {
         // Each iteration inserts a blank line at the band's top — the lines
         // below it slide down — then removes the line pushed just past the
         // band's bottom, so the band keeps its original height after every
-        // step.
+        // step. Row ends travel with their rows.
         for _ in 0..insert_count as usize {
             self.rows.insert(first as usize, blank_row.clone());
             self.rows.remove(last as usize + 1);
+            self.row_ends.insert(first as usize, RowEnd::Hard);
+            self.row_ends.remove(last as usize + 1);
         }
+        // The inserted blanks broke two continuations: the row above the band
+        // now precedes a blank row, and the row that slid into the band's
+        // bottom now precedes a row it never wrapped into.
+        if first > 0 {
+            self.set_row_end(first - 1, RowEnd::Hard);
+        }
+        self.set_row_end(last, RowEnd::Hard);
     }
 }
 

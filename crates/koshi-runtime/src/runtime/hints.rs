@@ -15,10 +15,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
-use koshi_config::keymap_merge::{merge_keymaps, MergedModeMap};
-use koshi_config::types::{default_prefix_labels, KeybindingsConfig, ModeName};
+use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
+use koshi_config::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::ActionRef;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
@@ -28,6 +29,12 @@ use koshi_renderer::snapshot::{HintBinding, KeymapHints};
 /// Per-mode hint-bar data: every mode's bindings joined to display names,
 /// shared by reference with each frame's snapshot.
 pub(crate) struct KeymapHintCatalog {
+    /// Liveness-filtered lookup table shared by hints and keyboard resolution.
+    merged: Arc<MergedKeyMap>,
+    /// Multi-chord wait before an incomplete prefix falls through.
+    chord_timeout: Duration,
+    /// Hard cap on one pending key sequence.
+    max_chord_depth: usize,
     /// One sorted binding list per built-in mode; a mode nothing binds in
     /// holds an empty list.
     entries: BTreeMap<ModeName, Arc<Vec<HintBinding>>>,
@@ -52,9 +59,12 @@ impl KeymapHintCatalog {
     /// In locked mode the entry firing `core:unlock` is pinned, so
     /// truncation keeps the escape hint visible.
     pub(crate) fn from_registry(registry: &ActionRegistry) -> Self {
+        let config = KeybindingsConfig::default();
+        let chord_timeout = Duration::from_millis(u64::from(config.chord_timeout_ms));
+        let max_chord_depth = usize::from(config.max_chord_depth);
         let layers = [KeyMapLayer {
             origin: LayerOrigin::Defaults,
-            modes: KeybindingsConfig::default().modes,
+            modes: config.modes,
         }];
         let known_modes: BTreeSet<ModeName> = LockMode::ALL
             .iter()
@@ -79,11 +89,44 @@ impl KeymapHintCatalog {
         }
 
         KeymapHintCatalog {
+            merged: Arc::new(merged),
+            chord_timeout,
+            max_chord_depth,
             entries,
             removed,
             prefix_labels: Arc::new(default_prefix_labels()),
             reverted: false,
         }
+    }
+
+    /// Resolve one pending sequence in a built-in mode.
+    pub(crate) fn match_sequence(&self, mode: LockMode, sequence: &KeySequence) -> KeyMatch {
+        let name = ModeName::new(mode.name());
+        let Some(mode_map) = self.merged.modes.get(&name) else {
+            return KeyMatch::default();
+        };
+        let exact = mode_map
+            .user_set
+            .get(sequence)
+            .map(|binding| binding.bound.clone())
+            .or_else(|| mode_map.defaults.get(sequence).cloned());
+        let prefix = mode_map
+            .user_set
+            .keys()
+            .chain(mode_map.defaults.keys())
+            .any(|candidate| {
+                candidate.chords().len() > sequence.chords().len()
+                    && candidate.chords().starts_with(sequence.chords())
+            });
+        KeyMatch { exact, prefix }
+    }
+
+    pub(crate) fn chord_timeout(&self) -> Duration {
+        self.chord_timeout
+    }
+
+    pub(crate) fn max_chord_depth(&self) -> usize {
+        self.max_chord_depth
     }
 
     /// The hint-bar data for one client's current mode: the mode's bindings
@@ -97,6 +140,13 @@ impl KeymapHintCatalog {
             reverted: self.reverted,
         }
     }
+}
+
+/// Exact and longer-prefix results for one sequence lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeyMatch {
+    pub(crate) exact: Option<BoundAction>,
+    pub(crate) prefix: bool,
 }
 
 /// One mode's merged bindings joined to display names, sorted by sequence.

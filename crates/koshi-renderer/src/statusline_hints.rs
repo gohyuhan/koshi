@@ -1,157 +1,153 @@
-//! The keybinding hint bar: the bottom statusline row showing what keys do in
-//! the client's current input mode.
+//! Bottom keybinding bar with Zellij-style modifier groups and action ribbons.
 //!
-//! The bar has two faces, switched by the client's pending key sequence:
-//!
-//! - **Idle** (no sequence pending): the mode's top-level view. A single-chord
-//!   binding shows as `<key> Action` (`<C-l> Lock`); the multi-chord bindings
-//!   sharing an opening chord collapse into one group hint — labeled
-//!   (`<C-p> PANE`) while every binding under the chord is an untouched
-//!   default with a shipped label, or a derived `<C-p> +2` marker once any
-//!   user surface overrides, adds, or removes a binding under it.
-//! - **Pending** (a multi-chord sequence underway): a breadcrumb of the
-//!   chords pressed so far, then the continuations one more chord reaches —
-//!   `<C-p> PANE ▸ n New Pane  x Close Pane`. Deeper groups nest the same
-//!   way.
-//!
-//! Hints render in key order, pinned entries first (the locked-mode unlock
-//! binding), and truncate by dropping whole trailing hints — the bar never
-//! wraps. When the user keymap was reverted to defaults over a key collision,
-//! a red `[keys!]` marker holds the row's right edge.
-//!
-//! All data arrives resolved in [`KeymapHints`] — bindings joined to display
-//! names, labels, removals, and the revert flag — so this module is pure
-//! presentation over the snapshot.
+//! Idle view groups every top-level hint under one human modifier header such
+//! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
+//! A modifier-less key (bare `Tab`) is its own opener, so it wears the header
+//! style itself rather than a block inside a neighboring group.
+//! Pending view paints the pressed prefix as an accent breadcrumb, then shows
+//! only its next chords. Internal config spellings such as `C-` and `A-` never
+//! leak into user-facing text. Each modifier group takes one stop on the koshi
+//! purple→blue ramp, matching the tab list above; hints that don't fit are
+//! dropped whole with a trailing `…` marker.
 
 use std::collections::BTreeMap;
 
+use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
-use koshi_core::key::KeyChord;
-
 use crate::snapshot::{KeymapHints, RenderSnapshot};
+use crate::theme;
 
-/// Paint the hint bar for `snapshot`'s client into the one-row `area`.
-///
-/// Blanks the row first — it is koshi-owned chrome, so no pane cell shows
-/// through even in a mode with nothing to hint — then draws the idle or
-/// pending face from the client's `pending_sequence`, with the revert marker
-/// right-aligned when the keymap was reverted. Does nothing for a zero-size
-/// area.
+const REVERT_MARKER: &str = " keys! ";
+
+/// Paint one chrome-owned hint row.
 pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-
     Clear.render(area, buf);
 
     let hints = &snapshot.keymap_hints;
-    let pending: &[KeyChord] = snapshot
+    let pending = snapshot
         .client
         .pending_sequence
         .as_ref()
-        .map_or(&[], |sequence| sequence.chords());
-
-    // The revert marker owns the right edge; hints truncate short of it.
+        .map_or(&[][..], |sequence| sequence.chords());
     let mut right_edge = area.right();
     if hints.reverted {
-        let marker = Line::from(Span::styled(REVERT_MARKER, hint_revert_style()));
+        let marker = Line::from(Span::styled(REVERT_MARKER, revert_style()));
         let width = marker.width() as u16;
         let x = right_edge.saturating_sub(width).max(area.x);
         set_line_clipped(buf, x, area.y, &marker, right_edge - x);
-        right_edge = x.saturating_sub(1).max(area.x);
+        right_edge = x;
     }
 
     let mut x = area.x;
-
-    // Breadcrumb: the chords pressed so far, labeled when the opening chord
-    // carries a shipped label, then the continuation arrow.
     if !pending.is_empty() {
-        let mut spans = Vec::new();
-        for (i, chord) in pending.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(chord.to_string(), hint_breadcrumb_style()));
-            if let Some(label) = hints.prefix_labels.get(chord) {
-                spans.push(Span::styled(format!(" {label}"), hint_breadcrumb_style()));
+        for (index, chord) in pending.iter().enumerate() {
+            let prefix_text = (index == 0).then(|| prefix_text(hints, *chord)).flatten();
+            let line = chord_ribbon(*chord, prefix_text.as_deref());
+            if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
+                draw_overflow_marker(buf, x, area.y, right_edge);
+                return;
             }
         }
-        spans.push(Span::styled(" ▸ ", hint_label_style()));
-        let breadcrumb = Line::from(spans);
-        let width = (breadcrumb.width() as u16).min(right_edge.saturating_sub(x));
-        set_line_clipped(buf, x, area.y, &breadcrumb, width);
-        x += width;
+        let arrow = Line::from(Span::styled(" ▶ ", breadcrumb_arrow_style()));
+        if !paint_whole(buf, &mut x, area.y, right_edge, &arrow) {
+            draw_overflow_marker(buf, x, area.y, right_edge);
+            return;
+        }
     }
 
-    // Hints in key order, pinned first; a hint that no longer fits whole is
-    // dropped along with everything after it.
-    for item in hint_items(hints, pending) {
-        let line = Line::from(vec![
-            Span::styled(item.key, hint_key_style()),
-            Span::raw(" "),
-            Span::styled(item.text, hint_label_style()),
-        ]);
-        let width = line.width() as u16;
-        if x + width > right_edge {
-            break;
+    let groups = display_groups(hint_items(hints, pending));
+    let count = groups.len();
+    for (group_index, group) in groups.into_iter().enumerate() {
+        // A modifier-less binding has no header: its key IS the sequence's
+        // first key, so it wears the header's plain-text style instead of a
+        // continuation key's block — `Tab` reads as its own opener, not as
+        // another key inside the preceding modifier group.
+        let key_style = if group.mods.is_empty() {
+            ramp_header_style(group_index, count)
+        } else {
+            ramp_key_style(group_index, count)
+        };
+        let label_style = ramp_label_style(group_index, count);
+        let header = (!group.mods.is_empty()).then(|| {
+            Line::from(Span::styled(
+                format!(" {} + ", human_modifiers(group.mods)),
+                ramp_header_style(group_index, count),
+            ))
+        });
+        let first_width = group.entries.first().map_or(0, |entry| {
+            entry_ribbon(entry, key_style, label_style).width() as u16
+        });
+        let header_width = header.as_ref().map_or(0, |line| line.width() as u16);
+        if x.saturating_add(header_width).saturating_add(first_width) > right_edge {
+            draw_overflow_marker(buf, x, area.y, right_edge);
+            return;
         }
-        set_line_clipped(buf, x, area.y, &line, width);
-        x += width + 2;
+        if let Some(header) = header {
+            let _ = paint_whole(buf, &mut x, area.y, right_edge, &header);
+        }
+        for entry in group.entries {
+            let line = entry_ribbon(&entry, key_style, label_style);
+            if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
+                draw_overflow_marker(buf, x, area.y, right_edge);
+                return;
+            }
+        }
     }
 }
 
-/// The right-aligned marker shown while the user keymap is reverted to
-/// defaults over a key collision.
-const REVERT_MARKER: &str = "[keys!]";
+/// Mark dropped trailing hints with `…` so truncation is visible. Painted at
+/// the current cursor, or over the row's last cell when the hints consumed
+/// the full width.
+fn draw_overflow_marker(buf: &mut Buffer, x: u16, y: u16, right_edge: u16) {
+    let x = x.min(right_edge.saturating_sub(1));
+    let marker = Line::from(Span::styled("…", overflow_style()));
+    set_line_clipped(buf, x, y, &marker, 1);
+}
 
-/// One rendered hint: the key part, the text after it, and whether
-/// truncation must keep it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HintItem {
-    /// The chord's canonical text (`<C-p>`, `n`).
-    key: String,
-    /// The action name, the group label, or the `+N` marker.
+    chord: KeyChord,
     text: String,
-    /// True for the hint truncation never drops (the locked-mode unlock).
     pinned: bool,
 }
 
-/// What one continuation chord leads to: a directly bound action, deeper
-/// sequences, or both.
 #[derive(Default)]
 struct ChordBucket {
-    /// The action label of the binding this chord completes, if one does,
-    /// and whether that binding is pinned.
     leaf: Option<(String, bool)>,
-    /// How many bindings continue past this chord.
     deeper: usize,
-    /// Whether any binding under this chord is user-authored, which voids
-    /// the group's shipped label.
     any_user: bool,
 }
 
-/// The hints to show for `pending`: every binding one more chord advances,
-/// folded per continuation chord, pinned entries first.
-///
-/// A chord that completes a binding shows that action's name; a chord more
-/// bindings continue past shows the group — its shipped label while the
-/// group is untouched defaults, a `+N` count otherwise. A chord that does
-/// both shows `Action +N`. A user removal under a labeled chord voids the
-/// label the same way a user entry does: the shipped name no longer
-/// describes the set.
+#[derive(Debug, PartialEq, Eq)]
+struct DisplayGroup {
+    mods: ModFlags,
+    entries: Vec<DisplayEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DisplayEntry {
+    keys: Vec<Key>,
+    text: String,
+    pinned: bool,
+}
+
 fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
     let mut buckets: BTreeMap<KeyChord, ChordBucket> = BTreeMap::new();
-
     for entry in hints.entries.iter() {
         let chords = entry.sequence.chords();
         if chords.len() <= pending.len() || &chords[..pending.len()] != pending {
             continue;
         }
-        let bucket = buckets.entry(chords[pending.len()]).or_default();
+        let chord = chords[pending.len()];
+        let bucket = buckets.entry(chord).or_default();
         if chords.len() == pending.len() + 1 {
             bucket.leaf = Some((entry.label.clone(), entry.pinned));
         } else {
@@ -160,34 +156,95 @@ fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
         bucket.any_user |= entry.user_set;
     }
 
-    let mut items: Vec<HintItem> = buckets
+    let mut items: Vec<_> = buckets
         .into_iter()
         .map(|(chord, bucket)| {
             let (text, pinned) = match (bucket.leaf, bucket.deeper) {
                 (Some((label, pinned)), 0) => (label, pinned),
-                (Some((label, pinned)), n) => (format!("{label} +{n}"), pinned),
-                (None, n) => {
-                    let pure = !bucket.any_user && !removed_under(hints, pending, chord);
-                    let text = pure
+                (Some((label, pinned)), count) => (format!("{label} +{count}"), pinned),
+                (None, count) => {
+                    let untouched = !bucket.any_user && !removed_under(hints, pending, chord);
+                    let text = untouched
                         .then(|| hints.prefix_labels.get(&chord).cloned())
                         .flatten()
-                        .unwrap_or_else(|| format!("+{n}"));
+                        .unwrap_or_else(|| format!("+{count}"));
                     (text, false)
                 }
             };
             HintItem {
-                key: chord.to_string(),
+                chord,
                 text,
                 pinned,
             }
         })
         .collect();
-    items.sort_by_key(|item| !item.pinned);
+    items.sort_by_key(|item| {
+        (
+            !item.pinned,
+            modifier_rank(item.chord.mods),
+            key_rank(item.chord.key),
+        )
+    });
     items
 }
 
-/// Whether any user-removed key in the current mode sits under
-/// `pending + chord` — including that exact sequence.
+fn display_groups(items: Vec<HintItem>) -> Vec<DisplayGroup> {
+    let mut groups: Vec<DisplayGroup> = Vec::new();
+    for item in items {
+        let group = match groups
+            .iter_mut()
+            .find(|group| group.mods == item.chord.mods)
+        {
+            Some(group) => group,
+            None => {
+                let index = groups.len();
+                groups.push(DisplayGroup {
+                    mods: item.chord.mods,
+                    entries: Vec::new(),
+                });
+                &mut groups[index]
+            }
+        };
+        if let Some(entry) = group
+            .entries
+            .iter_mut()
+            .find(|entry| entry.text == item.text && entry.pinned == item.pinned)
+        {
+            entry.keys.push(item.chord.key);
+        } else {
+            group.entries.push(DisplayEntry {
+                keys: vec![item.chord.key],
+                text: item.text,
+                pinned: item.pinned,
+            });
+        }
+    }
+    groups.sort_by_key(|group| modifier_rank(group.mods));
+    groups
+}
+
+fn prefix_text(hints: &KeymapHints, chord: KeyChord) -> Option<String> {
+    let mut count = 0;
+    let mut any_user = false;
+    for entry in hints.entries.iter() {
+        let chords = entry.sequence.chords();
+        if chords.len() > 1 && chords[0] == chord {
+            count += 1;
+            any_user |= entry.user_set;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let untouched = !any_user && !removed_under(hints, &[], chord);
+    Some(
+        untouched
+            .then(|| hints.prefix_labels.get(&chord).cloned())
+            .flatten()
+            .unwrap_or_else(|| format!("+{count}")),
+    )
+}
+
 fn removed_under(hints: &KeymapHints, pending: &[KeyChord], chord: KeyChord) -> bool {
     hints.removed.iter().any(|sequence| {
         let chords = sequence.chords();
@@ -197,38 +254,164 @@ fn removed_under(hints: &KeymapHints, pending: &[KeyChord], chord: KeyChord) -> 
     })
 }
 
-/// Write `line` at `(x, y)` clipped to `max_width`, skipping rows outside the
-/// buffer — the same resize guard the frame's other chrome rows use.
-fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
-    if y < buf.area.top() || y >= buf.area.bottom() {
-        return;
+/// The accent ribbon for one already-pressed chord of the pending sequence.
+fn chord_ribbon(chord: KeyChord, label: Option<&str>) -> Line<'static> {
+    let mut spans = Vec::new();
+    if !chord.mods.is_empty() {
+        spans.push(Span::styled(
+            format!(" {} + ", human_modifiers(chord.mods)),
+            breadcrumb_modifier_style(),
+        ));
     }
-    buf.set_line(x, y, line, max_width);
+    spans.push(Span::styled(
+        format!(" {} ", human_key(chord.key)),
+        breadcrumb_key_style(),
+    ));
+    if let Some(label) = label {
+        spans.push(Span::styled(format!(" {label} "), breadcrumb_key_style()));
+    }
+    Line::from(spans)
 }
 
-/// Accent style on a hint's key glyph.
-fn hint_key_style() -> Style {
+fn entry_ribbon(entry: &DisplayEntry, key_style: Style, label_style: Style) -> Line<'static> {
+    let keys = entry
+        .keys
+        .iter()
+        .map(|key| human_key(*key))
+        .collect::<Vec<_>>()
+        .join("");
+    Line::from(vec![
+        Span::styled(format!(" {keys} "), key_style),
+        Span::styled(format!(" {} ", entry.text), label_style),
+    ])
+}
+
+fn human_modifiers(mods: ModFlags) -> String {
+    let mut names = Vec::new();
+    if mods.contains(ModFlags::CTRL) {
+        names.push("Ctrl");
+    }
+    if mods.contains(ModFlags::ALT) {
+        names.push("Alt");
+    }
+    if mods.contains(ModFlags::SHIFT) {
+        names.push("Shift");
+    }
+    if mods.contains(ModFlags::SUPER) {
+        names.push("Super");
+    }
+    names.join("+")
+}
+
+fn human_key(key: Key) -> String {
+    match key {
+        Key::Char(c) => c.to_string(),
+        Key::Named(NamedKey::Left) => "←".to_owned(),
+        Key::Named(NamedKey::Down) => "↓".to_owned(),
+        Key::Named(NamedKey::Up) => "↑".to_owned(),
+        Key::Named(NamedKey::Right) => "→".to_owned(),
+        Key::Named(NamedKey::Enter) => "ENTER".to_owned(),
+        Key::Named(NamedKey::Backspace) => "BACKSPACE".to_owned(),
+        Key::Named(NamedKey::Esc) => "ESC".to_owned(),
+        Key::Named(NamedKey::Space) => "SPACE".to_owned(),
+        Key::Named(named) => named.to_string(),
+    }
+}
+
+fn modifier_rank(mods: ModFlags) -> u16 {
+    match mods.bits() {
+        1 => 0, // Ctrl
+        2 => 1, // Alt
+        5 => 2, // Ctrl+Shift
+        4 => 3, // Shift
+        8 => 4, // Super
+        bits => 5 + u16::from(bits),
+    }
+}
+
+fn key_rank(key: Key) -> (u8, String) {
+    let direction = match key {
+        Key::Named(NamedKey::Left) => 0,
+        Key::Named(NamedKey::Down) => 1,
+        Key::Named(NamedKey::Up) => 2,
+        Key::Named(NamedKey::Right) => 3,
+        _ => 4,
+    };
+    (direction, human_key(key))
+}
+
+fn paint_whole(buf: &mut Buffer, x: &mut u16, y: u16, right_edge: u16, line: &Line<'_>) -> bool {
+    let width = line.width() as u16;
+    if x.saturating_add(width) > right_edge {
+        return false;
+    }
+    set_line_clipped(buf, *x, y, line, width);
+    *x += width;
+    true
+}
+
+fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
+    if y >= buf.area.top() && y < buf.area.bottom() {
+        buf.set_line(x, y, line, max_width);
+    }
+}
+
+/// A modifier group's `Ctrl +` header: its ramp stop as plain colored text.
+fn ramp_header_style(index: usize, count: usize) -> Style {
     Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::ramp(index, count))
         .add_modifier(Modifier::BOLD)
 }
 
-/// Dim style on a hint's action name, group label, or `+N` marker.
-fn hint_label_style() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
-}
-
-/// Inverted accent on the pending-sequence breadcrumb, marking the chords
-/// already pressed.
-fn hint_breadcrumb_style() -> Style {
+/// A group's key block: light text on the group's ramp stop.
+fn ramp_key_style(index: usize, count: usize) -> Style {
     Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        .fg(theme::ON_RAMP)
+        .bg(theme::ramp(index, count))
+        .add_modifier(Modifier::BOLD)
 }
 
-/// Alarm style on the keymap-revert marker.
-fn hint_revert_style() -> Style {
-    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+/// A group's action-label block: the same stop dimmed, quiet text.
+fn ramp_label_style(index: usize, count: usize) -> Style {
+    Style::default()
+        .fg(theme::ON_RAMP_DIM)
+        .bg(theme::ramp_dim(index, count))
+}
+
+/// The pressed-prefix breadcrumb's modifier text: accent on the bar.
+fn breadcrumb_modifier_style() -> Style {
+    Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The pressed-prefix breadcrumb's key/label blocks: dark text on the
+/// accent, brighter than any ramp stop, so the in-progress chords stand out.
+fn breadcrumb_key_style() -> Style {
+    Style::default()
+        .fg(theme::ON_ACCENT)
+        .bg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn breadcrumb_arrow_style() -> Style {
+    Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The `…` marking hints dropped for width.
+fn overflow_style() -> Style {
+    Style::default()
+        .fg(theme::ON_RAMP_DIM)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn revert_style() -> Style {
+    Style::default()
+        .fg(Color::White)
+        .bg(Color::Red)
+        .add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

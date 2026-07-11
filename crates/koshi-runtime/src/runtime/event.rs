@@ -21,6 +21,7 @@ use koshi_core::{
     command::CommandEnvelope,
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
+    key::KeyChord,
     process::ExitStatus,
 };
 
@@ -80,7 +81,16 @@ pub enum RuntimeEvent {
     /// A request to stop the event loop and shut the process down. Produced by
     /// the quit keybinding or by outer-input reaching end of stream.
     Quit,
-    /// Raw input bytes read from a client's terminal, awaiting decoding.
+    /// One decoded outer-terminal key awaiting keybinding resolution.
+    KeyInput {
+        /// Client whose terminal produced the key.
+        client_id: ClientId,
+        /// Canonical chord used for keymap lookup.
+        chord: KeyChord,
+        /// Terminal bytes used if the active mode falls through.
+        raw_bytes: Vec<u8>,
+    },
+    /// Raw input bytes ready for direct pane passthrough.
     OuterInput {
         /// Client the input came from.
         client_id: ClientId,

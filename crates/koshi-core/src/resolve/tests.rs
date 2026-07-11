@@ -142,6 +142,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::RenameSession(RenameSessionArgs { session: None }),
         ),
+        ("quit", ActionArgs::None, Command::Quit),
         ("toggle-lock", ActionArgs::None, Command::ToggleLockMode),
         (
             "lock",
@@ -184,6 +185,7 @@ fn plugin_metadata(owner: PluginId) -> ActionMetadata {
         args_schema: None,
         handler: ActionHandlerRef::PluginHostCall(owner),
         status: ActionStatus::Available,
+        continuous: false,
     }
 }
 
@@ -198,6 +200,7 @@ fn macro_metadata(steps: Vec<ActionRef>) -> ActionMetadata {
         args_schema: None,
         handler: ActionHandlerRef::Sequence(steps),
         status: ActionStatus::Available,
+        continuous: false,
     }
 }
 
@@ -292,7 +295,7 @@ fn coming_soon_actions_are_refused() {
         .map(|(action, _)| action)
         .collect();
 
-    assert_eq!(coming_soon.len(), 16);
+    assert_eq!(coming_soon.len(), 15);
     for action in coming_soon {
         assert_eq!(
             resolve_action(&action, &ActionArgs::None, &registry),
@@ -331,7 +334,6 @@ fn coming_soon_names_are_pinned() {
             "plugin-reload",
             "plugin-uninstall",
             "plugin-update",
-            "quit",
         ]
     );
 }

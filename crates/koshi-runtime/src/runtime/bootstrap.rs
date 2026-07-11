@@ -15,7 +15,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_core::process::SpawnSpec;
 use koshi_pty::error::PtyError;
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{pane_viewport, Client, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
@@ -27,7 +27,7 @@ use crate::runtime::state::Runtime;
 impl Runtime {
     /// Seed the first session/tab/root-pane/client for a local single-process
     /// start and return the client's id. The root pane runs the default shell,
-    /// sized to `viewport`; `now` stamps the client attach and tab creation.
+    /// sized to the middle pane region of `viewport`; `now` stamps attach/create.
     ///
     /// The child is spawned before any state is committed, so a failed launch
     /// leaves no session behind and surfaces as `Err`.
@@ -43,8 +43,8 @@ impl Runtime {
         let pane_id = PaneId::new();
         let client_id = ClientId::new();
 
-        // Size the sole root pane against the whole viewport.
-        let spawn_size = size_root_pane(pane_id, viewport);
+        // Chrome owns one row above and below the pane region.
+        let spawn_size = size_root_pane(pane_id, pane_viewport(viewport));
 
         // Launch the shell first: on failure nothing is registered.
         let spawn_spec = SpawnSpec::default_shell(None, BTreeMap::new());

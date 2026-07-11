@@ -395,6 +395,12 @@ pub struct ActionMetadata {
     pub handler: ActionHandlerRef,
     /// Whether the runtime implements the action yet.
     pub status: ActionStatus,
+    /// Whether the action repeats from a held prefix: fired from a
+    /// multi-chord binding, the binding's prefix stays armed so the next
+    /// chord alone fires again (`<C-s> h h h` resizes three times).
+    /// System-declared per action — never authored in a binding.
+    #[serde(default)]
+    pub continuous: bool,
 }
 
 /// Build one `core:` seed entry. Names here are compile-time constants known to
@@ -422,6 +428,7 @@ fn core_seed(
         args_schema: None,
         handler,
         status,
+        continuous: false,
     };
     (action, metadata)
 }
@@ -436,7 +443,7 @@ fn core_seed(
 /// [`ActionArgsSchema`], not duplicated into [`CommandKind`].
 ///
 /// Each entry declares its own [`ActionStatus`]. The `copy-mode-*` and
-/// `plugin-*` actions and `quit` have no runtime handler yet and are seeded
+/// `plugin-*` actions have no runtime handler yet and are seeded
 /// `ComingSoon`, so introspection hides them; every other action is
 /// `Available`. Status is per-action, so a family lands one member at a time
 /// rather than all at once.
@@ -580,11 +587,11 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "quit",
             "Quit",
-            "Prompt the issuing client to quit the client or session",
+            "Quit koshi, ending every pane's process immediately",
             Client,
             vec![ClientTarget, Session],
             CoreCommand(CommandKind::Quit),
-            ComingSoon,
+            Available,
         ),
         // --- Lock mode ---
         core_seed(
@@ -718,6 +725,16 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             ComingSoon,
         )
     }));
+
+    // Repeat-from-prefix actions: fired from a multi-chord binding, the
+    // prefix stays armed so the next chord alone fires again (`<C-s> h h h`,
+    // `<C-p> ← ← ←`). A system property of the action, never authored in a
+    // binding.
+    for (action, metadata) in &mut seeds {
+        if matches!(action.name.as_str(), "resize-pane" | "focus-pane") {
+            metadata.continuous = true;
+        }
+    }
 
     seeds
 }

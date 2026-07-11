@@ -71,7 +71,7 @@ fn pty_output_event_renders_to_the_screen() {
     .is_continue());
 
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    render(&mut terminal, &runtime, client_id).expect("render");
+    render(&mut terminal, &runtime, client_id, &mut String::new()).expect("render");
 
     assert!(
         screen_text(&terminal).contains("hello"),
@@ -227,4 +227,48 @@ fn run_loop_exits_on_a_quit_event() {
         runtime.has_active_panes(),
         "the shell is still alive; the quit event ended the loop"
     );
+}
+
+#[test]
+fn resize_event_reflows_before_the_next_queued_quit() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, tx, client_id, pane_id) = boot(&fake);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    tx.send(RuntimeEvent::Resize {
+        client_id,
+        size: Size {
+            cols: 100,
+            rows: 30,
+        },
+    })
+    .expect("queue resize");
+    tx.send(RuntimeEvent::Quit).expect("queue quit");
+
+    run_loop(&mut runtime, &mut terminal, client_id).expect("loop");
+
+    assert_eq!(
+        runtime.build_snapshot(client_id).unwrap().client.viewport,
+        Size {
+            cols: 100,
+            rows: 30
+        }
+    );
+    assert_eq!(
+        *fake.resizes(pane_id).unwrap().last().unwrap(),
+        koshi_core::process::PtySize { cols: 98, rows: 26 }
+    );
+}
+
+#[test]
+fn quit_event_teardown_group_kills_without_grace_delay() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, tx, client_id, pane_id) = boot(&fake);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    tx.send(RuntimeEvent::Quit).expect("queue quit");
+
+    run_loop(&mut runtime, &mut terminal, client_id).expect("loop");
+    let outcome: thread::Result<Result<(), <TestBackend as Backend>::Error>> = Ok(Ok(()));
+    teardown(&mut runtime, outcome).expect("teardown");
+
+    assert_eq!(fake.kills(pane_id).expect("kills"), vec![KillPolicy::Tree]);
 }

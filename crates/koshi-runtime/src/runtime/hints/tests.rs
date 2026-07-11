@@ -22,8 +22,8 @@ fn ctrl(key: char) -> KeyChord {
 fn normal_mode_joins_defaults_to_display_names() {
     let hints = catalog().hints_for(LockMode::Normal);
 
-    // 22 shipped normal-mode bindings minus the dead `<C-q>` quit.
-    assert_eq!(hints.entries.len(), 21);
+    // All 20 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.entries.len(), 20);
 
     let new_pane = KeySequence::new(
         ctrl('p'),
@@ -40,24 +40,31 @@ fn normal_mode_joins_defaults_to_display_names() {
 }
 
 #[test]
-fn coming_soon_action_yields_no_hint() {
-    let hints = catalog().hints_for(LockMode::Normal);
+fn quit_binding_surfaces_in_both_modes() {
+    let catalog = catalog();
     let quit = KeySequence::from(ctrl('q'));
-    assert!(
-        !hints.entries.iter().any(|entry| entry.sequence == quit),
-        "the ComingSoon quit binding must not surface as a hint"
-    );
+    for mode in [LockMode::Normal, LockMode::Locked] {
+        let hints = catalog.hints_for(mode);
+        let entry = hints
+            .entries
+            .iter()
+            .find(|entry| entry.sequence == quit)
+            .unwrap_or_else(|| panic!("{mode:?} binds the quit chord"));
+        assert_eq!(entry.label, "Quit");
+    }
 }
 
 #[test]
 fn locked_mode_pins_the_reserved_unlock() {
     let hints = catalog().hints_for(LockMode::Locked);
-    assert_eq!(hints.entries.len(), 1);
-    let entry = &hints.entries[0];
-    assert_eq!(
-        entry.sequence,
-        KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)
-    );
+    // The reserved unlock (the same `<C-l>` that locks in normal mode) plus
+    // the quit chord.
+    assert_eq!(hints.entries.len(), 2);
+    let entry = hints
+        .entries
+        .iter()
+        .find(|entry| entry.sequence == KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK))
+        .expect("locked mode binds the reserved unlock");
     assert_eq!(entry.label, "Unlock");
     assert!(entry.pinned);
 }

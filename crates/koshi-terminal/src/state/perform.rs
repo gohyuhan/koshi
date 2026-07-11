@@ -38,7 +38,7 @@
 //! accessors ([`params`]) — while the [`vte::Perform`] trait impl itself stays
 //! here as the dispatch surface.
 
-use crate::grid::state::Cell;
+use crate::grid::state::{Cell, RowEnd};
 use crate::state::{MouseEncoding, MouseTracking, Screen, TerminalState};
 use unicode_width::UnicodeWidthChar;
 
@@ -107,6 +107,11 @@ impl vte::Perform for TerminalState {
         // overwrites in place; either way the parked latch is cleared.
         if self.active_cursor().pending_wrap {
             if self.modes.autowrap {
+                // The row the cursor leaves soft-wraps into the next: record
+                // it (before the linefeed, so a scroll carries the mark with
+                // the row) so a resize reflow re-joins the two rows.
+                let row = self.active_cursor().row;
+                self.active_grid_mut().set_row_end(row, RowEnd::Soft);
                 self.linefeed();
                 self.active_cursor_mut().col = 0;
             }
@@ -141,6 +146,9 @@ impl vte::Perform for TerminalState {
             if let Some(cell) = self.active_grid_mut().cell_mut(row, last_col) {
                 *cell = Cell::blank_with(style.bg_fill());
             }
+            // The freed last column is a wide-glyph spacer, not text: record
+            // the wrap so a reflow re-joins the rows AND drops the spacer.
+            self.active_grid_mut().set_row_end(row, RowEnd::SoftWide);
             self.linefeed();
             self.active_cursor_mut().col = 0;
             self.clear_wrap_latch();

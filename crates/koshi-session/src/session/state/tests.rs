@@ -32,10 +32,8 @@ fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
     // A client on a different tab must not count.
     viewer(&mut session, other_tab, 10, 1);
 
-    // Per-axis minimum: smallest cols (40) and smallest rows (5), independently —
-    // not the lexicographically smaller viewport (which would keep 24 rows and
-    // overflow the 5-row viewer).
-    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 40, rows: 5 }));
+    // Full-viewport minimum is 40×5; reserving two chrome rows leaves 40×3.
+    assert_eq!(session.tab_viewport(tab), Some(Size { cols: 40, rows: 3 }));
 }
 
 #[test]

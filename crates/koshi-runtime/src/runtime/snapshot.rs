@@ -27,6 +27,7 @@ use koshi_renderer::snapshot::{
     RenderSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_session::session::state::{Session, Tab};
+use koshi_terminal::state::Screen;
 
 use crate::runtime::state::Runtime;
 
@@ -120,9 +121,9 @@ impl Runtime {
                 active_tab: active_tab_id,
                 focused_pane: client.focused_pane(active_tab_id),
                 lock_mode: client.lock_mode(),
-                // The input pipeline's sequence matcher supplies the live
-                // pending state once it lands; until then no sequence pends.
-                pending_sequence: None,
+                pending_sequence: client
+                    .pending_key_sequence()
+                    .map(|pending| pending.sequence.clone()),
             },
             plugin_ui: PluginUiSnapshot::default(),
             keymap_hints: self.keymap_hints.hints_for(client.lock_mode()),
@@ -167,11 +168,20 @@ impl Runtime {
         // screen), so the composed grid, the indicator, and cursor suppression
         // all agree on how far the view is scrolled.
         let (grid, view_offset) = state.scrolled_view(view_offset);
+        // On the alternate screen a full-screen app is running: its OSC 0/1/2
+        // title names the pane. On the primary screen the shell's OSC 7 cwd
+        // (`~`-shortened) is the more useful name, with the OSC title as the
+        // fallback. An explicit `rename-pane` does not feed the rendered title.
+        let title = match state.active_screen() {
+            Screen::Alternate => state.title().map(str::to_owned),
+            Screen::Primary => state
+                .current_cwd()
+                .map(|cwd| display_path(cwd.path()))
+                .or_else(|| state.title().map(str::to_owned)),
+        };
         PaneSnapshot {
             id: pane_id,
-            // OSC 0/1/2 title only; an explicit `rename-pane` does not feed the
-            // rendered title.
-            title: state.title().map(str::to_owned),
+            title,
             cursor: CursorSnapshot {
                 row,
                 col,
@@ -221,6 +231,31 @@ impl Runtime {
             .values_mut()
             .find(|session| session.panes.get(pane_id).is_some())
     }
+}
+
+/// One path as pane-title text: the user's home directory prefix shortened
+/// to `~`, everything else verbatim.
+fn display_path(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    shorten_home(path, home.as_deref())
+}
+
+/// The `~`-shortening behind [`display_path`], with the home directory passed
+/// in. The prefix must end on a path boundary — a sibling like `/Users/ab2`
+/// next to home `/Users/ab` stays whole.
+fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    let text = path.display().to_string();
+    if let Some(home) = home {
+        let home = home.display().to_string();
+        if let Some(rest) = text.strip_prefix(&home) {
+            if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    text
 }
 
 /// Solve `tab`'s current layout over a `viewport`-sized rect at origin `(0, 0)`
