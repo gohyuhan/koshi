@@ -92,10 +92,8 @@ impl Style {
     /// cleared by erase, scroll, and resize.
     pub fn bg_fill(&self) -> Self {
         Style {
-            fg: Color::Default,
             bg: self.bg,
-            attrs: AttrFlags::default(),
-            underline_color: None,
+            ..Style::default()
         }
     }
 

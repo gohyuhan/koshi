@@ -44,6 +44,14 @@ pub fn merge(base: KoshiConfig, layers: Vec<PartialKoshiConfig>) -> KoshiConfig 
     config
 }
 
+/// Overwrites `field` with `value` when the layer set one, leaving it
+/// untouched otherwise — the field-level merge grain every section below uses.
+fn merge_field<T>(field: &mut T, value: Option<T>) {
+    if let Some(value) = value {
+        *field = value;
+    }
+}
+
 /// One config layer: [`KoshiConfig`] with every section optional. A section
 /// left `None` leaves the lower layers untouched;
 /// a section set to `Some` applies its own per-field overrides.
@@ -113,12 +121,8 @@ pub struct PartialPaneConfig {
 
 impl PartialPaneConfig {
     fn apply(self, target: &mut PaneConfig) {
-        if let Some(v) = self.min_cols {
-            target.min_cols = v;
-        }
-        if let Some(v) = self.min_rows {
-            target.min_rows = v;
-        }
+        merge_field(&mut target.min_cols, self.min_cols);
+        merge_field(&mut target.min_rows, self.min_rows);
     }
 }
 
@@ -133,12 +137,8 @@ pub struct PartialScrollbackConfig {
 
 impl PartialScrollbackConfig {
     fn apply(self, target: &mut ScrollbackConfig) {
-        if let Some(v) = self.max_lines {
-            target.max_lines = v;
-        }
-        if let Some(v) = self.max_bytes {
-            target.max_bytes = v;
-        }
+        merge_field(&mut target.max_lines, self.max_lines);
+        merge_field(&mut target.max_bytes, self.max_bytes);
     }
 }
 
@@ -164,25 +164,13 @@ pub struct PartialKeybindingsConfig {
 
 impl PartialKeybindingsConfig {
     fn apply(self, target: &mut KeybindingsConfig) {
-        if let Some(v) = self.chord_timeout_ms {
-            target.chord_timeout_ms = v;
-        }
-        if let Some(v) = self.which_key_delay_ms {
-            target.which_key_delay_ms = v;
-        }
-        if let Some(v) = self.max_chord_depth {
-            target.max_chord_depth = v;
-        }
-        if let Some(v) = self.leader {
-            target.leader = v;
-        }
+        merge_field(&mut target.chord_timeout_ms, self.chord_timeout_ms);
+        merge_field(&mut target.which_key_delay_ms, self.which_key_delay_ms);
+        merge_field(&mut target.max_chord_depth, self.max_chord_depth);
+        merge_field(&mut target.leader, self.leader);
         // ponytail: whole-map replace; per-mode keymap merge is the keymap pass.
-        if let Some(v) = self.modes {
-            target.modes = v;
-        }
-        if let Some(v) = self.unlock_alternative {
-            target.unlock_alternative = v;
-        }
+        merge_field(&mut target.modes, self.modes);
+        merge_field(&mut target.unlock_alternative, self.unlock_alternative);
     }
 }
 
@@ -199,12 +187,8 @@ pub struct PartialLayoutDefaults {
 
 impl PartialLayoutDefaults {
     fn apply(self, target: &mut LayoutDefaults) {
-        if let Some(v) = self.new_pane_direction {
-            target.new_pane_direction = v;
-        }
-        if let Some(v) = self.default_layout {
-            target.default_layout = v;
-        }
+        merge_field(&mut target.new_pane_direction, self.new_pane_direction);
+        merge_field(&mut target.default_layout, self.default_layout);
     }
 }
 
@@ -219,9 +203,7 @@ pub struct PartialPluginActivationConfig {
 impl PartialPluginActivationConfig {
     fn apply(self, target: &mut PluginActivationConfig) {
         // ponytail: whole-list replace; per-entry merge is the plugin pass.
-        if let Some(v) = self.entries {
-            target.entries = v;
-        }
+        merge_field(&mut target.entries, self.entries);
     }
 }
 
@@ -240,18 +222,13 @@ pub struct PartialMouseConfig {
 
 impl PartialMouseConfig {
     fn apply(self, target: &mut MouseConfig) {
-        if let Some(v) = self.border_resize {
-            target.border_resize = v;
-        }
-        if let Some(v) = self.border_resize_in_lock {
-            target.border_resize_in_lock = v;
-        }
-        if let Some(v) = self.click_to_focus {
-            target.click_to_focus = v;
-        }
-        if let Some(v) = self.scroll_lines {
-            target.scroll_lines = v;
-        }
+        merge_field(&mut target.border_resize, self.border_resize);
+        merge_field(
+            &mut target.border_resize_in_lock,
+            self.border_resize_in_lock,
+        );
+        merge_field(&mut target.click_to_focus, self.click_to_focus);
+        merge_field(&mut target.scroll_lines, self.scroll_lines);
     }
 }
 
@@ -268,15 +245,12 @@ pub struct PartialCopyConfig {
 
 impl PartialCopyConfig {
     fn apply(self, target: &mut CopyConfig) {
-        if let Some(v) = self.copy_on_select {
-            target.copy_on_select = v;
-        }
-        if let Some(v) = self.trim_trailing_whitespace {
-            target.trim_trailing_whitespace = v;
-        }
-        if let Some(v) = self.clipboard {
-            target.clipboard = v;
-        }
+        merge_field(&mut target.copy_on_select, self.copy_on_select);
+        merge_field(
+            &mut target.trim_trailing_whitespace,
+            self.trim_trailing_whitespace,
+        );
+        merge_field(&mut target.clipboard, self.clipboard);
     }
 }
 
@@ -294,15 +268,9 @@ pub struct PartialTerminalConfig {
 
 impl PartialTerminalConfig {
     fn apply(self, target: &mut TerminalConfig) {
-        if let Some(v) = self.term {
-            target.term = v;
-        }
-        if let Some(v) = self.colorterm {
-            target.colorterm = v;
-        }
-        if let Some(v) = self.default_shell {
-            target.default_shell = v;
-        }
+        merge_field(&mut target.term, self.term);
+        merge_field(&mut target.colorterm, self.colorterm);
+        merge_field(&mut target.default_shell, self.default_shell);
     }
 }
 
@@ -317,9 +285,7 @@ pub struct PartialThemeConfig {
 
 impl PartialThemeConfig {
     fn apply(self, target: &mut ThemeConfig) {
-        if let Some(v) = self.name {
-            target.name = v;
-        }
+        merge_field(&mut target.name, self.name);
         if let Some(colors) = self.colors {
             colors.apply(&mut target.colors);
         }
@@ -366,54 +332,22 @@ pub struct PartialColorPalette {
 
 impl PartialColorPalette {
     fn apply(self, target: &mut ColorPalette) {
-        if let Some(v) = self.foreground {
-            target.foreground = v;
-        }
-        if let Some(v) = self.background {
-            target.background = v;
-        }
-        if let Some(v) = self.accent {
-            target.accent = v;
-        }
-        if let Some(v) = self.border_focused {
-            target.border_focused = v;
-        }
-        if let Some(v) = self.border_unfocused {
-            target.border_unfocused = v;
-        }
-        if let Some(v) = self.tab_active_fg {
-            target.tab_active_fg = v;
-        }
-        if let Some(v) = self.tab_active_bg {
-            target.tab_active_bg = v;
-        }
-        if let Some(v) = self.tab_inactive_fg {
-            target.tab_inactive_fg = v;
-        }
-        if let Some(v) = self.tab_inactive_bg {
-            target.tab_inactive_bg = v;
-        }
-        if let Some(v) = self.mode_fg {
-            target.mode_fg = v;
-        }
-        if let Some(v) = self.mode_bg {
-            target.mode_bg = v;
-        }
-        if let Some(v) = self.stack_header_fg {
-            target.stack_header_fg = v;
-        }
-        if let Some(v) = self.stack_header_bg {
-            target.stack_header_bg = v;
-        }
-        if let Some(v) = self.hint_key {
-            target.hint_key = v;
-        }
-        if let Some(v) = self.hint_label {
-            target.hint_label = v;
-        }
-        if let Some(v) = self.hint_bg {
-            target.hint_bg = v;
-        }
+        merge_field(&mut target.foreground, self.foreground);
+        merge_field(&mut target.background, self.background);
+        merge_field(&mut target.accent, self.accent);
+        merge_field(&mut target.border_focused, self.border_focused);
+        merge_field(&mut target.border_unfocused, self.border_unfocused);
+        merge_field(&mut target.tab_active_fg, self.tab_active_fg);
+        merge_field(&mut target.tab_active_bg, self.tab_active_bg);
+        merge_field(&mut target.tab_inactive_fg, self.tab_inactive_fg);
+        merge_field(&mut target.tab_inactive_bg, self.tab_inactive_bg);
+        merge_field(&mut target.mode_fg, self.mode_fg);
+        merge_field(&mut target.mode_bg, self.mode_bg);
+        merge_field(&mut target.stack_header_fg, self.stack_header_fg);
+        merge_field(&mut target.stack_header_bg, self.stack_header_bg);
+        merge_field(&mut target.hint_key, self.hint_key);
+        merge_field(&mut target.hint_label, self.hint_label);
+        merge_field(&mut target.hint_bg, self.hint_bg);
     }
 }
 

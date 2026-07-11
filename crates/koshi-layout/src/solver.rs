@@ -202,27 +202,33 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
     match node {
         LayoutNode::Pane(_) => border_inclusive_min(default_min, true),
         LayoutNode::Split(split) => match split.direction {
-            SplitDirection::Horizontal => {
-                let mut cols: u16 = 0;
-                let mut rows: u16 = 0;
+            SplitDirection::Horizontal | SplitDirection::Vertical => {
+                let horizontal = split.direction == SplitDirection::Horizontal;
+                // Floors sum along the split axis; the cross axis takes the
+                // largest child minimum.
+                let mut along: u16 = 0;
+                let mut across: u16 = 0;
                 for (index, child) in split.children.iter().enumerate() {
                     let child_min = min_size(&child.node, default_min);
-                    let floor = child_floor(split, index, child_min.cols);
-                    cols = cols.saturating_add(floor);
-                    rows = rows.max(child_min.rows);
+                    let (axis_min, cross_min) = if horizontal {
+                        (child_min.cols, child_min.rows)
+                    } else {
+                        (child_min.rows, child_min.cols)
+                    };
+                    along = along.saturating_add(child_floor(split, index, axis_min));
+                    across = across.max(cross_min);
                 }
-                Size { cols, rows }
-            }
-            SplitDirection::Vertical => {
-                let mut cols: u16 = 0;
-                let mut rows: u16 = 0;
-                for (index, child) in split.children.iter().enumerate() {
-                    let child_min = min_size(&child.node, default_min);
-                    let floor = child_floor(split, index, child_min.rows);
-                    rows = rows.saturating_add(floor);
-                    cols = cols.max(child_min.cols);
+                if horizontal {
+                    Size {
+                        cols: along,
+                        rows: across,
+                    }
+                } else {
+                    Size {
+                        cols: across,
+                        rows: along,
+                    }
                 }
-                Size { cols, rows }
             }
             SplitDirection::Stacked => stack_min_size(split, default_min),
         },

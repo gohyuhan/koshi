@@ -219,12 +219,8 @@ pub enum FocusTarget {
 pub struct FocusPaneArgs {
     /// Pane to focus, by id or by direction from the focused pane.
     pub target: FocusTarget,
-    /// Client whose focus moves. When set, that client is targeted and takes
-    /// priority even over an in-session issuer; a client not attached to the
-    /// acting session is rejected outright (no fallback). `None` targets the
-    /// issuing client or, for a source with no client, the session's sole
-    /// attached client — a session with several attached clients and no named
-    /// target is rejected rather than moving an arbitrary client's focus.
+    /// Client whose focus moves; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
     pub client: Option<ClientId>,
 }
 
@@ -234,13 +230,8 @@ pub struct FocusPaneArgs {
 pub struct NewTabArgs {
     /// Working directory for the tab's first pane; `None` inherits.
     pub cwd: Option<PathBuf>,
-    /// Client that switches onto the new tab. When set, that client is
-    /// targeted and takes priority even over an in-session issuer; a client
-    /// not attached to the acting session is rejected outright (no fallback).
-    /// `None` targets the issuing client or, for a source with no client, the
-    /// session's sole attached client — a session with several attached
-    /// clients and no named target is rejected rather than switching an
-    /// arbitrary one.
+    /// Client that switches onto the new tab; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
     pub client: Option<ClientId>,
 }
 
@@ -284,13 +275,8 @@ pub enum TabTarget {
 pub struct FocusTabArgs {
     /// Which tab to focus.
     pub target: TabTarget,
-    /// Client whose view switches. When set, that client is targeted and
-    /// takes priority even over an in-session issuer; a client not attached
-    /// to the acting session is rejected outright (no fallback). `None`
-    /// targets the issuing client or, for a source with no client, the
-    /// session's sole attached client — a session with several attached
-    /// clients and no named target is rejected rather than switching an
-    /// arbitrary client's view.
+    /// Client whose view switches; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
     pub client: Option<ClientId>,
 }
 
