@@ -28,7 +28,8 @@
 //! binding fires when both halves hold: action resolution accepts it as
 //! written (each binding is handed to the real resolver), and a keypress
 //! can reach it — in locked mode the reserved unlock chord resolves
-//! instantly, so a longer sequence opening with it is unreachable. A
+//! instantly, so a longer sequence opening with it is unreachable, and a
+//! `remove` in a higher-precedence layer voids the binding outright. A
 //! binding that fails either half is warned per layer — exactly once, with
 //! the most specific reason — and is otherwise transparent: it claims no
 //! key in the collision scan, never pairs in the prefix scan, steals no
@@ -36,7 +37,10 @@
 //! dead class re-surfaces exactly when it could start to matter:
 //! unregistered actions when their plugin registers (detection re-runs on
 //! plugin lifecycle), the build-fixed classes at the first load of a build
-//! that implements them.
+//! that implements them. A binding voided by a remove draws no warning at
+//! all: the removal is the user's own authored intent, and removing a key
+//! then rebinding it in a higher layer is the supported way to move a key
+//! between user-authored layers without a collision.
 //!
 //! Detection is pure: it reads the layers and writes nothing. Applying the
 //! verdict — at load, new-session, or reload time — is the caller's step.
@@ -470,9 +474,17 @@ pub fn detect_conflicts(
         }
     }
 
-    for layer in layers.iter().filter(|l| l.origin.is_user_authored()) {
+    let removals = removal_index(layers, known_modes);
+
+    for (index, layer) in layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.origin.is_user_authored())
+    {
         scan_layer(
             layer,
+            index,
+            &removals,
             registry,
             known_modes,
             reserved,
@@ -483,6 +495,7 @@ pub fn detect_conflicts(
 
     scan_collisions(
         layers,
+        &removals,
         registry,
         known_modes,
         reserved,
@@ -490,7 +503,7 @@ pub fn detect_conflicts(
         &mut diagnostics,
     );
 
-    let effective = effective_bindings(layers, registry, known_modes, reserved, &locked);
+    let effective = effective_bindings(layers, &removals, registry, known_modes, reserved, &locked);
     scan_prefixes(&effective, &mut diagnostics);
     check_reserved_unlock(&effective, reserved, &locked, &mut diagnostics);
 
@@ -510,6 +523,41 @@ enum BindingState {
     ComingSoon,
     /// The arguments (or macro shape) can never resolve as written.
     Unresolvable,
+}
+
+/// For every `(mode, key)` some layer removes, the index of the
+/// highest-precedence layer removing it. A binding at layer index `i` is
+/// voided when a removal for its key exists at an index greater than `i`
+/// ([`removed_above`]); a layer's own remove never voids its own binding,
+/// so removing and rebinding a key in one layer keeps the rebind.
+/// Unregistered modes are skipped, matching every other scan.
+pub(crate) fn removal_index<'a>(
+    layers: &'a [KeyMapLayer],
+    known_modes: &BTreeSet<ModeName>,
+) -> BTreeMap<(&'a ModeName, &'a KeySequence), usize> {
+    let mut removals: BTreeMap<(&ModeName, &KeySequence), usize> = BTreeMap::new();
+    for (index, layer) in layers.iter().enumerate() {
+        for (mode, bindings) in &layer.modes {
+            if !known_modes.contains(mode) {
+                continue;
+            }
+            for key in &bindings.removed {
+                removals.insert((mode, key), index);
+            }
+        }
+    }
+    removals
+}
+
+/// True when a layer above `index` removes `(mode, key)`, voiding any
+/// binding a layer at `index` holds on it.
+pub(crate) fn removed_above(
+    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
+    mode: &ModeName,
+    key: &KeySequence,
+    index: usize,
+) -> bool {
+    removals.get(&(mode, key)).is_some_and(|&at| at > index)
 }
 
 /// Classifies one binding by asking the real resolver, so detection and the
@@ -539,8 +587,12 @@ fn is_reserved_led(
 
 /// True when the binding participates in firing: the resolver accepts it as
 /// written and no reserved-chord bypass swallows it. Only firing bindings
-/// claim keys in the collision scan or enter the effective map.
-fn is_firing(
+/// claim keys in the collision scan or enter the effective map. Removal by
+/// a higher layer also voids a binding; that check is positional, so it
+/// lives with the callers ([`removed_above`]). The keymap-merge pass reads
+/// the same predicate, so merge and detection can never disagree about what
+/// fires.
+pub(crate) fn is_firing(
     mode: &ModeName,
     key: &KeySequence,
     bound: &BoundAction,
@@ -564,13 +616,18 @@ fn leader_is_typeable(leader: Leader) -> bool {
 
 /// Per-layer warnings for one user-authored layer. An unregistered mode
 /// warns once and its bindings are skipped — the whole overlay is inactive
-/// until the mode registers. Each binding gets at most one cannot-fire
-/// warning, most specific reason first: the resolver's refusal, then the
+/// until the mode registers. A binding a higher layer removes is skipped
+/// silently: the removal is the user's own authored intent, not a surprise
+/// to surface. Each remaining binding gets at most one cannot-fire warning,
+/// most specific reason first: the resolver's refusal, then the
 /// reserved-chord bypass. Only a binding that participates in firing is
 /// checked for a typeable opening chord, since a dead binding steals
 /// nothing.
+#[expect(clippy::too_many_arguments)]
 fn scan_layer(
     layer: &KeyMapLayer,
+    index: usize,
+    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
     registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
@@ -586,6 +643,9 @@ fn scan_layer(
             continue;
         }
         for (key, bound) in &bindings.keys {
+            if removed_above(removals, mode, key, index) {
+                continue;
+            }
             match classify(bound, registry) {
                 BindingState::Live => {}
                 BindingState::Orphan => {
@@ -646,9 +706,13 @@ fn scan_layer(
 /// never escalate a working neighbor into the revert. The collision
 /// re-surfaces on the detection run where the binding turns live — at
 /// plugin registration for orphans, at the first load of the implementing
-/// build for the build-fixed classes.
+/// build for the build-fixed classes. A claim a higher layer removes is
+/// voided the same way — removing a key and rebinding it above is how a
+/// user-authored layer takes a key another user-authored layer holds
+/// without colliding.
 fn scan_collisions(
     layers: &[KeyMapLayer],
+    removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
     registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
@@ -657,13 +721,19 @@ fn scan_collisions(
 ) {
     let mut claims: BTreeMap<(&ModeName, &KeySequence), Vec<(LayerOrigin, &BoundAction)>> =
         BTreeMap::new();
-    for layer in layers.iter().filter(|l| l.origin.is_user_authored()) {
+    for (index, layer) in layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.origin.is_user_authored())
+    {
         for (mode, bindings) in &layer.modes {
             if !known_modes.contains(mode) {
                 continue;
             }
             for (key, bound) in &bindings.keys {
-                if !is_firing(mode, key, bound, registry, reserved, locked) {
+                if removed_above(removals, mode, key, index)
+                    || !is_firing(mode, key, bound, registry, reserved, locked)
+                {
                     continue;
                 }
                 claims
@@ -696,11 +766,13 @@ fn scan_collisions(
 /// The winning **firing** binding per `(mode, key)` after folding the
 /// layers in order: a later layer's firing entry replaces a lower layer's
 /// on the same key. A binding that cannot fire is transparent — the firing
-/// binding beneath it shows through — unregistered modes are omitted, and
-/// locked-mode sequences the reserved chord swallows never enter, so this
-/// map is what a keypress actually reaches.
+/// binding beneath it shows through — a binding a higher layer removes is
+/// voided, unregistered modes are omitted, and locked-mode sequences the
+/// reserved chord swallows never enter, so this map is what a keypress
+/// actually reaches.
 fn effective_bindings<'a>(
     layers: &'a [KeyMapLayer],
+    removals: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
     registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
@@ -708,14 +780,16 @@ fn effective_bindings<'a>(
 ) -> BTreeMap<&'a ModeName, BTreeMap<&'a KeySequence, (LayerOrigin, &'a BoundAction)>> {
     let mut effective: BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>> =
         BTreeMap::new();
-    for layer in layers {
+    for (index, layer) in layers.iter().enumerate() {
         for (mode, bindings) in &layer.modes {
             if !known_modes.contains(mode) {
                 continue;
             }
             let mode_map = effective.entry(mode).or_default();
             for (key, bound) in &bindings.keys {
-                if !is_firing(mode, key, bound, registry, reserved, locked) {
+                if removed_above(removals, mode, key, index)
+                    || !is_firing(mode, key, bound, registry, reserved, locked)
+                {
                     continue;
                 }
                 mode_map.insert(key, (layer.origin, bound));

@@ -45,12 +45,24 @@ fn layer(
     mode_name: &str,
     entries: Vec<(KeySequence, BoundAction)>,
 ) -> KeyMapLayer {
+    layer_with_removed(origin, mode_name, entries, Vec::new())
+}
+
+/// A one-mode layer built from `(sequence, bound action)` entries plus the
+/// keys it removes.
+fn layer_with_removed(
+    origin: LayerOrigin,
+    mode_name: &str,
+    entries: Vec<(KeySequence, BoundAction)>,
+    removed: Vec<KeySequence>,
+) -> KeyMapLayer {
     KeyMapLayer {
         origin,
         modes: BTreeMap::from([(
             mode(mode_name),
             ModeBindings {
                 keys: entries.into_iter().collect(),
+                removed: removed.into_iter().collect(),
             },
         )]),
     }
@@ -1227,4 +1239,185 @@ fn display_messages_are_exact() {
         "leader `S-` is reachable by plain typing; bindings that start with it steal \
          those keys from panes"
     );
+}
+
+#[test]
+fn remove_then_rebind_across_user_layers_is_not_a_collision() {
+    // The supported way to re-key: the session layer removes the project
+    // layer's key, voiding its claim, and rebinds the key itself.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer_with_removed(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+            vec![key],
+        ),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn remove_without_rebind_voids_the_lower_claim() {
+    // Project binds the key, session only removes it: one claim, voided —
+    // no collision, and the key reaches nothing.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer_with_removed(LayerOrigin::Session, "normal", Vec::new(), vec![key]),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn remove_below_both_claims_does_not_stop_their_collision() {
+    // A remove voids only LOWER layers' claims: with the remove at the
+    // bottom user layer, the two claims above it still collide.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::KeyCollision {
+            mode: mode("normal"),
+            key,
+            claims: vec![
+                (LayerOrigin::Project, bound("new-tab")),
+                (LayerOrigin::Session, bound("lock")),
+            ],
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::RevertToDefaults);
+}
+
+#[test]
+fn remove_above_both_claims_voids_the_collision() {
+    // The user disabled the key wholesale in a higher layer; two voided
+    // claims cannot collide, and no warning fires — the removal is the
+    // user's own authored intent.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer_with_removed(LayerOrigin::Manual, "normal", Vec::new(), vec![key]),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn removing_the_locked_unlock_binding_is_fatal() {
+    // Clearing the reserved chord's binding in locked mode leaves no unlock
+    // escape: the effective map misses it, and the keymap is refused.
+    let report = detect(&[
+        defaults(),
+        layer_with_removed(
+            LayerOrigin::User,
+            "locked",
+            Vec::new(),
+            vec![KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::ReservedUnlockMissing {
+            reserved: KeybindingsConfig::RESERVED_UNLOCK,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
+fn removed_binding_draws_no_per_binding_warns() {
+    // Project binds an orphan action on a typeable key; session removes the
+    // key. Removal silences both warns the binding would otherwise draw:
+    // disabling it is the user's own authored intent, not a surprise.
+    let key = seq(ModFlags::NONE, 'g');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("does-not-exist"))],
+        ),
+        layer_with_removed(LayerOrigin::Session, "normal", Vec::new(), vec![key]),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn removed_prefix_binding_does_not_pair_as_a_prefix() {
+    // A single-chord `<C-p>` binding would pair with the defaults' `<C-p> n`
+    // and `<C-p> x` sequences; removing it above voids the pairing.
+    let prefix = seq(ModFlags::CTRL, 'p');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(prefix.clone(), bound("lock"))],
+        ),
+        layer_with_removed(LayerOrigin::Session, "normal", Vec::new(), vec![prefix]),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn remove_in_an_unregistered_mode_is_inert() {
+    // Removals in an unknown mode are skipped like its bindings; only the
+    // orphan-mode warning surfaces.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::Project,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer_with_removed(LayerOrigin::Session, "git", Vec::new(), vec![key]),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::OrphanMode {
+            origin: LayerOrigin::Session,
+            mode: mode("git"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
 }
