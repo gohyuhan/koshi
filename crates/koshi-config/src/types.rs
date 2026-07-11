@@ -8,7 +8,7 @@
 //! discovering and reading config files, validation, and migration live in later
 //! loader passes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use koshi_core::action::ActionRef;
@@ -193,6 +193,11 @@ pub struct BoundAction {
 pub struct ModeBindings {
     /// Key sequence → the action it triggers.
     pub keys: BTreeMap<KeySequence, BoundAction>,
+    /// Key sequences this surface clears: a removed key voids whatever any
+    /// lower-precedence layer bound on it, leaving the key free for this or
+    /// a higher layer to rebind. Authored as `remove "<C-x>"` in a mode
+    /// block. The built-in defaults carry none — no layer sits below them.
+    pub removed: BTreeSet<KeySequence>,
 }
 
 /// The built-in default binding table: the `normal`-mode set plus the
@@ -346,8 +351,20 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     .collect();
 
     BTreeMap::from([
-        (ModeName::new("normal"), ModeBindings { keys: normal }),
-        (ModeName::new("locked"), ModeBindings { keys: locked }),
+        (
+            ModeName::new("normal"),
+            ModeBindings {
+                keys: normal,
+                removed: BTreeSet::new(),
+            },
+        ),
+        (
+            ModeName::new("locked"),
+            ModeBindings {
+                keys: locked,
+                removed: BTreeSet::new(),
+            },
+        ),
     ])
 }
 
