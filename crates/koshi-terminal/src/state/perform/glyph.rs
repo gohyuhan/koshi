@@ -113,7 +113,7 @@ impl TerminalState {
             self.arm_wrap_latch(last_col);
         } else {
             self.active_cursor_mut().col = col + 1;
-            self.active_cursor_mut().pending_wrap = false;
+            self.clear_wrap_latch();
         }
     }
 
@@ -168,7 +168,7 @@ impl TerminalState {
             }
             self.linefeed();
             self.active_cursor_mut().col = 0;
-            self.active_cursor_mut().pending_wrap = false;
+            self.clear_wrap_latch();
 
             let new_row = self.active_cursor().row;
             let mut widened = Cell::new(base_ch, 2, style);

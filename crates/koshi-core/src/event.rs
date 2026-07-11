@@ -13,11 +13,9 @@
 //! is opaque across processes; timestamps use `SystemTime`. No raw OS handles
 //! and no `&mut` references.
 //!
-//! Privacy is structural, not advisory: each input payload variant encodes the
-//! classified context and the resulting [`PrivacyTier`] together, so there is no
-//! separate classification or tier field that could disagree with the content,
-//! and every non-public variant is unit-shaped with no content field, so
-//! sensitive text cannot ride along.
+//! Privacy is structural: each input payload variant encodes the classified
+//! context and the resulting [`PrivacyTier`] together, and every non-public
+//! variant is unit-shaped with no content field.
 
 use crate::command::{CopyTarget, GridPos, SelectionKind};
 use crate::geometry::{Point, Size};
@@ -376,10 +374,6 @@ pub struct KeybindingMatched {
 
 // ============================================================================
 // Input privacy: typed characters and submitted lines
-//
-// The classified context and privacy tier of an input event live *inside* its
-// payload variant, never in a separate field — so the two can never disagree,
-// and non-public variants are unit-shaped and cannot carry text.
 // ============================================================================
 
 /// The privacy tier the runtime computes for an input event before delivery.
@@ -404,11 +398,9 @@ pub enum PrivacyTier {
 
 /// The character payload of a [`PaneTyped`] event.
 ///
-/// The variant captures the classified input context *and* the resulting
-/// privacy tier in one value, so the two can never disagree — there is no
-/// separate classification or tier field to contradict the content. A character
-/// is only present in [`SafePublic`]; every other context is unit-shaped, so a
-/// non-public input physically cannot carry one.
+/// Each variant encodes the classified input context and its privacy tier in
+/// one value. A character is only present in [`SafePublic`]; every other
+/// context is unit-shaped and carries none.
 ///
 /// [`SafePublic`]: TypedPayload::SafePublic
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,8 +437,7 @@ impl TypedPayload {
 
 /// Payload for [`Event::PaneTyped`].
 ///
-/// A privacy-gated domain event, not a raw key event: the classified context
-/// and privacy tier both live in the `payload` variant, so a character is only
+/// A privacy-gated domain event, not a raw key event: a character is only
 /// present when the context was safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTyped {
@@ -466,9 +457,8 @@ pub struct PaneTyped {
 
 /// The submitted-line payload of a [`PaneEnterPressed`] event.
 ///
-/// As with [`TypedPayload`], the variant captures both the classified context
-/// and the privacy tier: the line text is only present in [`SafePublic`], and
-/// every other variant is unit-shaped so it physically cannot hold the line.
+/// As with [`TypedPayload`], each variant encodes context and tier together:
+/// the line text is only present in [`SafePublic`].
 ///
 /// [`SafePublic`]: SubmittedLinePayload::SafePublic
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -50,8 +50,7 @@ impl KillPolicy {
         match self {
             Self::Graceful { timeout } => Self::GracefulTree { timeout },
             Self::Force => Self::Tree,
-            Self::Tree => Self::Tree,
-            Self::GracefulTree { timeout } => Self::GracefulTree { timeout },
+            already_tree_scoped => already_tree_scoped,
         }
     }
 }

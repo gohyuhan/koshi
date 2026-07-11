@@ -94,18 +94,8 @@ pub struct Grid {
 impl Grid {
     /// Build a `rows × cols` grid, every cell a blank space in `fill`.
     pub fn blank(rows: u16, cols: u16, fill: Style) -> Self {
-        let mut blank_grid_rows = Vec::new();
-
-        for _ in 0..rows {
-            let mut row = Vec::new();
-            for _ in 0..cols {
-                row.push(Cell::blank_with(fill));
-            }
-            blank_grid_rows.push(row);
-        }
-
         Grid {
-            rows: blank_grid_rows,
+            rows: vec![vec![Cell::blank_with(fill); cols as usize]; rows as usize],
         }
     }
 
@@ -131,29 +121,13 @@ impl Grid {
 
     /// A reference to the cell at (`row`, `col`), or `None` if out of bounds.
     pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
-        if row as usize >= self.rows.len() {
-            return None;
-        }
-
-        if col as usize >= self.rows[row as usize].len() {
-            return None;
-        }
-
-        Some(&self.rows[row as usize][col as usize])
+        self.rows.get(row as usize)?.get(col as usize)
     }
 
     /// A mutable reference to the cell at (`row`, `col`), or `None` if out of
     /// bounds — the write path used by the VTE performer.
     pub fn cell_mut(&mut self, row: u16, col: u16) -> Option<&mut Cell> {
-        if row as usize >= self.rows.len() {
-            return None;
-        }
-
-        if col as usize >= self.rows[row as usize].len() {
-            return None;
-        }
-
-        Some(&mut self.rows[row as usize][col as usize])
+        self.rows.get_mut(row as usize)?.get_mut(col as usize)
     }
 
     /// All rows, row-major, for read-only iteration by the renderer.

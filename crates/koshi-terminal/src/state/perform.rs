@@ -110,7 +110,7 @@ impl vte::Perform for TerminalState {
                 self.linefeed();
                 self.active_cursor_mut().col = 0;
             }
-            self.active_cursor_mut().pending_wrap = false;
+            self.clear_wrap_latch();
         }
 
         let (_, cols) = self.active_grid().dimensions();
@@ -143,7 +143,7 @@ impl vte::Perform for TerminalState {
             }
             self.linefeed();
             self.active_cursor_mut().col = 0;
-            self.active_cursor_mut().pending_wrap = false;
+            self.clear_wrap_latch();
         }
 
         let row = self.active_cursor().row;
@@ -181,17 +181,17 @@ impl vte::Perform for TerminalState {
             // LF, VT, FF: line feed (VT/FF treated as LF).
             0x0A..=0x0C => {
                 self.linefeed();
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CR: carriage return to column 0.
             0x0D => {
                 self.active_cursor_mut().col = 0;
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // BS: backspace one column (no erase).
             0x08 => {
                 self.active_cursor_mut().col = self.active_cursor().col.saturating_sub(1);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // HT: advance to the next 8-column tab stop, clamped to the grid.
             0x09 => {
@@ -199,7 +199,7 @@ impl vte::Perform for TerminalState {
                 let last_col = cols.saturating_sub(1);
                 let col = self.active_cursor().col;
                 self.active_cursor_mut().col = next_tab_stop(col, last_col);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // SO (shift out): select G1 into the GL range for printing.
             0x0E => self.active_render_mut().gl = 1,
@@ -466,7 +466,7 @@ impl vte::Perform for TerminalState {
             'A' => {
                 self.active_cursor_mut().row =
                     self.active_cursor().row.saturating_sub(move_count(params));
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CUD / VPR — cursor down, clamped to the last row (VPR `e` is the
             // same vertical move as CUD).
@@ -474,7 +474,7 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 self.active_cursor_mut().row =
                     self.active_cursor().row.saturating_add(n).min(last_row);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CUF / HPR — cursor forward, clamped to the last column (HPR `a` is
             // the same horizontal move as CUF).
@@ -482,13 +482,13 @@ impl vte::Perform for TerminalState {
                 let n = move_count(params);
                 self.active_cursor_mut().col =
                     self.active_cursor().col.saturating_add(n).min(last_col);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CUB — cursor back.
             'D' => {
                 self.active_cursor_mut().col =
                     self.active_cursor().col.saturating_sub(move_count(params));
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CUP / HVP — absolute position; 1-based row;col arguments mapped to
             // 0-based coordinates and clamped into the grid (via `goto`).
@@ -525,7 +525,7 @@ impl vte::Perform for TerminalState {
                     col = next_tab_stop(col, last_col);
                 }
                 self.active_cursor_mut().col = col;
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // CBT — cursor backward tabulation: retreat n tab stops, floored at
             // column 0; a cursor already at column 0 does not move.
@@ -538,7 +538,7 @@ impl vte::Perform for TerminalState {
                     col = prev_tab_stop(col);
                 }
                 self.active_cursor_mut().col = col;
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // ED — erase in display (cursor unmoved; an erasing mode clears the
             // wrap latch, see below).
@@ -587,7 +587,7 @@ impl vte::Perform for TerminalState {
                 // armed glyph is gone. ED 3 (scrollback only) and unknown modes
                 // leave the visible grid and the latch untouched.
                 if matches!(mode, 0..=2) {
-                    self.active_cursor_mut().pending_wrap = false;
+                    self.clear_wrap_latch();
                 }
                 // Only the cursor row is partially cleared (the others are whole
                 // rows, which cannot split a pair); repair it.
@@ -617,7 +617,7 @@ impl vte::Perform for TerminalState {
                 // that cell directly with no wrap pending. An unknown mode erases
                 // nothing and leaves the latch armed.
                 if matches!(mode, 0..=2) {
-                    self.active_cursor_mut().pending_wrap = false;
+                    self.clear_wrap_latch();
                 }
                 self.normalize_wide_pairs(r);
             }
@@ -634,7 +634,7 @@ impl vte::Perform for TerminalState {
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 let end = c.saturating_add(n).min(cols);
                 self.active_grid_mut().clear_line(r, c, end, fill);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
                 self.normalize_wide_pairs(r);
             }
             // SGR — set graphic rendition: update the pen colors and text
@@ -648,7 +648,7 @@ impl vte::Perform for TerminalState {
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().insert_cells(r, c, n, fill);
                 self.normalize_wide_pairs(r);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // DCH — delete n cells at the cursor, pulling the rest of the line
             // left; the right end is refilled with blanks.
@@ -658,7 +658,7 @@ impl vte::Perform for TerminalState {
                 let (r, c) = (self.active_cursor().row, self.active_cursor().col);
                 self.active_grid_mut().delete_cells(r, c, n, fill);
                 self.normalize_wide_pairs(r);
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
             }
             // SCOSC — save cursor (ANSI.SYS), companion to DECSC.
             's' => self.save_cursor(),
@@ -732,7 +732,7 @@ impl vte::Perform for TerminalState {
                     }
                     self.active_cursor_mut().row = 0;
                     self.active_cursor_mut().col = 0;
-                    self.active_cursor_mut().pending_wrap = false;
+                    self.clear_wrap_latch();
                 }
             }
             // Any other CSI final byte is not handled yet, so it is ignored.

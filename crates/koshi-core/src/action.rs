@@ -447,7 +447,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionStatus::{Available, ComingSoon};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
-    vec![
+    let mut seeds = vec![
         // --- Panes ---
         core_seed(
             "new-pane",
@@ -624,144 +624,102 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::RunCommandPane),
             Available,
         ),
-        // --- Copy mode ---
-        core_seed(
+    ];
+
+    // --- Copy mode --- (all: PaneSession scope, Pane target, CopyMode command, ComingSoon)
+    let copy_mode_seeds = [
+        (
             "copy-mode-enter",
             "Enter Copy Mode",
             "Enter copy mode in the focused pane",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
-            "copy-mode-exit",
-            "Exit Copy Mode",
-            "Leave copy mode",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
-        ),
-        core_seed(
+        ("copy-mode-exit", "Exit Copy Mode", "Leave copy mode"),
+        (
             "copy-mode-move-cursor",
             "Move Copy Cursor",
             "Move the copy-mode cursor",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "copy-mode-set-selection",
             "Set Selection",
             "Begin or extend the copy-mode selection",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "copy-mode-clear-selection",
             "Clear Selection",
             "Clear the active copy-mode selection",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "copy-mode-copy",
             "Copy Selection",
             "Copy the current selection to a clipboard target",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
-            "copy-mode-search",
-            "Search",
-            "Start a search in copy mode",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
-        ),
-        core_seed(
+        ("copy-mode-search", "Search", "Start a search in copy mode"),
+        (
             "copy-mode-search-next",
             "Search Next",
             "Jump to the next search match",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "copy-mode-search-prev",
             "Search Previous",
             "Jump to the previous search match",
+        ),
+    ];
+    seeds.extend(copy_mode_seeds.map(|(name, display_name, description)| {
+        core_seed(
+            name,
+            display_name,
+            description,
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::CopyMode),
             ComingSoon,
-        ),
-        // --- Plugin lifecycle ---
-        core_seed(
+        )
+    }));
+
+    // --- Plugin lifecycle --- (all: Global scope, no targets, Plugin command, ComingSoon)
+    let plugin_seeds = [
+        (
             "plugin-install",
             "Install Plugin",
             "Install a plugin from a source",
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "plugin-uninstall",
             "Uninstall Plugin",
             "Remove an installed plugin",
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "plugin-enable",
             "Enable Plugin",
             "Enable an installed plugin",
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "plugin-disable",
             "Disable Plugin",
             "Disable an installed plugin",
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
         ),
-        core_seed(
+        (
             "plugin-update",
             "Update Plugin",
             "Update a plugin to its latest version",
-            Global,
-            vec![],
-            CoreCommand(CommandKind::Plugin),
-            ComingSoon,
         ),
+        ("plugin-reload", "Reload Plugin", "Reload a plugin in place"),
+    ];
+    seeds.extend(plugin_seeds.map(|(name, display_name, description)| {
         core_seed(
-            "plugin-reload",
-            "Reload Plugin",
-            "Reload a plugin in place",
+            name,
+            display_name,
+            description,
             Global,
             vec![],
             CoreCommand(CommandKind::Plugin),
             ComingSoon,
-        ),
-    ]
+        )
+    }));
+
+    seeds
 }
 
 #[cfg(test)]

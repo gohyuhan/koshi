@@ -40,7 +40,7 @@ use koshi_layout::{
     solver::{fits, solve, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
 };
-use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy};
+use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_session::client::{Client, ClientRegistry};
@@ -170,64 +170,56 @@ impl Runtime {
     /// passes validation but has no handler yet is rejected with
     /// [`RejectReason::InvalidState`].
     pub fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
+        let command_id = envelope.id;
         if let Err(rejection) = self.validate(&envelope) {
-            return CommandResult::Rejected {
-                command_id: envelope.id,
-                reason: rejection.reason,
-                help: rejection.help,
-            };
+            return Self::rejected(command_id, rejection);
         }
-        match envelope.command {
+        let outcome = match envelope.command {
             Command::NewPane(args) => {
-                self.handle_new_pane(envelope.id, &envelope.source, &args, envelope.issued_at)
+                self.handle_new_pane(command_id, &envelope.source, &args, envelope.issued_at)
             }
-            Command::ClosePane(args) => {
-                self.handle_close_pane(envelope.id, &envelope.source, &args)
-            }
+            Command::ClosePane(args) => self.handle_close_pane(command_id, &envelope.source, &args),
             Command::ResizePane(args) => {
-                self.handle_resize_pane(envelope.id, &envelope.source, &args)
+                self.handle_resize_pane(command_id, &envelope.source, &args)
             }
-            Command::FocusPane(args) => {
-                self.handle_focus_pane(envelope.id, &envelope.source, &args)
-            }
+            Command::FocusPane(args) => self.handle_focus_pane(command_id, &envelope.source, &args),
             Command::NewTab(args) => {
-                self.handle_new_tab(envelope.id, &envelope.source, &args, envelope.issued_at)
+                self.handle_new_tab(command_id, &envelope.source, &args, envelope.issued_at)
             }
-            Command::CloseTab(args) => self.handle_close_tab(envelope.id, &envelope.source, &args),
-            Command::RenameTab(args) => {
-                self.handle_rename_tab(envelope.id, &envelope.source, &args)
-            }
-            Command::FocusTab(args) => self.handle_focus_tab(envelope.id, &envelope.source, &args),
+            Command::CloseTab(args) => self.handle_close_tab(command_id, &envelope.source, &args),
+            Command::RenameTab(args) => self.handle_rename_tab(command_id, &envelope.source, &args),
+            Command::FocusTab(args) => self.handle_focus_tab(command_id, &envelope.source, &args),
             Command::WriteToPane(args) => {
-                self.handle_write_to_pane(envelope.id, &envelope.source, &args)
+                self.handle_write_to_pane(command_id, &envelope.source, &args)
             }
-            Command::ToggleLockMode => self.handle_toggle_lock_mode(envelope.id, &envelope.source),
+            Command::ToggleLockMode => self.handle_toggle_lock_mode(command_id, &envelope.source),
             Command::SetLockMode(args) => {
-                self.handle_set_lock_mode(envelope.id, &envelope.source, &args)
+                self.handle_set_lock_mode(command_id, &envelope.source, &args)
             }
             Command::RunCommandPane(args) => {
                 let new_pane_args = Self::run_command_new_pane_args(&args);
                 self.handle_new_pane(
-                    envelope.id,
+                    command_id,
                     &envelope.source,
                     &new_pane_args,
                     envelope.issued_at,
                 )
             }
-            Command::CopyMode(command) => self.handle_copy_mode(envelope.id, &command),
-            Command::Plugin(_) => self.reject(envelope.id, "plugin"),
-            Command::Quit => self.reject(envelope.id, "quit"),
+            Command::CopyMode(command) => Ok(self.handle_copy_mode(command_id, &command)),
+            Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
+            Command::Quit => Ok(self.reject(command_id, "quit")),
             Command::TogglePaneFullscreen => {
-                self.handle_toggle_pane_fullscreen(envelope.id, &envelope.source)
+                self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
             }
             Command::RenamePane(args) => {
-                self.handle_rename_pane(envelope.id, &envelope.source, &args)
+                self.handle_rename_pane(command_id, &envelope.source, &args)
             }
-            Command::MoveTab(args) => self.handle_move_tab(envelope.id, &envelope.source, &args),
+            Command::MoveTab(args) => self.handle_move_tab(command_id, &envelope.source, &args),
             Command::RenameSession(args) => {
-                self.handle_rename_session(envelope.id, &envelope.source, &args)
+                self.handle_rename_session(command_id, &envelope.source, &args)
             }
-        }
+        };
+        outcome.unwrap_or_else(|rejection| Self::rejected(command_id, rejection))
     }
 
     /// Build a rejection for a command with no handler wired yet, keyed back to
@@ -321,31 +313,27 @@ impl Runtime {
         source: &CommandSource,
         args: &NewPaneArgs,
         issued_at: SystemTime,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_new_pane_source(args, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_new_pane_source(args, source, acting)?;
 
         // Clone the shared backend before borrowing a session: spawn and resize
         // then need no `&self` borrow, so they coexist with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // Build the post-edit tree without mutating anything: `--stacked` joins
         // the source's stack (creating one when the source is a plain leaf),
         // otherwise the source leaf splits directionally. A source pane that is
         // not a live leaf of the tab rejects here, before any state changes.
-        let Some(tab) = session.tabs.get(&target.tab_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let tab = session
+            .tabs
+            .get(&target.tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
         // A pane added to a fullscreen tab lands in the tiled view — the
         // commit drops the fullscreen — so the candidate is sized against the
         // tiled solve the clients will see.
@@ -360,27 +348,19 @@ impl Runtime {
             let direction = args.direction.unwrap_or(self.default_new_pane_direction);
             split_leaf(tab.layout(), target.source_pane, new_pane_id, direction)
         };
-        let candidate = match edited {
-            Ok(candidate) => candidate,
-            Err(_) => {
-                return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-            }
-        };
+        let candidate = edited.map_err(|_| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // Choose the viewport the split is sized against, and the client (if any)
         // designated to view the tab and focus the new pane. Fit is judged against
         // the candidate, so a split too large for the chosen viewport is rejected
         // before anything mutates.
-        let (viewport, designated) = match Self::resolve_new_pane_viewport(
+        let (viewport, designated) = Self::resolve_new_pane_viewport(
             session,
             target.tab_id,
             &candidate,
             target.focus_client,
             args.client,
-        ) {
-            Ok(resolved) => resolved,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+        )?;
 
         // Solve the candidate against that viewport to size the new pane and
         // its siblings. Fit passed above, so the new pane has a real content
@@ -388,13 +368,11 @@ impl Runtime {
         // before any mutation.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         let rects = content_rects(&solve_with_mode(&candidate, layout_mode, tab_rect));
-        let Some(new_rect) = rects
+        let new_rect = rects
             .iter()
             .find(|(pane_id, _)| *pane_id == new_pane_id)
             .and_then(|(_, content)| *content)
-        else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::InvalidState));
-        };
+            .ok_or_else(|| Rejection::bare(RejectReason::InvalidState))?;
         let spawn_size = compute_pty_size(new_rect);
 
         // The spawn request: the requested command (its cwd falling back to
@@ -420,16 +398,14 @@ impl Runtime {
 
         // Launch the child BEFORE committing any state. On failure nothing was
         // registered and no view moved, so the command rejects as if it never ran.
-        let handle = match backend.spawn(new_pane_id, spawn_spec, spawn_size) {
-            Ok(handle) => handle,
-            Err(_) => {
-                return CommandResult::Rejected {
-                    command_id,
-                    reason: RejectReason::InvalidState,
-                    help: Some("failed to launch the pane's process".to_string()),
-                };
-            }
-        };
+        let handle = backend
+            .spawn(new_pane_id, spawn_spec, spawn_size)
+            .map_err(|_| {
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "failed to launch the pane's process",
+                )
+            })?;
 
         // The child is live — commit all session state through the pure op: it
         // switches the designated client onto the tab (if not already there),
@@ -494,7 +470,7 @@ impl Runtime {
             );
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::ClosePane`]: tear the pane out of its session and
@@ -524,56 +500,29 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &ClosePaneArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_pane_target(args.pane, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_pane_target(args.pane, source, acting)?;
 
         // Clone the shared backend before borrowing a session: the kill thread
         // takes its own handle, so no `&self` borrow crosses the commit.
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(record) = session.panes.get(target.pane_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let record = session
+            .panes
+            .get(target.pane_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
-        // Pick how the child dies. `--force` overrides the pane's own policy;
-        // `ConfirmIfBusy` closes only a pane whose child provably ended
-        // (`Exited`) and otherwise rejects, pointing at `--force`. `tree`
-        // widens whichever kill was picked to the child's whole process
-        // group.
-        let kill_policy = if args.force {
-            KillPolicy::Force
-        } else {
-            match record.close_policy {
-                PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
-                    PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
-                    _ => {
-                        return CommandResult::Rejected {
-                            command_id,
-                            reason: RejectReason::InvalidState,
-                            help: Some(
-                                "pane may be busy; pass --force to close anyway".to_string(),
-                            ),
-                        };
-                    }
-                },
-                policy => policy.kill_policy(),
-            }
-        };
-        let kill_policy = if args.tree {
-            kill_policy.tree_scoped()
-        } else {
-            kill_policy
-        };
+        let kill_policy = Self::pick_kill_policy(
+            record,
+            args.force,
+            args.tree,
+            "pane may be busy; pass --force to close anyway",
+        )?;
 
         // Solve the tab against a deterministic viewport so focus candidates
         // rank geometrically even when no client currently views the tab.
@@ -611,7 +560,36 @@ impl Runtime {
             let _ = backend.kill(pane_id, kill_policy);
         });
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
+    }
+
+    /// Pick how a pane's child dies. `force` overrides the pane's own policy
+    /// with an immediate force-kill; `ConfirmIfBusy` allows the close only for
+    /// a pane whose child provably ended (`Exited`) and otherwise rejects with
+    /// `busy_hint`. `tree` widens the picked kill to the child's whole process
+    /// group.
+    fn pick_kill_policy(
+        record: &PaneRecord,
+        force: bool,
+        tree: bool,
+        busy_hint: &str,
+    ) -> Result<KillPolicy, Rejection> {
+        let kill_policy = if force {
+            KillPolicy::Force
+        } else {
+            match record.close_policy {
+                PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
+                    PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
+                    _ => return Err(Rejection::new(RejectReason::InvalidState, busy_hint)),
+                },
+                policy => policy.kill_policy(),
+            }
+        };
+        Ok(if tree {
+            kill_policy.tree_scoped()
+        } else {
+            kill_policy
+        })
     }
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
@@ -977,54 +955,44 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &ResizePaneArgs,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, Rejection> {
         if args.size == 0 {
-            return CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::InvalidState,
-                help: Some("resize size must be non-zero".to_string()),
-            };
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "resize size must be non-zero",
+            ));
         }
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_pane_target(args.pane, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_pane_target(args.pane, source, acting)?;
 
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(viewport) = session.tab_viewport(target.tab_id) else {
-            return Self::rejected(
-                command_id,
-                Rejection::new(
-                    RejectReason::InvalidState,
-                    "pane's tab is not viewed by any client",
-                ),
-            );
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let viewport = session.tab_viewport(target.tab_id).ok_or_else(|| {
+            Rejection::new(
+                RejectReason::InvalidState,
+                "pane's tab is not viewed by any client",
+            )
+        })?;
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        let Some(tab) = session.tabs.get_mut(&target.tab_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let tab = session
+            .tabs
+            .get_mut(&target.tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // The resize transaction returns a new tree and leaves the tab's
         // untouched on rejection, so a failed resize mutates nothing.
-        let resized = match resize(
+        let resized = resize(
             tab.layout(),
             tab_rect,
             target.pane_id,
             args.direction,
             args.size,
-        ) {
-            Ok(resized) => resized,
-            Err(error) => return Self::rejected(command_id, Self::resize_rejection(&error)),
-        };
+        )
+        .map_err(|error| Self::resize_rejection(&error))?;
         tab.update_layout(resized);
         // A layout edit returns the tab to the tiled view: resizing a pane of
         // a fullscreen tab drops the fullscreen, so the moved border is
@@ -1049,7 +1017,7 @@ impl Runtime {
             &mut events,
         );
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::FocusPane`]: move the target client's focus to the
@@ -1074,33 +1042,26 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &FocusPaneArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match Self::resolve_focus_target(args, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = Self::resolve_focus_target(args, source, acting)?;
 
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(viewport) = session.tab_viewport(target.tab_id) else {
-            return Self::rejected(
-                command_id,
-                Rejection::new(
-                    RejectReason::InvalidState,
-                    "pane's tab is not viewed by any client",
-                ),
-            );
-        };
-        let Some(tab) = session.tabs.get_mut(&target.tab_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let viewport = session.tab_viewport(target.tab_id).ok_or_else(|| {
+            Rejection::new(
+                RejectReason::InvalidState,
+                "pane's tab is not viewed by any client",
+            )
+        })?;
+        let tab = session
+            .tabs
+            .get_mut(&target.tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // Fullscreen follows focus: focusing a pane hidden behind a
         // fullscreen tab retargets the fullscreen to it, so the mode the tab
@@ -1120,13 +1081,10 @@ impl Runtime {
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         let solved = solve_with_mode(tab.layout(), effective_mode, tab_rect);
         if solved.suppressed.contains(&target.pane_id) {
-            return Self::rejected(
-                command_id,
-                Rejection::new(
-                    RejectReason::InvalidState,
-                    "pane is suppressed; not enough space to show it",
-                ),
-            );
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "pane is suppressed; not enough space to show it",
+            ));
         }
 
         // A collapsed stack member is a valid target: focusing it expands it.
@@ -1161,12 +1119,13 @@ impl Runtime {
             );
         }
 
-        let Some(client) = session.clients.get_mut(target.client_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
-        };
+        let client = session
+            .clients
+            .get_mut(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         let prior_pane = client.focused_pane(target.tab_id);
         if prior_pane == Some(target.pane_id) && !activated && !retargeted {
-            return TransactionScope::new().commit(command_id);
+            return Ok(TransactionScope::new().commit(command_id));
         }
         client.update_focused_pane(target.tab_id, target.pane_id);
         if let Some(tab) = session.tabs.get_mut(&target.tab_id) {
@@ -1181,7 +1140,7 @@ impl Runtime {
             }));
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::NewTab`]: create a tab holding one fresh shell pane
@@ -1206,25 +1165,21 @@ impl Runtime {
         source: &CommandSource,
         args: &NewTabArgs,
         issued_at: SystemTime,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match Self::resolve_new_tab_target(args, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = Self::resolve_new_tab_target(args, source, acting)?;
         // Clone the shared backend before borrowing a session: spawn then
         // needs no `&self` borrow, so it coexists with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(client) = session.clients.get(target.client_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let client = session
+            .clients
+            .get(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
 
         // The new tab is viewed (only) by the designated client, so its root
         // pane is sized against that client's viewport.
@@ -1234,10 +1189,10 @@ impl Runtime {
         let candidate = LayoutNode::Pane(new_pane_id);
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         if !fits(&candidate, tab_rect, MIN_PANE_SIZE) {
-            return Self::rejected(
-                command_id,
-                Rejection::new(RejectReason::MinSize, "not enough space for a new tab"),
-            );
+            return Err(Rejection::new(
+                RejectReason::MinSize,
+                "not enough space for a new tab",
+            ));
         }
         let spawn_size = size_root_pane(new_pane_id, viewport);
 
@@ -1255,16 +1210,14 @@ impl Runtime {
         // Launch the child BEFORE committing any state. On failure nothing
         // was registered and no view moved, so the command rejects as if it
         // never ran.
-        let handle = match backend.spawn(new_pane_id, spawn_spec, spawn_size) {
-            Ok(handle) => handle,
-            Err(_) => {
-                return CommandResult::Rejected {
-                    command_id,
-                    reason: RejectReason::InvalidState,
-                    help: Some("failed to launch the pane's process".to_string()),
-                };
-            }
-        };
+        let handle = backend
+            .spawn(new_pane_id, spawn_spec, spawn_size)
+            .map_err(|_| {
+                Rejection::new(
+                    RejectReason::InvalidState,
+                    "failed to launch the pane's process",
+                )
+            })?;
 
         // The child is live — commit all session state through the pure op:
         // it registers the root pane `Running`, appends the tab, and switches
@@ -1317,7 +1270,7 @@ impl Runtime {
             );
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::CloseTab`]: tear the tab and every pane in it out of
@@ -1343,67 +1296,41 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &CloseTabArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let tab_id = match self.resolve_tab_or_active(args.tab, source, acting) {
-            Ok(tab_id) => tab_id,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(session_id) = acting.map(|session| session.id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let tab_id = self.resolve_tab_or_active(args.tab, source, acting)?;
+        let session_id = acting
+            .map(|session| session.id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // Clone the shared backend before borrowing a session: the kill
         // thread takes its own handle, so no `&self` borrow crosses the
         // commit.
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(tab) = session.tabs.get(&tab_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let tab = session
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
         let pane_ids = tab.layout().leaf_panes();
 
-        // Pick how every child dies before anything mutates — all-or-nothing.
-        // `--force` overrides each pane's own policy; `ConfirmIfBusy` allows
-        // the close only for a pane whose child provably ended (`Exited`) and
-        // otherwise rejects the whole tab. `tree` widens each picked kill to
-        // that child's whole process group.
+        // Pick how every child dies before anything mutates — all-or-nothing:
+        // one busy `ConfirmIfBusy` pane rejects the whole tab.
         let mut kills: Vec<(PaneId, KillPolicy)> = Vec::with_capacity(pane_ids.len());
         for &pane_id in &pane_ids {
             let Some(record) = session.panes.get(pane_id) else {
                 continue;
             };
-            let kill_policy = if args.force {
-                KillPolicy::Force
-            } else {
-                match record.close_policy {
-                    PaneClosePolicy::ConfirmIfBusy => match record.lifecycle() {
-                        PaneLifecycle::Exited { .. } => record.close_policy.kill_policy(),
-                        _ => {
-                            return CommandResult::Rejected {
-                                command_id,
-                                reason: RejectReason::InvalidState,
-                                help: Some(
-                                    "a pane in the tab may be busy; pass --force to close anyway"
-                                        .to_string(),
-                                ),
-                            };
-                        }
-                    },
-                    policy => policy.kill_policy(),
-                }
-            };
-            let kill_policy = if args.tree {
-                kill_policy.tree_scoped()
-            } else {
-                kill_policy
-            };
+            let kill_policy = Self::pick_kill_policy(
+                record,
+                args.force,
+                args.tree,
+                "a pane in the tab may be busy; pass --force to close anyway",
+            )?;
             kills.push((pane_id, kill_policy));
         }
 
@@ -1454,7 +1381,7 @@ impl Runtime {
             });
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::RenameTab`]: update the tab's display name.
@@ -1470,28 +1397,23 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &RenameTabArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let tab_id = match self.resolve_tab_or_active(args.tab, source, acting) {
-            Ok(tab_id) => tab_id,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(session_id) = acting.map(|session| session.id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let tab_id = self.resolve_tab_or_active(args.tab, source, acting)?;
+        let session_id = acting
+            .map(|session| session.id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
         let new_name = generate_name(NameKind::Tab, |candidate| {
             session.tabs.values().any(|tab| tab.name() == candidate)
         });
 
         let events = tab_ops::rename_tab(session, tab_id, new_name);
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::FocusTab`]: switch the designated client's view to
@@ -1510,30 +1432,26 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &FocusTabArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match Self::resolve_focus_tab_target(args, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = Self::resolve_focus_tab_target(args, source, acting)?;
 
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(client) = session.clients.get(target.client_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let client = session
+            .clients
+            .get(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         let prior_tab = client.active_tab();
 
         // Already viewing it — nothing to do, and no events: events are
         // completed facts.
         if prior_tab == target.tab_id {
-            return TransactionScope::new().commit(command_id);
+            return Ok(TransactionScope::new().commit(command_id));
         }
 
         let mut events = tab_ops::focus_tab(
@@ -1557,7 +1475,7 @@ impl Runtime {
             );
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
@@ -1575,25 +1493,20 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &MoveTabArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let tab_id = match self.resolve_tab_or_active(args.tab, source, acting) {
-            Ok(tab_id) => tab_id,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(session_id) = acting.map(|session| session.id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let tab_id = self.resolve_tab_or_active(args.tab, source, acting)?;
+        let session_id = acting
+            .map(|session| session.id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         let events = tab_ops::move_tab(session, tab_id, args.index);
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::RenameSession`]: assign the session a fresh
@@ -1611,27 +1524,22 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &RenameSessionArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let session_id = match self.resolve_session_target(args.session, source, acting) {
-            Ok(session_id) => session_id,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let session_id = self.resolve_session_target(args.session, source, acting)?;
         let new_name = generate_name(NameKind::Session, |candidate| {
             self.sessions
                 .values()
                 .any(|session| session.name == candidate)
         });
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         let events = session_ops::rename_session(session, new_name);
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::TogglePaneFullscreen`]: switch the target pane's tab
@@ -1652,37 +1560,27 @@ impl Runtime {
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_default_pane(source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_default_pane(source, acting)?;
 
         let backend = Arc::clone(self.pty_backend());
 
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let tab_id = match Self::tab_of_pane(session, target.pane_id) {
-            Ok(tab_id) => tab_id,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(viewport) = session.tab_viewport(tab_id) else {
-            return Self::rejected(
-                command_id,
-                Rejection::new(
-                    RejectReason::InvalidState,
-                    "pane's tab is not viewed by any client",
-                ),
-            );
-        };
-        let Some(tab) = session.tabs.get_mut(&tab_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let tab_id = Self::tab_of_pane(session, target.pane_id)?;
+        let viewport = session.tab_viewport(tab_id).ok_or_else(|| {
+            Rejection::new(
+                RejectReason::InvalidState,
+                "pane's tab is not viewed by any client",
+            )
+        })?;
+        let tab = session
+            .tabs
+            .get_mut(&tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // Flip the mode. Entering solves the candidate mode first: a viewport
         // too small to show the pane at its content minimum rejects before
@@ -1699,13 +1597,10 @@ impl Runtime {
                 let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
                 let solved = solve_with_mode(tab.layout(), mode, tab_rect);
                 if solved.suppressed.contains(&target.pane_id) {
-                    return Self::rejected(
-                        command_id,
-                        Rejection::new(
-                            RejectReason::InvalidState,
-                            "not enough space to fullscreen the pane",
-                        ),
-                    );
+                    return Err(Rejection::new(
+                        RejectReason::InvalidState,
+                        "not enough space to fullscreen the pane",
+                    ));
                 }
                 tab.update_layout_mode(mode);
                 true
@@ -1746,7 +1641,7 @@ impl Runtime {
             }
         }
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::ToggleLockMode`]: flip the acting client between
@@ -1758,7 +1653,7 @@ impl Runtime {
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, Rejection> {
         self.set_lock_mode(command_id, source, |current| match current {
             LockMode::Locked => LockMode::Normal,
             _ => LockMode::Locked,
@@ -1775,7 +1670,7 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &LockModeArgs,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, Rejection> {
         let next = if args.locked {
             LockMode::Locked
         } else {
@@ -1796,27 +1691,20 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         resolve: impl FnOnce(LockMode) -> LockMode,
-    ) -> CommandResult {
-        let session_id = match self.acting_session(source) {
-            Ok(Some(session)) => session.id,
-            Ok(None) => {
-                return Self::rejected(
-                    command_id,
-                    Rejection::new(RejectReason::TargetNotFound, "no session context"),
-                )
-            }
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(client_id) = source.client_id() else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::Unauthorized));
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let session_id = Self::require_session(self.acting_session(source)?)?.id;
+        let client_id = source
+            .client_id()
+            .ok_or_else(|| Rejection::bare(RejectReason::Unauthorized))?;
 
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(client) = session.clients.get_mut(client_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::SourceClientStale));
-        };
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let client = session
+            .clients
+            .get_mut(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
 
         let current = client.lock_mode();
         let next = resolve(current);
@@ -1828,7 +1716,7 @@ impl Runtime {
                 mode: Self::input_mode(next),
             }));
         }
-        scope.commit(command_id)
+        Ok(scope.commit(command_id))
     }
 
     /// Map a [`LockMode`] to the wire-facing [`InputMode`] carried on
@@ -1857,18 +1745,13 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &RenamePaneArgs,
-    ) -> CommandResult {
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_pane_target(args.pane, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(session) = self.sessions.get_mut(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+    ) -> Result<CommandResult, Rejection> {
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_pane_target(args.pane, source, acting)?;
+        let session = self
+            .sessions
+            .get_mut(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
         let new_name = generate_name(NameKind::Pane, |candidate| {
             session
                 .panes
@@ -1878,7 +1761,7 @@ impl Runtime {
 
         let events = pane_ops::rename_pane(session, target.pane_id, new_name);
 
-        Self::commit_events(command_id, events)
+        Ok(Self::commit_events(command_id, events))
     }
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
@@ -1897,39 +1780,34 @@ impl Runtime {
         command_id: CommandId,
         source: &CommandSource,
         args: &WriteToPaneArgs,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, Rejection> {
         // Plugin input injection requires the `pane_write` capability granted
         // by the plugin host; until that lands a plugin source is denied.
         if matches!(source, CommandSource::Plugin { .. }) {
-            return CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::Unauthorized,
-                help: Some("plugin lacks the pane_write capability".to_string()),
-            };
+            return Err(Rejection::new(
+                RejectReason::Unauthorized,
+                "plugin lacks the pane_write capability",
+            ));
         }
-        let acting = match self.acting_session(source) {
-            Ok(acting) => acting,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let target = match self.resolve_pane_target(args.pane, source, acting) {
-            Ok(target) => target,
-            Err(rejection) => return Self::rejected(command_id, rejection),
-        };
-        let Some(session) = self.sessions.get(&target.session_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
-        let Some(record) = session.panes.get(target.pane_id) else {
-            return Self::rejected(command_id, Rejection::bare(RejectReason::TargetNotFound));
-        };
+        let acting = self.acting_session(source)?;
+        let target = self.resolve_pane_target(args.pane, source, acting)?;
+        let session = self
+            .sessions
+            .get(&target.session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let record = session
+            .panes
+            .get(target.pane_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
         match record.lifecycle() {
             PaneLifecycle::Spawning | PaneLifecycle::Running => {}
             PaneLifecycle::Exited { .. }
             | PaneLifecycle::Closing { .. }
             | PaneLifecycle::Removed => {
-                return Self::rejected(
-                    command_id,
-                    Rejection::new(RejectReason::InvalidState, "pane is not accepting input"),
-                );
+                return Err(Rejection::new(
+                    RejectReason::InvalidState,
+                    "pane is not accepting input",
+                ));
             }
         }
         if self
@@ -1937,12 +1815,12 @@ impl Runtime {
             .write(target.pane_id, &args.data)
             .is_err()
         {
-            return Self::rejected(
-                command_id,
-                Rejection::new(RejectReason::InvalidState, "pane is not accepting input"),
-            );
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "pane is not accepting input",
+            ));
         }
-        TransactionScope::new().commit(command_id)
+        Ok(TransactionScope::new().commit(command_id))
     }
 
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
@@ -2362,49 +2240,18 @@ impl Runtime {
                     focus_client,
                 })
             }
+            // With no explicit source the default-pane resolution is exactly
+            // [`Self::resolve_pane_target`]'s: the in-session CLI's captured
+            // pane, else the issuing client's focused pane. The issuer (already
+            // confirmed attached by that resolution) becomes the focus client.
             None => {
-                let session = Self::require_session(session)?;
-                match source {
-                    CommandSource::InSessionCli {
-                        pane_id, client_id, ..
-                    } => {
-                        // The captured pane defines its own tab; confirm it is
-                        // still a live, registered leaf before splitting it.
-                        Self::resolve_pane_in_session(session, *pane_id)?;
-                        let tab_id = Self::tab_of_pane(session, *pane_id)?;
-                        Ok(NewPaneTarget {
-                            session_id: session.id,
-                            source_pane: *pane_id,
-                            tab_id,
-                            focus_client: Some(*client_id),
-                        })
-                    }
-                    _ => {
-                        let client_id = source.client_id().ok_or_else(|| {
-                            Rejection::new(
-                                RejectReason::TargetNotFound,
-                                "no target and no focused pane to default to",
-                            )
-                        })?;
-                        let client = session
-                            .clients
-                            .get(client_id)
-                            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-                        let tab_id = client.active_tab();
-                        let pane = client.focused_pane(tab_id).ok_or_else(|| {
-                            Rejection::new(RejectReason::TargetNotFound, "no focused pane")
-                        })?;
-                        // The focused pane must be a live leaf of the active
-                        // tab — a stale focus entry is rejected, never split.
-                        Self::require_pane_in_active_tab(session, client_id, pane)?;
-                        Ok(NewPaneTarget {
-                            session_id: session.id,
-                            source_pane: pane,
-                            tab_id,
-                            focus_client: Some(client_id),
-                        })
-                    }
-                }
+                let target = self.resolve_pane_target(None, source, session)?;
+                Ok(NewPaneTarget {
+                    session_id: target.session_id,
+                    source_pane: target.pane_id,
+                    tab_id: target.tab_id,
+                    focus_client: source.client_id(),
+                })
             }
         }
     }

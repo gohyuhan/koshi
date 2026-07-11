@@ -84,7 +84,7 @@ impl TerminalState {
         } else if self.active_cursor().row > 0 {
             self.active_cursor_mut().row -= 1;
         }
-        self.active_cursor_mut().pending_wrap = false;
+        self.clear_wrap_latch();
     }
 
     /// Save the cursor position and the active screen's render state (DECSC /
@@ -120,7 +120,7 @@ impl TerminalState {
             None => {
                 self.active_cursor_mut().row = 0;
                 self.active_cursor_mut().col = 0;
-                self.active_cursor_mut().pending_wrap = false;
+                self.clear_wrap_latch();
                 *self.active_render_mut() = RenderState::fresh();
             }
         }
@@ -153,6 +153,13 @@ impl TerminalState {
         let cursor = self.active_cursor_mut();
         cursor.col = last_col;
         cursor.pending_wrap = armed;
+    }
+
+    /// Clear the active cursor's deferred-wrap latch: the next glyph prints at
+    /// the cursor's column instead of wrapping first. Counterpart of
+    /// [`arm_wrap_latch`](Self::arm_wrap_latch).
+    pub(super) fn clear_wrap_latch(&mut self) {
+        self.active_cursor_mut().pending_wrap = false;
     }
 }
 

@@ -45,33 +45,39 @@ impl PtyChildKillControl {
         PtyChildKillControl { pid }
     }
 
-    /// SIGKILL the child process (leader only).
-    pub fn force(&self) -> Result<(), PtyError> {
-        kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL).map_err(|e| PtyError::Signal {
+    /// Send `signal` to the child (`kill`) or, when `whole_group`, to its whole
+    /// process group (`killpg`). The shared delivery behind the four operations.
+    fn signal(&self, whole_group: bool, signal: Signal) -> Result<(), PtyError> {
+        let pid = Pid::from_raw(self.pid as i32);
+        let sent = if whole_group {
+            killpg(pid, signal)
+        } else {
+            kill(pid, signal)
+        };
+        sent.map_err(|e| PtyError::Signal {
             detail: e.to_string(),
         })
+    }
+
+    /// SIGKILL the child process (leader only).
+    pub fn force(&self) -> Result<(), PtyError> {
+        self.signal(false, Signal::SIGKILL)
     }
 
     /// SIGKILL the child's whole process group, reaping any grandchildren.
     pub fn tree(&self) -> Result<(), PtyError> {
-        killpg(Pid::from_raw(self.pid as i32), Signal::SIGKILL).map_err(|e| PtyError::Signal {
-            detail: e.to_string(),
-        })
+        self.signal(true, Signal::SIGKILL)
     }
 
     /// SIGTERM the child, asking it to exit on its own.
     pub fn request_stop(&self) -> Result<(), PtyError> {
-        kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM).map_err(|e| PtyError::Signal {
-            detail: e.to_string(),
-        })
+        self.signal(false, Signal::SIGTERM)
     }
 
     /// SIGTERM the child's whole process group, asking every member to exit on
     /// its own.
     pub fn request_stop_tree(&self) -> Result<(), PtyError> {
-        killpg(Pid::from_raw(self.pid as i32), Signal::SIGTERM).map_err(|e| PtyError::Signal {
-            detail: e.to_string(),
-        })
+        self.signal(true, Signal::SIGTERM)
     }
 
     /// The PID of the child process this control targets.
