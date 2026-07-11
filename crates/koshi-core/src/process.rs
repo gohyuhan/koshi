@@ -40,6 +40,22 @@ pub enum KillPolicy {
     },
 }
 
+impl KillPolicy {
+    /// The same kill widened to group scope, so no descendant survives:
+    /// `Graceful` becomes [`GracefulTree`](Self::GracefulTree) with the same
+    /// timeout, `Force` becomes [`Tree`](Self::Tree); the group-scoped
+    /// policies are returned unchanged.
+    #[must_use]
+    pub fn tree_scoped(self) -> Self {
+        match self {
+            Self::Graceful { timeout } => Self::GracefulTree { timeout },
+            Self::Force => Self::Tree,
+            Self::Tree => Self::Tree,
+            Self::GracefulTree { timeout } => Self::GracefulTree { timeout },
+        }
+    }
+}
+
 /// The known shells, used to pick shell-specific launch behaviour.
 ///
 /// `Other` carries the raw program name for shells we do not special-case.

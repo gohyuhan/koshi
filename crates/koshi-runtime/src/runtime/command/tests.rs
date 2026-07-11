@@ -264,6 +264,7 @@ fn explicit_pane_target_absent_is_not_found() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(PaneId::new()),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
 
@@ -570,6 +571,7 @@ fn tab_command_without_session_context_is_not_found() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(TabId::new()),
             force: false,
+            tree: false,
         }),
         Command::FocusTab(FocusTabArgs {
             target: TabTarget::Next,
@@ -1192,6 +1194,7 @@ fn close_pane_registered_but_in_no_tab_is_not_found() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     assert_eq!(
@@ -1218,6 +1221,7 @@ fn explicit_pane_in_stopping_session_is_invalid_state() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     assert_eq!(
@@ -4170,6 +4174,7 @@ fn close_pane_explicit_non_focused_target_keeps_focus() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(root),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -4231,11 +4236,82 @@ fn close_pane_force_overrides_the_close_policy() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(new_pane),
         force: true,
+        tree: false,
     }));
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
     assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
     assert_eq!(wait_for_kill(&fake, new_pane), vec![KillPolicy::Force]);
+}
+
+#[test]
+fn close_pane_tree_widens_the_graceful_kill_to_the_group() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    // The default-bound close key sends `tree: true`: the pane's graceful
+    // policy keeps its window, widened to the whole process group so every
+    // descendant stops with the shell.
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(new_pane),
+        force: false,
+        tree: true,
+    }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(
+        wait_for_kill(&fake, new_pane),
+        vec![KillPolicy::GracefulTree {
+            timeout: GRACEFUL_TIMEOUT_DURATION
+        }]
+    );
+}
+
+#[test]
+fn close_pane_tree_with_force_group_kills_immediately() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, sid, root);
+
+    let env = envelope(Command::ClosePane(ClosePaneArgs {
+        pane: Some(new_pane),
+        force: true,
+        tree: true,
+    }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert!(rt.sessions[&sid].panes.get(new_pane).is_none());
+    assert_eq!(wait_for_kill(&fake, new_pane), vec![KillPolicy::Tree]);
 }
 
 #[test]
@@ -4375,6 +4451,7 @@ fn close_pane_confirm_if_busy_spawning_rejects() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     assert_eq!(
@@ -4407,6 +4484,7 @@ fn close_pane_last_pane_closes_the_tab_and_quits() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -4456,6 +4534,7 @@ fn close_pane_last_pane_of_a_tab_moves_viewers_to_the_nearest_tab() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane_b),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -4534,6 +4613,7 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane_c),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -4741,6 +4821,7 @@ fn close_pane_in_a_tab_with_no_viewer_keeps_pty_sizes() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(root_front),
             force: false,
+            tree: false,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -4868,6 +4949,7 @@ fn close_last_pane_of_an_unviewed_tab_reflows_nothing() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(pane_back),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -4931,6 +5013,7 @@ fn close_pane_reflow_skips_a_collapsed_stack_member() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(root),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -5096,6 +5179,7 @@ fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: false,
+            tree: false,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -5187,6 +5271,7 @@ fn close_pane_with_no_attached_clients_succeeds() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(pane_b),
         force: false,
+        tree: false,
     }));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -5240,6 +5325,7 @@ fn close_pane_honors_the_panes_own_force_policy() {
     let env = envelope(Command::ClosePane(ClosePaneArgs {
         pane: Some(new_pane),
         force: false,
+        tree: false,
     }));
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -5286,6 +5372,7 @@ fn close_pane_explicit_target_in_another_session_closes_there() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(pane_b2),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -6146,6 +6233,7 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -6269,6 +6357,7 @@ fn close_tab_kills_every_pane_concurrently() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: false,
+            tree: false,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -6330,6 +6419,7 @@ fn close_tab_with_a_busy_confirm_pane_rejects_without_force() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -6390,6 +6480,7 @@ fn close_tab_force_kills_a_busy_confirm_pane() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: true,
+            tree: false,
         }),
     ));
     assert!(matches!(result, CommandResult::Ok { .. }));
@@ -6446,6 +6537,7 @@ fn close_tab_confirm_if_busy_exited_pane_closes() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(tab_b),
             force: false,
+            tree: false,
         }),
     ));
     assert!(matches!(result, CommandResult::Ok { .. }));
@@ -6510,6 +6602,7 @@ fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
         Command::CloseTab(CloseTabArgs {
             tab: Some(TabId::new()),
             force: false,
+            tree: false,
         }),
     );
     let command_id = env.id;
@@ -8184,6 +8277,7 @@ fn close_pane_hidden_behind_a_fullscreen_drops_it() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(root),
             force: true,
+            tree: false,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -8208,6 +8302,7 @@ fn close_pane_closing_the_promoted_pane_drops_the_fullscreen() {
         Command::ClosePane(ClosePaneArgs {
             pane: Some(pane_a),
             force: true,
+            tree: false,
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));

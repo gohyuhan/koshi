@@ -413,6 +413,7 @@ impl CliCommand {
                 Command::ClosePane(ClosePaneArgs {
                     pane: *pane,
                     force: *force,
+                    tree: false,
                 }),
             ),
             CliCommand::ResizePane {
@@ -440,6 +441,7 @@ impl CliCommand {
                 Command::CloseTab(CloseTabArgs {
                     tab: *tab,
                     force: *force,
+                    tree: false,
                 }),
             ),
             CliCommand::NextTab { client } => (

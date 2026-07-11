@@ -946,6 +946,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::ClosePane(ClosePaneArgs {
                 pane: None,
                 force: true,
+                tree: false,
             }),
         ),
         (
@@ -988,6 +989,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::CloseTab(CloseTabArgs {
                 tab: Some(tab),
                 force: false,
+                tree: false,
             }),
         ),
         (

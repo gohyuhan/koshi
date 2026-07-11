@@ -35,6 +35,7 @@ fn pane_commands_roundtrip() {
     roundtrip(&Command::ClosePane(ClosePaneArgs {
         pane: Some(PaneId::new()),
         force: true,
+        tree: true,
     }));
     roundtrip(&Command::ResizePane(ResizePaneArgs {
         pane: None,

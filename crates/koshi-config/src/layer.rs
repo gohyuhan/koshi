@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use koshi_core::geometry::Direction;
+use koshi_core::key::KeyChord;
 
 use crate::key::Leader;
 use crate::types::{
@@ -155,6 +156,10 @@ pub struct PartialKeybindingsConfig {
     /// Per-mode bindings. When set, the whole map replaces the lower layer's;
     /// per-mode keymap merging is done by the keymap-merge pass.
     pub modes: Option<BTreeMap<ModeName, ModeBindings>>,
+    /// Replacement chord for the reserved unlock. The outer `Option` is
+    /// whether this layer sets the field; the inner `Option` is the value
+    /// (`None` = keep the built-in unlock key).
+    pub unlock_alternative: Option<Option<KeyChord>>,
 }
 
 impl PartialKeybindingsConfig {
@@ -174,6 +179,9 @@ impl PartialKeybindingsConfig {
         // ponytail: whole-map replace; per-mode keymap merge is the keymap pass.
         if let Some(v) = self.modes {
             target.modes = v;
+        }
+        if let Some(v) = self.unlock_alternative {
+            target.unlock_alternative = v;
         }
     }
 }
