@@ -120,8 +120,12 @@ impl Runtime {
                 active_tab: active_tab_id,
                 focused_pane: client.focused_pane(active_tab_id),
                 lock_mode: client.lock_mode(),
+                // The input pipeline's sequence matcher supplies the live
+                // pending state once it lands; until then no sequence pends.
+                pending_sequence: None,
             },
             plugin_ui: PluginUiSnapshot::default(),
+            keymap_hints: self.keymap_hints.hints_for(client.lock_mode()),
         })
     }
 

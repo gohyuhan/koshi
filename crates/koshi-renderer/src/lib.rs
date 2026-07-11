@@ -7,5 +7,6 @@ pub mod types;
 
 pub mod render;
 pub mod snapshot;
+pub mod statusline_hints;
 
 pub use render::{cursor_position, render_frame};

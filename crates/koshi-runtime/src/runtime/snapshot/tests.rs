@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
@@ -132,6 +133,37 @@ fn build_snapshot_maps_session_tab_and_client() {
 
     // No plugin UI for a stock session.
     assert_eq!(snap.plugin_ui, PluginUiSnapshot::default());
+
+    // No sequence pends until the input pipeline sets one.
+    assert_eq!(snap.client.pending_sequence, None);
+}
+
+#[test]
+fn build_snapshot_carries_the_hints_for_the_clients_mode() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, _pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    // Normal mode: the shipped normal-mode bindings surface as hint data.
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.client.lock_mode, LockMode::Normal);
+    assert_eq!(snap.keymap_hints.entries.len(), 21);
+    assert!(!snap.keymap_hints.reverted);
+
+    // Locked mode: the same frame path now carries only the pinned unlock.
+    rt.sessions
+        .get_mut(&session_id)
+        .expect("session")
+        .clients
+        .get_mut(client_id)
+        .expect("client")
+        .update_lock_mode(LockMode::Locked);
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.client.lock_mode, LockMode::Locked);
+    assert_eq!(snap.keymap_hints.entries.len(), 1);
+    assert_eq!(snap.keymap_hints.entries[0].label, "Unlock");
+    assert!(snap.keymap_hints.entries[0].pinned);
 }
 
 #[test]

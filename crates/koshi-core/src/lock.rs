@@ -34,5 +34,35 @@ pub enum LockMode {
     SearchMode,
 }
 
+impl LockMode {
+    /// Every built-in mode, in declaration order. The startup mode
+    /// registration and the keymap layers iterate this so the built-in set
+    /// is defined once.
+    pub const ALL: [LockMode; 7] = [
+        LockMode::Normal,
+        LockMode::Locked,
+        LockMode::Resize,
+        LockMode::PaneMode,
+        LockMode::TabMode,
+        LockMode::ScrollMode,
+        LockMode::SearchMode,
+    ];
+
+    /// The mode's canonical keymap name — the string the keybinding config
+    /// groups a mode's bindings under (`modes.normal`, `modes.locked`, …).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            LockMode::Normal => "normal",
+            LockMode::Locked => "locked",
+            LockMode::Resize => "resize",
+            LockMode::PaneMode => "pane",
+            LockMode::TabMode => "tab",
+            LockMode::ScrollMode => "scroll",
+            LockMode::SearchMode => "search",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -439,3 +439,33 @@ fn reserved_unlock_is_the_locked_mode_binding() {
     );
     assert_eq!(bound.args, ActionArgs::None);
 }
+
+#[test]
+fn prefix_labels_name_exactly_the_default_prefix_chords() {
+    let labels = default_prefix_labels();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(
+        labels
+            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('p')))
+            .map(String::as_str),
+        Some("PANE")
+    );
+    assert_eq!(
+        labels
+            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('s')))
+            .map(String::as_str),
+        Some("RESIZE")
+    );
+
+    // Every labeled chord opens at least one multi-chord default sequence,
+    // and every multi-chord default sequence's opening chord is labeled —
+    // the label table and the binding table stay in lockstep.
+    let normal = &default_mode_bindings()[&ModeName::new("normal")];
+    let openers: std::collections::BTreeSet<KeyChord> = normal
+        .keys
+        .keys()
+        .filter(|sequence| sequence.chords().len() > 1)
+        .map(|sequence| sequence.chords()[0])
+        .collect();
+    assert_eq!(openers, labels.keys().copied().collect());
+}

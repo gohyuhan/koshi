@@ -804,6 +804,7 @@ dependencies = [
 name = "koshi-runtime"
 version = "0.1.0"
 dependencies = [
+ "koshi-config",
  "koshi-core",
  "koshi-layout",
  "koshi-observability",

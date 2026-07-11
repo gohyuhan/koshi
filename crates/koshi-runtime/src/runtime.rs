@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod command;
 pub mod driver;
 pub mod event;
+pub(crate) mod hints;
 pub mod input;
 pub mod pty_forward;
 pub mod pty_output;

@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 
 use crate::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
-    ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, KeymapHints, PaneSlot, PaneSnapshot,
+    PluginUiSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -113,8 +114,10 @@ fn build(
             active_tab: tab_id,
             focused_pane: focused,
             lock_mode,
+            pending_sequence: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
+        keymap_hints: KeymapHints::default(),
     }
 }
 
@@ -179,12 +182,41 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
     assert_eq!(buf[(1, 1)].symbol(), "─");
     assert_eq!(buf[(0, 2)].symbol(), "│");
 
-    // Bottom row (row 7): the keybind-hint bar is reserved and blank for now.
+    // Bottom row (row 7): the keybind-hint bar row is koshi-owned chrome —
+    // blank here because this snapshot carries no hint data.
     assert!(
         row_text(&buf, 7).trim().is_empty(),
         "hint bar row: {:?}",
         row_text(&buf, 7)
     );
+}
+
+#[test]
+fn hint_bar_paints_the_bottom_row_from_the_snapshot_hints() {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 0, 40, 8), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.keymap_hints = KeymapHints {
+        entries: Arc::new(vec![crate::snapshot::HintBinding {
+            sequence: KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('l'))),
+            label: "Lock".to_string(),
+            user_set: false,
+            pinned: false,
+        }]),
+        ..KeymapHints::default()
+    };
+    let buf = render(&snap, 40, 8);
+
+    // The bar owns the bottom row: the hint text replaces the pane's bottom
+    // border there, while the border's side columns above it still draw.
+    assert_eq!(row_text(&buf, 7).trim_end(), "<C-l> Lock");
+    assert_eq!(buf[(0, 6)].symbol(), "│");
 }
 
 #[test]

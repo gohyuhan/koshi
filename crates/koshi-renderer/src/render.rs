@@ -5,8 +5,8 @@
 //! the left, a right-aligned status section — scroll position and mode tag), the
 //! **pane area** in the middle (a bordered box per visible pane, the focused
 //! pane's border highlighted), and the **keybinding hint bar** on the bottom row
-//! — a koshi-owned row reserved here and left blank until config and action
-//! metadata are available to fill it.
+//! — a koshi-owned row painted by [`crate::statusline_hints`] from the
+//! snapshot's per-mode keybinding data.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -16,9 +16,8 @@
 //! for any pane, a centered "terminal too small" overlay replaces the pane
 //! render for that frame. When the client's viewport is larger than the size
 //! the layout was solved for, the whole frame is centered and the surrounding
-//! margin is filled with a dim letterbox. The keybinding hints are painted by a
-//! later task over the same buffer; plugin-contributed segments (empty here) are
-//! injected once the plugin host lands.
+//! margin is filled with a dim letterbox. Plugin-contributed segments (empty
+//! here) are injected once the plugin host lands.
 
 pub mod state;
 
@@ -35,16 +34,18 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::{PaneSnapshot, RenderSnapshot};
+use crate::statusline_hints::draw_hint_bar;
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
 /// Blanks `area` first so a buffer reused across frames shows no stale cells,
 /// then draws the pane borders, each visible pane's terminal cells, and the
-/// collapsed stack-member strips, then the tabline over the top row. The bottom
-/// row is the koshi-owned keybinding hint bar: reserved and left blank here,
-/// filled by a later task. When the active tab has no room for any pane
-/// (`all_suppressed`), draws only a centered too-small overlay and returns,
-/// skipping the panes and the tabline. Does nothing for a zero-size area.
+/// collapsed stack-member strips, then the tabline over the top row and the
+/// keybinding hint bar over the bottom row (skipped when the content area is a
+/// single row — the tabline owns it). When the active tab has no room for any
+/// pane (`all_suppressed`), draws only a centered too-small overlay and
+/// returns, skipping the panes and both chrome rows. Does nothing for a
+/// zero-size area.
 pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -89,6 +90,18 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         height: 1,
     };
     draw_tabline(snapshot, tabline, buf);
+
+    // The hint bar owns the bottom row, painted over the frame like the
+    // tabline. A one-row content area is the tabline's; no hint bar fits.
+    if content.height >= 2 {
+        let hint_bar = RatatuiRect {
+            x: content.x,
+            y: content.bottom() - 1,
+            width: content.width,
+            height: 1,
+        };
+        draw_hint_bar(snapshot, hint_bar, buf);
+    }
 
     draw_letterbox(area, content, buf);
 }

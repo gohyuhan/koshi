@@ -368,6 +368,29 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     ])
 }
 
+/// The display labels for the default binding table's prefix chords, keyed by
+/// the opening chord of the multi-chord sequences it groups.
+///
+/// The hint bar shows a prefix's label (`<C-p> PANE`) only while every binding
+/// under that prefix still comes from the untouched defaults; once any user
+/// surface overrides, adds, or removes a binding under it, the group falls
+/// back to a derived `+N` marker, since the shipped label no longer describes
+/// the set. Lives beside the default binding table so the labels and the
+/// sequences they describe change together.
+#[must_use]
+pub fn default_prefix_labels() -> BTreeMap<KeyChord, String> {
+    BTreeMap::from([
+        (
+            KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+            "PANE".to_string(),
+        ),
+        (
+            KeyChord::new(ModFlags::CTRL, Key::Char('s')),
+            "RESIZE".to_string(),
+        ),
+    ])
+}
+
 /// Defaults applied when creating panes and layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDefaults {
