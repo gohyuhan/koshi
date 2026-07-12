@@ -33,13 +33,14 @@
 //! - `KOSHI_LOG_FORMAT` — `json` or `pretty` (default: `pretty`).
 //! - `KOSHI_LOG` — tracing filter directive, e.g. `info` or `koshi=debug`
 //!   (default: `info`).
+//! - `KOSHI_STATE_DIR` — moves the state directory the default log file
+//!   lives under (resolved by [`koshi_paths::state_dir`]).
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use directories::ProjectDirs;
 use thiserror::Error;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_appender::rolling::{Builder, Rotation};
@@ -117,19 +118,15 @@ impl LogDestination {
 /// How many rotated log files to keep before the oldest is deleted.
 pub const DEFAULT_MAX_LOG_FILES: usize = 7;
 
-/// The default log file is `koshi.log` under the OS state directory, resolved by
-/// [`directories::ProjectDirs`]: `$XDG_STATE_HOME/koshi` (or `~/.local/state/koshi`)
-/// on Linux, `~/Library/Application Support/koshi` on macOS, and
-/// `%LOCALAPPDATA%\koshi` on Windows. macOS and Windows have no distinct "state"
-/// location, so `state_dir()` is `None` there and we fall back to the per-user
-/// data directory. If no home directory can be found at all, the file lands in
-/// the current directory as a last resort.
+/// The default log file is `koshi.log` under the user's state directory,
+/// resolved by [`koshi_paths::state_dir`] — `~/.local/state/koshi` on Linux,
+/// `~/Library/Application Support/koshi` on macOS, `%LOCALAPPDATA%\koshi\data`
+/// on Windows, with `KOSHI_STATE_DIR` overriding on every platform. If no
+/// home directory can be found at all, the file lands in the current
+/// directory as a last resort.
 pub fn default_log_path() -> PathBuf {
-    match ProjectDirs::from("", "", "koshi") {
-        Some(dirs) => dirs
-            .state_dir()
-            .unwrap_or_else(|| dirs.data_local_dir())
-            .join("koshi.log"),
+    match koshi_paths::state_dir() {
+        Some(dir) => dir.join("koshi.log"),
         None => PathBuf::from("koshi.log"),
     }
 }

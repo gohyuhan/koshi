@@ -669,6 +669,7 @@ dependencies = [
  "koshi-core",
  "koshi-input",
  "koshi-observability",
+ "koshi-paths",
  "koshi-pty",
  "koshi-renderer",
  "koshi-runtime",
@@ -748,8 +749,8 @@ dependencies = [
 name = "koshi-observability"
 version = "0.1.0"
 dependencies = [
- "directories",
  "koshi-core",
+ "koshi-paths",
  "miette",
  "thiserror 2.0.18",
  "tracing",
@@ -765,6 +766,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-paths"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "tempfile",
 ]
 
 [[package]]

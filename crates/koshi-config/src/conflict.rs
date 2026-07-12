@@ -1,8 +1,8 @@
 //! Keybinding conflict detection over ordered keymap layers.
 //!
 //! Bindings arrive in layers — the built-in defaults, then the user's own
-//! surfaces (user file, project file, session, layout, manual `koshi keys`
-//! edits), lowest first. Before the keymap-merge pass folds them into the
+//! surfaces (user file, session, layout, manual `koshi keys` edits), lowest
+//! first. Before the keymap-merge pass folds them into the
 //! runtime lookup map, [`detect_conflicts`] inspects the layers and reports
 //! every finding as a typed [`ConflictDiagnostic`]. The report's
 //! [`verdict`](ConflictReport::verdict) tells the caller what to do with the
@@ -64,10 +64,8 @@ use crate::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 pub enum LayerOrigin {
     /// The built-in default binding table koshi ships.
     Defaults,
-    /// The user's own keymap file (`~/.config/koshi/keys.kdl`).
+    /// The user's own keymap file (`keys.kdl` in the koshi config directory).
     User,
-    /// A project-local keymap file (`.koshi/keys.kdl`).
-    Project,
     /// Per-named-session overrides.
     Session,
     /// Bindings a layout file declares for itself.
@@ -91,7 +89,6 @@ impl fmt::Display for LayerOrigin {
         f.write_str(match self {
             Self::Defaults => "defaults",
             Self::User => "user",
-            Self::Project => "project",
             Self::Session => "session",
             Self::Layout => "layout",
             Self::Manual => "manual",

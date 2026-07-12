@@ -54,6 +54,7 @@ impl Widget for SnapshotWidget<'_> {
 /// or the shell exits, then restore the terminal. Errors surface to `main`.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _tracing = init_tracing(TracingOptions::from_env())?;
+    ensure_koshi_dirs();
 
     // Restore the terminal on any exit — normal, error, or panic.
     let cleanup = TerminalCleanupGuard::new();
@@ -103,6 +104,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }));
     teardown(&mut runtime, outcome)?;
     Ok(())
+}
+
+/// Create koshi's on-disk homes for this run: the config directory with its
+/// `plugins/` tree, and the private runtime directory sockets live in
+/// (owner-only on Unix). Every path resolves through `koshi-paths`, so a
+/// `KOSHI_CONFIG_DIR`/`KOSHI_RUNTIME_DIR` override relocates what gets
+/// created. Failures are logged and the session still starts: a terminal
+/// works without a config directory.
+fn ensure_koshi_dirs() {
+    match koshi_paths::config_dir() {
+        Some(config) => {
+            for dir in [config.clone(), config.join("plugins")] {
+                if let Err(error) = koshi_paths::ensure_dir(&dir) {
+                    tracing::warn!(path = %dir.display(), %error, "could not create config directory");
+                }
+            }
+        }
+        None => tracing::warn!("no home directory found; skipping config directory setup"),
+    }
+    match koshi_paths::runtime_dir() {
+        Some(runtime) => {
+            if let Err(error) = koshi_paths::ensure_private_dir(&runtime) {
+                tracing::warn!(path = %runtime.display(), %error, "could not create runtime directory");
+            }
+        }
+        None => tracing::warn!("no home directory found; skipping runtime directory setup"),
+    }
 }
 
 /// Tear the runtime down for whichever way the loop ended. A normal return —

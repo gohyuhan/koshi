@@ -194,7 +194,7 @@ fn later_user_layer_wins_the_key_and_its_attribution() {
             vec![(key.clone(), bound("lock"))],
         ),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
@@ -205,7 +205,7 @@ fn later_user_layer_wins_the_key_and_its_attribution() {
         normal.user_set[&key],
         MergedBinding {
             bound: bound("lock"),
-            source: LayerOrigin::Project,
+            source: LayerOrigin::Session,
         }
     );
 }
@@ -227,13 +227,13 @@ fn remove_clears_a_default_and_records_both_sides() {
 
 #[test]
 fn remove_then_rebind_moves_a_key_between_user_layers() {
-    // The supported way to re-key: the session layer removes the project
+    // The supported way to re-key: the session layer removes the user
     // layer's key and rebinds it itself.
     let key = seq(ModFlags::CTRL, 't');
     let merged = merge(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -246,7 +246,7 @@ fn remove_then_rebind_moves_a_key_between_user_layers() {
     ]);
     let normal = &merged.modes[&mode("normal")];
 
-    // The same-layer rebind survives its own remove; the project entry is
+    // The same-layer rebind survives its own remove; the user entry is
     // voided.
     assert_eq!(
         normal.user_set[&key],
@@ -264,12 +264,7 @@ fn remove_below_does_not_void_a_higher_binding() {
     let key = seq(ModFlags::CTRL, 't');
     let merged = merge(&[
         defaults(),
-        layer_with_removed(
-            LayerOrigin::Project,
-            "normal",
-            Vec::new(),
-            vec![key.clone()],
-        ),
+        layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
         layer(
             LayerOrigin::Session,
             "normal",
