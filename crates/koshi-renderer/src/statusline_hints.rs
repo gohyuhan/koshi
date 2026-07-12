@@ -6,9 +6,9 @@
 //! style itself rather than a block inside a neighboring group.
 //! Pending view paints the pressed prefix as an accent breadcrumb, then shows
 //! only its next chords. Internal config spellings such as `C-` and `A-` never
-//! leak into user-facing text. Each modifier group takes one stop on the koshi
-//! purple→blue ramp, matching the tab list above; hints that don't fit are
-//! dropped whole with a trailing `…` marker.
+//! leak into user-facing text. Each modifier group takes one stop on the
+//! theme's chrome ramp (dark-purple → blue by default), matching the tab list
+//! above; hints that don't fit are dropped whole with a trailing `…` marker.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
 use crate::snapshot::{KeymapHints, RenderSnapshot};
-use crate::theme;
+use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
@@ -32,6 +32,7 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
     Clear.render(area, buf);
 
     let hints = &snapshot.keymap_hints;
+    let theme = &snapshot.theme;
     let pending = snapshot
         .client
         .pending_sequence
@@ -50,15 +51,15 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
     if !pending.is_empty() {
         for (index, chord) in pending.iter().enumerate() {
             let prefix_text = (index == 0).then(|| prefix_text(hints, *chord)).flatten();
-            let line = chord_ribbon(*chord, prefix_text.as_deref());
+            let line = chord_ribbon(theme, *chord, prefix_text.as_deref());
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, right_edge);
                 return;
             }
         }
-        let arrow = Line::from(Span::styled(" ▶ ", breadcrumb_arrow_style()));
+        let arrow = Line::from(Span::styled(" ▶ ", breadcrumb_arrow_style(theme)));
         if !paint_whole(buf, &mut x, area.y, right_edge, &arrow) {
-            draw_overflow_marker(buf, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, right_edge);
             return;
         }
     }
@@ -71,15 +72,15 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
         // continuation key's block — `Tab` reads as its own opener, not as
         // another key inside the preceding modifier group.
         let key_style = if group.mods.is_empty() {
-            ramp_header_style(group_index, count)
+            ramp_header_style(theme, group_index, count)
         } else {
-            ramp_key_style(group_index, count)
+            ramp_key_style(theme, group_index, count)
         };
-        let label_style = ramp_label_style(group_index, count);
+        let label_style = ramp_label_style(theme, group_index, count);
         let header = (!group.mods.is_empty()).then(|| {
             Line::from(Span::styled(
                 format!(" {} + ", human_modifiers(group.mods)),
-                ramp_header_style(group_index, count),
+                ramp_header_style(theme, group_index, count),
             ))
         });
         let first_width = group.entries.first().map_or(0, |entry| {
@@ -87,7 +88,7 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
         });
         let header_width = header.as_ref().map_or(0, |line| line.width() as u16);
         if x.saturating_add(header_width).saturating_add(first_width) > right_edge {
-            draw_overflow_marker(buf, x, area.y, right_edge);
+            draw_overflow_marker(buf, theme, x, area.y, right_edge);
             return;
         }
         if let Some(header) = header {
@@ -96,7 +97,7 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
         for entry in group.entries {
             let line = entry_ribbon(&entry, key_style, label_style);
             if !paint_whole(buf, &mut x, area.y, right_edge, &line) {
-                draw_overflow_marker(buf, x, area.y, right_edge);
+                draw_overflow_marker(buf, theme, x, area.y, right_edge);
                 return;
             }
         }
@@ -106,9 +107,9 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
 /// Mark dropped trailing hints with `…` so truncation is visible. Painted at
 /// the current cursor, or over the row's last cell when the hints consumed
 /// the full width.
-fn draw_overflow_marker(buf: &mut Buffer, x: u16, y: u16, right_edge: u16) {
+fn draw_overflow_marker(buf: &mut Buffer, theme: &Theme, x: u16, y: u16, right_edge: u16) {
     let x = x.min(right_edge.saturating_sub(1));
-    let marker = Line::from(Span::styled("…", overflow_style()));
+    let marker = Line::from(Span::styled("…", overflow_style(theme)));
     set_line_clipped(buf, x, y, &marker, 1);
 }
 
@@ -255,20 +256,23 @@ fn removed_under(hints: &KeymapHints, pending: &[KeyChord], chord: KeyChord) -> 
 }
 
 /// The accent ribbon for one already-pressed chord of the pending sequence.
-fn chord_ribbon(chord: KeyChord, label: Option<&str>) -> Line<'static> {
+fn chord_ribbon(theme: &Theme, chord: KeyChord, label: Option<&str>) -> Line<'static> {
     let mut spans = Vec::new();
     if !chord.mods.is_empty() {
         spans.push(Span::styled(
             format!(" {} + ", human_modifiers(chord.mods)),
-            breadcrumb_modifier_style(),
+            breadcrumb_modifier_style(theme),
         ));
     }
     spans.push(Span::styled(
         format!(" {} ", human_key(chord.key)),
-        breadcrumb_key_style(),
+        breadcrumb_key_style(theme),
     ));
     if let Some(label) = label {
-        spans.push(Span::styled(format!(" {label} "), breadcrumb_key_style()));
+        spans.push(Span::styled(
+            format!(" {label} "),
+            breadcrumb_key_style(theme),
+        ));
     }
     Line::from(spans)
 }
@@ -357,53 +361,53 @@ fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width
 }
 
 /// A modifier group's `Ctrl +` header: its ramp stop as plain colored text.
-fn ramp_header_style(index: usize, count: usize) -> Style {
+fn ramp_header_style(theme: &Theme, index: usize, count: usize) -> Style {
     Style::default()
-        .fg(theme::ramp(index, count))
+        .fg(theme.ramp(index, count))
         .add_modifier(Modifier::BOLD)
 }
 
 /// A group's key block: light text on the group's ramp stop.
-fn ramp_key_style(index: usize, count: usize) -> Style {
+fn ramp_key_style(theme: &Theme, index: usize, count: usize) -> Style {
     Style::default()
-        .fg(theme::ON_RAMP)
-        .bg(theme::ramp(index, count))
+        .fg(theme.on_ramp)
+        .bg(theme.ramp(index, count))
         .add_modifier(Modifier::BOLD)
 }
 
 /// A group's action-label block: the same stop dimmed, quiet text.
-fn ramp_label_style(index: usize, count: usize) -> Style {
+fn ramp_label_style(theme: &Theme, index: usize, count: usize) -> Style {
     Style::default()
-        .fg(theme::ON_RAMP_DIM)
-        .bg(theme::ramp_dim(index, count))
+        .fg(theme.on_ramp_dim)
+        .bg(theme.ramp_dim(index, count))
 }
 
 /// The pressed-prefix breadcrumb's modifier text: accent on the bar.
-fn breadcrumb_modifier_style() -> Style {
+fn breadcrumb_modifier_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ACCENT)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD)
 }
 
 /// The pressed-prefix breadcrumb's key/label blocks: dark text on the
 /// accent, brighter than any ramp stop, so the in-progress chords stand out.
-fn breadcrumb_key_style() -> Style {
+fn breadcrumb_key_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ON_ACCENT)
-        .bg(theme::ACCENT)
+        .fg(theme.on_accent)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD)
 }
 
-fn breadcrumb_arrow_style() -> Style {
+fn breadcrumb_arrow_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ACCENT)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD)
 }
 
 /// The `…` marking hints dropped for width.
-fn overflow_style() -> Style {
+fn overflow_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ON_RAMP_DIM)
+        .fg(theme.on_ramp_dim)
         .add_modifier(Modifier::BOLD)
 }
 

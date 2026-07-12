@@ -94,6 +94,7 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints,
+        theme: Theme::default(),
     }
 }
 
@@ -427,4 +428,30 @@ fn zero_size_area_draws_nothing() {
     });
     draw_hint_bar(&snapshot, area, &mut buf);
     assert_eq!(row_text(&buf), "");
+}
+
+/// A non-default palette recolors the bar: the pending breadcrumb takes the
+/// theme's accent pair and a group's key block sits on the custom ramp.
+#[test]
+fn a_custom_theme_recolors_the_bar() {
+    let mut snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
+    snapshot.theme = Theme {
+        ramp_start: (0xff, 0x00, 0x00),
+        ramp_end: (0x00, 0x00, 0xff),
+        accent: Color::Rgb(0x00, 0xff, 0x00),
+        on_accent: Color::Rgb(0x01, 0x02, 0x03),
+        ..Theme::default()
+    };
+    let buf = draw(&snapshot, 80);
+    // Row: " Ctrl +  p  PANE  ▶  n  New Pane …". The breadcrumb's `Ctrl +`
+    // is accent text; its key block is on-accent text on the accent.
+    assert_eq!(buf[(1, 0)].fg, Color::Rgb(0x00, 0xff, 0x00));
+    assert_eq!(buf[(9, 0)].fg, Color::Rgb(0x01, 0x02, 0x03));
+    assert_eq!(buf[(9, 0)].bg, Color::Rgb(0x00, 0xff, 0x00));
+    // The modifier-less continuation key wears the group's header style: the
+    // custom ramp's start stop as its text color.
+    let n_x = (0..80)
+        .find(|&x| buf[(x, 0)].symbol() == "n")
+        .expect("continuation key drawn");
+    assert_eq!(buf[(n_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
 }

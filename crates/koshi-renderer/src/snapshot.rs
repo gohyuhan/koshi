@@ -30,6 +30,8 @@ use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
 
+use crate::theme::Theme;
+
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
 /// The renderer joins [`panes`](Self::panes) to the [`PaneSlot`]s in
@@ -49,6 +51,9 @@ pub struct RenderSnapshot {
     pub plugin_ui: PluginUiSnapshot,
     /// The keybinding data the hint bar draws for the client's current mode.
     pub keymap_hints: KeymapHints,
+    /// The resolved chrome theme every koshi-owned surface draws its colors
+    /// from this frame.
+    pub theme: Theme,
 }
 
 /// The session-scoped part of a frame: identity plus the active tab and the

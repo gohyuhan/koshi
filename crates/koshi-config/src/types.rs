@@ -569,62 +569,60 @@ impl Default for ThemeConfig {
 
 /// The set of colors the renderer draws chrome with. Each field names one
 /// role; the renderer maps its chrome styles onto these when themed.
+///
+/// Chrome elements that come in runs — the tab ribbon, the hint bar's
+/// modifier groups — are colored as a gradient between [`ramp_start`] and
+/// [`ramp_end`], each element taking one interpolated stop by its position.
+/// For example, `ramp_start "#ff0000"` with `ramp_end "#0000ff"` turns a
+/// five-tab ribbon into five stops fading red → blue.
+///
+/// [`ramp_start`]: ColorPalette::ramp_start
+/// [`ramp_end`]: ColorPalette::ramp_end
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorPalette {
-    /// Default text foreground.
-    pub foreground: RgbColor,
-    /// Default background.
-    pub background: RgbColor,
-    /// Highlight color for focus and active elements.
+    /// First endpoint of the chrome gradient, taken whole by the first
+    /// element of a run.
+    pub ramp_start: RgbColor,
+    /// Second endpoint of the chrome gradient, taken whole by the last
+    /// element of a run.
+    pub ramp_end: RgbColor,
+    /// Text drawn over a ramp-colored block.
+    pub on_ramp: RgbColor,
+    /// Text drawn over a dimmed ramp block.
+    pub on_ramp_dim: RgbColor,
+    /// The in-progress accent: marks the chords already pressed in a pending
+    /// key sequence.
     pub accent: RgbColor,
+    /// Text drawn over an accent block.
+    pub on_accent: RgbColor,
     /// Border of the focused pane.
     pub border_focused: RgbColor,
     /// Border of unfocused panes.
     pub border_unfocused: RgbColor,
-    /// Foreground of the active tab.
-    pub tab_active_fg: RgbColor,
-    /// Background of the active tab.
-    pub tab_active_bg: RgbColor,
-    /// Foreground of inactive tabs.
-    pub tab_inactive_fg: RgbColor,
-    /// Background of inactive tabs.
-    pub tab_inactive_bg: RgbColor,
-    /// Foreground of the mode indicator.
-    pub mode_fg: RgbColor,
-    /// Background of the mode indicator.
-    pub mode_bg: RgbColor,
-    /// Foreground of a stacked-pane header.
+    /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: RgbColor,
-    /// Background of a stacked-pane header.
+    /// Background of a collapsed stack member's header strip.
     pub stack_header_bg: RgbColor,
-    /// The key glyph in a keybinding hint.
-    pub hint_key: RgbColor,
-    /// The label text in a keybinding hint.
-    pub hint_label: RgbColor,
-    /// Background of the keybinding hint bar.
-    pub hint_bg: RgbColor,
+    /// Backdrop of the letterbox margin around a centered layout.
+    pub letterbox: RgbColor,
 }
 
 impl Default for ColorPalette {
-    /// A dark theme applied when no theme is configured.
+    /// The stock koshi chrome — a dark-purple → blue ramp with a violet
+    /// accent — applied when no theme is configured.
     fn default() -> Self {
         Self {
-            foreground: RgbColor::new(0xd4, 0xd4, 0xd4),
-            background: RgbColor::new(0x1e, 0x1e, 0x1e),
-            accent: RgbColor::new(0x00, 0xaf, 0xd7),
+            ramp_start: RgbColor::new(0x58, 0x1c, 0x87),
+            ramp_end: RgbColor::new(0x3b, 0x82, 0xf6),
+            on_ramp: RgbColor::new(0xf4, 0xf1, 0xfa),
+            on_ramp_dim: RgbColor::new(0xc9, 0xc4, 0xd4),
+            accent: RgbColor::new(0xa7, 0x8b, 0xfa),
+            on_accent: RgbColor::new(0x1e, 0x10, 0x33),
             border_focused: RgbColor::new(0x00, 0xaf, 0xd7),
             border_unfocused: RgbColor::new(0x58, 0x58, 0x58),
-            tab_active_fg: RgbColor::new(0x1e, 0x1e, 0x1e),
-            tab_active_bg: RgbColor::new(0xd4, 0xd4, 0xd4),
-            tab_inactive_fg: RgbColor::new(0x80, 0x80, 0x80),
-            tab_inactive_bg: RgbColor::new(0x1e, 0x1e, 0x1e),
-            mode_fg: RgbColor::new(0x1e, 0x1e, 0x1e),
-            mode_bg: RgbColor::new(0x00, 0xaf, 0x5f),
-            stack_header_fg: RgbColor::new(0x1e, 0x1e, 0x1e),
-            stack_header_bg: RgbColor::new(0x80, 0x80, 0x80),
-            hint_key: RgbColor::new(0x00, 0xaf, 0xd7),
-            hint_label: RgbColor::new(0xd4, 0xd4, 0xd4),
-            hint_bg: RgbColor::new(0x30, 0x30, 0x30),
+            stack_header_fg: RgbColor::new(0xf4, 0xf1, 0xfa),
+            stack_header_bg: RgbColor::new(0x30, 0x0f, 0x4a),
+            letterbox: RgbColor::new(0x58, 0x58, 0x58),
         }
     }
 }

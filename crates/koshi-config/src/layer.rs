@@ -296,58 +296,43 @@ impl PartialThemeConfig {
 /// keeps the lower layer's color.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialColorPalette {
-    /// Default text foreground.
-    pub foreground: Option<RgbColor>,
-    /// Default background.
-    pub background: Option<RgbColor>,
-    /// Highlight color for focus and active elements.
+    /// First endpoint of the chrome gradient.
+    pub ramp_start: Option<RgbColor>,
+    /// Second endpoint of the chrome gradient.
+    pub ramp_end: Option<RgbColor>,
+    /// Text drawn over a ramp-colored block.
+    pub on_ramp: Option<RgbColor>,
+    /// Text drawn over a dimmed ramp block.
+    pub on_ramp_dim: Option<RgbColor>,
+    /// The in-progress accent for the pending-sequence breadcrumb.
     pub accent: Option<RgbColor>,
+    /// Text drawn over an accent block.
+    pub on_accent: Option<RgbColor>,
     /// Border of the focused pane.
     pub border_focused: Option<RgbColor>,
     /// Border of unfocused panes.
     pub border_unfocused: Option<RgbColor>,
-    /// Foreground of the active tab.
-    pub tab_active_fg: Option<RgbColor>,
-    /// Background of the active tab.
-    pub tab_active_bg: Option<RgbColor>,
-    /// Foreground of inactive tabs.
-    pub tab_inactive_fg: Option<RgbColor>,
-    /// Background of inactive tabs.
-    pub tab_inactive_bg: Option<RgbColor>,
-    /// Foreground of the mode indicator.
-    pub mode_fg: Option<RgbColor>,
-    /// Background of the mode indicator.
-    pub mode_bg: Option<RgbColor>,
-    /// Foreground of a stacked-pane header.
+    /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: Option<RgbColor>,
-    /// Background of a stacked-pane header.
+    /// Background of a collapsed stack member's header strip.
     pub stack_header_bg: Option<RgbColor>,
-    /// The key glyph in a keybinding hint.
-    pub hint_key: Option<RgbColor>,
-    /// The label text in a keybinding hint.
-    pub hint_label: Option<RgbColor>,
-    /// Background of the keybinding hint bar.
-    pub hint_bg: Option<RgbColor>,
+    /// Backdrop of the letterbox margin around a centered layout.
+    pub letterbox: Option<RgbColor>,
 }
 
 impl PartialColorPalette {
     fn apply(self, target: &mut ColorPalette) {
-        merge_field(&mut target.foreground, self.foreground);
-        merge_field(&mut target.background, self.background);
+        merge_field(&mut target.ramp_start, self.ramp_start);
+        merge_field(&mut target.ramp_end, self.ramp_end);
+        merge_field(&mut target.on_ramp, self.on_ramp);
+        merge_field(&mut target.on_ramp_dim, self.on_ramp_dim);
         merge_field(&mut target.accent, self.accent);
+        merge_field(&mut target.on_accent, self.on_accent);
         merge_field(&mut target.border_focused, self.border_focused);
         merge_field(&mut target.border_unfocused, self.border_unfocused);
-        merge_field(&mut target.tab_active_fg, self.tab_active_fg);
-        merge_field(&mut target.tab_active_bg, self.tab_active_bg);
-        merge_field(&mut target.tab_inactive_fg, self.tab_inactive_fg);
-        merge_field(&mut target.tab_inactive_bg, self.tab_inactive_bg);
-        merge_field(&mut target.mode_fg, self.mode_fg);
-        merge_field(&mut target.mode_bg, self.mode_bg);
         merge_field(&mut target.stack_header_fg, self.stack_header_fg);
         merge_field(&mut target.stack_header_bg, self.stack_header_bg);
-        merge_field(&mut target.hint_key, self.hint_key);
-        merge_field(&mut target.hint_label, self.hint_label);
-        merge_field(&mut target.hint_bg, self.hint_bg);
+        merge_field(&mut target.letterbox, self.letterbox);
     }
 }
 

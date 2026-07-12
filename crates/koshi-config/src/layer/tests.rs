@@ -157,8 +157,8 @@ fn deep_theme_color_override_keeps_other_roles() {
 
     assert_eq!(merged.theme.colors.accent, overridden);
     // Every other role keeps its default.
-    assert_eq!(merged.theme.colors.foreground, default_palette.foreground);
-    assert_eq!(merged.theme.colors.background, default_palette.background);
+    assert_eq!(merged.theme.colors.ramp_start, default_palette.ramp_start);
+    assert_eq!(merged.theme.colors.ramp_end, default_palette.ramp_end);
     assert_eq!(merged.theme.name, "default"); // sibling field kept
 }
 

@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 
+use koshi_config::types::{RgbColor, ThemeConfig};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_layout::content::content_rects;
@@ -26,10 +27,45 @@ use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
     RenderSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
+use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::state::Screen;
+use ratatui::style::Color;
 
 use crate::runtime::state::Runtime;
+
+/// Resolve a config theme into the renderer [`Theme`] the snapshot carries:
+/// each palette role's `#RRGGBB` value becomes the matching truecolor field.
+/// For example, a theme with `ramp_start "#ff0000"` yields a `Theme` whose
+/// first tab ribbon paints red. Resolving the default config theme yields
+/// exactly [`Theme::default`], so a default config reproduces the stock look.
+#[must_use]
+pub fn resolve_theme(config: &ThemeConfig) -> Theme {
+    let colors = &config.colors;
+    Theme {
+        ramp_start: rgb_channels(colors.ramp_start),
+        ramp_end: rgb_channels(colors.ramp_end),
+        on_ramp: rgb_color(colors.on_ramp),
+        on_ramp_dim: rgb_color(colors.on_ramp_dim),
+        accent: rgb_color(colors.accent),
+        on_accent: rgb_color(colors.on_accent),
+        border_focused: rgb_color(colors.border_focused),
+        border_unfocused: rgb_color(colors.border_unfocused),
+        stack_header_fg: rgb_color(colors.stack_header_fg),
+        stack_header_bg: rgb_color(colors.stack_header_bg),
+        letterbox: rgb_color(colors.letterbox),
+    }
+}
+
+/// A config color's `(r, g, b)` channels, for the theme's ramp endpoints.
+fn rgb_channels(color: RgbColor) -> (u8, u8, u8) {
+    (color.r, color.g, color.b)
+}
+
+/// A config color as a ratatui truecolor.
+fn rgb_color(color: RgbColor) -> Color {
+    Color::Rgb(color.r, color.g, color.b)
+}
 
 impl Runtime {
     /// Freeze the world the way `client_id` sees it into a [`RenderSnapshot`].
@@ -127,6 +163,7 @@ impl Runtime {
             },
             plugin_ui: PluginUiSnapshot::default(),
             keymap_hints: self.keymap_hints.hints_for(client.lock_mode()),
+            theme: self.theme,
         })
     }
 

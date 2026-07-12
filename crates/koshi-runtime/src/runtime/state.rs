@@ -15,6 +15,7 @@ use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
+use koshi_renderer::theme::Theme;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
@@ -65,6 +66,10 @@ pub struct Runtime {
     /// the built-in defaults — the sole keymap layer until the config loader
     /// lands — and rebuilt whenever the keymap inputs change.
     pub(crate) keymap_hints: KeymapHintCatalog,
+    /// The resolved chrome theme copied onto each frame's snapshot. Seeded
+    /// with the stock koshi look — the sole theme until the config loader
+    /// lands — and replaced from the effective config's theme when it does.
+    pub(crate) theme: Theme,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -117,6 +122,7 @@ impl Runtime {
             storage,
             ipc_server: None,
             keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
+            theme: Theme::default(),
             action_registry,
             render_scheduler: RenderScheduler::new(),
             inbox_rx,

@@ -2,7 +2,7 @@
 //! buffer, tabs show their marker, the mode tag tracks the client lock mode,
 //! pane borders draw with focus highlighting, terminal cells paint into pane
 //! content rects with their styles and wide-glyph handling, collapsed stack
-//! members render as inverted title strips, the focused pane's cursor cell is
+//! members render as theme-filled title strips, the focused pane's cursor cell is
 //! reported (clamped inside its content area, and hidden for unfocused, plugin,
 //! hidden, or app-hidden cursors), a centered too-small overlay replaces the
 //! frame when the tab has no room for any pane, a viewport larger than the
@@ -118,6 +118,7 @@ fn build(
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
+        theme: Theme::default(),
     }
 }
 
@@ -314,11 +315,11 @@ fn focused_pane_border_is_highlighted() {
     );
     let buf = render(&snap, 40, 8);
 
-    // Focused pane: cyan, bold border corner.
-    assert_eq!(buf[(0, 1)].fg, Color::Cyan);
+    // Focused pane: the theme's focus color, bold border corner.
+    assert_eq!(buf[(0, 1)].fg, Color::Rgb(0x00, 0xaf, 0xd7));
     assert!(buf[(0, 1)].modifier.contains(Modifier::BOLD));
     // Unfocused pane: dim border corner, no bold.
-    assert_eq!(buf[(20, 1)].fg, Color::DarkGray);
+    assert_eq!(buf[(20, 1)].fg, Color::Rgb(0x58, 0x58, 0x58));
     assert!(!buf[(20, 1)].modifier.contains(Modifier::BOLD));
 }
 
@@ -445,11 +446,18 @@ fn stack_headers_render_collapsed_strips() {
     assert!(strip_c.starts_with("▸ logs"), "strip: {strip_c:?}");
     assert!(strip_c.trim_end().ends_with("[3/3]"), "strip: {strip_c:?}");
 
-    // The whole strip row is inverted (the koshi-owned marker), gap included.
+    // The whole strip row carries the theme's strip colors (the koshi-owned
+    // marker), gap included.
     for x in 0..30 {
-        assert!(
-            buf[(x, 1)].modifier.contains(Modifier::REVERSED),
-            "col {x} of strip not inverted"
+        assert_eq!(
+            buf[(x, 1)].fg,
+            Color::Rgb(0xf4, 0xf1, 0xfa),
+            "col {x} of strip"
+        );
+        assert_eq!(
+            buf[(x, 1)].bg,
+            Color::Rgb(0x30, 0x0f, 0x4a),
+            "col {x} of strip"
         );
     }
 }
@@ -556,14 +564,15 @@ fn narrow_stack_header_indicator_does_not_bleed_left() {
     // The indicator clips inside the strip: nothing is written left of x=10.
     for x in 0..10 {
         assert_eq!(buf[(x, 1)].symbol(), " ", "col {x} written outside strip");
-        assert!(
-            !buf[(x, 1)].modifier.contains(Modifier::REVERSED),
-            "col {x} inverted outside strip"
+        assert_ne!(
+            buf[(x, 1)].bg,
+            Color::Rgb(0x30, 0x0f, 0x4a),
+            "col {x} styled outside strip"
         );
     }
-    // The strip's own cells (x=10..13) are inverted.
+    // The strip's own cells (x=10..13) carry the strip background.
     for x in 10..13 {
-        assert!(buf[(x, 1)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buf[(x, 1)].bg, Color::Rgb(0x30, 0x0f, 0x4a));
     }
 }
 
@@ -1024,7 +1033,11 @@ fn larger_viewport_centers_layout_and_letterboxes_margin() {
     // Margin cells around the pane region carry dim letterbox fill.
     for (x, y) in [(30, 1), (9, 5), (50, 5), (30, 10)] {
         assert_eq!(buf[(x, y)].symbol(), " ", "margin ({x},{y})");
-        assert_eq!(buf[(x, y)].bg, Color::DarkGray, "margin ({x},{y})");
+        assert_eq!(
+            buf[(x, y)].bg,
+            Color::Rgb(0x58, 0x58, 0x58),
+            "margin ({x},{y})"
+        );
     }
 
     // A cell inside the content rect keeps the default background: the fill
@@ -1088,7 +1101,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
 
     // No panic, and a margin cell inside the smaller buffer still got the
     // fill (row 0 is the tabline's, so probe the margin band below it).
-    assert_eq!(buf[(0, 1)].bg, Color::DarkGray);
+    assert_eq!(buf[(0, 1)].bg, Color::Rgb(0x58, 0x58, 0x58));
 }
 
 #[test]
@@ -1161,7 +1174,52 @@ fn equal_viewport_draws_no_letterbox() {
     // carries the letterbox background.
     for y in 0..8 {
         for x in 0..40 {
-            assert_ne!(buf[(x, y)].bg, Color::DarkGray, "cell ({x},{y})");
+            assert_ne!(
+                buf[(x, y)].bg,
+                Color::Rgb(0x58, 0x58, 0x58),
+                "cell ({x},{y})"
+            );
         }
     }
+}
+
+/// A non-default palette on the snapshot recolors every chrome element the
+/// theme names; the same frame under the default theme paints none of these
+/// custom colors.
+#[test]
+fn a_custom_theme_recolors_the_chrome() {
+    let left = PaneId::new();
+    let right = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true), ("logs", false)],
+        &[
+            (left, rect(0, 1, 20, 6), true),
+            (right, rect(20, 1, 20, 6), true),
+        ],
+        Some(left),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.theme = Theme {
+        ramp_start: (0xff, 0x00, 0x00),
+        ramp_end: (0x00, 0x00, 0xff),
+        border_focused: Color::Rgb(0xff, 0x88, 0x00),
+        border_unfocused: Color::Rgb(0x11, 0x22, 0x33),
+        ..Theme::default()
+    };
+    let buf = render(&snap, 40, 8);
+
+    // Borders take the theme's border colors.
+    assert_eq!(buf[(0, 1)].fg, Color::Rgb(0xff, 0x88, 0x00));
+    assert_eq!(buf[(20, 1)].fg, Color::Rgb(0x11, 0x22, 0x33));
+    // The session name takes the custom ramp's start end, the mode tag its
+    // other end.
+    assert_eq!(buf[(1, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
+    assert_eq!(buf[(38, 0)].fg, Color::Rgb(0x00, 0x00, 0xff));
+    // The first tab's ribbon sits on the custom ramp's start stop.
+    let tab_x = (0..40)
+        .find(|&x| buf[(x, 0)].symbol() == "#")
+        .expect("tab marker drawn");
+    assert_eq!(buf[(tab_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
 }

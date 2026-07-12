@@ -35,7 +35,7 @@ use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineSty
 
 use crate::snapshot::{PaneSnapshot, RenderSnapshot};
 use crate::statusline_hints::draw_hint_bar;
-use crate::theme;
+use crate::theme::Theme;
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
@@ -86,7 +86,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
 
     // Fill multi-client margins before chrome; the tabline and hint bar own
     // the outer rows and must remain visible over the letterbox.
-    draw_letterbox(area, content, buf);
+    draw_letterbox(area, content, &snapshot.theme, buf);
 
     let tabline = RatatuiRect {
         x: area.x,
@@ -186,9 +186,9 @@ fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
             continue;
         }
         let style = if Some(slot.pane_id) == focused {
-            border_focused_style()
+            border_focused_style(&snapshot.theme)
         } else {
-            border_unfocused_style()
+            border_unfocused_style(&snapshot.theme)
         };
         let rect = place(slot.rect, offset);
         Block::new()
@@ -352,17 +352,17 @@ fn cell_color(color: CellColor) -> Color {
 
 /// Draw the one-row title strip for every collapsed stack member: a collapse
 /// arrow and the pane title on the left, a `[position/total]` indicator
-/// right-aligned, over an inverted-background row that marks the strip as
+/// right-aligned, over a theme-filled row that marks the strip as
 /// koshi-owned. `offset` shifts each strip into the centered content rect.
 fn draw_stack_headers(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
-    let style = stack_header_style();
+    let style = stack_header_style(&snapshot.theme);
     for header in &snapshot.session.active_tab.stack_headers {
         let rect = place(header.rect, offset);
         if rect.width == 0 || rect.height == 0 {
             continue;
         }
 
-        // Invert the whole row first so the gap between the title and the
+        // Fill the whole row first so the gap between the title and the
         // indicator carries the strip background too.
         buf.set_style(rect, style);
 
@@ -391,8 +391,8 @@ fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> String {
 /// plus mode tag on the right are always shown whole, as colored text on the
 /// terminal's own background; only the tab list between them carries
 /// backgrounds — each tab a hint-bar-style ribbon on its own stop of the
-/// koshi purple→blue ramp. Tabs that don't fit are dropped whole with a
-/// trailing `…`.
+/// theme's chrome ramp (dark-purple → blue by default). Tabs that don't fit
+/// are dropped whole with a trailing `…`.
 fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     // The row is koshi-owned chrome: reset it first so its unused space keeps
     // the terminal's own background — never letterbox fill or stale cells.
@@ -405,7 +405,7 @@ fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) 
     }
     right.push(Span::styled(
         format!(" {} ", mode_tag(snapshot.client.lock_mode)),
-        mode_style(),
+        mode_style(&snapshot.theme),
     ));
     let right = Line::from(right);
     let right_width = right.width() as u16;
@@ -415,7 +415,7 @@ fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) 
     // Left block: the session name, always whole (clipped only by the row).
     let session = Line::from(Span::styled(
         format!(" {} ", snapshot.session.name),
-        session_style(),
+        session_style(&snapshot.theme),
     ));
     let session_width = (session.width() as u16).min(right_x.saturating_sub(area.x));
     set_line_clipped(buf, area.x, area.y, &session, session_width);
@@ -430,16 +430,16 @@ fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) 
         let tab = Line::from(vec![
             Span::styled(
                 format!(" #{} ", meta.index + 1),
-                tab_index_style(meta.active, i, count),
+                tab_index_style(&snapshot.theme, meta.active, i, count),
             ),
             Span::styled(
                 format!(" {} ", meta.name),
-                tab_name_style(meta.active, i, count),
+                tab_name_style(&snapshot.theme, meta.active, i, count),
             ),
         ]);
         let width = tab.width() as u16;
         if x + width + 1 > right_x {
-            let marker = Line::from(Span::styled("…", tab_overflow_style()));
+            let marker = Line::from(Span::styled("…", tab_overflow_style(&snapshot.theme)));
             set_line_clipped(buf, x.min(right_x.saturating_sub(1)), area.y, &marker, 1);
             break;
         }
@@ -525,11 +525,11 @@ fn content_rect(area: RatatuiRect, effective: Size) -> RatatuiRect {
 /// blanked every cell with `Clear`, so restyling is enough. [`Buffer::set_style`]
 /// clips to the buffer, so an `area` larger than `buf` (a resize race can report
 /// a viewport bigger than the current buffer) never indexes out of bounds.
-fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, buf: &mut Buffer) {
+fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, theme: &Theme, buf: &mut Buffer) {
     if content == area {
         return;
     }
-    let style = letterbox_style();
+    let style = letterbox_style(theme);
     let bands = [
         // Above the content, full width.
         RatatuiRect {
@@ -568,56 +568,58 @@ fn draw_letterbox(area: RatatuiRect, content: RatatuiRect, buf: &mut Buffer) {
 /// A tab's `#N` block. The active tab is inverted — its ramp stop as the
 /// TEXT color on the terminal's own background; an inactive tab paints the
 /// dimmed stop as the block background with quiet text.
-fn tab_index_style(active: bool, index: usize, count: usize) -> Style {
+fn tab_index_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
         Style::default()
-            .fg(theme::ramp(index, count))
+            .fg(theme.ramp(index, count))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(theme::ON_RAMP_DIM)
-            .bg(theme::ramp_dim(index, count))
+            .fg(theme.on_ramp_dim)
+            .bg(theme.ramp_dim(index, count))
     }
 }
 
 /// A tab's name block: same inversion as the `#N` block — the active tab's
 /// name is its ramp stop as text on the terminal background, an inactive
 /// tab's sits on the dimmed stop.
-fn tab_name_style(active: bool, index: usize, count: usize) -> Style {
+fn tab_name_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
-        Style::default().fg(theme::ramp(index, count))
+        Style::default().fg(theme.ramp(index, count))
     } else {
         Style::default()
-            .fg(theme::ON_RAMP_DIM)
-            .bg(theme::ramp_dim(index, count))
+            .fg(theme.on_ramp_dim)
+            .bg(theme.ramp_dim(index, count))
     }
 }
 
-/// The session name anchoring the tabline's left edge: the ramp's purple end
+/// The session name anchoring the tabline's left edge: the ramp's start end
 /// as the text color on the terminal's own background.
-fn session_style() -> Style {
+fn session_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ramp(0, 2))
+        .fg(theme.ramp(0, 2))
         .add_modifier(Modifier::BOLD)
 }
 
 /// The `…` marking tabs dropped for width.
-fn tab_overflow_style() -> Style {
+fn tab_overflow_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ON_RAMP_DIM)
+        .fg(theme.on_ramp_dim)
         .add_modifier(Modifier::BOLD)
 }
 
-/// Inverted style marking a collapsed stack member's koshi-owned header strip.
-fn stack_header_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+/// Filled strip style marking a collapsed stack member's koshi-owned header.
+fn stack_header_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.stack_header_fg)
+        .bg(theme.stack_header_bg)
 }
 
-/// The mode tag anchoring the tabline's right edge: the ramp's blue end as
+/// The mode tag anchoring the tabline's right edge: the ramp's other end as
 /// the text color on the terminal's own background.
-fn mode_style() -> Style {
+fn mode_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(theme::ramp(1, 2))
+        .fg(theme.ramp(1, 2))
         .add_modifier(Modifier::BOLD)
 }
 
@@ -627,20 +629,20 @@ fn too_small_style() -> Style {
 }
 
 /// Dim backdrop style for the letterbox margin around a centered layout.
-fn letterbox_style() -> Style {
-    Style::default().bg(Color::DarkGray)
+fn letterbox_style(theme: &Theme) -> Style {
+    Style::default().bg(theme.letterbox)
 }
 
 /// Highlighted border style for the focused pane.
-fn border_focused_style() -> Style {
+fn border_focused_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Cyan)
+        .fg(theme.border_focused)
         .add_modifier(Modifier::BOLD)
 }
 
 /// Dim border style for unfocused panes.
-fn border_unfocused_style() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn border_unfocused_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.border_unfocused)
 }
 
 #[cfg(test)]
