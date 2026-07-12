@@ -828,6 +828,7 @@ dependencies = [
  "koshi-session",
  "koshi-terminal",
  "koshi-test-support",
+ "ratatui",
 ]
 
 [[package]]

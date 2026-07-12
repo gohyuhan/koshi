@@ -16,10 +16,17 @@
 //! belongs in the in-memory event ring (`koshi debug events`), not the log file.
 //! This keeps the file small over a long session and free of user data.
 //!
-//! Logs never go to stdout: that is Koshi's render surface, and writing to it
-//! would corrupt the terminal UI. The default [`logging::LogDestination`] is a file under
-//! the user's state directory (the sink behind `koshi debug tail-log`); [stderr]
-//! is offered for non-UI contexts such as early startup or a foreground daemon.
+//! Logging is **off by default**: [`logging::TracingOptions::from_env`] yields
+//! [`Disabled`](logging::LogDestination::Disabled) unless `KOSHI_LOG` is set,
+//! and disabled means no log file and no directory is ever created. The
+//! `logging` config section turns it on (`enabled true`) once the config
+//! loader wires it through.
+//!
+//! When enabled, logs never go to stdout: that is Koshi's render surface, and
+//! writing to it would corrupt the terminal UI. The file destination is
+//! `logs/koshi.log` under the user's state directory (the sink behind
+//! `koshi debug tail-log`); [stderr] is offered for non-UI contexts such as
+//! early startup or a foreground daemon.
 //!
 //! [stderr]: logging::LogDestination::Stderr
 //!
@@ -31,10 +38,11 @@
 //!
 //! Environment variables read by [`logging::TracingOptions::from_env`]:
 //! - `KOSHI_LOG_FORMAT` — `json` or `pretty` (default: `pretty`).
-//! - `KOSHI_LOG` — tracing filter directive, e.g. `info` or `koshi=debug`
-//!   (default: `info`).
-//! - `KOSHI_STATE_DIR` — moves the state directory the default log file
-//!   lives under (resolved by [`koshi_paths::state_dir`]).
+//! - `KOSHI_LOG` — enables file logging and sets the tracing filter
+//!   directive, e.g. `info` or `koshi=debug`; unset or empty leaves logging
+//!   disabled.
+//! - `KOSHI_STATE_DIR` — moves the state directory the log file lives under
+//!   (resolved by [`koshi_paths::state_dir`]).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -94,22 +102,24 @@ impl LogFormat {
 /// Where log lines are written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogDestination {
-    /// A file. The default for a running session, since stdout is the render
-    /// surface and even stderr smears a full-screen terminal UI.
+    /// A file. The destination for a running session with logging enabled,
+    /// since stdout is the render surface and even stderr smears a
+    /// full-screen terminal UI.
     File(PathBuf),
     /// The standard error stream, for contexts with no terminal UI (early
     /// startup, a foreground daemon, one-shot commands).
     Stderr,
-    /// No logging at all. `init_tracing` installs nothing and touches no disk:
-    /// no directory, no file. Distinct from a filter of `off`, which still opens
-    /// a (then-empty) log file.
+    /// No logging at all — the default. `init_tracing` installs nothing and
+    /// touches no disk: no directory, no file. Distinct from a filter of
+    /// `off`, which still opens a (then-empty) log file.
     Disabled,
 }
 
 impl LogDestination {
-    /// The default destination: a `koshi.log` file under the user's state
-    /// directory (see [`default_log_path`]). A file destination rotates daily and
-    /// keeps a bounded number of days (see [`TracingOptions::max_log_files`]).
+    /// The standard file destination: a `koshi.log` file under the user's
+    /// state directory's `logs/` folder (see [`default_log_path`]). A file
+    /// destination rotates daily and keeps a bounded number of days (see
+    /// [`TracingOptions::max_log_files`]).
     pub fn default_file() -> Self {
         LogDestination::File(default_log_path())
     }
@@ -118,15 +128,16 @@ impl LogDestination {
 /// How many rotated log files to keep before the oldest is deleted.
 pub const DEFAULT_MAX_LOG_FILES: usize = 7;
 
-/// The default log file is `koshi.log` under the user's state directory,
-/// resolved by [`koshi_paths::state_dir`] — `~/.local/state/koshi` on Linux,
-/// `~/Library/Application Support/koshi` on macOS, `%LOCALAPPDATA%\koshi\data`
-/// on Windows, with `KOSHI_STATE_DIR` overriding on every platform. If no
+/// The standard log file is `koshi.log` in the `logs/` folder of the user's
+/// state directory, resolved by [`koshi_paths::state_dir`] —
+/// `~/.local/state/koshi/logs` on Linux, `~/Library/Application
+/// Support/koshi/logs` on macOS, `%LOCALAPPDATA%\koshi\data\logs` on Windows,
+/// with `KOSHI_STATE_DIR` moving the state directory on every platform. If no
 /// home directory can be found at all, the file lands in the current
 /// directory as a last resort.
 pub fn default_log_path() -> PathBuf {
     match koshi_paths::state_dir() {
-        Some(dir) => dir.join("koshi.log"),
+        Some(dir) => dir.join("logs").join("koshi.log"),
         None => PathBuf::from("koshi.log"),
     }
 }
@@ -146,14 +157,34 @@ pub struct TracingOptions {
 }
 
 impl TracingOptions {
-    /// Build options from the environment: [`LogFormat::from_env`] for the format,
-    /// `KOSHI_LOG` (defaulting to `info`) for the filter, the default log file for
-    /// the destination, and [`DEFAULT_MAX_LOG_FILES`] for retention.
+    /// Build options from the environment: [`LogFormat::from_env`] for the
+    /// format, `KOSHI_LOG` for the filter, and [`DEFAULT_MAX_LOG_FILES`] for
+    /// retention. Logging is off by default: with `KOSHI_LOG` unset (or
+    /// empty) the destination is [`LogDestination::Disabled`] and no log
+    /// file is created; setting it — e.g. `KOSHI_LOG=info` — turns on the
+    /// standard log file with that filter. The config loader flips the same
+    /// switch from the `logging` config section once it consumes these
+    /// options.
     pub fn from_env() -> Self {
+        Self::from_filter(std::env::var("KOSHI_LOG").ok().filter(|v| !v.is_empty()))
+    }
+
+    /// The mapping behind [`Self::from_env`]: `Some(filter)` — e.g.
+    /// `Some("koshi=debug")` — enables the standard log file with that
+    /// filter, `None` disables logging entirely. Kept separate so the
+    /// filter → destination mapping can be tested without setting
+    /// `KOSHI_LOG` in the process-global environment (the format still
+    /// reads [`LogFormat::from_env`]).
+    pub fn from_filter(filter: Option<String>) -> Self {
+        let destination = if filter.is_some() {
+            LogDestination::default_file()
+        } else {
+            LogDestination::Disabled
+        };
         TracingOptions {
             format: LogFormat::from_env(),
-            filter: std::env::var("KOSHI_LOG").unwrap_or_else(|_| "info".to_string()),
-            destination: LogDestination::default_file(),
+            destination,
+            filter: filter.unwrap_or_else(|| "info".to_string()),
             max_log_files: DEFAULT_MAX_LOG_FILES,
         }
     }

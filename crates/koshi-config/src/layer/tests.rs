@@ -157,9 +157,25 @@ fn deep_theme_color_override_keeps_other_roles() {
 
     assert_eq!(merged.theme.colors.accent, overridden);
     // Every other role keeps its default.
-    assert_eq!(merged.theme.colors.foreground, default_palette.foreground);
-    assert_eq!(merged.theme.colors.background, default_palette.background);
+    assert_eq!(merged.theme.colors.ramp_start, default_palette.ramp_start);
+    assert_eq!(merged.theme.colors.ramp_end, default_palette.ramp_end);
     assert_eq!(merged.theme.name, "default"); // sibling field kept
+}
+
+#[test]
+fn logging_override_enables_the_log_file() {
+    let layer = PartialKoshiConfig {
+        logging: Some(PartialLoggingConfig {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let merged = merge(KoshiConfig::default(), vec![layer]);
+
+    assert!(merged.logging.enabled);
+    // An absent logging section leaves the default (disabled) in place.
+    let untouched = merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert!(!untouched.logging.enabled);
 }
 
 #[test]
