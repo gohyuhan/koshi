@@ -688,6 +688,7 @@ version = "0.1.0"
 dependencies = [
  "kdl",
  "koshi-core",
+ "koshi-layout",
  "miette",
  "thiserror 2.0.18",
 ]
