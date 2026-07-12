@@ -26,8 +26,8 @@ use koshi_core::key::KeyChord;
 use crate::key::Leader;
 use crate::types::{
     ClipboardBackend, ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults,
-    ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation, PluginActivationConfig,
-    RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig,
+    LoggingConfig, ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation,
+    PluginActivationConfig, RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig,
 };
 
 /// Folds `layers` onto `base` in order and returns the effective config.
@@ -75,6 +75,8 @@ pub struct PartialKoshiConfig {
     pub terminal: Option<PartialTerminalConfig>,
     /// Theme overrides.
     pub theme: Option<PartialThemeConfig>,
+    /// Logging overrides.
+    pub logging: Option<PartialLoggingConfig>,
 }
 
 impl PartialKoshiConfig {
@@ -106,6 +108,9 @@ impl PartialKoshiConfig {
         }
         if let Some(theme) = self.theme {
             theme.apply(&mut config.theme);
+        }
+        if let Some(logging) = self.logging {
+            logging.apply(&mut config.logging);
         }
     }
 }
@@ -318,6 +323,19 @@ pub struct PartialColorPalette {
     pub stack_header_bg: Option<RgbColor>,
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: Option<RgbColor>,
+}
+
+/// Logging overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartialLoggingConfig {
+    /// Whether koshi writes a log file.
+    pub enabled: Option<bool>,
+}
+
+impl PartialLoggingConfig {
+    fn apply(self, target: &mut LoggingConfig) {
+        merge_field(&mut target.enabled, self.enabled);
+    }
 }
 
 impl PartialColorPalette {

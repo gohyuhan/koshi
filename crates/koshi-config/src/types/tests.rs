@@ -55,6 +55,8 @@ fn default_loads_with_expected_values() {
     assert_eq!(config.terminal.default_shell, None);
 
     assert_eq!(config.theme.name, "default");
+
+    assert!(!config.logging.enabled);
 }
 
 #[test]

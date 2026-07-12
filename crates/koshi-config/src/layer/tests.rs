@@ -163,6 +163,22 @@ fn deep_theme_color_override_keeps_other_roles() {
 }
 
 #[test]
+fn logging_override_enables_the_log_file() {
+    let layer = PartialKoshiConfig {
+        logging: Some(PartialLoggingConfig {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let merged = merge(KoshiConfig::default(), vec![layer]);
+
+    assert!(merged.logging.enabled);
+    // An absent logging section leaves the default (disabled) in place.
+    let untouched = merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert!(!untouched.logging.enabled);
+}
+
+#[test]
 fn modes_replaced_wholesale() {
     let mut base = KoshiConfig::default();
     base.keybindings

@@ -50,6 +50,8 @@ pub struct KoshiConfig {
     pub terminal: TerminalConfig,
     /// Color theme.
     pub theme: ThemeConfig,
+    /// Log-file behavior.
+    pub logging: LoggingConfig,
 }
 
 impl Default for KoshiConfig {
@@ -65,6 +67,7 @@ impl Default for KoshiConfig {
             copy: CopyConfig::default(),
             terminal: TerminalConfig::default(),
             theme: ThemeConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }
@@ -677,6 +680,22 @@ impl FromStr for RgbColor {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_hex(s)
+    }
+}
+
+/// Log-file behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoggingConfig {
+    /// Whether koshi writes a log file. Disabled, nothing is logged and no
+    /// log file or directory is created; enabled, log lines are written to a
+    /// daily-rotated file under the platform state directory.
+    pub enabled: bool,
+}
+
+impl Default for LoggingConfig {
+    /// Logging is off unless the user turns it on.
+    fn default() -> Self {
+        Self { enabled: false }
     }
 }
 

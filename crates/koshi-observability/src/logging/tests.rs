@@ -143,11 +143,33 @@ fn init_tracing_disabled_is_noop() {
 }
 
 #[test]
-fn default_log_path_is_under_state_dir() {
+fn default_log_path_is_the_logs_folder_of_the_state_dir() {
     let path = default_log_path();
+    // The state dir's own tail differs per OS (`koshi` on Linux/macOS,
+    // `koshi\data` on Windows), so pin the `logs/koshi.log` tail plus the
+    // state-dir prefix instead of a full literal path.
     assert!(
-        path.ends_with("koshi/koshi.log"),
+        path.ends_with("logs/koshi.log"),
         "unexpected default path: {}",
         path.display()
     );
+    if let Some(state) = koshi_paths::state_dir() {
+        assert_eq!(path, state.join("logs").join("koshi.log"));
+    }
+}
+
+#[test]
+fn no_filter_disables_logging() {
+    let opts = TracingOptions::from_filter(None);
+    assert_eq!(opts.destination, LogDestination::Disabled);
+    assert_eq!(opts.filter, "info");
+    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
+}
+
+#[test]
+fn a_filter_enables_the_standard_log_file() {
+    let opts = TracingOptions::from_filter(Some("koshi=debug".to_string()));
+    assert_eq!(opts.destination, LogDestination::File(default_log_path()));
+    assert_eq!(opts.filter, "koshi=debug");
+    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
 }
