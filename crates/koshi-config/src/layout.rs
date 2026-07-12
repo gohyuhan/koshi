@@ -844,6 +844,8 @@ impl Walker<'_> {
     }
 
     /// Parses a `command` node: the program plus its arguments, all strings.
+    /// The program must be non-empty (an empty program has nothing to
+    /// execute); arguments may be empty strings.
     fn command(&mut self, node: &KdlNode) -> Option<CommandTemplate> {
         if node.children().is_some() {
             self.error(node.span(), "`command` takes no children");
@@ -868,6 +870,10 @@ impl Walker<'_> {
             );
             return None;
         }
+        if words[0].is_empty() {
+            self.error(node.span(), "`command` program must not be empty");
+            return None;
+        }
         let program = PathBuf::from(words.remove(0));
         Some(CommandTemplate {
             program,
@@ -875,8 +881,13 @@ impl Walker<'_> {
         })
     }
 
-    /// Parses an `env "NAME" "value"` node into `env`, rejecting a name
-    /// set twice.
+    /// Parses an `env "NAME" "value"` node into `env`. The name must be
+    /// spawnable: non-empty, no `=` (environment blocks encode entries as
+    /// `NAME=value`, so `env "A=B" "x"` would reach the child as variable
+    /// `A` with value `B=x`), no NUL in name or value, and set once —
+    /// names compare case-insensitively, since Windows folds environment
+    /// keys by case at spawn and one of two case variants would silently
+    /// win there.
     fn env(&mut self, node: &KdlNode, env: &mut BTreeMap<String, String>) {
         if node.children().is_some() {
             self.error(node.span(), "`env` takes no children");
@@ -900,8 +911,27 @@ impl Walker<'_> {
             self.error(node.span(), "`env` name must not be empty");
             return;
         }
-        if env.contains_key(*name) {
-            self.error(node.span(), format!("`env` sets `{name}` more than once"));
+        if name.contains('=') {
+            self.error(node.span(), "`env` name must not contain `=`");
+            return;
+        }
+        if name.contains('\0') || value.contains('\0') {
+            self.error(
+                node.span(),
+                "`env` name and value must not contain a NUL character",
+            );
+            return;
+        }
+        if let Some(existing) = env.keys().find(|key| key.eq_ignore_ascii_case(name)) {
+            let message = if existing == name {
+                format!("`env` sets `{name}` more than once")
+            } else {
+                format!(
+                    "`env` already sets `{existing}`; env names match case-insensitively \
+                     (Windows folds environment keys by case)"
+                )
+            };
+            self.error(node.span(), message);
             return;
         }
         env.insert((*name).to_string(), (*value).to_string());

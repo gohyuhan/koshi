@@ -740,6 +740,35 @@ fn command_without_program_is_reported() {
 }
 
 #[test]
+fn empty_command_program_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { command \"\" } }"),
+        ["`command` program must not be empty"]
+    );
+}
+
+#[test]
+fn empty_command_program_with_arguments_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { command \"\" \"file.txt\" } }"),
+        ["`command` program must not be empty"]
+    );
+}
+
+#[test]
+fn empty_command_argument_is_allowed() {
+    // Only the program word must be non-empty; `""` is a legitimate
+    // argument value for programs that take one.
+    let template = parse("version 1\ntab { pane { command \"printf\" \"\" } }").unwrap();
+    let TemplateNode::Leaf(LeafTemplate::Terminal(terminal)) = &template.tabs[0].root else {
+        panic!("expected terminal leaf root");
+    };
+    let command = terminal.command.as_ref().unwrap();
+    assert_eq!(command.program, PathBuf::from("printf"));
+    assert_eq!(command.args, vec![String::new()]);
+}
+
+#[test]
 fn non_string_command_argument_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { command \"nvim\" 42 } }"),
@@ -784,6 +813,44 @@ fn duplicate_env_name_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { env \"A\" \"1\"; env \"A\" \"2\" } }"),
         ["`env` sets `A` more than once"]
+    );
+}
+
+#[test]
+fn case_variant_env_duplicate_is_reported() {
+    // `Path` and `PATH` are one variable to a Windows child, so a layout
+    // setting both must fail on every platform rather than behave
+    // differently per OS.
+    assert_eq!(
+        messages("version 1\ntab { pane { env \"Path\" \"a\"; env \"PATH\" \"b\" } }"),
+        [
+            "`env` already sets `Path`; env names match case-insensitively (Windows folds \
+             environment keys by case)"
+        ]
+    );
+}
+
+#[test]
+fn env_name_with_equals_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { env \"A=B\" \"x\" } }"),
+        ["`env` name must not contain `=`"]
+    );
+}
+
+#[test]
+fn env_nul_in_name_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { env \"A\\u{0}B\" \"x\" } }"),
+        ["`env` name and value must not contain a NUL character"]
+    );
+}
+
+#[test]
+fn env_nul_in_value_is_reported() {
+    assert_eq!(
+        messages("version 1\ntab { pane { env \"A\" \"x\\u{0}\" } }"),
+        ["`env` name and value must not contain a NUL character"]
     );
 }
 
