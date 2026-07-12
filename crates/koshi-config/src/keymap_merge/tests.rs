@@ -79,9 +79,12 @@ fn known() -> BTreeSet<ModeName> {
     BTreeSet::from([mode("normal"), mode("locked")])
 }
 
+/// The chord-depth cap the tests run under, matching the shipped default.
+const DEPTH: u8 = 4;
+
 /// Merges with no unlock alternative and the seeded core registry.
 fn merge(layers: &[KeyMapLayer]) -> MergedKeyMap {
-    merge_keymaps(layers, None, &ActionRegistry::new(), &known())
+    merge_keymaps(layers, None, DEPTH, &ActionRegistry::new(), &known())
 }
 
 /// The `<A-t>` → `core:new-tab` shipped default.
@@ -389,6 +392,7 @@ fn unlock_alternative_moves_the_reserved_chord() {
             ),
         ],
         Some(alternative),
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -506,5 +510,60 @@ fn stealing_a_dead_defaults_key_unbinds_nothing() {
             source: LayerOrigin::User,
         }
     );
+    assert_eq!(normal.unbound_defaults, BTreeMap::new());
+}
+
+#[test]
+fn binding_past_the_chord_depth_cap_is_transparent() {
+    // At a cap of 1 a two-chord entry enters no map — a dead user entry
+    // leaves the defaulted key untouched, and a dead default is absent, not
+    // displaced — while one-chord entries merge as usual.
+    let long_default = seq2(
+        KeyChord::new(ModFlags::ALT, Key::Char('p')),
+        KeyChord::new(ModFlags::NONE, Key::Char('q')),
+    );
+    let short_default = seq(ModFlags::ALT, 't');
+    let long_user = seq2(
+        KeyChord::new(ModFlags::CTRL, Key::Char('y')),
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+    );
+    let short_user = seq(ModFlags::CTRL, 'y');
+    let merged = merge_keymaps(
+        &[
+            layer(
+                LayerOrigin::Defaults,
+                "normal",
+                vec![
+                    (long_default.clone(), bound("new-pane")),
+                    (short_default.clone(), bound("new-tab")),
+                ],
+            ),
+            layer(
+                LayerOrigin::User,
+                "normal",
+                vec![
+                    (long_user.clone(), bound("lock")),
+                    (short_user.clone(), bound("lock")),
+                ],
+            ),
+        ],
+        None,
+        1,
+        &ActionRegistry::new(),
+        &known(),
+    );
+    let normal = &merged.modes[&mode("normal")];
+
+    assert_eq!(normal.user_set.get(&long_user), None);
+    assert_eq!(
+        normal.user_set[&short_user],
+        MergedBinding {
+            bound: bound("lock"),
+            source: LayerOrigin::User,
+        }
+    );
+    assert_eq!(normal.defaults.get(&long_default), None);
+    assert_eq!(normal.defaults[&short_default], bound("new-tab"));
+    // The dead default is absent by build state, never displaced.
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }

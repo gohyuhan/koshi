@@ -223,12 +223,16 @@ fn keybinding_reload_with_zero_chord_depth_is_kept() {
     let before = runtime.config.clone();
     let outcome = runtime.reload_keybindings(candidate);
 
+    // The explicit guard message leads; the unlock-guarantee fatal the empty
+    // effective map produces follows in the same joined reason.
     assert_eq!(
         outcome.events,
         vec![Event::ConfigReloadFailed(ConfigReloadFailed {
             session_id,
             reason: "`max_chord_depth` 0 would disable every keybinding including the \
-                     locked-mode unlock; the minimum is 1"
+                     locked-mode unlock; the minimum is 1; locked mode has no binding \
+                     from `<C-l>` to `core:unlock`; the unlock escape would be \
+                     unreachable"
                 .to_owned(),
         })]
     );
@@ -237,38 +241,84 @@ fn keybinding_reload_with_zero_chord_depth_is_kept() {
 }
 
 #[test]
-fn keybinding_reload_joins_the_depth_and_conflict_reasons() {
+fn keybinding_reload_with_low_depth_drops_overlong_bindings() {
     let (mut runtime, _client) = runtime();
     let session_id = only_session_id(&runtime);
-    // Zero depth AND a reserved-unlock shadow in one candidate: the failure
-    // carries both reasons.
-    let mut candidate = candidate_binding("locked", new_tab_ref());
-    let modes = candidate.modes.as_mut().expect("candidate sets modes");
-    modes
-        .get_mut(&ModeName::new("locked"))
-        .expect("locked mode present")
-        .keys
-        .insert(
-            KeySequence::new(KeybindingsConfig::RESERVED_UNLOCK, Vec::new()),
-            BoundAction {
-                action: new_tab_ref(),
-                args: ActionArgs::None,
-            },
-        );
-    candidate.max_chord_depth = Some(0);
+    let long = KeySequence::new(
+        KeyChord::new(ModFlags::CTRL, Key::Char('y')),
+        vec![KeyChord::new(ModFlags::NONE, Key::Char('x'))],
+    );
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        long.clone(),
+        BoundAction {
+            action: new_tab_ref(),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    let candidate = PartialKeybindingsConfig {
+        max_chord_depth: Some(1),
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    };
 
     let outcome = runtime.reload_keybindings(candidate);
 
+    // Depth 1 applies — with a warning naming the unreachable binding.
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Apply);
+    assert_eq!(
+        outcome.report.diagnostics,
+        vec![ConflictDiagnostic::ExceedsChordDepth {
+            origin: LayerOrigin::User,
+            mode: ModeName::new("normal"),
+            key: long.clone(),
+            action: new_tab_ref(),
+            max_chord_depth: 1,
+        }]
+    );
     assert_eq!(
         outcome.events,
-        vec![Event::ConfigReloadFailed(ConfigReloadFailed {
-            session_id,
-            reason: "`max_chord_depth` 0 would disable every keybinding including the \
-                     locked-mode unlock; the minimum is 1; the reserved unlock key is \
-                     bound by user to `core:new-tab` in locked mode; declare \
-                     `unlock_alternative` before rebinding it"
-                .to_owned(),
-        })]
+        vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
+    );
+    // The overlong binding is transparent: no exact match, and its first
+    // chord is not a live prefix, so it falls through to the pane.
+    assert_eq!(
+        runtime.keymap_hints.match_sequence(LockMode::Normal, &long),
+        KeyMatch::default()
+    );
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &sequence(ModFlags::CTRL, 'y')),
+        KeyMatch::default()
+    );
+    // The shipped two-chord defaults (`<C-p> n` …) fall the same way:
+    // `<C-p>` stops being a prefix and falls through.
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &sequence(ModFlags::CTRL, 'p')),
+        KeyMatch::default()
+    );
+    // The one-chord unlock is untouched.
+    let unlock_key = KeySequence::new(KeybindingsConfig::RESERVED_UNLOCK, Vec::new());
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Locked, &unlock_key)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("unlock").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
     );
 }
 
@@ -324,6 +374,90 @@ fn keybinding_reload_clears_pending_sequences() {
     runtime.reload_keybindings(candidate_binding("normal", new_tab_ref()));
 
     assert!(!has_pending(&runtime, client));
+}
+
+#[test]
+fn registry_refresh_never_swaps_in_a_refused_keymap() {
+    let (mut runtime, _client) = runtime();
+    let plugin = PluginId::new();
+    let action = ActionRef::plugin(plugin, "grab").expect("valid plugin action name");
+    let unlock_key = KeySequence::new(KeybindingsConfig::RESERVED_UNLOCK, Vec::new());
+    let unlock_bound = BoundAction {
+        action: ActionRef::core("unlock").expect("valid core action name"),
+        args: ActionArgs::None,
+    };
+
+    // A locked-mode binding on the reserved unlock chord to an unregistered
+    // plugin action: an orphan, so the reload applies with a warning and the
+    // shipped unlock stays live beneath the transparent binding.
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        unlock_key.clone(),
+        BoundAction {
+            action: action.clone(),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    });
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Apply);
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Locked, &unlock_key)
+            .exact,
+        Some(unlock_bound.clone())
+    );
+
+    // The plugin registers the action: the stored binding would now fire and
+    // shadow the unlock, so detection refuses — and the refresh must keep
+    // the running catalog rather than swap the shadow in.
+    runtime
+        .action_registry
+        .register(
+            plugin,
+            action.clone(),
+            ActionMetadata {
+                namespace: ActionNamespace::Plugin(plugin),
+                display_name: "Grab".to_owned(),
+                description: "Grab the unlock chord".to_owned(),
+                scope_class: ActionScope::Client,
+                target_compat: vec![TargetKind::Pane],
+                args_schema: None,
+                handler: ActionHandlerRef::PluginHostCall(plugin),
+                status: ActionStatus::Available,
+                continuous: false,
+            },
+        )
+        .expect("plugin action registers");
+    let report = runtime.refresh_keymap_for_registry();
+
+    assert_eq!(report.verdict(), KeymapVerdict::Reject);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::ReservedUnlockShadowed {
+            origin: LayerOrigin::User,
+            action,
+        }]
+    );
+    // The running catalog is unchanged: the reserved chord still unlocks.
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Locked, &unlock_key)
+            .exact,
+        Some(unlock_bound)
+    );
 }
 
 #[test]

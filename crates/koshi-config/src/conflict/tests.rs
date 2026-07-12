@@ -80,6 +80,9 @@ fn known() -> BTreeSet<ModeName> {
     BTreeSet::from([mode("normal"), mode("locked")])
 }
 
+/// The chord-depth cap the tests run under, matching the shipped default.
+const DEPTH: u8 = 4;
+
 /// Runs detection with the default leader, no unlock alternative, and the
 /// seeded core registry.
 fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
@@ -87,6 +90,7 @@ fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
         layers,
         Leader::default(),
         None,
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     )
@@ -668,6 +672,7 @@ fn shadow_with_a_bound_alternative_passes() {
         &layers,
         Leader::default(),
         Some(alternative),
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -682,6 +687,7 @@ fn declared_but_unbound_alternative_is_fatal() {
         &[defaults()],
         Leader::default(),
         Some(alternative),
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -701,6 +707,7 @@ fn typeable_alternative_is_fatal() {
         &[defaults()],
         Leader::default(),
         Some(alternative),
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -885,6 +892,7 @@ fn shift_only_mods_leader_warns() {
         &[defaults()],
         Leader::Mods(ModFlags::SHIFT),
         None,
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -904,6 +912,7 @@ fn typeable_chord_leader_warns() {
         &[defaults()],
         leader,
         None,
+        DEPTH,
         &ActionRegistry::new(),
         &known(),
     );
@@ -925,6 +934,7 @@ fn non_typeable_leaders_do_not_warn() {
             &[defaults()],
             leader,
             None,
+            DEPTH,
             &ActionRegistry::new(),
             &known(),
         );
@@ -1400,6 +1410,67 @@ fn removed_prefix_binding_does_not_pair_as_a_prefix() {
     ]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn binding_past_the_chord_depth_cap_warns_and_applies() {
+    // At a cap of 1, a two-chord user binding can never be reached — the
+    // input path flushes the pending sequence before lookup — so it warns
+    // and stays transparent; the keymap still applies.
+    let long = seq2(chord(ModFlags::CTRL, 'y'), chord(ModFlags::NONE, 'x'));
+    let report = detect_conflicts(
+        &[
+            defaults(),
+            layer(
+                LayerOrigin::User,
+                "normal",
+                vec![(long.clone(), bound("new-tab"))],
+            ),
+        ],
+        Leader::default(),
+        None,
+        1,
+        &ActionRegistry::new(),
+        &known(),
+    );
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::ExceedsChordDepth {
+            origin: LayerOrigin::User,
+            mode: mode("normal"),
+            key: long,
+            action: core("new-tab"),
+            max_chord_depth: 1,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+    assert_eq!(
+        report.diagnostics[0].to_string(),
+        "`<C-y> x` in mode `normal` (user, `core:new-tab`) is 2 chords, over the \
+         `max_chord_depth` cap of 1; the binding can never fire"
+    );
+}
+
+#[test]
+fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
+    // With every sequence at least one chord, a cap of 0 makes the whole
+    // keymap unreachable — including the locked-mode unlock, which the
+    // guarantee check reports as missing.
+    let report = detect_conflicts(
+        &[defaults()],
+        Leader::default(),
+        None,
+        0,
+        &ActionRegistry::new(),
+        &known(),
+    );
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::ReservedUnlockMissing {
+            reserved: KeybindingsConfig::RESERVED_UNLOCK,
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Reject);
 }
 
 #[test]

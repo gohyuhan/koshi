@@ -10,8 +10,8 @@
 //!
 //! - **Warnings** (ambiguous prefix, orphan action or mode, a
 //!   not-yet-implemented action, arguments the action cannot take, typeable
-//!   keys, a binding shadowed by the reserved unlock) inform; the keymap
-//!   applies.
+//!   keys, a binding shadowed by the reserved unlock, a sequence past the
+//!   chord-depth cap) inform; the keymap applies.
 //! - **A key collision** — the same key sequence claimed for different
 //!   actions by two user-authored layers in one mode — makes one of those
 //!   features unreachable, so the whole user keymap reverts to the built-in
@@ -28,7 +28,9 @@
 //! binding fires when both halves hold: action resolution accepts it as
 //! written (each binding is handed to the real resolver), and a keypress
 //! can reach it — in locked mode the reserved unlock chord resolves
-//! instantly, so a longer sequence opening with it is unreachable, and a
+//! instantly, so a longer sequence opening with it is unreachable, a
+//! sequence longer than the `max_chord_depth` cap is flushed by the input
+//! path before keymap lookup, and a
 //! `remove` in a higher-precedence layer voids the binding outright. A
 //! binding that fails either half is warned per layer — exactly once, with
 //! the most specific reason — and is otherwise transparent: it claims no
@@ -214,6 +216,21 @@ pub enum ConflictDiagnostic {
         /// The action it would have triggered.
         action: ActionRef,
     },
+    /// A binding's sequence is longer than the `max_chord_depth` cap, so
+    /// the input path flushes it before keymap lookup and it can never
+    /// fire.
+    ExceedsChordDepth {
+        /// The layer holding the binding.
+        origin: LayerOrigin,
+        /// The mode the binding lives in.
+        mode: ModeName,
+        /// The bound key sequence.
+        key: KeySequence,
+        /// The action it would have triggered.
+        action: ActionRef,
+        /// The configured cap the sequence exceeds.
+        max_chord_depth: u8,
+    },
     /// A binding names a registered action the runtime does not implement
     /// yet, so the binding cannot fire in this build.
     ComingSoonAction {
@@ -290,6 +307,7 @@ impl ConflictDiagnostic {
             | Self::UnlockAlternativeTypeable { .. } => ConflictSeverity::Fatal,
             Self::AmbiguousPrefix { .. }
             | Self::DeadUnderReservedUnlock { .. }
+            | Self::ExceedsChordDepth { .. }
             | Self::ComingSoonAction { .. }
             | Self::UnresolvableArgs { .. }
             | Self::OrphanAction { .. }
@@ -357,6 +375,19 @@ impl fmt::Display for ConflictDiagnostic {
                 f,
                 "`{key}` ({origin}, `{action}`) in locked mode can never fire: \
                  its first chord is the reserved unlock, which resolves instantly"
+            ),
+            Self::ExceedsChordDepth {
+                origin,
+                mode,
+                key,
+                action,
+                max_chord_depth,
+            } => write!(
+                f,
+                "`{key}` in mode `{}` ({origin}, `{action}`) is {} chords, over the \
+                 `max_chord_depth` cap of {max_chord_depth}; the binding can never fire",
+                mode.as_str(),
+                key.chords().len()
             ),
             Self::ComingSoonAction {
                 origin,
@@ -445,10 +476,10 @@ impl ConflictReport {
 /// Inspects keybinding layers (ordered lowest precedence first) and reports
 /// every conflict finding.
 ///
-/// `leader` and `unlock_alternative` come from the merged keybindings
-/// config; `registry` is the live action table each binding is resolved
-/// against for the liveness judgment; `known_modes` holds every registered
-/// mode name (built-in and plugin).
+/// `leader`, `unlock_alternative`, and `max_chord_depth` come from the
+/// merged keybindings config; `registry` is the live action table each
+/// binding is resolved against for the liveness judgment; `known_modes`
+/// holds every registered mode name (built-in and plugin).
 /// The reserved unlock chord is `unlock_alternative` when set, otherwise
 /// [`KeybindingsConfig::RESERVED_UNLOCK`].
 #[must_use]
@@ -456,6 +487,7 @@ pub fn detect_conflicts(
     layers: &[KeyMapLayer],
     leader: Leader,
     unlock_alternative: Option<KeyChord>,
+    max_chord_depth: u8,
     registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
 ) -> ConflictReport {
@@ -487,6 +519,7 @@ pub fn detect_conflicts(
             known_modes,
             reserved,
             &locked,
+            max_chord_depth,
             &mut diagnostics,
         );
     }
@@ -498,10 +531,19 @@ pub fn detect_conflicts(
         known_modes,
         reserved,
         &locked,
+        max_chord_depth,
         &mut diagnostics,
     );
 
-    let effective = effective_bindings(layers, &removals, registry, known_modes, reserved, &locked);
+    let effective = effective_bindings(
+        layers,
+        &removals,
+        registry,
+        known_modes,
+        reserved,
+        &locked,
+        max_chord_depth,
+    );
     scan_prefixes(&effective, &mut diagnostics);
     check_reserved_unlock(&effective, reserved, &locked, &mut diagnostics);
 
@@ -584,12 +626,12 @@ fn is_reserved_led(
 }
 
 /// True when the binding participates in firing: the resolver accepts it as
-/// written and no reserved-chord bypass swallows it. Only firing bindings
-/// claim keys in the collision scan or enter the effective map. Removal by
-/// a higher layer also voids a binding; that check is positional, so it
-/// lives with the callers ([`removed_above`]). The keymap-merge pass reads
-/// the same predicate, so merge and detection can never disagree about what
-/// fires.
+/// written, no reserved-chord bypass swallows it, and its sequence fits the
+/// chord-depth cap. Only firing bindings claim keys in the collision scan
+/// or enter the effective map. Removal by a higher layer also voids a
+/// binding; that check is positional, so it lives with the callers
+/// ([`removed_above`]). The keymap-merge pass reads the same predicate, so
+/// merge and detection can never disagree about what fires.
 pub(crate) fn is_firing(
     mode: &ModeName,
     key: &KeySequence,
@@ -597,8 +639,18 @@ pub(crate) fn is_firing(
     registry: &ActionRegistry,
     reserved: KeyChord,
     locked: &ModeName,
+    max_chord_depth: u8,
 ) -> bool {
-    classify(bound, registry) == BindingState::Live && !is_reserved_led(mode, key, reserved, locked)
+    classify(bound, registry) == BindingState::Live
+        && !is_reserved_led(mode, key, reserved, locked)
+        && !exceeds_chord_depth(key, max_chord_depth)
+}
+
+/// True when the sequence is longer than the `max_chord_depth` cap: the
+/// input path flushes a pending sequence past the cap before keymap lookup,
+/// so such a binding can never be reached.
+fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
+    key.chords().len() > usize::from(max_chord_depth)
 }
 
 /// True when the leader is reachable by plain typing: a chord leader that is
@@ -618,9 +670,9 @@ fn leader_is_typeable(leader: Leader) -> bool {
 /// silently: the removal is the user's own authored intent, not a surprise
 /// to surface. Each remaining binding gets at most one cannot-fire warning,
 /// most specific reason first: the resolver's refusal, then the
-/// reserved-chord bypass. Only a binding that participates in firing is
-/// checked for a typeable opening chord, since a dead binding steals
-/// nothing.
+/// reserved-chord bypass, then the chord-depth cap. Only a binding that
+/// participates in firing is checked for a typeable opening chord, since a
+/// dead binding steals nothing.
 #[expect(clippy::too_many_arguments)]
 fn scan_layer(
     layer: &KeyMapLayer,
@@ -630,6 +682,7 @@ fn scan_layer(
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
     locked: &ModeName,
+    max_chord_depth: u8,
     out: &mut Vec<ConflictDiagnostic>,
 ) {
     for (mode, bindings) in &layer.modes {
@@ -682,6 +735,16 @@ fn scan_layer(
                 });
                 continue;
             }
+            if exceeds_chord_depth(key, max_chord_depth) {
+                out.push(ConflictDiagnostic::ExceedsChordDepth {
+                    origin: layer.origin,
+                    mode: mode.clone(),
+                    key: key.clone(),
+                    action: bound.action.clone(),
+                    max_chord_depth,
+                });
+                continue;
+            }
             if key.chords()[0].is_typeable() {
                 out.push(ConflictDiagnostic::TypeableBinding {
                     origin: layer.origin,
@@ -708,6 +771,7 @@ fn scan_layer(
 /// voided the same way — removing a key and rebinding it above is how a
 /// user-authored layer takes a key another user-authored layer holds
 /// without colliding.
+#[expect(clippy::too_many_arguments)]
 fn scan_collisions(
     layers: &[KeyMapLayer],
     removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
@@ -715,6 +779,7 @@ fn scan_collisions(
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
     locked: &ModeName,
+    max_chord_depth: u8,
     out: &mut Vec<ConflictDiagnostic>,
 ) {
     let mut claims: BTreeMap<(&ModeName, &KeySequence), Vec<(LayerOrigin, &BoundAction)>> =
@@ -730,7 +795,15 @@ fn scan_collisions(
             }
             for (key, bound) in &bindings.keys {
                 if removed_above(removals, mode, key, index)
-                    || !is_firing(mode, key, bound, registry, reserved, locked)
+                    || !is_firing(
+                        mode,
+                        key,
+                        bound,
+                        registry,
+                        reserved,
+                        locked,
+                        max_chord_depth,
+                    )
                 {
                     continue;
                 }
@@ -766,8 +839,8 @@ fn scan_collisions(
 /// on the same key. A binding that cannot fire is transparent — the firing
 /// binding beneath it shows through — a binding a higher layer removes is
 /// voided, unregistered modes are omitted, and locked-mode sequences the
-/// reserved chord swallows never enter, so this map is what a keypress
-/// actually reaches.
+/// reserved chord swallows and sequences past the chord-depth cap never
+/// enter, so this map is what a keypress actually reaches.
 fn effective_bindings<'a>(
     layers: &'a [KeyMapLayer],
     removals: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
@@ -775,6 +848,7 @@ fn effective_bindings<'a>(
     known_modes: &BTreeSet<ModeName>,
     reserved: KeyChord,
     locked: &ModeName,
+    max_chord_depth: u8,
 ) -> BTreeMap<&'a ModeName, BTreeMap<&'a KeySequence, (LayerOrigin, &'a BoundAction)>> {
     let mut effective: BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>> =
         BTreeMap::new();
@@ -786,7 +860,15 @@ fn effective_bindings<'a>(
             let mode_map = effective.entry(mode).or_default();
             for (key, bound) in &bindings.keys {
                 if removed_above(removals, mode, key, index)
-                    || !is_firing(mode, key, bound, registry, reserved, locked)
+                    || !is_firing(
+                        mode,
+                        key,
+                        bound,
+                        registry,
+                        reserved,
+                        locked,
+                        max_chord_depth,
+                    )
                 {
                     continue;
                 }

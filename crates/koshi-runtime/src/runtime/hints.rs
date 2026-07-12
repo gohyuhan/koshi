@@ -79,6 +79,7 @@ impl KeymapHintCatalog {
         let merged = merge_keymaps(
             layers,
             config.unlock_alternative,
+            config.max_chord_depth,
             registry,
             &built_in_modes(),
         );

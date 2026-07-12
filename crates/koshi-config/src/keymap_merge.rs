@@ -78,22 +78,25 @@ pub struct MergedKeyMap {
 /// per-mode lookup tables.
 ///
 /// `registry` is the live action table each binding is resolved against
-/// for the firing judgment; `known_modes` holds every registered mode name
-/// — a layer's bindings in an unregistered mode are skipped, matching
-/// detection. The reserved unlock chord is `unlock_alternative` when set,
-/// otherwise [`KeybindingsConfig::RESERVED_UNLOCK`].
+/// for the firing judgment; `max_chord_depth` is the cap a firing sequence
+/// must fit; `known_modes` holds every registered mode name — a layer's
+/// bindings in an unregistered mode are skipped, matching detection. The
+/// reserved unlock chord is `unlock_alternative` when set, otherwise
+/// [`KeybindingsConfig::RESERVED_UNLOCK`].
 ///
 /// Per key, the highest firing entry wins. A firing user-authored entry on
 /// a defaulted key takes it and the displaced default moves to
 /// [`unbound_defaults`](MergedModeMap::unbound_defaults); a remove above
-/// the defaults layer does the same. A dead binding (resolver-refused, or
-/// swallowed by the locked-mode reserved-chord bypass) enters no map: a
+/// the defaults layer does the same. A dead binding (resolver-refused,
+/// swallowed by the locked-mode reserved-chord bypass, or longer than the
+/// chord-depth cap) enters no map: a
 /// dead user entry leaves the default beneath it live, and a dead default
 /// is simply absent — dead by build state, not displaced by the user.
 #[must_use]
 pub fn merge_keymaps(
     layers: &[KeyMapLayer],
     unlock_alternative: Option<KeyChord>,
+    max_chord_depth: u8,
     registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
 ) -> MergedKeyMap {
@@ -115,7 +118,15 @@ pub fn merge_keymaps(
             }
 
             for (key, bound) in &bindings.keys {
-                if !is_firing(mode, key, bound, registry, reserved, &locked) {
+                if !is_firing(
+                    mode,
+                    key,
+                    bound,
+                    registry,
+                    reserved,
+                    &locked,
+                    max_chord_depth,
+                ) {
                     continue;
                 }
                 if removed_above(&removals, mode, key, index) {

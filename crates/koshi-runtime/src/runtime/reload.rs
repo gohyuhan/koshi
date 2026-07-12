@@ -150,6 +150,7 @@ impl Runtime {
             &layers,
             tentative.keybindings.leader,
             tentative.keybindings.unlock_alternative,
+            tentative.keybindings.max_chord_depth,
             &self.action_registry,
             &built_in_modes(),
         );
@@ -186,8 +187,14 @@ impl Runtime {
     /// catalog, so a binding whose action just registered starts firing and
     /// one whose action vanished falls transparent. Runs after a plugin
     /// registers or unregisters actions; the stored layers stay as they are.
-    /// Returns the detection report so the caller can surface findings the
-    /// registry change uncovered.
+    ///
+    /// A registry change can turn a warned-dead binding live in a way the
+    /// verdict refuses — an orphan binding on the locked-mode reserved
+    /// unlock chord becomes a fatal shadow the moment its plugin registers
+    /// the action. On any verdict but [`KeymapVerdict::Apply`] the running
+    /// catalog is kept as it is, so the guaranteed unlock escape stays in
+    /// effect. Returns the detection report so the caller can surface the
+    /// findings the registry change uncovered.
     pub fn refresh_keymap_for_registry(&mut self) -> ConflictReport {
         let user_modes = self
             .config_layers
@@ -200,9 +207,13 @@ impl Runtime {
             &layers,
             self.config.keybindings.leader,
             self.config.keybindings.unlock_alternative,
+            self.config.keybindings.max_chord_depth,
             &self.action_registry,
             &built_in_modes(),
         );
+        if report.verdict() != KeymapVerdict::Apply {
+            return report;
+        }
         self.keymap_hints =
             KeymapHintCatalog::from_parts(&layers, &self.config.keybindings, &self.action_registry);
         self.clear_pending_key_sequences();
