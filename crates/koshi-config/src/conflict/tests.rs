@@ -134,7 +134,7 @@ fn empty_report_applies() {
 }
 
 #[test]
-fn user_vs_project_same_key_different_action_collides() {
+fn user_vs_session_same_key_different_action_collides() {
     let key = seq(ModFlags::CTRL, 't');
     let layers = [
         defaults(),
@@ -144,7 +144,7 @@ fn user_vs_project_same_key_different_action_collides() {
             vec![(key.clone(), bound("new-tab"))],
         ),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
@@ -157,7 +157,7 @@ fn user_vs_project_same_key_different_action_collides() {
             key,
             claims: vec![
                 (LayerOrigin::User, bound("new-tab")),
-                (LayerOrigin::Project, bound("lock")),
+                (LayerOrigin::Session, bound("lock")),
             ],
         }]
     );
@@ -247,7 +247,7 @@ fn orphan_actions_on_a_shared_key_do_not_collide() {
         defaults(),
         layer(LayerOrigin::User, "normal", vec![(key.clone(), ghost("a"))]),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), ghost("b"))],
         ),
@@ -262,7 +262,7 @@ fn orphan_actions_on_a_shared_key_do_not_collide() {
                 action: ghost("a").action,
             },
             ConflictDiagnostic::OrphanAction {
-                origin: LayerOrigin::Project,
+                origin: LayerOrigin::Session,
                 mode: mode("normal"),
                 key,
                 action: ghost("b").action,
@@ -287,7 +287,7 @@ fn one_orphan_claim_does_not_collide_with_a_live_one() {
             vec![(key.clone(), ghost.clone())],
         ),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
@@ -310,7 +310,7 @@ fn bindings_in_an_orphan_mode_do_not_collide() {
     let report = detect(&[
         defaults(),
         layer(LayerOrigin::User, "git", vec![(key.clone(), bound("lock"))]),
-        layer(LayerOrigin::Project, "git", vec![(key, bound("new-tab"))]),
+        layer(LayerOrigin::Session, "git", vec![(key, bound("new-tab"))]),
     ]);
     assert_eq!(
         report.diagnostics,
@@ -320,7 +320,7 @@ fn bindings_in_an_orphan_mode_do_not_collide() {
                 mode: mode("git"),
             },
             ConflictDiagnostic::OrphanMode {
-                origin: LayerOrigin::Project,
+                origin: LayerOrigin::Session,
                 mode: mode("git"),
             },
         ]
@@ -366,7 +366,7 @@ fn coming_soon_claims_do_not_collide() {
             vec![(key.clone(), bound("copy-mode-enter"))],
         ),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("copy-mode-exit"))],
         ),
@@ -381,7 +381,7 @@ fn coming_soon_claims_do_not_collide() {
                 action: core("copy-mode-enter"),
             },
             ConflictDiagnostic::ComingSoonAction {
-                origin: LayerOrigin::Project,
+                origin: LayerOrigin::Session,
                 mode: mode("normal"),
                 key,
                 action: core("copy-mode-exit"),
@@ -394,7 +394,7 @@ fn coming_soon_claims_do_not_collide() {
 #[test]
 fn unresolvable_args_binding_warns_and_does_not_collide() {
     // The user layer's binding carries arguments `core:lock` cannot take,
-    // so it can never fire; it must not escalate the project layer's
+    // so it can never fire; it must not escalate the session layer's
     // working binding into the all-or-nothing revert.
     let key = seq(ModFlags::CTRL, 't');
     let broken = BoundAction {
@@ -407,7 +407,7 @@ fn unresolvable_args_binding_warns_and_does_not_collide() {
         defaults(),
         layer(LayerOrigin::User, "normal", vec![(key.clone(), broken)]),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -498,7 +498,7 @@ fn reserved_led_claims_do_not_collide() {
             vec![(key.clone(), bound("lock"))],
         ),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "locked",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -512,7 +512,7 @@ fn reserved_led_claims_do_not_collide() {
                 action: core("lock"),
             },
             ConflictDiagnostic::DeadUnderReservedUnlock {
-                origin: LayerOrigin::Project,
+                origin: LayerOrigin::Session,
                 key,
                 action: core("new-tab"),
             },
@@ -630,7 +630,7 @@ fn orphan_on_the_reserved_chord_does_not_shadow() {
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "locked",
             vec![(key.clone(), ghost.clone())],
         ),
@@ -638,7 +638,7 @@ fn orphan_on_the_reserved_chord_does_not_shadow() {
     assert_eq!(
         report.diagnostics,
         vec![ConflictDiagnostic::OrphanAction {
-            origin: LayerOrigin::Project,
+            origin: LayerOrigin::User,
             mode: mode("locked"),
             key,
             action: ghost.action,
@@ -942,9 +942,9 @@ fn a_fatal_finding_outranks_a_collision() {
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
-        layer(LayerOrigin::Project, "normal", vec![(key, bound("lock"))]),
+        layer(LayerOrigin::Session, "normal", vec![(key, bound("lock"))]),
         layer(
-            LayerOrigin::Session,
+            LayerOrigin::Layout,
             "locked",
             vec![(
                 KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
@@ -967,7 +967,7 @@ fn a_fatal_finding_outranks_a_collision() {
 fn severity_table() {
     let claims = vec![
         (LayerOrigin::User, bound("new-tab")),
-        (LayerOrigin::Project, bound("lock")),
+        (LayerOrigin::Session, bound("lock")),
     ];
     let cases = [
         (
@@ -1080,12 +1080,12 @@ fn display_messages_are_exact() {
         key: seq(ModFlags::CTRL, 't'),
         claims: vec![
             (LayerOrigin::User, bound("new-tab")),
-            (LayerOrigin::Project, bound("lock")),
+            (LayerOrigin::Session, bound("lock")),
         ],
     };
     assert_eq!(
         collision.to_string(),
-        "key `<C-t>` in mode `normal` is bound by user to `core:new-tab` and by project \
+        "key `<C-t>` in mode `normal` is bound by user to `core:new-tab` and by session \
          to `core:lock`; all user keybindings revert to defaults"
     );
 
@@ -1213,12 +1213,12 @@ fn display_messages_are_exact() {
     );
 
     let orphan_mode = ConflictDiagnostic::OrphanMode {
-        origin: LayerOrigin::Project,
+        origin: LayerOrigin::Session,
         mode: mode("git"),
     };
     assert_eq!(
         orphan_mode.to_string(),
-        "the project keymap binds keys in unregistered mode `git`; those bindings are \
+        "the session keymap binds keys in unregistered mode `git`; those bindings are \
          inactive until the mode is registered"
     );
 
@@ -1246,13 +1246,13 @@ fn display_messages_are_exact() {
 
 #[test]
 fn remove_then_rebind_across_user_layers_is_not_a_collision() {
-    // The supported way to re-key: the session layer removes the project
+    // The supported way to re-key: the session layer removes the user
     // layer's key, voiding its claim, and rebinds the key itself.
     let key = seq(ModFlags::CTRL, 't');
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -1269,13 +1269,13 @@ fn remove_then_rebind_across_user_layers_is_not_a_collision() {
 
 #[test]
 fn remove_without_rebind_voids_the_lower_claim() {
-    // Project binds the key, session only removes it: one claim, voided —
-    // no collision, and the key reaches nothing.
+    // The user layer binds the key, session only removes it: one claim,
+    // voided — no collision, and the key reaches nothing.
     let key = seq(ModFlags::CTRL, 't');
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -1294,12 +1294,12 @@ fn remove_below_both_claims_does_not_stop_their_collision() {
         defaults(),
         layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::Session,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
         layer(
-            LayerOrigin::Session,
+            LayerOrigin::Layout,
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
@@ -1310,8 +1310,8 @@ fn remove_below_both_claims_does_not_stop_their_collision() {
             mode: mode("normal"),
             key,
             claims: vec![
-                (LayerOrigin::Project, bound("new-tab")),
-                (LayerOrigin::Session, bound("lock")),
+                (LayerOrigin::Session, bound("new-tab")),
+                (LayerOrigin::Layout, bound("lock")),
             ],
         }]
     );
@@ -1327,7 +1327,7 @@ fn remove_above_both_claims_voids_the_collision() {
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),
@@ -1366,14 +1366,15 @@ fn removing_the_locked_unlock_binding_is_fatal() {
 
 #[test]
 fn removed_binding_draws_no_per_binding_warns() {
-    // Project binds an orphan action on a typeable key; session removes the
-    // key. Removal silences both warns the binding would otherwise draw:
-    // disabling it is the user's own authored intent, not a surprise.
+    // The user layer binds an orphan action on a typeable key; session
+    // removes the key. Removal silences both warns the binding would
+    // otherwise draw: disabling it is the user's own authored intent, not a
+    // surprise.
     let key = seq(ModFlags::NONE, 'g');
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("does-not-exist"))],
         ),
@@ -1409,7 +1410,7 @@ fn remove_in_an_unregistered_mode_is_inert() {
     let report = detect(&[
         defaults(),
         layer(
-            LayerOrigin::Project,
+            LayerOrigin::User,
             "normal",
             vec![(key.clone(), bound("new-tab"))],
         ),

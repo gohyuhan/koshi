@@ -1,7 +1,7 @@
 //! Config layering: fold ordered override layers onto the built-in defaults.
 //!
 //! Koshi builds its effective config from ordered layers —
-//! `built-in defaults → user → project → session → CLI flags` — where a later
+//! `built-in defaults → user → session → CLI flags` — where a later
 //! layer overrides an earlier one field by field. Each override layer is a
 //! [`PartialKoshiConfig`]: a mirror of [`KoshiConfig`] whose every field is
 //! wrapped in [`Option`], so a layer carries only the

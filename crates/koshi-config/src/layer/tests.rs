@@ -71,14 +71,14 @@ fn sections_from_different_layers_combine() {
         }),
         ..Default::default()
     };
-    let project = PartialKoshiConfig {
+    let session = PartialKoshiConfig {
         mouse: Some(PartialMouseConfig {
             scroll_lines: Some(7),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![user, project]);
+    let merged = merge(KoshiConfig::default(), vec![user, session]);
 
     assert_eq!(merged.pane.min_cols, 10);
     assert_eq!(merged.pane.min_rows, 1);

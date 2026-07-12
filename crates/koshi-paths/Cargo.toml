@@ -1,0 +1,11 @@
+[package]
+name = "koshi-paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+directories = "6.0.0"
+
+[dev-dependencies]
+tempfile = "3.20.0"

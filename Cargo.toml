@@ -19,6 +19,7 @@ members = [
     "crates/koshi-ipc",
     "crates/koshi-storage",
     "crates/koshi-observability",
+    "crates/koshi-paths",
     "crates/koshi-test-support",
     "xtask",
 ]

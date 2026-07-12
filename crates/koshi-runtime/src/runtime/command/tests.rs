@@ -9180,3 +9180,99 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         })]
     );
 }
+
+// A split narrows its sibling: the sibling's terminal grid must re-wrap its
+// content to the new width, not keep the old-width rows for the renderer to
+// clip. Asserts on grid cells, not just the PtyResized event.
+#[test]
+fn new_pane_split_rewraps_the_sibling_grid_content() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let tab = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab, pane_a);
+    let client = ClientId::new();
+    add_client(&mut session, client, tab, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // First split: pane_x gets a live PTY + engine at the two-pane width.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let pane_x = other_pane(&rt, sid, pane_a);
+    let wide = rt.pty_sizes[&pane_x];
+    let line: String = "A".repeat(wide.cols as usize - 2);
+    let _ = rt
+        .terminal_engines
+        .get_mut(&pane_x)
+        .unwrap()
+        .advance(line.as_bytes());
+
+    // Second split of pane_x (it holds focus): pane_x narrows.
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let narrow = rt.pty_sizes[&pane_x];
+    assert!(narrow.cols < wide.cols, "narrow {narrow:?} wide {wide:?}");
+    let grid = rt.terminal_engines[&pane_x].state().active_grid();
+    assert_eq!(grid.dimensions(), (narrow.rows, narrow.cols));
+    let row0: String = grid.rows()[0]
+        .iter()
+        .map(koshi_terminal::grid::state::Cell::ch)
+        .collect();
+    let row1: String = grid.rows()[1]
+        .iter()
+        .map(koshi_terminal::grid::state::Cell::ch)
+        .collect();
+    let expect0 = "A".repeat(narrow.cols as usize);
+    let rest = wide.cols as usize - 2 - narrow.cols as usize;
+    let expect1 = format!(
+        "{}{}",
+        "A".repeat(rest),
+        " ".repeat(narrow.cols as usize - rest)
+    );
+    assert_eq!(row0, expect0, "row0 must be a full wrapped slice");
+    assert_eq!(row1, expect1, "row1 must carry the wrapped remainder");
+}
+
+// The genesis root pane goes through `bootstrap_local`, not the new-pane
+// handler; its first split must still re-wrap the root's grid content.
+#[test]
+fn bootstrap_root_pane_rewraps_on_first_split() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .expect("bootstrap");
+    let sid = *rt.sessions.keys().next().unwrap();
+    let root = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .next()
+        .unwrap();
+    let wide = rt.pty_sizes[&root];
+    let line: String = "A".repeat(wide.cols as usize - 2);
+    let _ = rt
+        .terminal_engines
+        .get_mut(&root)
+        .unwrap()
+        .advance(line.as_bytes());
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let narrow = rt.pty_sizes[&root];
+    assert!(narrow.cols < wide.cols, "narrow {narrow:?} wide {wide:?}");
+    let grid = rt.terminal_engines[&root].state().active_grid();
+    assert_eq!(grid.dimensions(), (narrow.rows, narrow.cols));
+    let row0: String = grid.rows()[0]
+        .iter()
+        .map(koshi_terminal::grid::state::Cell::ch)
+        .collect();
+    assert_eq!(row0, "A".repeat(narrow.cols as usize));
+}
