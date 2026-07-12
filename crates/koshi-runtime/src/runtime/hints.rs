@@ -8,10 +8,10 @@
 //! [`Arc`]s. Building a frame's snapshot then costs two `Arc` clones per
 //! field, not a re-merge.
 //!
-//! The catalog is rebuilt whenever the keymap inputs change — today that is
-//! construction only (the built-in defaults are the sole layer until the
-//! config loader and reload land); a config reload or plugin lifecycle
-//! change re-runs [`KeymapHintCatalog::from_registry`] the same way.
+//! The catalog is rebuilt whenever the keymap inputs change: construction
+//! and a keybinding config reload run [`KeymapHintCatalog::from_parts`] over
+//! the current layers, and a registry refresh after a plugin registers or
+//! unregisters actions re-runs it against the live action table.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
-use koshi_config::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
+use koshi_config::types::{
+    default_prefix_labels, BoundAction, KeybindingsConfig, ModeBindings, ModeName,
+};
 use koshi_core::action::ActionRef;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
@@ -51,26 +53,35 @@ pub(crate) struct KeymapHintCatalog {
 impl KeymapHintCatalog {
     /// Resolve the hint catalog from the built-in default bindings and the
     /// live action table.
-    ///
-    /// Folds the defaults as the single keymap layer — the exact merge the
-    /// config loader will later run over the full layer list — so the hint
-    /// bar honors the firing model: a binding whose action the resolver
-    /// refuses (unregistered, or not yet implemented) never yields a hint.
-    /// In locked mode the entry firing `core:unlock` is pinned, so
-    /// truncation keeps the escape hint visible.
     pub(crate) fn from_registry(registry: &ActionRegistry) -> Self {
-        let config = KeybindingsConfig::default();
+        Self::from_parts(
+            &keymap_layers(None),
+            &KeybindingsConfig::default(),
+            registry,
+        )
+    }
+
+    /// Resolve the hint catalog from `layers` and the effective keybinding
+    /// config, whose timing fields and unlock alternative carry into lookups.
+    ///
+    /// Folds the layers with [`merge_keymaps`], so the hint bar honors the
+    /// firing model: a binding whose action the resolver refuses
+    /// (unregistered, or not yet implemented) never yields a hint. In locked
+    /// mode the entry firing `core:unlock` is pinned, so truncation keeps
+    /// the escape hint visible.
+    pub(crate) fn from_parts(
+        layers: &[KeyMapLayer],
+        config: &KeybindingsConfig,
+        registry: &ActionRegistry,
+    ) -> Self {
         let chord_timeout = Duration::from_millis(u64::from(config.chord_timeout_ms));
         let max_chord_depth = usize::from(config.max_chord_depth);
-        let layers = [KeyMapLayer {
-            origin: LayerOrigin::Defaults,
-            modes: config.modes,
-        }];
-        let known_modes: BTreeSet<ModeName> = LockMode::ALL
-            .iter()
-            .map(|mode| ModeName::new(mode.name()))
-            .collect();
-        let merged = merge_keymaps(&layers, None, registry, &known_modes);
+        let merged = merge_keymaps(
+            layers,
+            config.unlock_alternative,
+            registry,
+            &built_in_modes(),
+        );
 
         let unlock = ActionRef::core("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar");
@@ -140,6 +151,37 @@ impl KeymapHintCatalog {
             reverted: self.reverted,
         }
     }
+}
+
+/// The ordered keymap layers: the built-in default binding table, plus the
+/// user's `keybinding.kdl` modes when present. The user layer passes through
+/// [`KeyMapLayer::with_user_args_stripped`], so binding arguments in a user
+/// file are dropped rather than honored.
+pub(crate) fn keymap_layers(
+    user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
+) -> Vec<KeyMapLayer> {
+    let mut layers = vec![KeyMapLayer {
+        origin: LayerOrigin::Defaults,
+        modes: KeybindingsConfig::default().modes,
+    }];
+    if let Some(modes) = user_modes {
+        layers.push(
+            KeyMapLayer {
+                origin: LayerOrigin::User,
+                modes,
+            }
+            .with_user_args_stripped(),
+        );
+    }
+    layers
+}
+
+/// Every built-in input mode's name.
+pub(crate) fn built_in_modes() -> BTreeSet<ModeName> {
+    LockMode::ALL
+        .iter()
+        .map(|mode| ModeName::new(mode.name()))
+        .collect()
 }
 
 /// Exact and longer-prefix results for one sequence lookup.

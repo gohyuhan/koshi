@@ -359,7 +359,9 @@ impl Runtime {
         let edited = if args.stacked {
             add_to_stack(tab.layout(), target.source_pane, new_pane_id)
         } else {
-            let direction = args.direction.unwrap_or(self.default_new_pane_direction);
+            let direction = args
+                .direction
+                .unwrap_or(self.config.layout.new_pane_direction);
             split_leaf(tab.layout(), target.source_pane, new_pane_id, direction)
         };
         let candidate = edited.map_err(|_| Rejection::bare(RejectReason::TargetNotFound))?;

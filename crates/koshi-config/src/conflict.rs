@@ -64,7 +64,8 @@ use crate::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 pub enum LayerOrigin {
     /// The built-in default binding table koshi ships.
     Defaults,
-    /// The user's own keymap file (`keys.kdl` in the koshi config directory).
+    /// The user's own keymap file (`keybinding.kdl` in the koshi config
+    /// directory).
     User,
     /// Per-named-session overrides.
     Session,
