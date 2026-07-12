@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 
 use crate::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
-    ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, KeymapHints, PaneSlot, PaneSnapshot,
+    PluginUiSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -113,8 +114,10 @@ fn build(
             active_tab: tab_id,
             focused_pane: focused,
             lock_mode,
+            pending_sequence: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
+        keymap_hints: KeymapHints::default(),
     }
 }
 
@@ -162,12 +165,12 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
     );
     let buf = render(&snap, 40, 8);
 
-    // Tabline (row 0): session + tab on the left, mode tag right-aligned.
+    // Tabline (row 0): session block + tab on the left, mode tag right-aligned.
     let tabline = row_text(&buf, 0);
-    assert!(tabline.starts_with("sess"), "tabline: {tabline:?}");
-    assert!(tabline.contains("1:shell"), "tabline: {tabline:?}");
+    assert!(tabline.starts_with(" sess "), "tabline: {tabline:?}");
+    assert!(tabline.contains(" #1  shell "), "tabline: {tabline:?}");
     assert!(
-        tabline.trim_end().ends_with("[BASE]"),
+        tabline.trim_end().ends_with(" BASE"),
         "tabline: {tabline:?}"
     );
 
@@ -179,12 +182,41 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
     assert_eq!(buf[(1, 1)].symbol(), "─");
     assert_eq!(buf[(0, 2)].symbol(), "│");
 
-    // Bottom row (row 7): the keybind-hint bar is reserved and blank for now.
+    // Bottom row (row 7): the keybind-hint bar row is koshi-owned chrome —
+    // blank here because this snapshot carries no hint data.
     assert!(
         row_text(&buf, 7).trim().is_empty(),
         "hint bar row: {:?}",
         row_text(&buf, 7)
     );
+}
+
+#[test]
+fn hint_bar_paints_the_bottom_row_from_the_snapshot_hints() {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.keymap_hints = KeymapHints {
+        entries: Arc::new(vec![crate::snapshot::HintBinding {
+            sequence: KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('l'))),
+            label: "Lock".to_string(),
+            user_set: false,
+            pinned: false,
+        }]),
+        ..KeymapHints::default()
+    };
+    let buf = render(&snap, 40, 8);
+
+    // Hint row is outside pane area: border bottom remains intact above it.
+    assert_eq!(row_text(&buf, 7).trim_end(), " Ctrl +  l  Lock");
+    assert_eq!(buf[(0, 6)].symbol(), "└");
+    assert_eq!(buf[(39, 6)].symbol(), "┘");
 }
 
 #[test]
@@ -200,11 +232,47 @@ fn tabline_lists_tabs_with_active_marker() {
     );
     let buf = render(&snap, 40, 8);
 
-    // "sess │ " is 7 columns, then "1:code" then " " then "2:logs".
-    assert!(row_text(&buf, 0).contains("1:code 2:logs"));
-    // The active tab is drawn inverted; the inactive one is not.
-    assert!(buf[(7, 0)].modifier.contains(Modifier::REVERSED));
-    assert!(!buf[(14, 0)].modifier.contains(Modifier::REVERSED));
+    // The session block ` sess ` (6 cols) then a gap, then each padded tab.
+    assert!(row_text(&buf, 0).contains(" #1  code "));
+    assert!(row_text(&buf, 0).contains(" #2  logs "));
+    // The active tab is inverted: its ramp stop as the TEXT color over the
+    // terminal's own background; an inactive tab's blocks sit on its dimmed
+    // stop. Two tabs → the stops are the ramp's purple and blue ends.
+    assert_eq!(buf[(8, 0)].fg, Color::Rgb(0x58, 0x1c, 0x87));
+    assert_eq!(buf[(8, 0)].bg, Color::Reset);
+    assert_eq!(buf[(19, 0)].bg, Color::Rgb(0x20, 0x47, 0x87));
+}
+
+#[test]
+fn tabline_truncates_overflowing_tabs_behind_an_ellipsis() {
+    let pane = PaneId::new();
+    let snap = build(
+        "sess",
+        &[
+            ("alpha", true),
+            ("bravo", false),
+            ("charlie", false),
+            ("delta", false),
+            ("echo", false),
+        ],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    let buf = render(&snap, 40, 8);
+    let tabline = row_text(&buf, 0);
+
+    // The session block and the mode tag always render whole; overflowing
+    // tabs are dropped whole behind a `…` in the middle.
+    assert!(tabline.starts_with(" sess "), "tabline: {tabline:?}");
+    assert!(
+        tabline.trim_end().ends_with(" BASE"),
+        "tabline: {tabline:?}"
+    );
+    assert!(tabline.contains(" #1  alpha "), "tabline: {tabline:?}");
+    assert!(tabline.contains('…'), "tabline: {tabline:?}");
+    assert!(!tabline.contains("#5  echo"), "tabline: {tabline:?}");
 }
 
 #[test]
@@ -222,11 +290,11 @@ fn mode_tag_reflects_lock_mode() {
     };
 
     let base = render(&make(LockMode::Normal), 40, 8);
-    assert!(row_text(&base, 0).contains("[BASE]"));
+    assert!(row_text(&base, 0).contains(" BASE "));
 
     let locked = render(&make(LockMode::Locked), 40, 8);
-    assert!(row_text(&locked, 0).contains("[LOCK]"));
-    assert!(!row_text(&locked, 0).contains("[BASE]"));
+    assert!(row_text(&locked, 0).contains(" LOCK "));
+    assert!(!row_text(&locked, 0).contains(" BASE "));
 }
 
 #[test]
@@ -919,18 +987,13 @@ fn small_and_zero_size_areas_are_safe() {
     );
 }
 
-/// A letterbox snapshot: a client `viewport` larger than the `effective` solved
-/// size, with one visible pane laid out in the effective space (row 0 tabline,
-/// bottom row hint bar, the pane box between).
+/// A letterbox snapshot: a client `viewport` larger than the effective middle
+/// pane region, with one visible pane laid out from that region's origin.
 fn letterbox_snap(pane: PaneId, viewport: Size, effective: Size) -> RenderSnapshot {
     let mut snap = build(
         "sess",
         &[("shell", true)],
-        &[(
-            pane,
-            rect(0, 1, effective.cols, effective.rows.saturating_sub(2)),
-            true,
-        )],
+        &[(pane, rect(0, 0, effective.cols, effective.rows), true)],
         Some(pane),
         LockMode::Normal,
         viewport,
@@ -949,27 +1012,24 @@ fn larger_viewport_centers_layout_and_letterboxes_margin() {
     );
     let buf = render(&snap, 60, 12);
 
-    // Effective 40x8 centered in 60x12 → offset (10, 2). The pane box shifts by
-    // that offset: top-left (0,1) → (10,3), top-right (39,1) → (49,3), and the
-    // bottom-left (0,6) → (10,8).
-    assert_eq!(buf[(10, 3)].symbol(), "┌");
-    assert_eq!(buf[(49, 3)].symbol(), "┐");
-    assert_eq!(buf[(10, 8)].symbol(), "└");
+    // Effective 40x8 pane region centered in 60x12 → offset (10, 2).
+    assert_eq!(buf[(10, 2)].symbol(), "┌");
+    assert_eq!(buf[(49, 2)].symbol(), "┐");
+    assert_eq!(buf[(10, 9)].symbol(), "└");
 
-    // The tabline shifts with it: the session name starts at the content origin.
-    assert_eq!(buf[(10, 2)].symbol(), "s");
-    assert!(row_text(&buf, 2).contains("1:shell"));
+    // Chrome stays on outer rows, independent of centered pane geometry.
+    assert_eq!(buf[(1, 0)].symbol(), "s");
+    assert!(row_text(&buf, 0).contains("#1  shell"));
 
-    // Margin cells outside the centered content carry the dim letterbox fill:
-    // left of, right of, above, and below the content rect.
-    for (x, y) in [(0, 0), (9, 5), (50, 5), (30, 11)] {
+    // Margin cells around the pane region carry dim letterbox fill.
+    for (x, y) in [(30, 1), (9, 5), (50, 5), (30, 10)] {
         assert_eq!(buf[(x, y)].symbol(), " ", "margin ({x},{y})");
         assert_eq!(buf[(x, y)].bg, Color::DarkGray, "margin ({x},{y})");
     }
 
     // A cell inside the content rect keeps the default background: the fill
     // lands only in the margin, never over the layout.
-    assert_eq!(buf[(11, 4)].bg, Color::Reset);
+    assert_eq!(buf[(11, 3)].bg, Color::Reset);
 }
 
 #[test]
@@ -991,11 +1051,11 @@ fn cursor_shifts_into_centered_content() {
         blink: false,
     };
 
-    // Content origin offset (10,2); pane inner origin (1,2) places to (11,4);
-    // the cursor at row 2, col 5 within it lands at (11+5, 4+2) = (16, 6).
+    // Content origin offset (10,2); pane inner origin (1,1) places to (11,3);
+    // cursor row 2, col 5 lands at (16,5).
     assert_eq!(
         cursor_position(&snap, viewport_area(&snap)),
-        Some(Position::new(16, 6))
+        Some(Position::new(16, 5))
     );
 }
 
@@ -1026,8 +1086,9 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         &mut buf,
     );
 
-    // No panic, and a margin cell inside the smaller buffer still got the fill.
-    assert_eq!(buf[(0, 0)].bg, Color::DarkGray);
+    // No panic, and a margin cell inside the smaller buffer still got the
+    // fill (row 0 is the tabline's, so probe the margin band below it).
+    assert_eq!(buf[(0, 1)].bg, Color::DarkGray);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
@@ -99,20 +100,20 @@ fn build_snapshot_maps_session_tab_and_client() {
     // The solved tab: one visible pane slot.
     assert_eq!(
         snap.session.active_tab.effective_size,
-        Size { cols: 80, rows: 24 }
+        Size { cols: 80, rows: 22 }
     );
     assert_eq!(snap.session.active_tab.layout_solved.len(), 1);
     let slot = &snap.session.active_tab.layout_solved[0];
     assert_eq!(slot.pane_id, pane_id);
     assert!(slot.visible);
-    // Single pane over 80×24: outer = the whole tab, inner = inset by the 1-cell border.
+    // Full 80×24 client leaves an 80×22 pane region; border insets content.
     assert_eq!(
         slot.rect,
-        Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
+        Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 })
     );
     assert_eq!(
         slot.inner_rect,
-        Some(Rect::new(Point { x: 1, y: 1 }, Size { cols: 78, rows: 22 }))
+        Some(Rect::new(Point { x: 1, y: 1 }, Size { cols: 78, rows: 20 }))
     );
     assert!(!slot.suppressed);
     assert!(!slot.dead);
@@ -132,6 +133,46 @@ fn build_snapshot_maps_session_tab_and_client() {
 
     // No plugin UI for a stock session.
     assert_eq!(snap.plugin_ui, PluginUiSnapshot::default());
+
+    // No sequence pends before a prefix key is pressed.
+    assert_eq!(snap.client.pending_sequence, None);
+}
+
+#[test]
+fn build_snapshot_carries_the_hints_for_the_clients_mode() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, _pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    // Normal mode: the shipped normal-mode bindings surface as hint data.
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.client.lock_mode, LockMode::Normal);
+    assert_eq!(snap.keymap_hints.entries.len(), 20);
+    assert!(!snap.keymap_hints.reverted);
+
+    // Locked mode: the same frame path now carries only the pinned unlock.
+    rt.sessions
+        .get_mut(&session_id)
+        .expect("session")
+        .clients
+        .get_mut(client_id)
+        .expect("client")
+        .update_lock_mode(LockMode::Locked);
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.client.lock_mode, LockMode::Locked);
+    // The reserved unlock (pinned) plus the quit chord.
+    assert_eq!(snap.keymap_hints.entries.len(), 2);
+    assert!(snap
+        .keymap_hints
+        .entries
+        .iter()
+        .any(|entry| entry.label == "Unlock" && entry.pinned));
+    assert!(snap
+        .keymap_hints
+        .entries
+        .iter()
+        .any(|entry| entry.label == "Quit" && !entry.pinned));
 }
 
 #[test]
@@ -236,7 +277,7 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     // ...but the tab is solved at the shared minimum, which the renderer letterboxes.
     assert_eq!(
         snap.session.active_tab.effective_size,
-        Size { cols: 40, rows: 10 }
+        Size { cols: 40, rows: 8 }
     );
 }
 
@@ -348,4 +389,19 @@ fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen(
     // The alternate screen keeps no scrollback: the parked offset does not apply,
     // so the view follows live and the renderer sees offset 0.
     assert_eq!(pane.grid_view.as_ref().unwrap().view_offset, 0);
+}
+
+#[test]
+fn shorten_home_replaces_the_prefix_only_on_a_path_boundary() {
+    use super::shorten_home;
+    use std::path::Path;
+    let home = Some(Path::new("/Users/ab"));
+    assert_eq!(shorten_home(Path::new("/Users/ab"), home), "~");
+    assert_eq!(shorten_home(Path::new("/Users/ab/koshi"), home), "~/koshi");
+    // A sibling directory sharing the prefix text is NOT under home.
+    assert_eq!(
+        shorten_home(Path::new("/Users/ab2/x"), home),
+        "/Users/ab2/x"
+    );
+    assert_eq!(shorten_home(Path::new("/tmp"), None), "/tmp");
 }

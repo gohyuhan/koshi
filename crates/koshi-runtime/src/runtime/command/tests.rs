@@ -33,7 +33,7 @@ use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::error::PtyError;
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{pane_viewport, Client, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops;
@@ -1671,7 +1671,7 @@ fn focus_pane_in_the_active_tab_resolves() {
 }
 
 #[test]
-fn focus_pane_by_direction_is_rejected_until_neighbor_lookup_lands() {
+fn focus_pane_by_direction_with_no_neighbor_is_target_not_found() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_id = TabId::new();
@@ -1682,8 +1682,8 @@ fn focus_pane_by_direction_is_rejected_until_neighbor_lookup_lands() {
     add_client(&mut session, client_id, tab_id, Some(pane));
     rt.sessions.insert(session.id, session);
 
-    // A fully valid session context, so the rejection is the Direction
-    // target itself, not a missing session or client.
+    // A fully valid session context whose sole pane has no left neighbor:
+    // the geometric lookup itself reports the miss.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
@@ -1696,26 +1696,27 @@ fn focus_pane_by_direction_is_rejected_until_neighbor_lookup_lands() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("directional focus not yet implemented".to_string()),
+            reason: RejectReason::TargetNotFound,
+            help: Some("no pane in that direction".to_string()),
         }
     );
 }
 
 #[test]
-fn quit_is_rejected_as_not_yet_implemented() {
+fn quit_marks_immediate_teardown_and_the_loop_flag() {
     let (mut rt, _tx) = new_runtime();
 
     let env = envelope(Command::Quit);
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
-        CommandResult::Rejected {
+        CommandResult::Ok {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("quit not yet implemented".to_string()),
+            emitted_events: Vec::new(),
         }
     );
+    assert!(rt.quit_requested());
+    assert!(rt.immediate_shutdown);
 }
 
 #[test]
@@ -2386,9 +2387,8 @@ fn focus_activation_reflows_the_expanded_member_pty() {
     };
     let c_resizes_before = fake.resizes(c).expect("c spawned").len();
 
-    // Focusing collapsed `b` expands it: at an 80x24 viewport the halved
-    // right column is 40x24, the stack's active member outer rect is 40x23
-    // (one header row), so `b`'s PTY content becomes 38x21.
+    // Focusing collapsed `b` expands it: 80x24 leaves an 80x22 pane region;
+    // the half-width stack member has one header, so content becomes 38x19.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
@@ -2425,7 +2425,7 @@ fn focus_activation_reflows_the_expanded_member_pty() {
     );
     assert_eq!(
         fake.resizes(b).expect("b spawned").last().copied(),
-        Some(PtySize { cols: 38, rows: 21 })
+        Some(PtySize { cols: 38, rows: 19 })
     );
     // The newly collapsed `c` keeps its last PTY size: no resize reached it.
     assert_eq!(fake.resizes(c).expect("c spawned").len(), c_resizes_before);
@@ -4071,7 +4071,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         let rects = content_rects(&solve_with_mode(
             &candidate,
             LayoutMode::Tiled,
-            Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 10 }),
+            Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 8 }),
         ));
         let rect = rects
             .iter()
@@ -5610,30 +5610,75 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
 }
 
 #[test]
-fn resize_pane_without_a_border_on_that_side_is_rejected() {
-    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size_a) = resize_fixture();
+fn resize_pane_at_the_tab_edge_moves_the_opposite_border_instead() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
 
-    // A touches the tab's right edge, and the split has no vertical level at
-    // all — both directions find no border to move.
-    for direction in [Direction::Right, Direction::Up] {
-        let env = envelope_from(
-            CommandSource::key_binding(client_id),
-            Command::ResizePane(ResizePaneArgs {
-                pane: None,
-                direction,
-                size: 1,
-            }),
-        );
-        let command_id = env.id;
-        assert_eq!(
-            rt.dispatch(env),
-            CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::InvalidState,
-                help: Some("pane has no neighbor on that side".to_string()),
-            }
-        );
-    }
+    // A touches the tab's right edge: no right border exists, so the left
+    // border moves right instead — A shrinks by the cell and the left
+    // sibling gains it.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Right,
+            size: 1,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let expected = PtySize {
+        cols: size_a.cols - 1,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+}
+
+#[test]
+fn resize_pane_negative_size_at_the_edge_grows_via_the_opposite_border() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    // A negative size toward the tab edge (shrink away from a border that
+    // does not exist) falls back the same way: the opposite border moves in
+    // the same visual direction, so A grows by the cell.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Right,
+            size: -1,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let expected = PtySize {
+        cols: size_a.cols + 1,
+        rows: size_a.rows,
+    };
+    assert_eq!(rt.pty_sizes[&pane_a], expected);
+}
+
+#[test]
+fn resize_pane_with_no_border_on_the_axis_is_rejected() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, size_a) = resize_fixture();
+
+    // The layout has no vertical split level at all: Up finds no border and
+    // neither does the opposite-side fallback, so the resize rejects whole.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ResizePane(ResizePaneArgs {
+            pane: None,
+            direction: Direction::Up,
+            size: 1,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane has no border to move on that axis".to_string()),
+        }
+    );
+    assert_eq!(rt.pty_sizes[&pane_a], size_a);
 }
 
 #[test]
@@ -5868,9 +5913,7 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
     assert_eq!(client.active_tab(), new_tab.id());
     assert_eq!(client.focused_pane(new_tab.id()), Some(new_pane));
 
-    // The root pane is Running, records the default-shell request (no
-    // explicit command), and was spawned at the client's full viewport:
-    // 80x24 outer -> 78x22 content.
+    // Root pane runs default shell in 80x22 middle region -> 78x20 content.
     let record = session.panes.get(new_pane).unwrap();
     assert_eq!(*record.lifecycle(), PaneLifecycle::Running);
     assert_eq!(record.command, None);
@@ -5878,9 +5921,9 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
     assert!(rt.pty_handles.contains_key(&new_pane));
     assert_eq!(
         fake.resizes(new_pane).unwrap(),
-        vec![PtySize { cols: 78, rows: 22 }]
+        vec![PtySize { cols: 78, rows: 20 }]
     );
-    assert_eq!(rt.pty_sizes[&new_pane], PtySize { cols: 78, rows: 22 });
+    assert_eq!(rt.pty_sizes[&new_pane], PtySize { cols: 78, rows: 20 });
 }
 
 #[test]
@@ -6154,7 +6197,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     rt.sessions.insert(sid, session);
 
     // Split the shared tab so it holds a live PTY sized to the 40x10
-    // constraint: two half-columns of 40 -> outer 20x10 -> content 18x8.
+    // constraint: chrome leaves 40x8; half-columns yield 18x6 content.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
         Command::NewPane(NewPaneArgs::default()),
@@ -6162,12 +6205,11 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     let pane_x = other_pane(&rt, sid, pane_a);
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 18, rows: 8 }
+        PtySize { cols: 18, rows: 6 }
     );
 
-    // A creates a new tab and leaves: the vacated tab's viewport grows to
-    // B's 80x24 -> outer 40x24 -> content 38x22. The new tab's root pane is
-    // sized to A's own 40x10 viewport -> content 38x8.
+    // A creates a new tab and leaves: vacated pane region grows to 80x22,
+    // giving 38x20 content per half. A's new 40x8 pane region gives 38x6.
     let result = rt.dispatch(envelope_from(
         CommandSource::key_binding(mover),
         Command::NewTab(NewTabArgs::default()),
@@ -6183,7 +6225,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     }
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 38, rows: 22 }
+        PtySize { cols: 38, rows: 20 }
     );
     let new_tab = rt.sessions[&sid]
         .tabs
@@ -6193,7 +6235,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     let new_pane = new_tab.layout().leaf_panes()[0];
     assert_eq!(
         fake.resizes(new_pane).unwrap(),
-        vec![PtySize { cols: 38, rows: 8 }]
+        vec![PtySize { cols: 38, rows: 6 }]
     );
 }
 
@@ -6645,8 +6687,8 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    // Split tab_a while only B views it: its PTY starts at the 80-wide
-    // geometry (outer 40x24 -> content 38x22).
+    // Split tab_a while only B views it: 80x24 leaves an 80x22 pane region,
+    // so each half's content is 38x20.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
         Command::NewPane(NewPaneArgs::default()),
@@ -6659,11 +6701,11 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
         .expect("the split pane");
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 38, rows: 22 }
+        PtySize { cols: 38, rows: 20 }
     );
 
-    // A closes its own tab and is moved to tab_a, which now counts A's 40x10
-    // viewport: outer 20x10 -> content 18x8.
+    // A closes its tab and joins tab_a: 40x10 leaves a 40x8 pane region,
+    // so each half's content is 18x6.
     let result = rt.dispatch(envelope_from(
         CommandSource::key_binding(mover),
         Command::CloseTab(CloseTabArgs::default()),
@@ -6677,7 +6719,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
     }
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 18, rows: 8 }
+        PtySize { cols: 18, rows: 6 }
     );
     assert_eq!(
         rt.sessions[&sid].clients.get(mover).unwrap().active_tab(),
@@ -7771,8 +7813,8 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    // Split tab_b while only B (40x10) views it: the new PTY sizes to the
-    // half column — outer 20x10 -> content 18x8.
+    // Split tab_b while only B (40x10) views it: chrome leaves 40x8,
+    // so the new half-column PTY content is 18x6.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
         Command::NewPane(NewPaneArgs::default()),
@@ -7785,11 +7827,11 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         .expect("the split pane");
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 18, rows: 8 }
+        PtySize { cols: 18, rows: 6 }
     );
 
-    // A switches onto tab_b: its viewport tightens to min(40,30) x min(10,8)
-    // = 30x8 — outer 15x8 -> content 13x6.
+    // A switches onto tab_b: full viewport minimum is 30x8, leaving a 30x6
+    // pane region; each half's content is 13x4.
     let result = rt.dispatch(envelope_from(
         CommandSource::key_binding(mover),
         Command::FocusTab(FocusTabArgs {
@@ -7806,7 +7848,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     }
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 13, rows: 6 }
+        PtySize { cols: 13, rows: 4 }
     );
 
     // A switches back to tab_a: tab_b loses the 30x8 constraint and reflows
@@ -7821,7 +7863,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     assert!(matches!(result, CommandResult::Ok { .. }));
     assert_eq!(
         *fake.resizes(pane_x).unwrap().last().unwrap(),
-        PtySize { cols: 18, rows: 8 }
+        PtySize { cols: 18, rows: 6 }
     );
 }
 
@@ -7921,7 +7963,7 @@ fn toggle_fullscreen_promotes_the_focused_pane_and_reflows_its_pty() {
     );
     // The mode is a solve-time overlay: the tree itself is untouched.
     assert_eq!(*session.tabs[&tab].layout(), tree_before);
-    let full = PtySize { cols: 78, rows: 22 };
+    let full = PtySize { cols: 78, rows: 20 };
     assert_eq!(rt.pty_sizes[&pane_a], full);
     assert_eq!(*fake.resizes(pane_a).unwrap().last().unwrap(), full);
 }
@@ -8064,7 +8106,7 @@ fn toggle_fullscreen_below_the_pane_floor_is_rejected() {
 fn focus_pane_under_fullscreen_retargets_the_zoom() {
     let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
     let tab = only_tab(&rt, sid);
-    let full = PtySize { cols: 78, rows: 22 };
+    let full = PtySize { cols: 78, rows: 20 };
 
     // Root is hidden behind the fullscreen — focusing it swaps the zoom to
     // it instead of rejecting or dropping the mode.
@@ -8100,7 +8142,7 @@ fn focus_pane_under_fullscreen_retargets_the_zoom() {
 fn focus_pane_retargeting_back_skips_the_unchanged_pty() {
     let (mut rt, fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
     let tab = only_tab(&rt, sid);
-    let full = PtySize { cols: 78, rows: 22 };
+    let full = PtySize { cols: 78, rows: 20 };
 
     let focus = |pane: PaneId| {
         envelope_from(
@@ -8217,7 +8259,7 @@ fn new_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
 
     // Splitting the promoted pane: the tab returns to the tiled view and
     // both halves of the split are sized against it (root 40, the split
-    // pair 20 each -> 18x22 content).
+    // pair 20 each -> 18x20 content after chrome rows).
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs::default()),
@@ -8232,7 +8274,7 @@ fn new_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
         .map(PaneRecord::id)
         .find(|id| *id != pane_a && rt.pty_sizes.contains_key(id))
         .expect("the new pane");
-    let half = PtySize { cols: 18, rows: 22 };
+    let half = PtySize { cols: 18, rows: 20 };
     assert_eq!(rt.pty_sizes[&pane_a], half);
     assert_eq!(rt.pty_sizes[&pane_b], half);
 }
@@ -8268,7 +8310,7 @@ fn resize_pane_on_a_fullscreen_tab_drops_the_fullscreen() {
 fn close_pane_hidden_behind_a_fullscreen_drops_it() {
     let (mut rt, _fake, _tx, sid, client_id, root, pane_a, _size_a) = fullscreen_fixture();
     let tab = only_tab(&rt, sid);
-    let full = PtySize { cols: 78, rows: 22 };
+    let full = PtySize { cols: 78, rows: 20 };
 
     // Closing the hidden root: the survivor already fills the tab, so its
     // PTY keeps the full-tab size it holds.
@@ -8676,8 +8718,43 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // to the per-axis minimum, so the live pane's PTY reflows down.
     let events = rt.handle_client_attach(sid, ClientId::new(), small, tab_id, SystemTime::now());
 
-    let expected = size_root_pane(pane, small);
+    let expected = size_root_pane(pane, pane_viewport(small));
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
+    assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+    assert_eq!(
+        events,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: pane,
+            size: expected,
+        })]
+    );
+}
+
+#[test]
+fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let initial = Size { cols: 80, rows: 24 };
+    let resized = Size {
+        cols: 100,
+        rows: 30,
+    };
+    let client = rt
+        .bootstrap_local(initial, SystemTime::now())
+        .expect("bootstrap");
+    let (_sid, _tab, pane) = only_slot(&rt);
+
+    let events = rt.handle_client_resize(client, resized);
+    let expected = size_root_pane(pane, pane_viewport(resized));
+
+    assert_eq!(
+        rt.session_for_client(client)
+            .unwrap()
+            .clients
+            .get(client)
+            .unwrap()
+            .viewport(),
+        resized
+    );
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     assert_eq!(
         events,
@@ -8724,7 +8801,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
     // back and the pane's PTY reflows up.
     let events = rt.handle_client_detach(small_client);
 
-    let expected = size_root_pane(pane, big);
+    let expected = size_root_pane(pane, pane_viewport(big));
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -8828,7 +8905,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now());
     assert_eq!(
         *fake.resizes(pane_1).unwrap().last().unwrap(),
-        size_root_pane(pane_1, small)
+        size_root_pane(pane_1, pane_viewport(small))
     );
     let resizes_before = fake.resizes(pane_1).unwrap().len();
 
@@ -8836,7 +8913,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
     let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now());
 
-    let expected = size_root_pane(pane_1, big);
+    let expected = size_root_pane(pane_1, pane_viewport(big));
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane_1).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -8900,6 +8977,114 @@ fn client_detach_schedules_a_render() {
     // The last viewer leaves: no PTY reflows, but the detach still schedules a
     // render.
     rt.handle_client_detach(client);
+
+    assert!(rt.poll_render(now + Duration::from_secs(1)));
+}
+
+#[test]
+fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
+    let viewport = Size {
+        cols: 100,
+        rows: 40,
+    };
+
+    // Baseline: the same-sized client splits the tab it already views, so the
+    // solve runs against the tab's drawable pane region.
+    let (mut rt_viewed, fake_viewed, _tx_viewed) = new_runtime_with_fake();
+    let client_viewed = ClientId::new();
+    let tab_viewed = TabId::new();
+    let root_viewed = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_viewed);
+    add_tab(&mut session, tab_viewed, root_viewed);
+    let mut client = Client::new(
+        client_viewed,
+        session.id,
+        SystemTime::now(),
+        viewport,
+        tab_viewed,
+    );
+    client.update_focused_pane(tab_viewed, root_viewed);
+    session.attach_client(client);
+    let sid_viewed = session.id;
+    rt_viewed.sessions.insert(sid_viewed, session);
+    rt_viewed.dispatch(envelope_from(
+        CommandSource::key_binding(client_viewed),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let baseline_pane = other_pane(&rt_viewed, sid_viewed, root_viewed);
+    let baseline_size = fake_viewed
+        .resizes(baseline_pane)
+        .expect("baseline pane spawned")[0];
+
+    // Adoption: an identical client is designated onto an UNVIEWED tab. The
+    // new pane must be fit and spawned against the client's pane region — the
+    // same geometry as the viewed baseline — not the full terminal viewport.
+    let (mut rt_adopt, fake_adopt, _tx_adopt) = new_runtime_with_fake();
+    let client_adopt = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let mut client = Client::new(
+        client_adopt,
+        session.id,
+        SystemTime::now(),
+        viewport,
+        tab_front,
+    );
+    client.update_focused_pane(tab_front, pane_front);
+    session.attach_client(client);
+    let sid_adopt = session.id;
+    rt_adopt.sessions.insert(sid_adopt, session);
+    rt_adopt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid_adopt)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            client: Some(client_adopt),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let adopted_pane = rt_adopt.sessions[&sid_adopt]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the adopted split pane");
+    let adopted_size = fake_adopt
+        .resizes(adopted_pane)
+        .expect("adopted pane spawned")[0];
+
+    assert_eq!(adopted_size, baseline_size);
+}
+
+#[test]
+fn dispatched_command_schedules_a_render() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+
+    // Drain the render the bootstrap scheduled.
+    let now = Instant::now();
+    assert!(rt.poll_render(now));
+    assert!(!rt.poll_render(now));
+
+    // A command arriving outside the key path — the IPC shape — mutates the
+    // layout; the dispatch itself must schedule the frame.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
 
     assert!(rt.poll_render(now + Duration::from_secs(1)));
 }
@@ -8984,7 +9169,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
 
     // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
     // size (its tab lost its only viewer).
-    let expected = size_root_pane(pane_2, small);
+    let expected = size_root_pane(pane_2, pane_viewport(small));
     assert_eq!(*fake.resizes(pane_2).unwrap().last().unwrap(), expected);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), pane_1_resizes_before);
     assert_eq!(

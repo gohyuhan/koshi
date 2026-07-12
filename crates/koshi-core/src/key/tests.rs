@@ -212,3 +212,18 @@ fn key_sequence_display_of_one_chord_is_that_chord() {
     let sequence = KeySequence::from(KeyChord::new(ModFlags::NONE, Key::Char('g')));
     assert_eq!(sequence.to_string(), "g");
 }
+
+#[test]
+fn fold_uppercase_folds_single_char_lowercase_letters_only() {
+    // ASCII and non-ASCII uppercase letters fold to lowercase plus Shift.
+    assert_eq!(fold_uppercase('A'), ('a', true));
+    assert_eq!(fold_uppercase('É'), ('é', true));
+    // Already-lowercase and non-letter characters stand as they are.
+    assert_eq!(fold_uppercase('a'), ('a', false));
+    assert_eq!(fold_uppercase('é'), ('é', false));
+    assert_eq!(fold_uppercase('!'), ('!', false));
+    assert_eq!(fold_uppercase('1'), ('1', false));
+    // An uppercase letter whose lowercase form is more than one character
+    // stands as it is, unshifted.
+    assert_eq!(fold_uppercase('İ'), ('İ', false));
+}

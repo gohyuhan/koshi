@@ -169,6 +169,7 @@ fn action_metadata_roundtrips() {
         args_schema: Some(ActionArgsSchema::default()),
         handler: ActionHandlerRef::CoreCommand(CommandKind::NewPane),
         status: ActionStatus::Available,
+        continuous: false,
     };
     roundtrip(&metadata);
 }
@@ -258,7 +259,6 @@ fn coming_soon_seeds_are_pinned() {
         "core:plugin-reload",
         "core:plugin-uninstall",
         "core:plugin-update",
-        "core:quit",
     ]
     .map(String::from)
     .to_vec();

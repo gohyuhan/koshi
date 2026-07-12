@@ -4,13 +4,27 @@
 //! modes are per-client so two attached terminals never fight over one
 //! global cursor; the session itself holds only this registry.
 
-use std::{collections::HashMap, time::SystemTime};
+use std::{
+    collections::HashMap,
+    time::{Instant, SystemTime},
+};
 
 use koshi_core::{
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
+    key::KeySequence,
     lock::LockMode,
 };
+
+/// Convert a full client terminal viewport into the middle pane region by
+/// reserving one top tabline row and one bottom key-hint row.
+#[must_use]
+pub const fn pane_viewport(viewport: Size) -> Size {
+    Size {
+        cols: viewport.cols,
+        rows: viewport.rows.saturating_sub(2),
+    }
+}
 
 /// One attached client: a single terminal connected to a session, holding the
 /// view state that is the client's alone. Two clients on the same session — and
@@ -27,6 +41,7 @@ pub struct Client {
     lock_mode: LockMode,
     mouse_state: MouseState,
     pending_resize_drag: Option<ResizeDragState>,
+    pending_key_sequence: Option<PendingKeySequence>,
     /// This client's scrollback view offset per pane: lines scrolled up from the
     /// live bottom. A pane absent from the map (the default) follows live output;
     /// only scrolled-back panes have an entry, always with a non-zero offset. It
@@ -58,6 +73,7 @@ impl Client {
             lock_mode: LockMode::Normal,
             mouse_state: MouseState,
             pending_resize_drag: None,
+            pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
         }
     }
@@ -121,6 +137,22 @@ impl Client {
     #[must_use]
     pub fn pending_resize_drag(&self) -> Option<&ResizeDragState> {
         self.pending_resize_drag.as_ref()
+    }
+
+    /// This client's incomplete multi-chord key sequence.
+    #[must_use]
+    pub fn pending_key_sequence(&self) -> Option<&PendingKeySequence> {
+        self.pending_key_sequence.as_ref()
+    }
+
+    /// Replace this client's incomplete multi-chord key sequence.
+    pub fn update_pending_key_sequence(&mut self, pending: Option<PendingKeySequence>) {
+        self.pending_key_sequence = pending
+    }
+
+    /// Take and clear this client's incomplete multi-chord key sequence.
+    pub fn take_pending_key_sequence(&mut self) -> Option<PendingKeySequence> {
+        self.pending_key_sequence.take()
     }
 
     /// This client's scrollback view offset for `pane_id`: lines scrolled up from
@@ -248,6 +280,20 @@ impl ClientRegistry {
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
+}
+
+/// One incomplete multi-chord keybinding plus its passthrough bytes and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingKeySequence {
+    /// Canonical chords pressed so far.
+    pub sequence: KeySequence,
+    /// Terminal bytes for each chord, retained for transparent-mode fallback.
+    pub raw_bytes: Vec<Vec<u8>>,
+    /// Disambiguation instant, set only when the chords so far are BOTH a
+    /// complete binding and the prefix of a longer one — reaching it fires the
+    /// complete binding. A prefix-only sequence carries `None` and waits for
+    /// the next chord indefinitely.
+    pub deadline: Option<Instant>,
 }
 
 /// Per-client mouse interaction state: what this client's pointer is currently

@@ -81,6 +81,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         active_tab: tab_id,
         focused_pane: Some(pane_id),
         lock_mode: LockMode::Normal,
+        pending_sequence: None,
     };
 
     RenderSnapshot {
@@ -88,6 +89,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         panes: vec![pane],
         client,
         plugin_ui: PluginUiSnapshot::default(),
+        keymap_hints: KeymapHints::default(),
     }
 }
 

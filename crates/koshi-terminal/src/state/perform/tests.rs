@@ -2855,7 +2855,9 @@ fn linefeed_pushes_the_top_primary_line_into_scrollback() {
         .scrollback()
         .lines()
         .front()
-        .expect("one retained row");
+        .expect("one retained row")
+        .0
+        .as_slice();
     assert_eq!(captured[0].ch(), 'a');
     assert_eq!(captured[1].ch(), 'b');
 }
@@ -2907,7 +2909,9 @@ fn su_on_a_top_anchored_region_feeds_scrollback() {
         .scrollback()
         .lines()
         .front()
-        .expect("one retained row");
+        .expect("one retained row")
+        .0
+        .as_slice();
     assert_eq!(captured[0].ch(), 'a');
     assert_eq!(captured[1].ch(), 'b');
 }
@@ -2922,7 +2926,7 @@ fn su_by_n_captures_each_departing_top_row_oldest_first() {
         .scrollback()
         .lines()
         .iter()
-        .map(|row| row.iter().map(Cell::ch).collect())
+        .map(|(row, _)| row.iter().map(Cell::ch).collect())
         .collect();
     assert_eq!(history, vec!["abc", "def"]); // oldest (top) first
 }
@@ -2955,7 +2959,9 @@ fn dl_with_the_cursor_on_row_0_feeds_scrollback() {
         .scrollback()
         .lines()
         .front()
-        .expect("one retained row");
+        .expect("one retained row")
+        .0
+        .as_slice();
     assert_eq!(captured[0].ch(), 'a');
     assert_eq!(captured[1].ch(), 'b');
 }

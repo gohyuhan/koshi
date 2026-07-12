@@ -10,7 +10,7 @@
 //! is the point: a new `Command` variant cannot be added without giving it an
 //! arm here, and each handler replaces its arm in place as it ships.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
@@ -25,7 +25,7 @@ use koshi_core::{
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
     },
-    geometry::{Point, Rect, Size},
+    geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
@@ -43,7 +43,7 @@ use koshi_layout::{
 use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{pane_viewport, Client, ClientRegistry};
 use koshi_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
@@ -78,6 +78,16 @@ pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size) -> PtySize {
         .and_then(|(_, content)| *content)
         .unwrap_or(tab_rect);
     compute_pty_size(rect)
+}
+
+/// The overlap length of the spans `[a_start, a_start + a_len)` and
+/// `[b_start, b_start + b_len)`, `0` when they are disjoint. Used by the
+/// directional focus lookup to require that a neighbor actually shares rows
+/// (or columns) with the pane focus moves from.
+fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
+    let start = a_start.max(b_start);
+    let end = (a_start + a_len).min(b_start + b_len);
+    end.saturating_sub(start)
 }
 
 /// A validation failure: the reason a command was rejected, plus an optional
@@ -168,7 +178,9 @@ impl Runtime {
     /// state outside a handler reached through this method. The command is
     /// validated first (target resolution, source policy); a command that
     /// passes validation but has no handler yet is rejected with
-    /// [`RejectReason::InvalidState`].
+    /// [`RejectReason::InvalidState`]. A command that reaches its handler
+    /// schedules a repaint, so a mutation shows regardless of which entry
+    /// point — key binding, IPC, or plugin — delivered it.
     pub fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
         let command_id = envelope.id;
         if let Err(rejection) = self.validate(&envelope) {
@@ -207,7 +219,7 @@ impl Runtime {
             }
             Command::CopyMode(command) => Ok(self.handle_copy_mode(command_id, &command)),
             Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
-            Command::Quit => Ok(self.reject(command_id, "quit")),
+            Command::Quit => Ok(self.handle_quit(command_id)),
             Command::TogglePaneFullscreen => {
                 self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
             }
@@ -219,6 +231,8 @@ impl Runtime {
                 self.handle_rename_session(command_id, &envelope.source, &args)
             }
         };
+        self.render_scheduler
+            .invalidate(InvalidationReason::StatusChanged);
         outcome.unwrap_or_else(|rejection| Self::rejected(command_id, rejection))
     }
 
@@ -880,6 +894,38 @@ impl Runtime {
         events
     }
 
+    /// Update one client's full terminal viewport, reconcile the active tab's
+    /// pane region and PTYs, then schedule a frame for the new terminal size.
+    pub fn handle_client_resize(&mut self, client_id: ClientId, viewport: Size) -> Vec<Event> {
+        let backend = Arc::clone(self.pty_backend());
+        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+            return Vec::new();
+        };
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("session located above");
+        let Some(client) = session.clients.get_mut(client_id) else {
+            return Vec::new();
+        };
+        let active_tab = client.active_tab();
+        client.update_viewport(viewport);
+
+        let mut events = Vec::new();
+        Self::reflow_tab_if_viewed(
+            backend.as_ref(),
+            session,
+            &self.pty_handles,
+            &mut self.pty_sizes,
+            &mut self.terminal_engines,
+            active_tab,
+            &mut events,
+        );
+        self.render_scheduler
+            .invalidate(InvalidationReason::TerminalResize);
+        events
+    }
+
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
     /// was viewing and schedule a redraw.
     ///
@@ -940,8 +986,11 @@ impl Runtime {
     /// The border that moves is resolved by the layout crate's resize
     /// transaction: a positive `args.size` grows the pane toward
     /// `args.direction` with the adjacent sibling donating the cells, a
-    /// negative one shrinks it with that sibling gaining them. The target
-    /// pane's tab must be viewed by at least one attached client: the tab is
+    /// negative one shrinks it with that sibling gaining them. A pane with no
+    /// border on the named side — it touches the tab edge there — moves its
+    /// opposite border in the same visual direction instead, so a resize
+    /// keybinding always adjusts the pane whenever any border can move. The
+    /// target pane's tab must be viewed by at least one attached client: the tab is
     /// solved against that real viewport ([`Session::tab_viewport`]), so the
     /// donating side's spare cells are measured against the exact terminal
     /// displaying the result, and a tab no client currently views rejects.
@@ -984,7 +1033,10 @@ impl Runtime {
             .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
         // The resize transaction returns a new tree and leaves the tab's
-        // untouched on rejection, so a failed resize mutates nothing.
+        // untouched on rejection, so a failed resize mutates nothing. When the
+        // pane touches the tab edge on the named side, the opposite border
+        // moves in the same visual direction instead — the pane shrinks where
+        // it would have grown, and grows where it would have shrunk.
         let resized = resize(
             tab.layout(),
             tab_rect,
@@ -992,6 +1044,16 @@ impl Runtime {
             args.direction,
             args.size,
         )
+        .or_else(|error| match error {
+            ResizeError::NoAdjacentBorder { .. } => resize(
+                tab.layout(),
+                tab_rect,
+                target.pane_id,
+                args.direction.opposite(),
+                args.size.saturating_neg(),
+            ),
+            other => Err(other),
+        })
         .map_err(|error| Self::resize_rejection(&error))?;
         tab.update_layout(resized);
         // A layout edit returns the tab to the tiled view: resizing a pane of
@@ -1181,9 +1243,8 @@ impl Runtime {
             .get(target.client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
 
-        // The new tab is viewed (only) by the designated client, so its root
-        // pane is sized against that client's viewport.
-        let viewport = client.viewport();
+        // New tab occupies the client's middle pane region, excluding chrome.
+        let viewport = pane_viewport(client.viewport());
         let new_pane_id = PaneId::new();
         let new_tab_id = TabId::new();
         let candidate = LayoutNode::Pane(new_pane_id);
@@ -1660,6 +1721,20 @@ impl Runtime {
         })
     }
 
+    /// Handle [`Command::Quit`]: mark the process for immediate teardown.
+    ///
+    /// Sets the quit request the event loop polls after each event batch and
+    /// flags zero-grace shutdown, so the loop exits on this iteration and
+    /// teardown group-kills every pane's child without the graceful window.
+    fn handle_quit(&mut self, command_id: CommandId) -> CommandResult {
+        self.quit_requested = true;
+        self.immediate_shutdown = true;
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    }
+
     /// Handle [`Command::SetLockMode`]: set the acting client to
     /// [`LockMode::Locked`] when `args.locked`, else [`LockMode::Normal`].
     ///
@@ -1711,6 +1786,7 @@ impl Runtime {
         let mut scope = TransactionScope::new();
         if next != current {
             client.update_lock_mode(next);
+            client.update_pending_key_sequence(None);
             scope.emit(Event::InputModeChanged(InputModeChanged {
                 client_id,
                 mode: Self::input_mode(next),
@@ -1833,7 +1909,7 @@ impl Runtime {
             ResizeError::PaneNotFound { .. } => Rejection::bare(RejectReason::TargetNotFound),
             ResizeError::NoAdjacentBorder { .. } => Rejection::new(
                 RejectReason::InvalidState,
-                "pane has no neighbor on that side",
+                "pane has no border to move on that axis",
             ),
             ResizeError::MinSize { spare, .. } => Rejection::new(
                 RejectReason::MinSize,
@@ -1896,13 +1972,15 @@ impl Runtime {
                 )
             })?;
             // Size to the smallest of the current viewers and the designated
-            // client, so the pane fits every client that will view the tab.
+            // client — each as its drawable pane region — so the pane fits
+            // every client that will view the tab.
+            let designated = pane_viewport(client.viewport());
             let viewport = match existing {
                 Some(existing) => Size {
-                    cols: existing.cols.min(client.viewport().cols),
-                    rows: existing.rows.min(client.viewport().rows),
+                    cols: existing.cols.min(designated.cols),
+                    rows: existing.rows.min(designated.rows),
                 },
-                None => client.viewport(),
+                None => designated,
             };
             return if fits_viewport(viewport) {
                 Ok((viewport, Some(client_id)))
@@ -1929,7 +2007,7 @@ impl Runtime {
                 "no attached client to view the new pane's tab",
             )),
             (Some(only), None) => {
-                let viewport = only.viewport();
+                let viewport = pane_viewport(only.viewport());
                 if fits_viewport(viewport) {
                     Ok((viewport, Some(only.id())))
                 } else {
@@ -1960,8 +2038,10 @@ impl Runtime {
     }
 
     /// The viewport `tab_id` is solved against when a pane closes: the tab's
-    /// own viewport when attached clients view it, else the smallest viewport
-    /// among all attached clients, else a nominal 80x24.
+    /// own viewport when attached clients view it, else the smallest pane
+    /// region among all attached clients, else a nominal 80x24. Every leg is
+    /// a drawable pane region, so the ranking geometry matches what a viewer
+    /// would actually see.
     ///
     /// The 80x24 leg is reached only when the session has no attached client
     /// at all — a headless close issued through the CLI, where no terminal
@@ -1977,7 +2057,7 @@ impl Runtime {
                 session
                     .clients
                     .list_attached()
-                    .map(|client| client.viewport())
+                    .map(|client| pane_viewport(client.viewport()))
                     .reduce(|a, b| Size {
                         cols: a.cols.min(b.cols),
                         rows: a.rows.min(b.rows),
@@ -2453,23 +2533,15 @@ impl Runtime {
     /// session with several is [`RejectReason::TargetAmbiguous`], and one with
     /// none is [`RejectReason::InvalidState`]. Focus is tab-local, so the pane
     /// resolves through [`Self::require_pane_in_active_tab`]. A
-    /// [`FocusTarget::Direction`] target is rejected as
-    /// [`RejectReason::InvalidState`]: the geometric neighbor lookup is not
-    /// implemented yet.
+    /// [`FocusTarget::Direction`] target resolves geometrically from the
+    /// target client's focused pane over the solved layout
+    /// ([`Self::directional_neighbor`]); no pane in that direction is
+    /// [`RejectReason::TargetNotFound`].
     fn resolve_focus_target(
         args: &FocusPaneArgs,
         source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<FocusPaneTarget, Rejection> {
-        let pane_id = match args.target {
-            FocusTarget::Pane(pane_id) => pane_id,
-            FocusTarget::Direction(_) => {
-                return Err(Rejection::new(
-                    RejectReason::InvalidState,
-                    "directional focus not yet implemented",
-                ))
-            }
-        };
         let session = Self::require_session(session)?;
         let client_id = match args.client.or_else(|| source.client_id()) {
             Some(client_id) => {
@@ -2500,6 +2572,13 @@ impl Runtime {
                 }
             }
         };
+        let pane_id = match args.target {
+            FocusTarget::Pane(pane_id) => pane_id,
+            FocusTarget::Direction(direction) => {
+                let from = Self::resolve_focused_pane(session, client_id)?;
+                Self::directional_neighbor(session, client_id, from, direction)?
+            }
+        };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
         let tab_id = session
             .clients
@@ -2511,6 +2590,96 @@ impl Runtime {
             client_id,
             tab_id,
             pane_id,
+        })
+    }
+
+    /// The nearest pane in `direction` from `from`, over the client's active
+    /// tab solved at its current pane region.
+    ///
+    /// A candidate qualifies when its whole box lies on the far side of
+    /// `from`'s edge in that direction and the two boxes overlap on the
+    /// perpendicular axis — a pane diagonally offset with no shared span is
+    /// not a neighbor. The nearest qualifying edge wins; among equals the
+    /// larger perpendicular overlap does. Suppressed and zero-area panes
+    /// never qualify. No qualifying pane is
+    /// [`RejectReason::TargetNotFound`].
+    fn directional_neighbor(
+        session: &Session,
+        client_id: ClientId,
+        from: PaneId,
+        direction: Direction,
+    ) -> Result<PaneId, Rejection> {
+        let client = session
+            .clients
+            .get(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let tab_id = client.active_tab();
+        let tab = session
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        let viewport = session
+            .tab_viewport(tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::InvalidState))?;
+        let solve = solve_tab(tab, viewport);
+        let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
+        let from_rect = solve
+            .panes
+            .iter()
+            .find(|(pane_id, _)| *pane_id == from)
+            .map(|(_, rect)| *rect)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+
+        let mut best: Option<(PaneId, u16, u16)> = None;
+        for &(pane_id, rect) in &solve.panes {
+            if pane_id == from || suppressed.contains(&pane_id) || rect.is_empty() {
+                continue;
+            }
+            // Distance between the facing edges; `None` when the candidate is
+            // not on the far side.
+            let distance = match direction {
+                Direction::Left => (rect.origin.x + rect.size.cols <= from_rect.origin.x)
+                    .then(|| from_rect.origin.x - (rect.origin.x + rect.size.cols)),
+                Direction::Right => (rect.origin.x >= from_rect.origin.x + from_rect.size.cols)
+                    .then(|| rect.origin.x - (from_rect.origin.x + from_rect.size.cols)),
+                Direction::Up => (rect.origin.y + rect.size.rows <= from_rect.origin.y)
+                    .then(|| from_rect.origin.y - (rect.origin.y + rect.size.rows)),
+                Direction::Down => (rect.origin.y >= from_rect.origin.y + from_rect.size.rows)
+                    .then(|| rect.origin.y - (from_rect.origin.y + from_rect.size.rows)),
+            };
+            let Some(distance) = distance else {
+                continue;
+            };
+            let overlap = match direction {
+                Direction::Left | Direction::Right => span_overlap(
+                    from_rect.origin.y,
+                    from_rect.size.rows,
+                    rect.origin.y,
+                    rect.size.rows,
+                ),
+                Direction::Up | Direction::Down => span_overlap(
+                    from_rect.origin.x,
+                    from_rect.size.cols,
+                    rect.origin.x,
+                    rect.size.cols,
+                ),
+            };
+            if overlap == 0 {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, best_distance, best_overlap)) => {
+                    distance < best_distance
+                        || (distance == best_distance && overlap > best_overlap)
+                }
+            };
+            if better {
+                best = Some((pane_id, distance, overlap));
+            }
+        }
+        best.map(|(pane_id, _, _)| pane_id).ok_or_else(|| {
+            Rejection::new(RejectReason::TargetNotFound, "no pane in that direction")
         })
     }
 

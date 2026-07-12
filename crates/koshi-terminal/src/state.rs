@@ -33,6 +33,7 @@ mod cursor;
 mod cwd;
 mod modes;
 mod perform;
+mod reflow;
 mod render;
 mod screen;
 
@@ -135,14 +136,38 @@ impl TerminalState {
         }
     }
 
-    /// Resize both screen buffers to `size` and clamp the cursor into the new
-    /// bounds. Existing cell contents are discarded — reflow is not done here.
+    /// Resize both screen buffers to `size`, preserving their contents.
+    ///
+    /// The primary screen REFLOWS: soft-wrapped rows re-join into logical
+    /// lines ([`RowEnd`](crate::grid::state::RowEnd)) and re-wrap to the new
+    /// width — text wider than the new width wraps onto continuation rows
+    /// instead of being cut off, and widening re-joins what an earlier
+    /// narrow width wrapped. Rows past the new height scroll into history
+    /// (trailing blank padding rows drop instead), a taller screen pulls
+    /// history back in, and the cursor stays on its logical line at its
+    /// content offset. The alternate screen has no history and its apps
+    /// repaint on resize: each row crops on the right or pads with the
+    /// screen's own background (a wide glyph whose right half is cut off is
+    /// blanked), and a height shrink crops off the top. Scroll margins index
+    /// the old geometry and are dropped until the app issues DECSTBM again.
     pub fn resize(&mut self, size: PtySize) {
-        // Blank each screen with its own render background.
-        let primary_fill = self.primary_render.style.bg_fill();
         let alternate_fill = self.alternate_render.style.bg_fill();
-        self.primary = Arc::new(Grid::blank(size.rows, size.cols, primary_fill));
-        self.alternate = Arc::new(Grid::blank(size.rows, size.cols, alternate_fill));
+
+        self.reflow_primary(size);
+
+        // The alternate screen keeps what fits: crop off the top, pad at the
+        // bottom, no history on either side.
+        let mut rows: Vec<Vec<Cell>> = self.alternate.rows().to_vec();
+        crop_columns(&mut rows, size.cols, alternate_fill);
+        while rows.len() > size.rows as usize {
+            rows.remove(0);
+            self.alternate_cursor.row = self.alternate_cursor.row.saturating_sub(1);
+        }
+        rows.resize(
+            size.rows as usize,
+            vec![Cell::blank_with(alternate_fill); size.cols as usize],
+        );
+        self.alternate = Arc::new(Grid::from_rows(rows, size.cols, alternate_fill));
 
         // Clamp both cursors to the new bounds.
         self.primary_cursor.row = min(self.primary_cursor.row, size.rows.saturating_sub(1));
@@ -158,8 +183,8 @@ impl TerminalState {
         self.primary_scroll_region = None;
         self.alternate_scroll_region = None;
 
-        // The resized buffers discard their cells, so any in-progress cluster's
-        // base cell is gone; drop the run.
+        // The surviving cells moved rows and columns, so any in-progress
+        // cluster's recorded base position is stale; drop the run.
         self.cluster.clear();
         self.cluster_base = None;
     }
@@ -241,9 +266,9 @@ impl TerminalState {
         let window: Vec<Vec<Cell>> = history
             .iter()
             .skip(retained - scrolled)
-            .chain(grid.rows())
+            .map(|(cells, _)| cells.clone())
+            .chain(grid.rows().iter().cloned())
             .take(rows as usize)
-            .cloned()
             .collect();
         (
             Arc::new(Grid::from_rows(
@@ -423,6 +448,21 @@ impl TerminalState {
             ClippedRow {
                 cells: &r[..w],
                 right_pad: false,
+            }
+        }
+    }
+}
+
+/// Normalize every row to exactly `cols` cells: truncate on the right or pad
+/// with blanks in `fill`. A wide glyph whose right (width-0) half falls past
+/// the new edge leaves its base as the last cell; that dangling base is
+/// blanked so no half glyph survives the crop.
+fn crop_columns(rows: &mut [Vec<Cell>], cols: u16, fill: Style) {
+    for row in rows {
+        row.resize(cols as usize, Cell::blank_with(fill));
+        if let Some(last) = row.last_mut() {
+            if last.width() > 1 {
+                *last = Cell::blank_with(fill);
             }
         }
     }

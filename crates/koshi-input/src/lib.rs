@@ -3,6 +3,7 @@
 //! privacy-aware input event classifier for typing/Enter events.
 
 pub mod error;
+pub mod keyboard;
 pub mod types;
 
 pub mod input;

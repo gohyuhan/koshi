@@ -3,6 +3,7 @@
 //! and group-kill every child when the loop panics (the normal quit path takes
 //! the staged [`Runtime::shutdown`]). They wrap the render scheduler and PTY
 //! maps, which are crate-private, so the loop can live outside this crate.
+//! Explicit quit marks zero-grace teardown before the loop exits.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

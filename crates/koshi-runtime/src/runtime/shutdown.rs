@@ -1,7 +1,8 @@
 //! Staged process teardown for the normal quit path, in a fixed order.
 //!
-//! The event loop calls [`Runtime::shutdown`] once it exits (quit chord,
-//! hangup, or the last pane closing). Stages 1–4 run here; stages 5 (restore
+//! The event loop calls [`Runtime::shutdown`] once it exits. Explicit quit
+//! group-kills immediately; hangup or last-pane exit keeps graceful teardown.
+//! Stages 1–4 run here; stages 5 (restore
 //! the outer terminal) and 6 (flush logs) run after this returns, as the
 //! binary's cleanup guard and tracing guard drop in that order. The panic path
 //! does not come here — it takes the abrupt [`Runtime::kill_all_panes`].
@@ -18,7 +19,7 @@ impl Runtime {
     /// Tear the process down in a fixed staged order:
     /// 1. enter draining mode (reject new IPC/plugin commands),
     /// 2. notify plugins of imminent shutdown *(seam — no host yet)*,
-    /// 3. graceful-then-group-kill every pane's child,
+    /// 3. group-kill immediately for explicit quit, otherwise graceful kill,
     /// 4. persist the session snapshot *(seam — no storage yet)*.
     ///
     /// Stages 5–6 (restore terminal, flush logs) are left to the caller's
@@ -32,10 +33,13 @@ impl Runtime {
         // SEAM: no plugin host exists yet. When it lands, broadcast the
         // shutdown notice here, ahead of the kill, so plugins can flush.
 
-        // Stage 3 — ask every pane's process group to exit, then group-kill so
-        // no descendant is orphaned. Parallel across panes and joined, so the
-        // wait is bounded by one grace window, not the sum across panes.
-        self.graceful_kill_all_panes();
+        // Stage 3 — explicit user quit is immediate; natural loop endings keep
+        // the graceful process-group window. Both paths reap descendants.
+        if self.immediate_shutdown {
+            self.kill_all_panes();
+        } else {
+            self.graceful_kill_all_panes();
+        }
 
         // Stage 4 — persist the session snapshot.
         // SEAM: storage is a no-op placeholder. When a real storage layer

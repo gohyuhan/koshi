@@ -5,7 +5,7 @@
 //! parts, variation selectors) onto a base cell, places narrow and wide
 //! glyphs, and keeps wide-glyph pairs intact across edits.
 
-use crate::grid::state::Cell;
+use crate::grid::state::{Cell, RowEnd};
 use crate::state::TerminalState;
 use unicode_segmentation::GraphemeCursor;
 use unicode_width::UnicodeWidthStr;
@@ -166,6 +166,9 @@ impl TerminalState {
             if let Some(slot) = self.active_grid_mut().cell_mut(row, col) {
                 *slot = Cell::blank_with(fill);
             }
+            // The vacated last column is a wide-glyph spacer: record the wrap
+            // so a resize reflow re-joins the rows and drops the spacer.
+            self.active_grid_mut().set_row_end(row, RowEnd::SoftWide);
             self.linefeed();
             self.active_cursor_mut().col = 0;
             self.clear_wrap_latch();
@@ -258,6 +261,13 @@ impl TerminalState {
             if let Some(slot) = self.active_grid_mut().cell_mut(row, col + 1) {
                 *slot = Cell::new(' ', 0, style);
             }
+        }
+        // A write that reaches the row's last column replaces whatever the
+        // previous wrap left there, so the row's continuation state resets;
+        // an actual wrap on the NEXT glyph re-records it.
+        let end_col = if wide { col + 1 } else { col };
+        if end_col + 1 >= cols {
+            self.active_grid_mut().set_row_end(row, RowEnd::Hard);
         }
     }
 

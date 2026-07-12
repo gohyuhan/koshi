@@ -74,6 +74,19 @@ pub enum Direction {
     Down,
 }
 
+impl Direction {
+    /// The direction pointing the opposite way.
+    #[must_use]
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
+}
+
 /// How a split divides space between its children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SplitDirection {

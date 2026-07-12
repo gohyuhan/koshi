@@ -130,11 +130,12 @@ pub struct KeybindingsConfig {
 }
 
 impl KeybindingsConfig {
-    /// The reserved unlock chord. In `locked` mode this chord fires
-    /// `core:unlock` and is intercepted ahead of pane pass-through;
+    /// The reserved unlock chord — the same chord that locks in normal mode,
+    /// so one key flips the client both ways. In `locked` mode this chord
+    /// fires `core:unlock` and is intercepted ahead of pane pass-through;
     /// validation refuses a config that removes it without naming an
     /// explicit alternative.
-    pub const RESERVED_UNLOCK: KeyChord = KeyChord::new(ModFlags::CTRL, Key::Char('g'));
+    pub const RESERVED_UNLOCK: KeyChord = KeyChord::new(ModFlags::CTRL, Key::Char('l'));
 }
 
 impl Default for KeybindingsConfig {
@@ -201,19 +202,20 @@ pub struct ModeBindings {
 }
 
 /// The built-in default binding table: the `normal`-mode set plus the
-/// reserved unlock in `locked` mode.
+/// reserved unlock and quit in `locked` mode.
 ///
-/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held), so no
-/// default steals a key plain typing produces; a later chord in a sequence
+/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held) — with
+/// ONE owner-chosen exception, the bare `Tab`/`Shift+Tab` tab-switching pair
+/// (2026-07-12): outside locked mode the keymap owns Tab, and a shell sees a
+/// literal Tab only while the client is locked. A later chord in a sequence
 /// may be a plain key, since it is only read while the pending sequence is
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
-/// Tab, Enter, Esc, and Backspace. Pane lifecycle operations live under the
-/// `<C-p>` prefix and resize under the `<C-s>` prefix; tab switching has a
-/// `<C-Tab>`-style pair plus an `<A-]>`/`<A-[>` pair for terminals that
-/// cannot encode Ctrl+Tab. Action names here are compile-time constants
-/// known to satisfy the action-name grammar; an invalid one is a bug in this
-/// table and is caught by its tests.
+/// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle and
+/// directional focus — live under the `<C-p>` prefix and resize under the
+/// `<C-s>` prefix. Action names here are compile-time constants known to
+/// satisfy the action-name grammar; an invalid one is a bug in this table
+/// and is caught by its tests.
 fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     let seq = |mods: ModFlags, key: Key| KeySequence::from(KeyChord::new(mods, key));
     let ctrl_then = |prefix: char, key: Key| {
@@ -232,12 +234,11 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     };
     let resize = |direction: Direction| ActionArgs::ResizePane { direction, size: 1 };
 
-    const CTRL_SHIFT: ModFlags = ModFlags::CTRL.union(ModFlags::SHIFT);
-
     let normal: BTreeMap<KeySequence, BoundAction> = [
-        // Lock and quit.
+        // Lock and quit. The lock chord IS the reserved unlock chord: it
+        // locks here and unlocks in locked mode, so one key flips both ways.
         (
-            seq(ModFlags::CTRL, Key::Char('l')),
+            KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
             bound("lock", ActionArgs::None),
         ),
         (
@@ -267,21 +268,23 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             seq(ModFlags::ALT, Key::Char('f')),
             bound("toggle-pane-fullscreen", ActionArgs::None),
         ),
-        // Directional focus: arrow style and vim style.
+        // Directional focus: arrows under the pane prefix, and vim style.
+        // Both fire continuous actions, so the prefix stays armed after each
+        // press — `<C-p> ← ← ←` walks focus left three panes.
         (
-            seq(ModFlags::CTRL, Key::Named(NamedKey::Left)),
+            ctrl_then('p', Key::Named(NamedKey::Left)),
             bound("focus-pane", focus(Direction::Left)),
         ),
         (
-            seq(ModFlags::CTRL, Key::Named(NamedKey::Down)),
+            ctrl_then('p', Key::Named(NamedKey::Down)),
             bound("focus-pane", focus(Direction::Down)),
         ),
         (
-            seq(ModFlags::CTRL, Key::Named(NamedKey::Up)),
+            ctrl_then('p', Key::Named(NamedKey::Up)),
             bound("focus-pane", focus(Direction::Up)),
         ),
         (
-            seq(ModFlags::CTRL, Key::Named(NamedKey::Right)),
+            ctrl_then('p', Key::Named(NamedKey::Right)),
             bound("focus-pane", focus(Direction::Right)),
         ),
         (
@@ -317,36 +320,40 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             ctrl_then('s', Key::Char('l')),
             bound("resize-pane", resize(Direction::Right)),
         ),
-        // Tabs. Switching gets a Ctrl+Tab-style pair and an Alt-bracket
-        // pair, since legacy unix terminals cannot encode Ctrl+Tab.
+        // Tabs. Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
+        // exception to the non-typeable-opening rule (2026-07-12): outside
+        // locked mode the keymap owns Tab, so a shell only sees a literal Tab
+        // while the client is locked.
         (
             seq(ModFlags::ALT, Key::Char('t')),
             bound("new-tab", ActionArgs::None),
         ),
         (
-            seq(ModFlags::CTRL, Key::Named(NamedKey::Tab)),
+            seq(ModFlags::NONE, Key::Named(NamedKey::Tab)),
             bound("next-tab", ActionArgs::None),
         ),
         (
-            seq(CTRL_SHIFT, Key::Named(NamedKey::Tab)),
-            bound("previous-tab", ActionArgs::None),
-        ),
-        (
-            seq(ModFlags::ALT, Key::Char(']')),
-            bound("next-tab", ActionArgs::None),
-        ),
-        (
-            seq(ModFlags::ALT, Key::Char('[')),
+            seq(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
             bound("previous-tab", ActionArgs::None),
         ),
     ]
     .into_iter()
     .collect();
 
-    let locked: BTreeMap<KeySequence, BoundAction> = [(
-        KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-        bound("unlock", ActionArgs::None),
-    )]
+    // Locked mode intercepts exactly its bound chords and passes every other
+    // key to the pane: the reserved unlock (the same chord that locks in
+    // normal mode) as the guaranteed escape, plus the quit chord so quitting
+    // works from either side of the lock.
+    let locked: BTreeMap<KeySequence, BoundAction> = [
+        (
+            KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
+            bound("unlock", ActionArgs::None),
+        ),
+        (
+            seq(ModFlags::CTRL, Key::Char('q')),
+            bound("quit", ActionArgs::None),
+        ),
+    ]
     .into_iter()
     .collect();
 
@@ -364,6 +371,29 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
                 keys: locked,
                 removed: BTreeSet::new(),
             },
+        ),
+    ])
+}
+
+/// The display labels for the default binding table's prefix chords, keyed by
+/// the opening chord of the multi-chord sequences it groups.
+///
+/// The hint bar shows a prefix's label (`<C-p> PANE`) only while every binding
+/// under that prefix still comes from the untouched defaults; once any user
+/// surface overrides, adds, or removes a binding under it, the group falls
+/// back to a derived `+N` marker, since the shipped label no longer describes
+/// the set. Lives beside the default binding table so the labels and the
+/// sequences they describe change together.
+#[must_use]
+pub fn default_prefix_labels() -> BTreeMap<KeyChord, String> {
+    BTreeMap::from([
+        (
+            KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+            "PANE".to_string(),
+        ),
+        (
+            KeyChord::new(ModFlags::CTRL, Key::Char('s')),
+            "RESIZE".to_string(),
         ),
     ])
 }

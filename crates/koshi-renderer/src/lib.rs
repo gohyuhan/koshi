@@ -7,5 +7,7 @@ pub mod types;
 
 pub mod render;
 pub mod snapshot;
+pub mod statusline_hints;
+pub(crate) mod theme;
 
 pub use render::{cursor_position, render_frame};

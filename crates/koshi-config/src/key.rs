@@ -19,7 +19,7 @@
 use std::fmt;
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
 use thiserror::Error;
 
 /// A key token that does not name a chord, with the token that failed.
@@ -176,20 +176,10 @@ fn finish_char(token: &str, mods: ModFlags, c: char) -> Result<KeyChord, KeyPars
         ));
     }
     let mut mods = mods;
-    let key_char = if c.is_uppercase() {
-        let mut lower = c.to_lowercase();
-        match (lower.next(), lower.next()) {
-            // A letter whose lowercase form is a single character: fold it.
-            (Some(l), None) => {
-                mods = mods.union(ModFlags::SHIFT);
-                l
-            }
-            // Anything whose lowercase form is not one character stands as it is.
-            _ => c,
-        }
-    } else {
-        c
-    };
+    let (key_char, shifted) = fold_uppercase(c);
+    if shifted {
+        mods = mods.union(ModFlags::SHIFT);
+    }
     if mods.contains(ModFlags::SHIFT) && !key_char.is_lowercase() {
         return Err(err(
             token,

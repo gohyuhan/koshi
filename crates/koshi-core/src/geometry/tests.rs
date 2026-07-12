@@ -158,3 +158,11 @@ fn serde_roundtrip_enums() {
         assert_eq!(split, back);
     }
 }
+
+#[test]
+fn direction_opposite_pairs_each_cardinal() {
+    assert_eq!(Direction::Left.opposite(), Direction::Right);
+    assert_eq!(Direction::Right.opposite(), Direction::Left);
+    assert_eq!(Direction::Up.opposite(), Direction::Down);
+    assert_eq!(Direction::Down.opposite(), Direction::Up);
+}

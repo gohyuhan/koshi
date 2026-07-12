@@ -49,6 +49,7 @@ fn plugin_metadata(plugin: PluginId) -> ActionMetadata {
         args_schema: None,
         handler: ActionHandlerRef::PluginHostCall(plugin),
         status: ActionStatus::Available,
+        continuous: false,
     }
 }
 

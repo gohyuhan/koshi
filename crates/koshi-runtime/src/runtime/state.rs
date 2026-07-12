@@ -20,7 +20,7 @@ use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
     placeholder::{EventBus, IpcServer, SnapshotProvider, Storage},
-    runtime::{event::RuntimeEvent, render_schedule::RenderScheduler},
+    runtime::{event::RuntimeEvent, hints::KeymapHintCatalog, render_schedule::RenderScheduler},
 };
 
 /// Owns all mutable state for one koshi process: the sessions and their layout
@@ -60,6 +60,11 @@ pub struct Runtime {
     /// table and extended by plugins as they load. The dispatcher is its only
     /// writer.
     pub(crate) action_registry: ActionRegistry,
+    /// Per-mode hint-bar data resolved from the merged keymap and the action
+    /// registry, shared by reference with each frame's snapshot. Seeded from
+    /// the built-in defaults — the sole keymap layer until the config loader
+    /// lands — and rebuilt whenever the keymap inputs change.
+    pub(crate) keymap_hints: KeymapHintCatalog,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -75,6 +80,11 @@ pub struct Runtime {
     /// state mid-teardown. One-way; no command-dispatch path checks it yet —
     /// [`is_draining`](Self::is_draining) exposes the raw flag today.
     pub(crate) draining: bool,
+    /// True when an explicit quit chord requested zero-grace process teardown.
+    pub(crate) immediate_shutdown: bool,
+    /// True once a `core:quit` command was applied. The event loop polls it
+    /// after each event batch and exits; the flag never resets.
+    pub(crate) quit_requested: bool,
     /// Direction a new pane splits in when the command names none. Seeded at
     /// construction from the layout config's default; the caller that loads
     /// config hands the value over.
@@ -95,6 +105,7 @@ impl Runtime {
         cleanup_guard: TerminalCleanupGuard,
         default_new_pane_direction: Direction,
     ) -> Self {
+        let action_registry = ActionRegistry::new();
         Runtime {
             sessions: HashMap::new(),
             pty_backend,
@@ -105,14 +116,24 @@ impl Runtime {
             snapshot_provider,
             storage,
             ipc_server: None,
-            action_registry: ActionRegistry::new(),
+            keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
+            action_registry,
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
             inbox_tx,
             cleanup_guard,
             draining: false,
+            immediate_shutdown: false,
+            quit_requested: false,
             default_new_pane_direction,
         }
+    }
+
+    /// Whether a `core:quit` command was applied; the event loop exits when
+    /// this turns true.
+    #[must_use]
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested
     }
 
     /// Borrow the session map.

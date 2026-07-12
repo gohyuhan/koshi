@@ -127,7 +127,6 @@ struct ExpectedBinding {
 
 /// The complete expected default binding table, row for row.
 fn expected_default_bindings() -> Vec<ExpectedBinding> {
-    let core = |name: &str| ActionRef::core(name).expect("test action name is valid");
     let row = |mode: &'static str,
                chord: &'static str,
                action: &'static str,
@@ -170,9 +169,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-q>",
             "quit",
             ActionArgs::None,
-            Err(ResolveError::ComingSoon {
-                action: core("quit"),
-            }),
+            Ok(Command::Quit),
         ),
         row(
             "normal",
@@ -204,28 +201,28 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "normal",
-            "<C-Left>",
+            "<C-p> <Left>",
             "focus-pane",
             focus_args(Direction::Left),
             Ok(focus_cmd(Direction::Left)),
         ),
         row(
             "normal",
-            "<C-Down>",
+            "<C-p> <Down>",
             "focus-pane",
             focus_args(Direction::Down),
             Ok(focus_cmd(Direction::Down)),
         ),
         row(
             "normal",
-            "<C-Up>",
+            "<C-p> <Up>",
             "focus-pane",
             focus_args(Direction::Up),
             Ok(focus_cmd(Direction::Up)),
         ),
         row(
             "normal",
-            "<C-Right>",
+            "<C-p> <Right>",
             "focus-pane",
             focus_args(Direction::Right),
             Ok(focus_cmd(Direction::Right)),
@@ -298,7 +295,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "normal",
-            "<C-Tab>",
+            "<Tab>",
             "next-tab",
             ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
@@ -308,27 +305,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "normal",
-            "<C-S-Tab>",
-            "previous-tab",
-            ActionArgs::None,
-            Ok(Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Prev,
-                client: None,
-            })),
-        ),
-        row(
-            "normal",
-            "<A-]>",
-            "next-tab",
-            ActionArgs::None,
-            Ok(Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Next,
-                client: None,
-            })),
-        ),
-        row(
-            "normal",
-            "<A-[>",
+            "<S-Tab>",
             "previous-tab",
             ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
@@ -338,10 +315,17 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "locked",
-            "<C-g>",
+            "<C-l>",
             "unlock",
             ActionArgs::None,
             Ok(Command::SetLockMode(LockModeArgs { locked: false })),
+        ),
+        row(
+            "locked",
+            "<C-q>",
+            "quit",
+            ActionArgs::None,
+            Ok(Command::Quit),
         ),
     ]
 }
@@ -399,13 +383,20 @@ fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
     // On unix terminals without the kitty keyboard protocol these four Ctrl
     // chords arrive as the Tab, Enter, Esc, and Backspace control bytes.
     let ambiguous = ['i', 'm', '[', 'h'].map(|c| KeyChord::new(ModFlags::CTRL, Key::Char(c)));
+    // The owner-chosen exception to the non-typeable-opening rule
+    // (2026-07-12): tab switching is the bare Tab / Shift+Tab pair; a shell
+    // sees a literal Tab only while the client is locked.
+    let tab_switch = [
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Tab)),
+        KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+    ];
     for (mode, bindings) in &config.keybindings.modes {
         for sequence in bindings.keys.keys() {
             // Only the OPENING chord competes with plain typing; later
             // chords are read while the pending sequence is live.
             let first = &sequence.chords()[0];
             assert!(
-                !first.is_typeable(),
+                !first.is_typeable() || tab_switch.contains(first),
                 "default {first} in {mode:?} opens with a typeable chord"
             );
             for chord in sequence.chords() {
@@ -421,14 +412,16 @@ fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
 #[test]
 fn reserved_unlock_is_the_locked_mode_binding() {
     let config = KoshiConfig::default();
-    assert_eq!(KeybindingsConfig::RESERVED_UNLOCK.to_string(), "<C-g>");
+    assert_eq!(KeybindingsConfig::RESERVED_UNLOCK.to_string(), "<C-l>");
     assert_eq!(
-        parse_chord("<C-g>").expect("reserved unlock text parses"),
+        parse_chord("<C-l>").expect("reserved unlock text parses"),
         KeybindingsConfig::RESERVED_UNLOCK
     );
 
     let locked = &config.keybindings.modes[&ModeName::new("locked")];
-    assert_eq!(locked.keys.len(), 1);
+    // The reserved unlock — the same chord normal mode locks with, so one
+    // key flips both ways — plus the quit chord.
+    assert_eq!(locked.keys.len(), 2);
     let bound = locked
         .keys
         .get(&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK))
@@ -438,4 +431,34 @@ fn reserved_unlock_is_the_locked_mode_binding() {
         ActionRef::core("unlock").expect("unlock name is valid")
     );
     assert_eq!(bound.args, ActionArgs::None);
+}
+
+#[test]
+fn prefix_labels_name_exactly_the_default_prefix_chords() {
+    let labels = default_prefix_labels();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(
+        labels
+            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('p')))
+            .map(String::as_str),
+        Some("PANE")
+    );
+    assert_eq!(
+        labels
+            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('s')))
+            .map(String::as_str),
+        Some("RESIZE")
+    );
+
+    // Every labeled chord opens at least one multi-chord default sequence,
+    // and every multi-chord default sequence's opening chord is labeled —
+    // the label table and the binding table stay in lockstep.
+    let normal = &default_mode_bindings()[&ModeName::new("normal")];
+    let openers: std::collections::BTreeSet<KeyChord> = normal
+        .keys
+        .keys()
+        .filter(|sequence| sequence.chords().len() > 1)
+        .map(|sequence| sequence.chords()[0])
+        .collect();
+    assert_eq!(openers, labels.keys().copied().collect());
 }

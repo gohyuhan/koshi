@@ -175,6 +175,30 @@ impl fmt::Display for Key {
     }
 }
 
+/// Folds an uppercase letter into the `lowercase + Shift` form every
+/// [`Key::Char`] chord is stored in — the one rule shared by the config
+/// parser and the input decoder.
+///
+/// - `'A'` → `('a', true)` — the `true` means "Shift is part of this key".
+/// - `'a'`, `'!'`, `'1'` → unchanged, `false` — nothing to fold.
+/// - `'İ'` → `('İ', false)` — Unicode lowercasing can produce MORE than one
+///   character (`'İ'` lowercases to `'i'` plus a combining dot), and a
+///   [`Key::Char`] holds exactly one, so such a letter cannot be modeled as
+///   `Shift + one lowercase char` and stands as it is.
+#[must_use]
+pub fn fold_uppercase(c: char) -> (char, bool) {
+    if !c.is_uppercase() {
+        return (c, false);
+    }
+    // `to_lowercase()` is an iterator because a lowercase mapping may be
+    // several chars; `(Some(l), None)` = the mapping is exactly one char.
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => (l, true),
+        _ => (c, false),
+    }
+}
+
 /// One key press: the modifiers held, and the key itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyChord {

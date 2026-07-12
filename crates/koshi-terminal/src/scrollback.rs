@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::grid::state::Cell;
+use crate::grid::state::{Cell, RowEnd};
 
 /// Default scrollback line cap: 10 000 lines per pane.
 const DEFAULT_MAX_LINES: usize = 10_000;
@@ -22,6 +22,16 @@ const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub struct ScrollbackLimit {
     max_lines: usize,
     max_bytes: usize,
+}
+
+impl ScrollbackLimit {
+    /// A cap of exactly `max_lines` rows and `max_bytes` bytes.
+    pub fn new(max_lines: usize, max_bytes: usize) -> Self {
+        ScrollbackLimit {
+            max_lines,
+            max_bytes,
+        }
+    }
 }
 
 impl Default for ScrollbackLimit {
@@ -40,8 +50,10 @@ impl Default for ScrollbackLimit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back. Each row is a
-    /// full grid line captured as it scrolled off the top.
-    lines: VecDeque<Vec<Cell>>,
+    /// full grid line captured as it scrolled off the top, paired with how it
+    /// ended ([`RowEnd`]) so a resize reflow can re-join soft-wrapped rows
+    /// that span the history/screen boundary.
+    lines: VecDeque<(Vec<Cell>, RowEnd)>,
     /// Maximum rows retained before the oldest are dropped.
     max_lines: usize,
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
@@ -98,24 +110,48 @@ impl Scrollback {
             .sum()
     }
 
-    /// Append `line` as the newest row, then drop oldest rows from the front
-    /// until both caps hold, tallying each drop. The byte cap never drops the
-    /// sole remaining row (`lines.len() > 1` guard): a single row larger than
-    /// `max_bytes` is still retained on arrival. The line cap has no such
-    /// guard — the row count is always brought back under `max_lines`.
-    pub fn push_line(&mut self, line: Vec<Cell>) {
+    /// Append `line` as the newest row — recording how it ended, so a reflow
+    /// can re-join a soft-wrapped row with the screen row below it — then drop
+    /// oldest rows from the front until both caps hold, tallying each drop.
+    /// The byte cap never drops the sole remaining row (`lines.len() > 1`
+    /// guard): a single row larger than `max_bytes` is still retained on
+    /// arrival. The line cap has no such guard — the row count is always
+    /// brought back under `max_lines`.
+    pub fn push_line(&mut self, line: Vec<Cell>, end: RowEnd) {
         let new_bytes = self.line_bytes(&line);
-        self.lines.push_back(line);
+        self.lines.push_back((line, end));
         self.byte_total += new_bytes;
         self.total_pushed += 1;
+        self.evict_to_caps();
+    }
 
-        // Evict oldest rows one at a time, updating the running byte total and
-        // the truncation tallies, until both caps hold (or only one row is
-        // left, which the byte cap alone cannot evict).
+    /// Replace every retained row with `lines`, re-applying both caps — the
+    /// resize reflow rebuilds history wholesale from the re-wrapped logical
+    /// lines. Rows evicted by the caps are tallied as truncation like any
+    /// other cap-driven drop. [`total_pushed`](Self::total_pushed) grows by
+    /// the net increase in retained rows (rows the screen handed into
+    /// history) and never decreases, staying monotonic.
+    pub fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowEnd)>) {
+        let before = self.lines.len() as u64;
+        self.lines = lines.into();
+        self.byte_total = self
+            .lines
+            .iter()
+            .map(|(cells, _)| self.line_bytes(cells))
+            .sum();
+        self.evict_to_caps();
+        let after = self.lines.len() as u64;
+        self.total_pushed += after.saturating_sub(before);
+    }
+
+    /// Evict oldest rows one at a time, updating the running byte total and
+    /// the truncation tallies, until both caps hold (or only one row is
+    /// left, which the byte cap alone cannot evict).
+    fn evict_to_caps(&mut self) {
         while self.lines.len() > self.max_lines
             || (self.byte_total > self.max_bytes && self.lines.len() > 1)
         {
-            let oldest_line = self.lines.pop_front().unwrap();
+            let (oldest_line, _) = self.lines.pop_front().unwrap();
             let oldest_bytes = self.line_bytes(&oldest_line);
 
             self.dropped_lines += 1;
@@ -143,9 +179,10 @@ impl Scrollback {
         self.lines.is_empty()
     }
 
-    /// The retained rows, oldest at the front. Lets the renderer compose a
-    /// scrolled-back view above the live grid.
-    pub fn lines(&self) -> &VecDeque<Vec<Cell>> {
+    /// The retained rows (each with how it ended), oldest at the front. Lets
+    /// the renderer compose a scrolled-back view above the live grid and the
+    /// resize reflow re-join wrapped lines.
+    pub fn lines(&self) -> &VecDeque<(Vec<Cell>, RowEnd)> {
         &self.lines
     }
 

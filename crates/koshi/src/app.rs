@@ -19,7 +19,7 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
 };
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
@@ -37,7 +37,7 @@ use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProv
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::state::Runtime;
 
-use crate::keys::{decode_key, KeyAction};
+use crate::keys::decode_key;
 
 /// Paints a render snapshot into ratatui's frame buffer via the widget trait —
 /// the only way to reach the frame's buffer, and exactly the shape
@@ -106,9 +106,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Tear the runtime down for whichever way the loop ended. A normal return —
-/// a clean quit or the loop's own I/O error, whose children's state is intact
-/// either way — runs the staged [`Runtime::shutdown`] (drain → graceful
-/// group-kill → persist), then hands back the loop's own result for [`run`] to
+/// a clean quit or the loop's own I/O error — runs staged shutdown. Explicit
+/// quit uses immediate group-kill; natural/error exits use graceful group-kill;
+/// both then persist and hand back the loop's result for [`run`] to
 /// propagate. A caught panic takes the abrupt path — immediately group-kill
 /// every child so none is orphaned, then re-raise, so the panic still unwinds
 /// `runtime` and its cleanup guard restores the terminal (and the tracing
@@ -129,32 +129,31 @@ fn teardown<E>(runtime: &mut Runtime, outcome: thread::Result<Result<(), E>>) ->
     }
 }
 
-/// Block on crossterm key events, forwarding each to the inbox as outer input.
-/// The quit chord and a read error both send [`RuntimeEvent::Quit`] so the loop
-/// stops — a read error means the outer terminal is gone (hangup), which must
-/// end the session rather than leave the loop blocked.
+/// Block on crossterm events and forward decoded keys plus every terminal
+/// resize into the runtime inbox. Read failure means terminal hangup and quits.
 fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId) {
     thread::spawn(move || loop {
-        match event::read() {
-            Ok(Event::Key(key)) => match decode_key(key) {
-                KeyAction::Quit => {
-                    let _ = inbox_tx.send(RuntimeEvent::Quit);
-                    break;
-                }
-                KeyAction::Bytes(bytes) => {
-                    if inbox_tx
-                        .send(RuntimeEvent::OuterInput { client_id, bytes })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                KeyAction::Ignore => {}
-            },
-            // Resize/mouse/focus/paste are not handled in this slice.
-            Ok(_) => {}
-            Err(_) => {
-                let _ = inbox_tx.send(RuntimeEvent::Quit);
+        let runtime_event = match event::read() {
+            Ok(Event::Key(key)) => {
+                let Some(decoded) = decode_key(key) else {
+                    continue;
+                };
+                Some(RuntimeEvent::KeyInput {
+                    client_id,
+                    chord: decoded.chord,
+                    raw_bytes: decoded.raw_bytes,
+                })
+            }
+            Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
+                client_id,
+                size: Size { cols, rows },
+            }),
+            Ok(_) => None,
+            Err(_) => Some(RuntimeEvent::Quit),
+        };
+        if let Some(runtime_event) = runtime_event {
+            let quit = matches!(runtime_event, RuntimeEvent::Quit);
+            if inbox_tx.send(runtime_event).is_err() || quit {
                 break;
             }
         }
@@ -163,15 +162,21 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
 
 /// The event loop: block until an event is due (bounded by the next render
 /// deadline), apply it and any others already queued, repaint if due, and stop
-/// once a [`RuntimeEvent::Quit`] arrives or no pane remains. Generic over the
-/// backend so a test can drive it headlessly.
+/// once a `core:quit` binding fires, a [`RuntimeEvent::Quit`] (terminal
+/// hangup) arrives, or no pane remains. Generic over the backend so a test
+/// can drive it headlessly.
 fn run_loop<B: Backend>(
     runtime: &mut Runtime,
     terminal: &mut Terminal<B>,
     client_id: ClientId,
 ) -> Result<(), B::Error> {
+    let mut last_title = String::new();
     loop {
-        let next = runtime.next_render_wakeup(Instant::now());
+        let now = Instant::now();
+        let next = earliest(
+            runtime.next_render_wakeup(now),
+            runtime.next_key_wakeup(now),
+        );
         let event = match next {
             Some(timeout) => match runtime.inbox_rx().recv_timeout(timeout) {
                 Ok(event) => Some(event),
@@ -191,11 +196,12 @@ fn run_loop<B: Backend>(
         while let Ok(event) = runtime.inbox_rx().try_recv() {
             quit |= handle_event(runtime, event).is_break();
         }
-        if quit {
+        if quit || runtime.quit_requested() {
             break;
         }
+        runtime.expire_key_sequences(Instant::now());
         if runtime.poll_render(Instant::now()) {
-            render(terminal, runtime, client_id)?;
+            render(terminal, runtime, client_id, &mut last_title)?;
         }
         if !runtime.has_active_panes() {
             break;
@@ -206,6 +212,9 @@ fn run_loop<B: Backend>(
 
 /// Route one inbox event to its runtime handler. Returns
 /// [`ControlFlow::Break`] when the event is a quit request, so the loop stops.
+/// A [`RuntimeEvent::Quit`] is a terminal hangup — explicit quit travels
+/// through the `core:quit` command — so it breaks the loop and leaves
+/// teardown on the graceful path.
 fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
     match event {
         RuntimeEvent::Quit => return ControlFlow::Break(()),
@@ -217,6 +226,11 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         } => {
             let _ = runtime.handle_child_exit(pane_id, status, exited_at);
         }
+        RuntimeEvent::KeyInput {
+            client_id,
+            chord,
+            raw_bytes,
+        } => runtime.handle_key_input(client_id, chord, raw_bytes, Instant::now()),
         RuntimeEvent::OuterInput { client_id, bytes } => {
             runtime.handle_outer_input(client_id, &bytes);
         }
@@ -238,26 +252,47 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         RuntimeEvent::ClientDetached { client_id } => {
             let _ = runtime.handle_client_detach(client_id);
         }
-        // Timer drives time-based refreshes; resize/IPC/plugin are not wired in
-        // this slice.
-        RuntimeEvent::Resize { .. }
-        | RuntimeEvent::Timer
-        | RuntimeEvent::Ipc(_)
-        | RuntimeEvent::Plugin(_) => {}
+        RuntimeEvent::Resize { client_id, size } => {
+            let _ = runtime.handle_client_resize(client_id, size);
+        }
+        RuntimeEvent::Timer => runtime.expire_key_sequences(Instant::now()),
+        RuntimeEvent::Ipc(envelope) | RuntimeEvent::Plugin(envelope) => {
+            let _ = runtime.dispatch(envelope);
+        }
     }
     ControlFlow::Continue(())
 }
 
-/// Paint one frame for `client_id`'s viewport, placing the hardware cursor.
-/// Generic over the backend so a test can render into an in-memory buffer.
+fn earliest(
+    left: Option<std::time::Duration>,
+    right: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
+        (None, None) => None,
+    }
+}
+
+/// Paint one frame for `client_id`'s viewport, placing the hardware cursor
+/// and keeping the outer terminal emulator's window title on
+/// `<session> | <focused pane title>`. Generic over the backend so a test can
+/// render into an in-memory buffer; the title escape goes to the real stdout
+/// and is skipped when unchanged, so frames that move nothing emit nothing.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     runtime: &Runtime,
     client_id: ClientId,
+    last_title: &mut String,
 ) -> Result<(), B::Error> {
     let Some(snapshot) = runtime.build_snapshot(client_id) else {
         return Ok(());
     };
+    let title = window_title(&snapshot);
+    if title != *last_title {
+        let _ = execute!(io::stdout(), SetTitle(&title));
+        *last_title = title;
+    }
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(SnapshotWidget(&snapshot), area);
@@ -266,6 +301,20 @@ fn render<B: Backend>(
         }
     })?;
     Ok(())
+}
+
+/// The outer emulator's window title for one frame: the session name, plus
+/// the focused pane's resolved title when it has one.
+fn window_title(snapshot: &RenderSnapshot) -> String {
+    let focused_title = snapshot
+        .client
+        .focused_pane
+        .and_then(|id| snapshot.panes.iter().find(|pane| pane.id == id))
+        .and_then(|pane| pane.title.as_deref());
+    match focused_title {
+        Some(title) if !title.is_empty() => format!("{} | {title}", snapshot.session.name),
+        _ => snapshot.session.name.clone(),
+    }
 }
 
 #[cfg(test)]
