@@ -468,12 +468,5 @@ fn crop_columns(rows: &mut [Vec<Cell>], cols: u16, fill: Style) {
     }
 }
 
-/// True when every cell in `row` is an unadorned space — the only content a
-/// blank or continuation cell carries — so the row shows nothing.
-fn row_is_blank(row: &[Cell]) -> bool {
-    row.iter()
-        .all(|cell| cell.ch() == ' ' && cell.combining().is_empty())
-}
-
 #[cfg(test)]
 mod tests;

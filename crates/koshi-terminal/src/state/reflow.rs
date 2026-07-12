@@ -18,7 +18,7 @@ use koshi_core::process::PtySize;
 use crate::grid::state::{Cell, Grid, RowEnd};
 use crate::style::Style;
 
-use super::{row_is_blank, TerminalState};
+use super::TerminalState;
 
 impl TerminalState {
     /// Rebuild the primary screen and its scrollback for `size` by re-wrapping
@@ -98,11 +98,13 @@ impl TerminalState {
 
         // Trailing blank rows below the cursor are padding the screen can
         // re-create; drop them rather than pushing real history further out.
+        // Content is judged by the same rule the unwind used, so a styled
+        // blank row counts as content and survives.
         while rewrapped.len() > size.rows as usize
             && rewrapped.len() > new_cursor_physical + 1
             && rewrapped
                 .last()
-                .is_some_and(|(row, end)| *end == RowEnd::Hard && row_is_blank(row))
+                .is_some_and(|(row, end)| *end == RowEnd::Hard && content_len(row) == 0)
         {
             rewrapped.pop();
         }

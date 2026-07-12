@@ -8982,6 +8982,114 @@ fn client_detach_schedules_a_render() {
 }
 
 #[test]
+fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
+    let viewport = Size {
+        cols: 100,
+        rows: 40,
+    };
+
+    // Baseline: the same-sized client splits the tab it already views, so the
+    // solve runs against the tab's drawable pane region.
+    let (mut rt_viewed, fake_viewed, _tx_viewed) = new_runtime_with_fake();
+    let client_viewed = ClientId::new();
+    let tab_viewed = TabId::new();
+    let root_viewed = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root_viewed);
+    add_tab(&mut session, tab_viewed, root_viewed);
+    let mut client = Client::new(
+        client_viewed,
+        session.id,
+        SystemTime::now(),
+        viewport,
+        tab_viewed,
+    );
+    client.update_focused_pane(tab_viewed, root_viewed);
+    session.attach_client(client);
+    let sid_viewed = session.id;
+    rt_viewed.sessions.insert(sid_viewed, session);
+    rt_viewed.dispatch(envelope_from(
+        CommandSource::key_binding(client_viewed),
+        Command::NewPane(NewPaneArgs::default()),
+    ));
+    let baseline_pane = other_pane(&rt_viewed, sid_viewed, root_viewed);
+    let baseline_size = fake_viewed
+        .resizes(baseline_pane)
+        .expect("baseline pane spawned")[0];
+
+    // Adoption: an identical client is designated onto an UNVIEWED tab. The
+    // new pane must be fit and spawned against the client's pane region — the
+    // same geometry as the viewed baseline — not the full terminal viewport.
+    let (mut rt_adopt, fake_adopt, _tx_adopt) = new_runtime_with_fake();
+    let client_adopt = ClientId::new();
+    let tab_front = TabId::new();
+    let tab_back = TabId::new();
+    let pane_front = PaneId::new();
+    let pane_back = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_front);
+    add_pane(&mut session, pane_back);
+    add_tab(&mut session, tab_front, pane_front);
+    add_tab(&mut session, tab_back, pane_back);
+    let mut client = Client::new(
+        client_adopt,
+        session.id,
+        SystemTime::now(),
+        viewport,
+        tab_front,
+    );
+    client.update_focused_pane(tab_front, pane_front);
+    session.attach_client(client);
+    let sid_adopt = session.id;
+    rt_adopt.sessions.insert(sid_adopt, session);
+    rt_adopt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid_adopt)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane_back),
+            client: Some(client_adopt),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    let adopted_pane = rt_adopt.sessions[&sid_adopt]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != pane_front && *id != pane_back)
+        .expect("the adopted split pane");
+    let adopted_size = fake_adopt
+        .resizes(adopted_pane)
+        .expect("adopted pane spawned")[0];
+
+    assert_eq!(adopted_size, baseline_size);
+}
+
+#[test]
+fn dispatched_command_schedules_a_render() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+
+    // Drain the render the bootstrap scheduled.
+    let now = Instant::now();
+    assert!(rt.poll_render(now));
+    assert!(!rt.poll_render(now));
+
+    // A command arriving outside the key path — the IPC shape — mutates the
+    // layout; the dispatch itself must schedule the frame.
+    let result = rt.dispatch(envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::NewPane(NewPaneArgs {
+            source: Some(pane),
+            ..NewPaneArgs::default()
+        }),
+    ));
+    assert!(matches!(result, CommandResult::Ok { .. }));
+
+    assert!(rt.poll_render(now + Duration::from_secs(1)));
+}
+
+#[test]
 fn same_session_reattach_preserves_client_view_state() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };

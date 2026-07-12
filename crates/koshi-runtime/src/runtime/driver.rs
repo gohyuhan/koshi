@@ -31,11 +31,6 @@ impl Runtime {
         !self.pty_handles.is_empty()
     }
 
-    /// Mark explicit user quit for immediate process-group teardown.
-    pub fn request_immediate_shutdown(&mut self) {
-        self.immediate_shutdown = true;
-    }
-
     /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),
     /// reaping any descendants so none is orphaned. The abrupt teardown for the
     /// panic path — no grace window while unwinding; the normal quit path takes

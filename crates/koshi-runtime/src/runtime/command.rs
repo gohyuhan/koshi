@@ -178,7 +178,9 @@ impl Runtime {
     /// state outside a handler reached through this method. The command is
     /// validated first (target resolution, source policy); a command that
     /// passes validation but has no handler yet is rejected with
-    /// [`RejectReason::InvalidState`].
+    /// [`RejectReason::InvalidState`]. A command that reaches its handler
+    /// schedules a repaint, so a mutation shows regardless of which entry
+    /// point — key binding, IPC, or plugin — delivered it.
     pub fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
         let command_id = envelope.id;
         if let Err(rejection) = self.validate(&envelope) {
@@ -229,6 +231,8 @@ impl Runtime {
                 self.handle_rename_session(command_id, &envelope.source, &args)
             }
         };
+        self.render_scheduler
+            .invalidate(InvalidationReason::StatusChanged);
         outcome.unwrap_or_else(|rejection| Self::rejected(command_id, rejection))
     }
 
@@ -1968,13 +1972,15 @@ impl Runtime {
                 )
             })?;
             // Size to the smallest of the current viewers and the designated
-            // client, so the pane fits every client that will view the tab.
+            // client — each as its drawable pane region — so the pane fits
+            // every client that will view the tab.
+            let designated = pane_viewport(client.viewport());
             let viewport = match existing {
                 Some(existing) => Size {
-                    cols: existing.cols.min(client.viewport().cols),
-                    rows: existing.rows.min(client.viewport().rows),
+                    cols: existing.cols.min(designated.cols),
+                    rows: existing.rows.min(designated.rows),
                 },
-                None => client.viewport(),
+                None => designated,
             };
             return if fits_viewport(viewport) {
                 Ok((viewport, Some(client_id)))
@@ -2001,7 +2007,7 @@ impl Runtime {
                 "no attached client to view the new pane's tab",
             )),
             (Some(only), None) => {
-                let viewport = only.viewport();
+                let viewport = pane_viewport(only.viewport());
                 if fits_viewport(viewport) {
                     Ok((viewport, Some(only.id())))
                 } else {
@@ -2032,8 +2038,10 @@ impl Runtime {
     }
 
     /// The viewport `tab_id` is solved against when a pane closes: the tab's
-    /// own viewport when attached clients view it, else the smallest viewport
-    /// among all attached clients, else a nominal 80x24.
+    /// own viewport when attached clients view it, else the smallest pane
+    /// region among all attached clients, else a nominal 80x24. Every leg is
+    /// a drawable pane region, so the ranking geometry matches what a viewer
+    /// would actually see.
     ///
     /// The 80x24 leg is reached only when the session has no attached client
     /// at all — a headless close issued through the CLI, where no terminal
@@ -2049,7 +2057,7 @@ impl Runtime {
                 session
                     .clients
                     .list_attached()
-                    .map(|client| client.viewport())
+                    .map(|client| pane_viewport(client.viewport()))
                     .reduce(|a, b| Size {
                         cols: a.cols.min(b.cols),
                         rows: a.rows.min(b.rows),

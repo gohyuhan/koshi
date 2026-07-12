@@ -163,6 +163,74 @@ fn super_and_meta_modifiers_map_to_the_super_flag() {
 }
 
 #[test]
+fn spacebar_decodes_as_the_named_space_key() {
+    // The chord form matches the config parser's `<Space>`; the passthrough
+    // byte stays the plain space the pane expects.
+    assert_eq!(
+        decode_key(press(KeyCode::Char(' '), KeyModifiers::NONE)),
+        Some(DecodedKey {
+            chord: KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space)),
+            raw_bytes: vec![b' '],
+        })
+    );
+    assert_eq!(
+        decode_key(press(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+        Some(DecodedKey {
+            chord: KeyChord::new(ModFlags::CTRL, Key::Named(NamedKey::Space)),
+            raw_bytes: vec![0x00],
+        })
+    );
+    assert_eq!(
+        decode_key(press(KeyCode::Char(' '), KeyModifiers::SHIFT)),
+        Some(DecodedKey {
+            chord: KeyChord::new(ModFlags::SHIFT, Key::Named(NamedKey::Space)),
+            raw_bytes: vec![b' '],
+        })
+    );
+}
+
+#[test]
+fn non_ascii_letters_fold_like_the_config_parser() {
+    // `É` folds to `é` plus Shift — the exact chord the config parser stores
+    // for a binding written `É` or `<S-é>` — while the passthrough bytes keep
+    // the typed character's UTF-8.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('É'), KeyModifiers::NONE)),
+        Some(DecodedKey {
+            chord: KeyChord::new(ModFlags::SHIFT, Key::Char('é')),
+            raw_bytes: "É".as_bytes().to_vec(),
+        })
+    );
+    // A lowercase non-ASCII letter with the Shift modifier held reports Shift.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('é'), KeyModifiers::SHIFT))
+            .expect("Shift+é decodes")
+            .chord,
+        KeyChord::new(ModFlags::SHIFT, Key::Char('é')),
+    );
+    // `İ` lowercases to two characters, so it stands as it is, unshifted —
+    // the same rule the config parser applies.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('İ'), KeyModifiers::NONE))
+            .expect("İ decodes")
+            .chord,
+        KeyChord::new(ModFlags::NONE, Key::Char('İ')),
+    );
+}
+
+#[test]
+fn shift_on_a_non_letter_is_not_reported_in_the_chord() {
+    // `!` is already the shifted form; the chord is the bare character, the
+    // same shape the config parser accepts (`<S-!>` is not writable).
+    assert_eq!(
+        decode_key(press(KeyCode::Char('!'), KeyModifiers::SHIFT))
+            .expect("Shift+1 decodes")
+            .chord,
+        KeyChord::new(ModFlags::NONE, Key::Char('!')),
+    );
+}
+
+#[test]
 fn repeat_events_decode_like_presses() {
     assert_eq!(
         decode_key(KeyEvent::new_with_kind(

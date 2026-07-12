@@ -212,12 +212,12 @@ fn run_loop<B: Backend>(
 
 /// Route one inbox event to its runtime handler. Returns
 /// [`ControlFlow::Break`] when the event is a quit request, so the loop stops.
+/// A [`RuntimeEvent::Quit`] is a terminal hangup — explicit quit travels
+/// through the `core:quit` command — so it breaks the loop and leaves
+/// teardown on the graceful path.
 fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
     match event {
-        RuntimeEvent::Quit => {
-            runtime.request_immediate_shutdown();
-            return ControlFlow::Break(());
-        }
+        RuntimeEvent::Quit => return ControlFlow::Break(()),
         RuntimeEvent::PtyOutput { pane_id, bytes } => runtime.handle_pty_output(pane_id, &bytes),
         RuntimeEvent::ChildExit {
             pane_id,

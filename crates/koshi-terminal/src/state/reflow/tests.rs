@@ -276,6 +276,24 @@ fn styled_blank_tail_counts_as_content() {
 }
 
 #[test]
+fn styled_blank_row_below_the_cursor_survives_a_shrink() {
+    // Row 1 is spaces with a blue background — visual content by the same
+    // rule the unwind uses — while rows 2 and 3 are true default padding.
+    // A height shrink drops the padding rows and keeps the colored row.
+    let mut e = engine(6, 4);
+    feed(&mut e, "top\r\n\x1b[44m\x1b[2K\x1b[0m\x1b[H");
+
+    resize(&mut e, 6, 2);
+    assert_eq!(e.state().scrollback().len(), 0);
+    assert_eq!(row_text(&e, 0), "top");
+    let painted = e.state().active_grid().cell(1, 0).unwrap();
+    assert_eq!(painted.ch(), ' ');
+    let mut blue = Style::default();
+    blue.set_bg(Color::Indexed(4));
+    assert_eq!(painted.style(), blue);
+}
+
+#[test]
 fn trailing_blank_rows_drop_instead_of_entering_history() {
     let mut e = engine(20, 10);
     feed(&mut e, "hi");

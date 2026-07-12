@@ -2,7 +2,7 @@
 //! chord plus the bytes a terminal pane receives when no binding consumes it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{fold_uppercase, Key, KeyChord, ModFlags, NamedKey};
 
 /// One normalized key press at the outer-terminal boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,20 +82,30 @@ fn normalize(key: Key, modifiers: KeyModifiers) -> (Key, ModFlags) {
         mods = mods.union(ModFlags::SUPER);
     }
 
+    // The spacebar arrives as the character `' '`; bindings spell it
+    // `<Space>`, so the chord carries the named key.
+    let key = match key {
+        Key::Char(' ') => Key::Named(NamedKey::Space),
+        other => other,
+    };
+
     match key {
-        Key::Char(c) if c.is_ascii_alphabetic() => {
-            if c.is_ascii_uppercase() || modifiers.contains(KeyModifiers::SHIFT) {
-                mods = mods.union(ModFlags::SHIFT);
-            }
-            (Key::Char(c.to_ascii_lowercase()), mods)
-        }
         Key::Named(key) => {
             if modifiers.contains(KeyModifiers::SHIFT) {
                 mods = mods.union(ModFlags::SHIFT);
             }
             (Key::Named(key), mods)
         }
-        Key::Char(c) => (Key::Char(c), mods),
+        // The chord carries the config parser's canonical character form: an
+        // uppercase letter folds to lowercase plus Shift, and a held Shift is
+        // reported only on a letter key.
+        Key::Char(c) => {
+            let (folded, shifted) = fold_uppercase(c);
+            if shifted || (folded.is_lowercase() && modifiers.contains(KeyModifiers::SHIFT)) {
+                mods = mods.union(ModFlags::SHIFT);
+            }
+            (Key::Char(folded), mods)
+        }
     }
 }
 
