@@ -9385,6 +9385,35 @@ fn set_key_binding_rejects_a_coming_soon_action() {
 }
 
 #[test]
+fn set_key_binding_rejects_an_action_that_requires_arguments() {
+    // A binding carries no arguments, so an action the resolver refuses with
+    // `ActionArgs::None` (focus-pane needs a target, resize-pane a direction
+    // and size) must reject instead of committing a binding that never fires.
+    let (mut rt, _tx) = new_runtime();
+    for name in ["focus-pane", "resize-pane", "move-tab", "focus-tab"] {
+        let result = rt.dispatch(envelope(Command::SetKeyBinding(SetKeyBindingArgs {
+            mode: None,
+            sequence: "<C-y>".to_string(),
+            action: core_ref(name),
+        })));
+        match result {
+            CommandResult::Rejected { reason, help, .. } => {
+                assert_eq!(reason, RejectReason::InvalidState, "for {name}");
+                assert_eq!(
+                    help,
+                    Some(format!(
+                        "action `core:{name}` requires arguments a key binding cannot carry"
+                    )),
+                    "for {name}"
+                );
+            }
+            other => panic!("expected rejection for {name}, got {other:?}"),
+        }
+        assert_eq!(bound_action(&rt, LockMode::Normal, "<C-y>"), None);
+    }
+}
+
+#[test]
 fn set_key_binding_rejects_a_malformed_sequence() {
     let (mut rt, _tx) = new_runtime();
 

@@ -20,7 +20,6 @@ use koshi_config::key_sequence::parse_sequence;
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::{BoundAction, ModeBindings, ModeName};
 use koshi_core::{
-    action::ActionStatus,
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
         CopyModeCommand, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
@@ -37,7 +36,7 @@ use koshi_core::{
     lock::LockMode,
     naming::{generate_name, NameKind},
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
-    resolve::ActionArgs,
+    resolve::{resolve_action, ActionArgs, ResolveError},
 };
 use koshi_layout::{
     content::content_rects,
@@ -1755,13 +1754,15 @@ impl Runtime {
     /// Handle [`Command::SetKeyBinding`]: bind a key sequence to an action in
     /// the manual keymap layer, for this process only.
     ///
-    /// The action must be registered and implemented — an explicit request
-    /// naming an unknown or not-yet-implemented action is rejected rather
-    /// than committed as a binding that can never fire. The sequence string
-    /// parses against the effective leader and chord-depth settings. The new
-    /// layer commits through [`Self::commit_manual_layer`], so a binding the
-    /// conflict verdict refuses (a cross-layer collision, a reserved-unlock
-    /// shadow) leaves the running keymap untouched.
+    /// The action must resolve as a binding fires it — with no arguments —
+    /// judged by the same resolver the firing model uses, so an explicit
+    /// request naming an unknown, not-yet-implemented, or argument-requiring
+    /// action is rejected rather than committed as a binding that can never
+    /// fire. The sequence string parses against the effective leader and
+    /// chord-depth settings. The new layer commits through
+    /// [`Self::commit_manual_layer`], so a binding the conflict verdict
+    /// refuses (a cross-layer collision, a reserved-unlock shadow) leaves
+    /// the running keymap untouched.
     fn handle_set_key_binding(
         &mut self,
         command_id: CommandId,
@@ -1769,17 +1770,29 @@ impl Runtime {
     ) -> Result<CommandResult, Rejection> {
         let mode = Self::known_mode(args.mode.as_deref())?;
         let sequence = self.parse_manual_sequence(&args.sequence)?;
-        let metadata = self.action_registry.lookup(&args.action).ok_or_else(|| {
-            Rejection::new(
-                RejectReason::TargetNotFound,
-                &format!("no action named `{}` is registered", args.action),
-            )
-        })?;
-        if metadata.status == ActionStatus::ComingSoon {
-            return Err(Rejection::new(
-                RejectReason::InvalidState,
-                &format!("action `{}` is not implemented yet", args.action),
-            ));
+        // A binding carries no arguments, so the action must resolve with
+        // none. This is the resolver judgment `is_firing` applies at merge,
+        // run up front: a refusal here is an explicit rejection instead of a
+        // silently dead binding.
+        if let Err(err) = resolve_action(&args.action, &ActionArgs::None, &self.action_registry) {
+            return Err(match err {
+                ResolveError::Unregistered { .. } => Rejection::new(
+                    RejectReason::TargetNotFound,
+                    &format!("no action named `{}` is registered", args.action),
+                ),
+                ResolveError::ComingSoon { .. } => Rejection::new(
+                    RejectReason::InvalidState,
+                    &format!("action `{}` is not implemented yet", args.action),
+                ),
+                ResolveError::ArgsMismatch { .. } => Rejection::new(
+                    RejectReason::InvalidState,
+                    &format!(
+                        "action `{}` requires arguments a key binding cannot carry",
+                        args.action
+                    ),
+                ),
+                other => Rejection::new(RejectReason::InvalidState, &other.to_string()),
+            });
         }
         let mut manual = self.manual_bindings.clone();
         manual.entry(mode).or_default().keys.insert(
