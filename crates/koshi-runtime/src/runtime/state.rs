@@ -2,14 +2,14 @@
 //! running koshi process, driven by the event loop.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         mpsc::{Receiver, Sender},
         Arc,
     },
 };
 
-use koshi_config::types::KoshiConfig;
+use koshi_config::types::{KoshiConfig, ModeBindings, ModeName};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::PtySize;
@@ -76,10 +76,15 @@ pub struct Runtime {
     /// `keybindings.modes` section here holds the folded layer data the
     /// merge consumes, not the merge result).
     pub(crate) config: KoshiConfig,
+    /// The manual keymap layer: per-mode bindings and removals made through
+    /// the `koshi keys` CLI at runtime. Merged above every file-authored
+    /// layer, held only in memory — it lives and dies with this process, and
+    /// a keybinding file reload leaves it in place.
+    pub(crate) manual_bindings: BTreeMap<ModeName, ModeBindings>,
     /// Per-mode hint-bar data resolved from the merged keymap and the action
     /// registry, shared by reference with each frame's snapshot. Seeded from
     /// the built-in defaults and rebuilt whenever the keymap inputs change —
-    /// a keybinding reload or a registry refresh.
+    /// a keybinding reload, a registry refresh, or a manual keymap edit.
     pub(crate) keymap_hints: KeymapHintCatalog,
     /// The resolved chrome theme copied onto each frame's snapshot. Resolved
     /// from the effective config's theme; a theme reload replaces it.
@@ -135,6 +140,7 @@ impl Runtime {
             snapshot_provider,
             storage,
             ipc_server: None,
+            manual_bindings: BTreeMap::new(),
             keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
             theme: resolve_theme(&config.theme),
             action_registry,

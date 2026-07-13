@@ -13,6 +13,11 @@ pub mod error;
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 
-/// Table and JSON rendering for discovery query answers and action-registry
-/// introspection.
+/// The offline keymap view served by the `koshi keys` queries: the user's
+/// keybinding file folded onto the built-in defaults, conflict-checked and
+/// merged.
+pub mod keymap;
+
+/// Table and JSON rendering for discovery query answers, action-registry
+/// introspection, and keymap introspection.
 pub mod output;

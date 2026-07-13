@@ -4,9 +4,10 @@
 //! field has a default via [`Default`], so Koshi runs with zero user config;
 //! [`KoshiConfig::default`] is the baseline that user overrides layer onto. This
 //! module owns the schema and defaults only. The sibling [`layer`](crate::layer)
-//! module folds override layers onto these defaults; parsing KDL into a layer,
-//! discovering and reading config files, validation, and migration live in later
-//! loader passes.
+//! module folds override layers onto these defaults, and
+//! [`keybinding`](crate::keybinding) parses keybinding-file KDL into its
+//! layer; discovering and reading config files, full validation, and
+//! migration live in later loader passes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
