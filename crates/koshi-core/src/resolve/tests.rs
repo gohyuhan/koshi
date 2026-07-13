@@ -170,39 +170,6 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
                 stacked: false,
             }),
         ),
-        (
-            "set-key-binding",
-            ActionArgs::SetKeyBinding {
-                mode: None,
-                sequence: "<C-t>".to_string(),
-                action: ActionRef::core("new-tab").expect("valid core action name"),
-            },
-            Command::SetKeyBinding(SetKeyBindingArgs {
-                mode: None,
-                sequence: "<C-t>".to_string(),
-                action: ActionRef::core("new-tab").expect("valid core action name"),
-            }),
-        ),
-        (
-            "remove-key-binding",
-            ActionArgs::RemoveKeyBinding {
-                mode: Some("normal".to_string()),
-                sequence: "<C-t>".to_string(),
-            },
-            Command::RemoveKeyBinding(RemoveKeyBindingArgs {
-                mode: Some("normal".to_string()),
-                sequence: "<C-t>".to_string(),
-            }),
-        ),
-        (
-            "reset-key-bindings",
-            ActionArgs::ResetKeyBindings {
-                mode: Some("normal".to_string()),
-            },
-            Command::ResetKeyBindings(ResetKeyBindingsArgs {
-                mode: Some("normal".to_string()),
-            }),
-        ),
     ]
 }
 

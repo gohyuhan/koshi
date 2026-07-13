@@ -934,14 +934,16 @@ fn the_reserved_chord_opening_a_normal_mode_sequence_is_an_ordinary_prefix_pair(
 #[test]
 fn a_later_redundant_remove_voids_a_rebind_that_an_earlier_remove_would_not() {
     // Two layers remove the same key; only the LAST (highest-index) remove
-    // determines what index a claim must beat. User removes the key (index
-    // 1, no bind), Session rebinds it without removing (index 2), Layout
-    // redundantly removes it again (index 3, no bind), Manual rebinds with a
-    // different action (index 4). If `removal_index` recorded the first
-    // remove (index 1) instead of the last (index 3), Session's rebind at
-    // index 2 would wrongly survive (1 is not > 2) and collide with
-    // Manual's claim; recording the last remove correctly voids it, leaving
-    // Manual's claim alone.
+    // determines what index a claim must beat. Removal is positional, not
+    // per-origin, so a stack may hold several layers of one origin. User
+    // removes the key (index 1, no bind), Session rebinds it without
+    // removing (index 2), a first layout layer redundantly removes it again
+    // (index 3, no bind), a second layout layer rebinds with a different
+    // action (index 4). If `removal_index` recorded the first remove (index
+    // 1) instead of the last (index 3), Session's rebind at index 2 would
+    // wrongly survive (1 is not > 2) and collide with the top claim;
+    // recording the last remove correctly voids it, leaving the top claim
+    // alone.
     let key = seq(ModFlags::CTRL, 't');
     let report = detect(&[
         defaults(),
@@ -953,7 +955,7 @@ fn a_later_redundant_remove_voids_a_rebind_that_an_earlier_remove_would_not() {
         ),
         layer_with_removed(LayerOrigin::Layout, "normal", Vec::new(), vec![key.clone()]),
         layer(
-            LayerOrigin::Manual,
+            LayerOrigin::Layout,
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
@@ -1536,7 +1538,7 @@ fn remove_above_both_claims_voids_the_collision() {
             "normal",
             vec![(key.clone(), bound("lock"))],
         ),
-        layer_with_removed(LayerOrigin::Manual, "normal", Vec::new(), vec![key]),
+        layer_with_removed(LayerOrigin::Layout, "normal", Vec::new(), vec![key]),
     ]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);

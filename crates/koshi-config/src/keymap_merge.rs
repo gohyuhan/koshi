@@ -3,7 +3,7 @@
 //!
 //! Bindings arrive in the same layers conflict detection reads — the
 //! built-in defaults, then the user's own surfaces (user file, session,
-//! layout, manual `koshi keys` edits), lowest precedence first. [`merge_keymaps`] folds them per key: a later layer's entry on a
+//! layout), lowest precedence first. [`merge_keymaps`] folds them per key: a later layer's entry on a
 //! key replaces a lower layer's on the same key, and every other key is
 //! untouched. The result splits each mode into two maps because the two
 //! resolve at different tiers of the key-resolution stack — sticky plugin

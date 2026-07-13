@@ -43,9 +43,7 @@ pub(crate) struct ConfigLayers {
     /// The `theme.kdl` layer; only its theme section is set.
     theme: PartialKoshiConfig,
     /// The `keybinding.kdl` layer; only its keybindings section is set.
-    /// Read and replaced by the keybinding-reset command handler too, so it
-    /// is crate-visible where the other layers stay private.
-    pub(crate) keybindings: PartialKoshiConfig,
+    keybindings: PartialKoshiConfig,
 }
 
 impl ConfigLayers {
@@ -147,7 +145,7 @@ impl Runtime {
             ..self.config_layers.clone()
         };
         let tentative = tentative_layers.effective();
-        let layers = keymap_layers(user_modes, &self.manual_bindings);
+        let layers = keymap_layers(user_modes);
         let report = detect_conflicts(
             &layers,
             tentative.keybindings.leader,
@@ -204,7 +202,7 @@ impl Runtime {
             .keybindings
             .as_ref()
             .and_then(|keybindings| keybindings.modes.clone());
-        let layers = keymap_layers(user_modes, &self.manual_bindings);
+        let layers = keymap_layers(user_modes);
         let report = detect_conflicts(
             &layers,
             self.config.keybindings.leader,
@@ -227,7 +225,7 @@ impl Runtime {
     /// Drop every attached client's pending multi-chord sequence; a prefix
     /// buffered against the old keymap no longer means anything under the
     /// new one.
-    pub(crate) fn clear_pending_key_sequences(&mut self) {
+    fn clear_pending_key_sequences(&mut self) {
         for session in self.sessions.values_mut() {
             for client in session.clients.list_attached_mut() {
                 client.update_pending_key_sequence(None);
@@ -267,7 +265,7 @@ impl Runtime {
 
 /// The user-facing reason a keymap was kept: every collision and fatal
 /// finding's message, joined with `; `.
-pub(crate) fn rejection_reason(report: &ConflictReport) -> String {
+fn rejection_reason(report: &ConflictReport) -> String {
     report
         .diagnostics
         .iter()
