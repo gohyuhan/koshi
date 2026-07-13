@@ -1167,3 +1167,187 @@ fn non_action_subcommands_map_to_none() {
         assert_eq!(command(argv).to_action(), None, "for {argv:?}");
     }
 }
+
+// --- Adversarial: duplicate flags, boundaries, and unicode ---
+
+#[test]
+fn a_repeated_single_valued_flag_is_a_usage_error_not_a_last_wins() {
+    // clap's derived args do not override themselves by default: giving the
+    // same single-valued flag twice is a hard usage error, not "the last one
+    // wins" — true for a root flag (`--attach`) and a subcommand flag
+    // (`--format`) alike.
+    let attach_twice = parse_err(&["koshi", "--attach", "first", "--attach", "second"]);
+    assert_eq!(attach_twice.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(attach_twice.exit_code(), 2);
+
+    let format_twice = parse_err(&[
+        "koshi",
+        "list-sessions",
+        "--format",
+        "json",
+        "--format",
+        "table",
+    ]);
+    assert_eq!(format_twice.kind(), ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn attach_accepts_an_empty_session_id() {
+    // `--attach` stores the raw string untyped; validation is a runtime
+    // concern, not a parse concern, so an empty value still parses.
+    let cli = parse(&["koshi", "--attach", ""]);
+    assert_eq!(cli.attach, Some(String::new()));
+}
+
+#[test]
+fn attach_accepts_a_unicode_session_id() {
+    let cli = parse(&["koshi", "--attach", "café-上海"]);
+    assert_eq!(cli.attach, Some("café-上海".to_string()));
+}
+
+#[test]
+fn focus_tab_index_rejects_a_negative_number() {
+    let err = parse_err(&["koshi", "focus-tab", "--index", "-1"]);
+    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn focus_tab_index_rejects_an_overflowing_number() {
+    // One digit past `usize::MAX` (18446744073709551615 on a 64-bit target).
+    let err = parse_err(&["koshi", "focus-tab", "--index", "18446744073709551616"]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn resize_pane_size_accepts_the_i16_boundaries() {
+    assert_eq!(
+        command(&[
+            "koshi",
+            "resize-pane",
+            "--direction",
+            "up",
+            "--size",
+            "32767"
+        ]),
+        CliCommand::ResizePane {
+            direction: DirectionArg::Up,
+            size: i16::MAX,
+            pane: None,
+        }
+    );
+    assert_eq!(
+        command(&[
+            "koshi",
+            "resize-pane",
+            "--direction",
+            "up",
+            "--size",
+            "-32768"
+        ]),
+        CliCommand::ResizePane {
+            direction: DirectionArg::Up,
+            size: i16::MIN,
+            pane: None,
+        }
+    );
+}
+
+#[test]
+fn resize_pane_size_rejects_i16_overflow() {
+    let err = parse_err(&[
+        "koshi",
+        "resize-pane",
+        "--direction",
+        "up",
+        "--size",
+        "32768",
+    ]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn format_value_is_case_sensitive() {
+    let err = parse_err(&["koshi", "list-sessions", "--format", "Table"]);
+    assert_eq!(err.kind(), ErrorKind::InvalidValue);
+}
+
+#[test]
+fn an_id_with_only_the_prefix_and_a_dash_is_rejected() {
+    let err = parse_err(&["koshi", "close-pane", "--pane", "pane-"]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn a_prefix_collision_without_a_separating_dash_is_rejected() {
+    // "sessions-<uuid>" strips as far as "session" (a true prefix of
+    // "sessions"), leaving "s-<uuid>" — which does not start with '-', so the
+    // dash-strip fails and the whole original string is tried as a bare UUID,
+    // which it is not.
+    let value = format!("sessions-{}", fixed_uuid());
+    let err = parse_err(&["koshi", "rename-session", "--session", &value]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn id_parse_error_message_names_the_expected_forms() {
+    let err = parse_err(&["koshi", "close-pane", "--pane", "not-a-uuid"]);
+    assert!(
+        err.to_string()
+            .contains("expected `pane-<uuid>` or a bare UUID"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn a_bare_uppercase_uuid_parses() {
+    // The UUID's own hex digits are case-insensitive even though the
+    // `<prefix>-` stripping is a case-sensitive byte match.
+    let uppercase = fixed_uuid().to_string().to_uppercase();
+    assert_eq!(
+        command(&["koshi", "close-pane", "--pane", &uppercase]),
+        CliCommand::ClosePane {
+            pane: Some(PaneId::from_uuid(fixed_uuid())),
+            force: false,
+        }
+    );
+}
+
+#[test]
+fn run_accepts_an_empty_program_token() {
+    assert_eq!(
+        command(&["koshi", "run", "--", ""]),
+        CliCommand::Run {
+            direction: None,
+            stacked: false,
+            pane: None,
+            command: vec![String::new()],
+        }
+    );
+    let (_, mapped) = action_of(&["koshi", "run", "--", ""]);
+    assert_eq!(
+        mapped,
+        Command::RunCommandPane(RunCommandPaneArgs {
+            command: SpawnSpec {
+                program: PathBuf::new(),
+                args: vec![],
+                cwd: None,
+                env: BTreeMap::new(),
+                shell_kind: ShellKind::Other(String::new()),
+            },
+            cwd: None,
+            source: None,
+            direction: None,
+            stacked: false,
+        })
+    );
+}
+
+#[test]
+fn run_program_name_is_preserved_verbatim_for_non_ascii() {
+    let (_, mapped) = action_of(&["koshi", "run", "--", "☕"]);
+    let Command::RunCommandPane(args) = mapped else {
+        panic!("expected RunCommandPane");
+    };
+    assert_eq!(args.command.program, PathBuf::from("☕"));
+    assert_eq!(args.command.shell_kind, ShellKind::Other("☕".to_string()));
+}

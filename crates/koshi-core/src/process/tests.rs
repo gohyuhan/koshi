@@ -119,6 +119,16 @@ fn shell_kind_unknown_becomes_other() {
 }
 
 #[test]
+fn shell_kind_of_an_empty_program_path_is_other_with_an_empty_name() {
+    // An empty path has no file stem, so `unwrap_or_default()` yields "" —
+    // must not panic and must not match any known shell.
+    assert_eq!(
+        ShellKind::from_program(Path::new("")),
+        ShellKind::Other(String::new())
+    );
+}
+
+#[test]
 fn spawn_spec_roundtrips() {
     let mut env = BTreeMap::new();
     env.insert("TERM".to_string(), "xterm-256color".to_string());

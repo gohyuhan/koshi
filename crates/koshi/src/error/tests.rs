@@ -71,6 +71,14 @@ fn messages_render_without_a_koshi_prefix() {
 #[test]
 fn category_classifies_by_variant() {
     assert_eq!(
+        CliError::UnknownCommand { name: "x".into() }.category(),
+        DomainCategory::Cli
+    );
+    assert_eq!(
+        CliError::UnknownAction { name: "x".into() }.category(),
+        DomainCategory::Cli
+    );
+    assert_eq!(
         CliError::InvalidArgs { detail: "x".into() }.category(),
         DomainCategory::Cli
     );
@@ -81,5 +89,70 @@ fn category_classifies_by_variant() {
     assert_eq!(
         CliError::Runtime { detail: "x".into() }.category(),
         DomainCategory::Session
+    );
+}
+
+#[test]
+fn severity_is_recoverable_for_every_variant() {
+    // `severity` is an unconditional constant today; assert it per variant so
+    // a future per-variant split (e.g. a fatal class) fails this test instead
+    // of shipping silently.
+    assert_eq!(
+        CliError::UnknownCommand { name: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::UnknownAction { name: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::InvalidArgs { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::IpcUnavailable { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::Runtime { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+}
+
+#[test]
+fn unknown_command_and_invalid_args_messages_are_exact() {
+    assert_eq!(
+        CliError::UnknownCommand {
+            name: "frobnicate".into()
+        }
+        .to_string(),
+        "unknown command: frobnicate"
+    );
+    assert_eq!(
+        CliError::InvalidArgs {
+            detail: "missing --pane".into()
+        }
+        .to_string(),
+        "invalid arguments: missing --pane"
+    );
+}
+
+#[test]
+fn messages_render_an_empty_or_unicode_field_verbatim() {
+    // Boundary (empty string) and encoding (multi-byte) cases: the message
+    // formats the field exactly as given, with no escaping or substitution.
+    assert_eq!(
+        CliError::UnknownCommand {
+            name: String::new()
+        }
+        .to_string(),
+        "unknown command: "
+    );
+    assert_eq!(
+        CliError::UnknownAction {
+            name: "日本語".into()
+        }
+        .to_string(),
+        "unknown action: 日本語"
     );
 }

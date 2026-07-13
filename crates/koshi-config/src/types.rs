@@ -657,19 +657,17 @@ impl RgbColor {
     pub fn from_hex(s: &str) -> Result<Self, ColorParseError> {
         // Accept the value with or without its leading `#`.
         let hex = s.strip_prefix('#').unwrap_or(s);
-        let bytes = hex.as_bytes();
-        if bytes.len() != 6 {
-            return Err(ColorParseError::BadLength {
-                got: hex.chars().count(),
-            });
+        let char_count = hex.chars().count();
+        if char_count != 6 {
+            return Err(ColorParseError::BadLength { got: char_count });
         }
-        if !bytes.iter().all(u8::is_ascii_hexdigit) {
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ColorParseError::BadDigit {
                 value: hex.to_string(),
             });
         }
-        // Every byte is an ASCII hex digit, so each two-byte slice is valid
-        // ASCII and parses.
+        // Six ASCII hex digits: one byte per character, so each two-byte
+        // slice is valid ASCII and parses.
         let component = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect("validated hex");
         Ok(Self::new(component(0), component(2), component(4)))
     }

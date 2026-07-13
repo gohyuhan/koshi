@@ -5,7 +5,7 @@
 //! global cursor; the session itself holds only this registry.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     time::{Instant, SystemTime},
 };
 
@@ -102,7 +102,10 @@ impl Client {
         self.viewport
     }
 
-    /// The tab this client is currently viewing.
+    /// The tab this client is currently viewing. Once the session's last tab
+    /// closes (the session is quitting), this keeps naming the closed tab
+    /// until the transport disconnects the client — there is no successor to
+    /// point at.
     #[must_use]
     pub fn active_tab(&self) -> TabId {
         self.active_tab
@@ -213,10 +216,11 @@ impl Client {
 /// The clients currently attached to one session, keyed by [`ClientId`]. The
 /// session owns exactly one registry and holds no per-client state itself —
 /// focus, lock mode, and viewport live on each [`Client`] — so attached
-/// terminals stay independent.
+/// terminals stay independent. The map is ordered, so iteration walks
+/// clients in id order deterministically.
 #[derive(Debug, Default)]
 pub struct ClientRegistry {
-    records: HashMap<ClientId, Client>,
+    records: BTreeMap<ClientId, Client>,
 }
 
 impl ClientRegistry {
@@ -224,7 +228,7 @@ impl ClientRegistry {
     #[must_use]
     pub fn new() -> Self {
         ClientRegistry {
-            records: HashMap::new(),
+            records: BTreeMap::new(),
         }
     }
 

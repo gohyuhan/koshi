@@ -79,3 +79,54 @@ fn committing_an_empty_scope_applies_with_no_events() {
         }
     );
 }
+
+#[test]
+fn two_scopes_commit_independently_with_no_shared_state() {
+    let tab_a = TabId::new();
+    let tab_b = TabId::new();
+    let command_a = CommandId::new();
+    let command_b = CommandId::new();
+
+    let mut scope_a = TransactionScope::new();
+    scope_a.emit(Event::TabCreated(TabCreated { tab_id: tab_a }));
+
+    let mut scope_b = TransactionScope::new();
+    scope_b.emit(Event::TabCreated(TabCreated { tab_id: tab_b }));
+    scope_b.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab_b }));
+
+    // Scope A's buffer is untouched by scope B's later emits.
+    assert_eq!(
+        scope_a.events(),
+        &[Event::TabCreated(TabCreated { tab_id: tab_a })]
+    );
+
+    let result_a = scope_a.commit(command_a);
+    let result_b = scope_b.commit(command_b);
+
+    // Each result carries its own command id and its own event count — no
+    // cross-instance bleed.
+    match (result_a, result_b) {
+        (
+            CommandResult::Ok {
+                command_id: applied_a,
+                emitted_events: events_a,
+            },
+            CommandResult::Ok {
+                command_id: applied_b,
+                emitted_events: events_b,
+            },
+        ) => {
+            assert_eq!(applied_a, command_a);
+            assert_eq!(applied_b, command_b);
+            assert_eq!(events_a.len(), 1);
+            assert_eq!(events_b.len(), 2);
+            let all_ids: HashSet<_> = events_a.iter().chain(events_b.iter()).collect();
+            assert_eq!(
+                all_ids.len(),
+                3,
+                "every minted id across both scopes is unique"
+            );
+        }
+        _ => panic!("commit must apply, never reject"),
+    }
+}

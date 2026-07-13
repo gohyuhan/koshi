@@ -63,6 +63,32 @@ fn later_layer_wins_on_same_field() {
 }
 
 #[test]
+fn a_field_a_later_layer_leaves_unset_keeps_the_middle_layers_override() {
+    // Three layers: the middle sets scrollback.max_lines, the last only
+    // touches an unrelated section. The field must not fall back to the
+    // base default when the LAST layer skips it — it keeps the nearest
+    // layer that did set it.
+    let middle = PartialKoshiConfig {
+        scrollback: Some(PartialScrollbackConfig {
+            max_lines: Some(7_000),
+            max_bytes: None,
+        }),
+        ..Default::default()
+    };
+    let last = PartialKoshiConfig {
+        pane: Some(PartialPaneConfig {
+            min_cols: Some(3),
+            min_rows: None,
+        }),
+        ..Default::default()
+    };
+    let merged = merge(KoshiConfig::default(), vec![middle, last]);
+
+    assert_eq!(merged.scrollback.max_lines, 7_000);
+    assert_eq!(merged.pane.min_cols, 3);
+}
+
+#[test]
 fn sections_from_different_layers_combine() {
     let user = PartialKoshiConfig {
         pane: Some(PartialPaneConfig {

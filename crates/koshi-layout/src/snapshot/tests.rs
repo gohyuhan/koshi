@@ -3,6 +3,7 @@
 use koshi_core::geometry::{Point, Rect, Size};
 
 use super::*;
+use crate::size::SizeWeight;
 use crate::solver::solve;
 use crate::tree::{LayoutChild, LayoutNode};
 
@@ -84,6 +85,40 @@ fn restore_clamps_a_stale_active_index_and_repairs_flags() {
     // The stored flag wins for member 0; member 1 keeps the derived state.
     assert!(restored.children[0].collapsed);
     assert!(!restored.children[1].collapsed);
+}
+
+#[test]
+fn capture_of_an_all_empty_stack_yields_no_members() {
+    // Hand-built: every member subtree is an empty split with no leaf
+    // pane, a shape the public edits never produce.
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        koshi_core::geometry::SplitDirection::Vertical,
+        Vec::new(),
+    ));
+    let stack = SplitNode {
+        direction: koshi_core::geometry::SplitDirection::Stacked,
+        children: vec![
+            LayoutChild {
+                node: empty.clone(),
+                collapsed: false,
+            },
+            LayoutChild {
+                node: empty,
+                collapsed: true,
+            },
+        ],
+        weights: vec![SizeWeight::default(), SizeWeight::default()],
+        active: 0,
+    };
+
+    let snapshot = StackSnapshot::capture(&stack).unwrap();
+    assert_eq!(snapshot.members, Vec::<PaneId>::new());
+    assert_eq!(snapshot.active, 0);
+    assert!(snapshot.collapsed_states.is_empty());
+
+    let restored = snapshot.restore();
+    assert!(restored.children.is_empty());
+    assert_eq!(restored.active, 0);
 }
 
 #[test]

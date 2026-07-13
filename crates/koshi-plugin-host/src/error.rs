@@ -26,3 +26,6 @@ impl DomainError for PluginError {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

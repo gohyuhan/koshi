@@ -5,10 +5,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use koshi_core::action::{core_action_seeds, ActionStatus};
+use koshi_core::action::{
+    core_action_seeds, ActionHandlerRef, ActionScope, ActionStatus, TargetKind,
+};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use uuid::Uuid;
 
@@ -495,5 +497,107 @@ fn an_empty_target_list_renders_as_a_dash() {
     assert_eq!(
         join_cell(&["pane".to_string(), "client".to_string()]),
         "pane, client"
+    );
+}
+
+// --- Cell helpers not reachable through the fixed fake data above ---
+
+#[test]
+fn state_cell_renders_spawning_and_closing() {
+    // Running and both Exited forms are covered via the pane table tests
+    // above; Spawning and Closing are not exercised by any fixed fixture.
+    assert_eq!(state_cell(PaneState::Spawning), "spawning");
+    assert_eq!(state_cell(PaneState::Closing), "closing");
+}
+
+#[test]
+fn time_cell_before_the_unix_epoch_renders_as_a_dash() {
+    // `duration_since` fails for a time earlier than the epoch; the cell
+    // falls back to "-" rather than panicking or underflowing.
+    let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+    assert_eq!(time_cell(before_epoch), "-");
+}
+
+#[test]
+fn scope_label_renders_tab_and_global() {
+    // PaneSession and Client are covered indirectly by the `new-pane` and
+    // `focus-pane` explain tests above; Tab and Global are not.
+    assert_eq!(scope_label(ActionScope::Tab), "tab");
+    assert_eq!(scope_label(ActionScope::Global), "global");
+}
+
+#[test]
+fn target_label_renders_session_and_tab() {
+    // Pane and Client are covered indirectly by the `focus-pane` explain test
+    // above; Session and Tab are not.
+    assert_eq!(target_label(TargetKind::Session), "session");
+    assert_eq!(target_label(TargetKind::Tab), "tab");
+}
+
+#[test]
+fn command_label_renders_plugin_host_and_sequence() {
+    // Every seeded core action dispatches through `CoreCommand`, so the
+    // plugin-host and sequence handler kinds are never reachable through
+    // `render_actions_list`/`render_action_explain` today; exercise the
+    // helper directly so those two arms stay covered.
+    assert_eq!(
+        command_label(&ActionHandlerRef::PluginHostCall(PluginId::new())),
+        "plugin-host"
+    );
+    assert_eq!(
+        command_label(&ActionHandlerRef::Sequence(vec![])),
+        "sequence"
+    );
+}
+
+#[test]
+fn table_column_width_counts_characters_not_display_width() {
+    // The table layout pads by `.chars().count()`, not visual/display width.
+    // "文字文字" is 4 Rust chars (each a double-width CJK glyph, 8 terminal
+    // columns), the same char count as the 4-char header "name" — so the
+    // implementation adds no padding, even though the two would not align in
+    // a real terminal. This locks in the actual (character-count) behavior.
+    assert_eq!(
+        table(&["name"], vec![vec!["文字文字".to_string()]]),
+        "name\n文字文字\n"
+    );
+}
+
+#[test]
+fn explain_new_tab_reports_tab_scope_and_target() {
+    // `new-tab` is seeded with `ActionScope::Tab` and `TargetKind::Tab`,
+    // neither of which any other explain test exercises end-to-end.
+    let expected = "\
+action: core:new-tab
+display_name: New Tab
+description: Create a new tab
+scope: tab
+targets: tab
+command: NewTab
+examples: core:new-tab, koshi new-tab
+";
+    assert_eq!(
+        render_action_explain("new-tab", FormatArg::Table),
+        Some(expected.to_string())
+    );
+}
+
+#[test]
+fn explain_rename_session_reports_global_scope_and_session_target() {
+    // `rename-session` is seeded with `ActionScope::Global` and
+    // `TargetKind::Session`, neither of which any other explain test
+    // exercises end-to-end.
+    let expected = "\
+action: core:rename-session
+display_name: Rename Session
+description: Assign a fresh generated name to the current session, or one named by id
+scope: global
+targets: session
+command: RenameSession
+examples: core:rename-session, koshi rename-session
+";
+    assert_eq!(
+        render_action_explain("rename-session", FormatArg::Table),
+        Some(expected.to_string())
     );
 }

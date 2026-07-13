@@ -208,6 +208,49 @@ fn resize_width_shrink_wraps_a_wide_glyph_whole() {
 }
 
 #[test]
+fn resize_to_zero_rows_pushes_all_content_into_scrollback_without_panicking() {
+    // A pane driven to zero height (e.g. mid-drag in the layout) must not
+    // panic; every row it held becomes history, and growing back pulls the
+    // same rows back in, in order.
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 3 });
+    put(&mut state, 0, 0, 'a', 1);
+    put(&mut state, 1, 0, 'b', 1);
+    put(&mut state, 2, 0, 'c', 1);
+
+    state.resize(PtySize { cols: 4, rows: 0 });
+    // A zero-row grid reports zero columns too: `dimensions()` derives cols
+    // from the first row, and there is no first row (see the grid-level
+    // `dimensions_of_grids_with_a_zero_axis` test for the same rule).
+    assert_eq!(state.primary.dimensions(), (0, 0));
+    assert_eq!(state.scrollback.len(), 3);
+    assert_eq!(state.primary_cursor.row, 0); // clamped: no row to sit on
+    assert_eq!(state.primary_cursor.col, 0);
+
+    state.resize(PtySize { cols: 4, rows: 3 });
+    assert_eq!(state.primary.cell(0, 0).unwrap().ch(), 'a');
+    assert_eq!(state.primary.cell(1, 0).unwrap().ch(), 'b');
+    assert_eq!(state.primary.cell(2, 0).unwrap().ch(), 'c');
+    assert_eq!(state.scrollback.len(), 0);
+}
+
+#[test]
+fn resize_to_zero_cols_yields_a_zero_width_grid_without_panicking() {
+    // A zero-width grid has no cells to hold text; the erased content (there
+    // is nowhere for it to live at width 0) does not resurface on regrow.
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 2 });
+    put(&mut state, 0, 0, 'h', 1);
+    put(&mut state, 0, 1, 'i', 1);
+
+    state.resize(PtySize { cols: 0, rows: 2 });
+    assert_eq!(state.primary.dimensions(), (2, 0));
+    assert_eq!(state.primary_cursor.col, 0);
+
+    state.resize(PtySize { cols: 4, rows: 2 });
+    assert_eq!(state.primary.dimensions(), (2, 4));
+    assert_eq!(state.primary.cell(0, 0), Some(&Cell::blank()));
+}
+
+#[test]
 fn resize_alternate_screen_crops_without_touching_scrollback() {
     let mut state = TerminalState::new(PtySize { cols: 4, rows: 3 });
     state.active = Screen::Alternate;

@@ -58,6 +58,19 @@ fn action_name_rejects_invalid_grammar() {
 }
 
 #[test]
+fn invalid_char_is_reported_even_when_the_name_is_also_too_long() {
+    // The char-grammar scan runs over every character before the length
+    // check, so a bad character anywhere — even past the length cap — wins
+    // over `TooLong`, per the documented precedence.
+    let name = format!("a{}_", "b".repeat(40));
+    assert!(name.chars().count() > MAX_ACTION_NAME_LEN);
+    assert_eq!(
+        ActionName::new(&name),
+        Err(ActionNameError::InvalidChar { ch: '_' })
+    );
+}
+
+#[test]
 fn action_name_serde_validates_on_decode() {
     roundtrip(&ActionName::new("focus-pane").expect("valid"));
     let decoded: Result<ActionName, _> = serde_json::from_str("\"BadName\"");

@@ -130,3 +130,6 @@ impl PaneRecord {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

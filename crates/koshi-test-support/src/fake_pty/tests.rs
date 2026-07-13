@@ -173,6 +173,102 @@ fn multiple_panes_are_isolated() {
 }
 
 #[test]
+fn write_after_kill_is_still_recorded() {
+    // `kill` only records the kill request; it does not remove the pane's
+    // record, so a write issued after kill still succeeds and is captured.
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.kill(pane, KillPolicy::Force).unwrap();
+    pty.write(pane, b"still here\n").unwrap();
+
+    assert_eq!(pty.writes(pane).unwrap(), vec![b"still here\n".to_vec()]);
+}
+
+#[test]
+fn resize_after_kill_is_still_recorded() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.kill(pane, KillPolicy::Force).unwrap();
+    pty.resize(pane, size(100, 30)).unwrap();
+
+    assert_eq!(
+        pty.resizes(pane).unwrap(),
+        vec![size(80, 24), size(100, 30)]
+    );
+}
+
+#[test]
+fn kill_called_twice_records_both_calls_not_deduplicated() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.kill(pane, KillPolicy::Force).unwrap();
+    pty.kill(pane, KillPolicy::Tree).unwrap();
+
+    assert_eq!(
+        pty.kills(pane).unwrap(),
+        vec![KillPolicy::Force, KillPolicy::Tree]
+    );
+}
+
+#[test]
+fn resize_to_zero_size_is_recorded_without_validation() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.resize(pane, size(0, 0)).unwrap();
+
+    assert_eq!(pty.resizes(pane).unwrap(), vec![size(80, 24), size(0, 0)]);
+}
+
+#[test]
+fn close_output_then_push_output_is_silently_dropped() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    let handle = pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.close_output(pane).unwrap();
+    // Push after close must still return Ok (mirrors a real child writing to
+    // a closed reader), but the bytes go nowhere.
+    pty.push_output(pane, b"lost".to_vec()).unwrap();
+
+    assert!(handle.try_read_output().is_none());
+}
+
+#[test]
+fn close_output_on_unknown_pane_errors() {
+    let pty = FakePtyBackend::new();
+    let ghost = PaneId::new();
+
+    assert_eq!(
+        pty.close_output(ghost),
+        Err(PtyError::UnknownPane { pane: ghost })
+    );
+}
+
+#[test]
+fn trigger_child_exit_twice_queues_both_statuses_in_order() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    let handle = pty.spawn(pane, spec(), size(80, 24)).unwrap();
+
+    pty.trigger_child_exit(pane, ExitStatus::ExitCode(0))
+        .unwrap();
+    pty.trigger_child_exit(pane, ExitStatus::Signaled(9))
+        .unwrap();
+
+    assert_eq!(handle.try_exit_status(), Some(ExitStatus::ExitCode(0)));
+    assert_eq!(handle.try_exit_status(), Some(ExitStatus::Signaled(9)));
+    assert!(handle.try_exit_status().is_none());
+}
+
+#[test]
 fn the_fake_is_usable_as_a_pty_backend_trait_object() {
     // The fake stands in for any `PtyBackend`, so it must work behind a trait
     // object the way the real backend will. Drive a full spawn/resize/write/

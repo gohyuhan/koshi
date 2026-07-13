@@ -8,7 +8,7 @@
 
 use std::time::SystemTime;
 
-use koshi_core::event::{Event, LayoutChanged, PaneClosing, PaneRemoved};
+use koshi_core::event::{Event, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved};
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
@@ -390,6 +390,44 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
         .iter()
         .any(|e| matches!(e, Event::TabClosed(t) if t.tab_id == tab_one)));
     assert!(!events.iter().any(|e| matches!(e, Event::Quit)));
+}
+
+#[test]
+fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
+    // The exit fact is reported unconditionally, but there is no pane record
+    // to read a policy off of, so nothing else in the session may change.
+    let tab_id = TabId::new();
+    let only = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, only)],
+        vec![record(
+            only,
+            PaneLifecycle::Running,
+            PaneExitPolicy::CloseOnExit,
+        )],
+    );
+    let unknown = PaneId::new();
+
+    let events = on_child_exit(
+        &mut session,
+        tab_id,
+        unknown,
+        Some(1),
+        SystemTime::UNIX_EPOCH,
+        rect(),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(
+        events,
+        vec![Event::PaneProcessExited(PaneProcessExited {
+            pane_id: unknown,
+            exit_code: Some(1),
+        })]
+    );
+    // The real pane in the tab is completely untouched.
+    assert!(session.panes.get(only).is_some());
+    assert!(session.tabs.contains_key(&tab_id));
 }
 
 #[test]

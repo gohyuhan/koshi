@@ -79,6 +79,12 @@ impl LayoutDiagnostic {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Where in the file the problem sits, as the caret label's span.
+    #[must_use]
+    pub fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 /// Parses `source` — the already-read contents of the layout file at `path`

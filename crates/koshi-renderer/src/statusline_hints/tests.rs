@@ -283,6 +283,15 @@ fn pending_prefix_shows_breadcrumb_and_continuations() {
 }
 
 #[test]
+fn pending_prefix_with_no_continuations_shows_bare_breadcrumb_and_no_groups() {
+    // The user pressed a chord that isn't a prefix of anything bound: no
+    // matching entries means no label and no continuation groups — just the
+    // breadcrumb and arrow, with no panic on the now-empty group list.
+    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('z')])));
+    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  z  ▶");
+}
+
+#[test]
 fn customized_pending_prefix_uses_count_not_shipped_label() {
     let snapshot = snap(pane_fixture(true), Some(seq(&[ctrl('p')])));
     assert_eq!(

@@ -810,3 +810,139 @@ fn offset_tab_origin_is_respected() {
     );
     assert_tiles_exactly(&result, tab);
 }
+
+#[test]
+fn an_empty_directional_split_solves_to_no_panes_without_panicking() {
+    // Hand-built: a split with no children at all, representable directly
+    // though the public edits never produce it.
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        Vec::new(),
+    ));
+    let result = solve(&empty, rect(0, 0, 80, 24));
+    assert!(result.panes.is_empty());
+    assert!(result.suppressed.is_empty());
+    assert!(!result.all_suppressed);
+    assert_eq!(min_size(&empty, MIN_PANE_SIZE), Size { cols: 0, rows: 0 });
+}
+
+#[test]
+fn an_empty_stack_solves_to_no_panes_without_panicking() {
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Stacked,
+        Vec::new(),
+    ));
+    let result = solve(&empty, rect(0, 0, 80, 24));
+    assert!(result.panes.is_empty());
+    assert!(result.stack_headers.is_empty());
+    assert_eq!(min_size(&empty, MIN_PANE_SIZE), Size { cols: 0, rows: 0 });
+}
+
+#[test]
+fn single_member_stack_has_no_headers_and_fills_the_rect() {
+    let a = PaneId::new();
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a], 0));
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.panes, [(a, tab)]);
+    assert!(result.stack_headers.is_empty());
+    assert!(result.suppressed.is_empty());
+}
+
+#[test]
+fn leftover_cells_distribute_to_multiple_trailing_flex_children() {
+    // Four equal flex shares over 10 cells: 10/4 floors to 2 each with 2
+    // left over, and both leftover cells go to the two trailing children.
+    let weights = vec![SizeWeight::default(); 4];
+    let floors = vec![0u16; 4];
+    assert_eq!(distribute(&weights, &floors, 10), [2, 2, 3, 3]);
+}
+
+#[test]
+fn a_fixed_child_is_raised_to_its_own_border_floor_by_a_flexible_donor() {
+    // A Fixed(1) constraint claims only one cell in the primary pass, but
+    // every leaf still carries its border-inclusive floor of four; the
+    // floor clamp pulls the difference from the flexible sibling.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Fixed(1))),
+            (b, SizeWeight::default()),
+        ],
+    );
+    let tab = rect(0, 0, 20, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [4, 16]);
+    assert_tiles_exactly(&result, tab);
+    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+}
+
+#[test]
+fn a_declared_min_overlay_outranks_a_smaller_min_primary() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let overlaid = SizeWeight::new(SizeConstraint::Min(10))
+        .with_min(20)
+        .unwrap();
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![(a, overlaid), (b, SizeWeight::new(SizeConstraint::Flex(1)))],
+    );
+    let tab = rect(0, 0, 30, 24);
+
+    // The overlay's 20 wins over the primary's 10, so a holds 20 and b
+    // takes the rest.
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [20, 10]);
+}
+
+#[test]
+fn fits_accepts_a_zero_rect_for_an_empty_split() {
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        Vec::new(),
+    ));
+    assert!(fits(&empty, Rect::zero(), MIN_PANE_SIZE));
+}
+
+#[test]
+fn border_inclusive_min_saturates_at_u16_max() {
+    let content = Size {
+        cols: u16::MAX,
+        rows: u16::MAX,
+    };
+    assert_eq!(
+        border_inclusive_min(content, true),
+        Size {
+            cols: u16::MAX,
+            rows: u16::MAX,
+        }
+    );
+}
+
+#[test]
+fn two_full_percent_children_over_the_total_share_donate_at_the_floor() {
+    // Both children claim 100% of the axis; the second gets nothing from
+    // the percent pass, then the floor clamp pulls its four cells back
+    // from the first, which is not flexible but is still tapped once the
+    // flexible-only donor pool comes up empty.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split_with(
+        SplitDirection::Horizontal,
+        vec![
+            (a, SizeWeight::new(SizeConstraint::Percent(100))),
+            (b, SizeWeight::new(SizeConstraint::Percent(100))),
+        ],
+    );
+    let tab = rect(0, 0, 100, 24);
+
+    let result = solve(&tree, tab);
+    let widths: Vec<u16> = result.panes.iter().map(|(_, r)| r.size.cols).collect();
+    assert_eq!(widths, [96, 4]);
+    assert_tiles_exactly(&result, tab);
+    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+}

@@ -96,3 +96,51 @@ fn absent_cwd_serializes_as_null() {
 
     assert_eq!(value["cwd"], serde_json::Value::Null);
 }
+
+#[test]
+fn valid_utf8_cwd_serializes_as_its_plain_string() {
+    let info = pane_info(Some(PathBuf::from("/home/user/project")));
+
+    let value = serde_json::to_value(&info).expect("serializes");
+
+    assert_eq!(value["cwd"], json!("/home/user/project"));
+}
+
+#[test]
+fn pane_state_serializes_with_snake_case_names() {
+    assert_eq!(
+        serde_json::to_value(PaneState::Spawning).expect("serializes"),
+        json!("spawning")
+    );
+    assert_eq!(
+        serde_json::to_value(PaneState::Running).expect("serializes"),
+        json!("running")
+    );
+    assert_eq!(
+        serde_json::to_value(PaneState::Closing).expect("serializes"),
+        json!("closing")
+    );
+    assert_eq!(
+        serde_json::to_value(PaneState::Exited { code: Some(1) }).expect("serializes"),
+        json!({"exited": {"code": 1}})
+    );
+    assert_eq!(
+        serde_json::to_value(PaneState::Exited { code: None }).expect("serializes"),
+        json!({"exited": {"code": null}})
+    );
+}
+
+#[test]
+fn pane_state_round_trips_through_json_for_every_variant() {
+    for state in [
+        PaneState::Spawning,
+        PaneState::Running,
+        PaneState::Closing,
+        PaneState::Exited { code: Some(137) },
+        PaneState::Exited { code: None },
+    ] {
+        let json = serde_json::to_string(&state).expect("serialize");
+        let back: PaneState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(state, back, "{json}");
+    }
+}

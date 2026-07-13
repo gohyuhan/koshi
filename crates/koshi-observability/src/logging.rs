@@ -303,8 +303,8 @@ fn file_writer(
             TracingError::Sink(format!("log path has no file name: {}", path.display()))
         })?;
     std::fs::create_dir_all(directory).map_err(|err| TracingError::Sink(err.to_string()))?;
-    // Clamped to one: retention of zero would prune every file, including
-    // the one being written — logs would silently vanish.
+    // Clamped to one: the appender treats a zero limit as "no pruning at all"
+    // (unbounded retention), so the smallest honored retention is one file.
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)

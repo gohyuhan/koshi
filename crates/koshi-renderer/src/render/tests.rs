@@ -1223,3 +1223,173 @@ fn a_custom_theme_recolors_the_chrome() {
         .expect("tab marker drawn");
     assert_eq!(buf[(tab_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
 }
+
+#[test]
+fn overlapping_panes_draw_in_layout_order_last_wins() {
+    // The layout solver normally tiles panes without overlap; this snapshot
+    // forces two visible pane rects to overlap to pin down what the renderer
+    // actually does with that input: later slots in `layout_solved` paint
+    // over earlier ones, for both the border and the pane content.
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(a, rect(0, 1, 20, 6), true), (b, rect(15, 1, 20, 6), true)],
+        Some(a),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    let mut grid_a = Grid::blank(4, 18, TermStyle::default());
+    *grid_a.cell_mut(0, 0).unwrap() = Cell::new('Z', 1, TermStyle::default());
+    *grid_a.cell_mut(0, 15).unwrap() = Cell::new('X', 1, TermStyle::default());
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(grid_a),
+        view_offset: 0,
+    });
+    let mut grid_b = Grid::blank(4, 18, TermStyle::default());
+    *grid_b.cell_mut(0, 0).unwrap() = Cell::new('Y', 1, TermStyle::default());
+    *grid_b.cell_mut(0, 17).unwrap() = Cell::new('W', 1, TermStyle::default());
+    snap.panes[1].grid_view = Some(GridView {
+        grid: Arc::new(grid_b),
+        view_offset: 0,
+    });
+    let buf = render(&snap, 40, 8);
+
+    // A's own corner (outside B's rect) survives untouched...
+    assert_eq!(buf[(0, 1)].symbol(), "┌");
+    assert_eq!(buf[(0, 1)].fg, Color::Rgb(0x00, 0xaf, 0xd7));
+    assert!(buf[(0, 1)].modifier.contains(Modifier::BOLD));
+    // ...but B (drawn second) overwrites A's right border where they overlap
+    // (A's right border sits at x=19, inside B's top-border row): the glyph
+    // and color are B's. The BOLD modifier is untouched by B's style (a
+    // ratatui `Style` with no `add_modifier` patches, not replaces, so it
+    // does not clear a modifier a previous style already set).
+    assert_eq!(buf[(19, 1)].symbol(), "─");
+    assert_eq!(buf[(19, 1)].fg, Color::Rgb(0x58, 0x58, 0x58));
+    assert!(buf[(19, 1)].modifier.contains(Modifier::BOLD));
+
+    // Content: each pane's own, non-overlapping cell keeps its own glyph...
+    assert_eq!(buf[(1, 2)].symbol(), "Z");
+    assert_eq!(buf[(33, 2)].symbol(), "W");
+    // ...but in the overlap region (screen x=16..19) B's cell wins over A's.
+    assert_eq!(buf[(16, 2)].symbol(), "Y");
+}
+
+#[test]
+fn pane_title_skipped_when_box_is_four_wide() {
+    // `rect.width <= 4` guards the `rect.width - 4` subtraction the title
+    // clip uses; at exactly 4 there is no room for the ` title ` padding.
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 4, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 10, rows: 8 },
+    );
+    snap.panes[0].title = Some("editor".to_string());
+    let buf = render(&snap, 10, 8);
+
+    // The top border stays a plain dash where the title would otherwise
+    // start (title drawing never ran).
+    assert_eq!(buf[(2, 1)].symbol(), "─");
+}
+
+#[test]
+fn pane_title_drawn_when_box_is_five_wide() {
+    // One cell wider crosses the `<= 4` threshold: the title's leading space
+    // now overwrites the dash that would otherwise sit at the same column.
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 5, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 10, rows: 8 },
+    );
+    snap.panes[0].title = Some("editor".to_string());
+    let buf = render(&snap, 10, 8);
+
+    assert_eq!(buf[(2, 1)].symbol(), " ");
+}
+
+#[test]
+fn orphan_pane_slot_with_no_matching_snapshot_draws_border_only() {
+    // A slot can reference a pane id absent from `panes` (e.g. the pane
+    // exited and was pruned between layout solve and snapshot build).
+    // `draw_panes` never looks up the pane for its box, so the border still
+    // draws; `draw_pane_contents` must skip content without panicking.
+    let pane = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes.clear();
+    let buf = render(&snap, 40, 8);
+
+    assert_eq!(buf[(0, 1)].symbol(), "┌");
+    assert_eq!(buf[(39, 1)].symbol(), "┐");
+    assert_eq!(buf[(1, 2)].symbol(), " ");
+}
+
+#[test]
+fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
+    // The client's focused_pane id still has a PaneSnapshot in `panes` (so
+    // `find_pane` alone would not catch a missing-slot bug), but its slot was
+    // dropped from `layout_solved` this frame (a stale handle after the
+    // layout re-solved without it): the layout lookup itself finds nothing.
+    let visible = PaneId::new();
+    let orphaned = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (visible, rect(0, 1, 20, 6), true),
+            (orphaned, rect(20, 1, 20, 6), true),
+        ],
+        Some(orphaned),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.session
+        .active_tab
+        .layout_solved
+        .retain(|slot| slot.pane_id != orphaned);
+    // The orphaned pane still carries a live, visible-cursor grid, so a
+    // lookup bug that silently grabs a different slot would still produce a
+    // `Some` position (using the wrong slot's rect) rather than `None` by
+    // coincidence of some other, unrelated guard.
+    snap.panes[1].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+        view_offset: 0,
+    });
+    assert_eq!(cursor_position(&snap, viewport_area(&snap)), None);
+}
+
+#[test]
+fn one_by_one_viewport_draws_without_panicking() {
+    // The smallest possible non-zero area: content_rect and the tabline draw
+    // must degrade gracefully rather than underflow or panic. The single
+    // cell ends up owned by the tabline's overflow marker: the tab list has
+    // no room at all once the mode tag saturates the row's whole 1-cell
+    // width, so it drops behind `…` (drawn last, so it wins the cell).
+    let pane = PaneId::new();
+    let snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(pane, rect(0, 1, 40, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 1, rows: 1 },
+    );
+    let buf = render(&snap, 1, 1);
+
+    assert_eq!(buf[(0, 0)].symbol(), "…");
+}

@@ -136,3 +136,85 @@ fn prefix_longer_than_recorded_fails() {
     assert!(msg.contains("event prefix mismatch"), "{msg}");
     assert!(msg.contains("[1] MISSING"), "{msg}");
 }
+
+#[test]
+fn assert_prefix_with_empty_expected_leaves_events_untouched() {
+    let a = created();
+    let b = focused();
+    let mut rec = RecordedEvents::new();
+    rec.push(a.clone());
+    rec.push(b.clone());
+    rec.assert_prefix(&[]);
+    assert_eq!(rec.len(), 2);
+    rec.assert_exact(&[a, b]);
+}
+
+#[test]
+fn assert_prefix_content_mismatch_reports_mismatch_not_missing() {
+    let a = created();
+    let b = focused();
+    let wrong = closed();
+    let mut rec = RecordedEvents::new();
+    rec.push(a.clone());
+    rec.push(b);
+    let err = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rec.assert_prefix(&[a, wrong]);
+    }));
+    let msg = message(err);
+    assert!(msg.contains("event prefix mismatch"), "{msg}");
+    assert!(msg.contains("[0] ok"), "{msg}");
+    assert!(msg.contains("[1] MISMATCH"), "{msg}");
+    assert!(!msg.contains("MISSING"), "{msg}");
+}
+
+#[test]
+fn assert_exact_with_fewer_expected_than_actual_reports_extra() {
+    let a = created();
+    let b = focused();
+    let mut rec = RecordedEvents::new();
+    rec.push(a.clone());
+    rec.push(b);
+    let err = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rec.assert_exact(&[a]);
+    }));
+    let msg = message(err);
+    assert!(msg.contains("event sequence mismatch"), "{msg}");
+    assert!(msg.contains("[1] EXTRA"), "{msg}");
+    assert!(msg.contains("length: expected 1, actual 2"), "{msg}");
+}
+
+#[test]
+fn failed_assert_prefix_does_not_consume_events() {
+    let a = created();
+    let b = focused();
+    let wrong = closed();
+    let mut rec = RecordedEvents::new();
+    rec.push(a.clone());
+    rec.push(b.clone());
+    let _ = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rec.assert_prefix(&[wrong]);
+    }));
+    // The failed assertion must not have drained anything: the original
+    // sequence is still there for a subsequent correct assertion.
+    rec.assert_exact(&[a, b]);
+}
+
+#[test]
+fn failed_assert_exact_does_not_clear_recorder() {
+    let a = created();
+    let wrong = closed();
+    let mut rec = RecordedEvents::new();
+    rec.push(a.clone());
+    let _ = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rec.assert_exact(&[wrong]);
+    }));
+    assert_eq!(rec.len(), 1);
+    rec.assert_exact(&[a]);
+}
+
+#[test]
+fn assert_exact_empty_expected_on_empty_recorder_succeeds() {
+    let mut rec = RecordedEvents::new();
+    rec.assert_exact(&[]);
+    rec.assert_no_more();
+}

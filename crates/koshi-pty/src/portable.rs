@@ -489,5 +489,5 @@ fn sig_no(desc: &str) -> i32 {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

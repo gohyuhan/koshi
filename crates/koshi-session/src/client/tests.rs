@@ -9,7 +9,7 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 
-use super::{Client, ClientRegistry, MouseState, ResizeDragState};
+use super::{pane_viewport, Client, ClientRegistry, MouseState, ResizeDragState};
 
 /// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
@@ -256,4 +256,52 @@ fn list_attached_mut_reaches_every_client_for_in_place_updates() {
         client.set_scroll_offset(pane, 4);
     }
     assert!(registry.list_attached().all(|c| c.scroll_offset(pane) == 4));
+}
+
+// --- pane_viewport -----------------------------------------------------
+
+#[test]
+fn pane_viewport_reserves_the_tabline_and_hint_row() {
+    // 80x24 minus one tabline row and one hint row leaves 80x22.
+    assert_eq!(
+        pane_viewport(Size { cols: 80, rows: 24 }),
+        Size { cols: 80, rows: 22 }
+    );
+}
+
+#[test]
+fn pane_viewport_of_a_two_row_viewport_is_exactly_zero_rows() {
+    // Exactly enough for the two chrome rows and nothing else: 2 - 2 = 0,
+    // the boundary just above the saturating case below.
+    assert_eq!(
+        pane_viewport(Size { cols: 80, rows: 2 }),
+        Size { cols: 80, rows: 0 }
+    );
+}
+
+#[test]
+fn pane_viewport_of_a_one_row_viewport_saturates_to_zero_rows() {
+    // Fewer rows than the reserved chrome: plain subtraction would underflow
+    // and panic (or wrap) on the u16 row count; the contract is saturation,
+    // not a panic.
+    assert_eq!(
+        pane_viewport(Size { cols: 80, rows: 1 }),
+        Size { cols: 80, rows: 0 }
+    );
+}
+
+#[test]
+fn pane_viewport_of_a_zero_row_viewport_stays_zero_rows() {
+    assert_eq!(
+        pane_viewport(Size { cols: 80, rows: 0 }),
+        Size { cols: 80, rows: 0 }
+    );
+}
+
+#[test]
+fn pane_viewport_never_touches_the_column_count() {
+    assert_eq!(
+        pane_viewport(Size { cols: 0, rows: 24 }),
+        Size { cols: 0, rows: 22 }
+    );
 }

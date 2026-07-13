@@ -330,3 +330,84 @@ fn missing_pane_is_reported_and_the_input_is_unchanged() {
     assert_eq!(err, ResizeError::PaneNotFound { pane: missing });
     assert_eq!(tree, snapshot);
 }
+
+#[test]
+fn resizing_the_only_pane_in_the_tree_has_no_border_anywhere() {
+    // A bare single-pane tree: the pane's path to itself is empty, so no
+    // ancestor split exists on any axis, on any side.
+    let a = PaneId::new();
+    let tree = LayoutNode::Pane(a);
+
+    for direction in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        let err = resize(&tree, tab(), a, direction, 1).unwrap_err();
+        assert_eq!(err, ResizeError::NoAdjacentBorder { pane: a, direction });
+    }
+}
+
+#[test]
+fn middle_pane_in_a_three_way_split_resizes_either_border() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b), leaf(c)],
+    ));
+
+    // Baseline three-way split of 80 columns: 26 / 27 / 27.
+    let grown_right = resize(&tree, tab(), b, Direction::Right, 2).unwrap();
+    assert_eq!(solved_size(&grown_right, tab(), a).cols, 26);
+    assert_eq!(solved_size(&grown_right, tab(), b).cols, 29);
+    assert_eq!(solved_size(&grown_right, tab(), c).cols, 25);
+    assert_tiles(&grown_right, tab());
+
+    let grown_left = resize(&tree, tab(), b, Direction::Left, 2).unwrap();
+    assert_eq!(solved_size(&grown_left, tab(), a).cols, 24);
+    assert_eq!(solved_size(&grown_left, tab(), b).cols, 29);
+    assert_eq!(solved_size(&grown_left, tab(), c).cols, 27);
+    assert_tiles(&grown_left, tab());
+}
+
+#[test]
+fn resize_amount_far_exceeding_available_reports_the_exact_spare() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    // b solves to 40 columns; its spare above the border-inclusive floor
+    // of 4 is 36. A maximal signed request is rejected with that exact
+    // figure, not an overflow or a panic.
+    let err = resize(&tree, tab(), a, Direction::Right, i16::MAX).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: i16::MAX as u16,
+            spare: 36,
+        }
+    );
+}
+
+#[test]
+fn a_request_exactly_at_the_spare_boundary_succeeds_one_past_it_fails() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
+
+    // b solves to five columns with a border-inclusive floor of four: one
+    // spare cell exactly. Taking exactly that one cell succeeds; asking
+    // for one more is rejected with the same spare figure.
+    let allowed = resize(&tree, narrow, a, Direction::Right, 1).unwrap();
+    assert_eq!(solved_size(&allowed, narrow, a).cols, 6);
+    assert_eq!(solved_size(&allowed, narrow, b).cols, 4);
+
+    let err = resize(&tree, narrow, a, Direction::Right, 2).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 2,
+            spare: 1,
+        }
+    );
+}

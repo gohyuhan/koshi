@@ -95,6 +95,17 @@ fn new_cell_round_trips_through_its_accessors() {
 }
 
 #[test]
+fn push_combining_appends_marks_in_arrival_order_without_changing_ch_or_width() {
+    let mut cell = Cell::new('e', 1, Style::default());
+    assert_eq!(cell.combining(), &[]);
+    cell.push_combining('\u{0301}'); // combining acute
+    cell.push_combining('\u{0302}'); // combining circumflex
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.width(), 1);
+    assert_eq!(cell.combining(), &['\u{0301}', '\u{0302}']);
+}
+
+#[test]
 fn dimensions_reports_rows_then_cols() {
     assert_eq!(default_grid(3, 5).dimensions(), (3, 5));
 }
@@ -351,6 +362,33 @@ fn line_ops_with_an_inverted_or_oob_band_are_no_ops() {
     assert_eq!(row_text(&grid, 0), "AA");
     assert_eq!(row_text(&grid, 1), "BB");
     assert_eq!(row_text(&grid, 2), "CC");
+}
+
+#[test]
+fn delete_lines_with_a_single_row_band_blanks_only_that_row() {
+    // A degenerate band (`first == last`) is still a legal band, e.g. a
+    // scroll region collapsed to one row: it must blank exactly that row,
+    // never touch a neighbor or fall through as a no-op.
+    let mut grid = default_grid(3, 3);
+    write_row(&mut grid, 0, "AAA");
+    write_row(&mut grid, 1, "BBB");
+    write_row(&mut grid, 2, "CCC");
+    grid.delete_lines(1, 1, 1, Style::default());
+    assert_eq!(row_text(&grid, 0), "AAA"); // above the band, untouched
+    assert_eq!(row_text(&grid, 1), "   "); // the band's one row blanked
+    assert_eq!(row_text(&grid, 2), "CCC"); // below the band, untouched
+}
+
+#[test]
+fn insert_lines_with_a_single_row_band_blanks_only_that_row() {
+    let mut grid = default_grid(3, 3);
+    write_row(&mut grid, 0, "AAA");
+    write_row(&mut grid, 1, "BBB");
+    write_row(&mut grid, 2, "CCC");
+    grid.insert_lines(1, 1, 1, Style::default());
+    assert_eq!(row_text(&grid, 0), "AAA"); // above the band, untouched
+    assert_eq!(row_text(&grid, 1), "   "); // the band's one row blanked
+    assert_eq!(row_text(&grid, 2), "CCC"); // below the band, untouched
 }
 
 /// A row of `s`, one default-styled cell per char.

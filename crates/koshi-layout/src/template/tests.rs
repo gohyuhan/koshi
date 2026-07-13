@@ -218,6 +218,62 @@ fn first_visible_leaf_skips_collapsed_stack_members() {
 }
 
 #[test]
+fn first_visible_leaf_of_an_empty_split_is_zero() {
+    // Hand-built: a split with no children, representable directly though
+    // no file parse or edit path produces it.
+    let empty = TemplateNode::Split(TemplateSplit {
+        direction: SplitDirection::Horizontal,
+        children: Vec::new(),
+        weights: Vec::new(),
+        active: 0,
+    });
+    assert_eq!(empty.first_visible_leaf(), 0);
+}
+
+#[test]
+fn first_visible_leaf_with_out_of_range_active_falls_back_to_zero() {
+    // Hand-built: a stacked template whose active index is out of bounds.
+    // Unlike the solver, this walk does not clamp; an unreachable pick
+    // index falls back to zero rather than panicking.
+    let stack = TemplateNode::Split(TemplateSplit {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            TemplateChild {
+                node: shell_leaf(),
+                collapsed: false,
+            },
+            TemplateChild {
+                node: command_leaf("htop"),
+                collapsed: true,
+            },
+        ],
+        weights: vec![SizeWeight::default(), SizeWeight::default()],
+        active: 9,
+    });
+    assert_eq!(stack.first_visible_leaf(), 0);
+}
+
+#[test]
+fn empty_split_template_instantiates_with_no_ids() {
+    let empty = TemplateNode::Split(TemplateSplit {
+        direction: SplitDirection::Horizontal,
+        children: Vec::new(),
+        weights: Vec::new(),
+        active: 0,
+    });
+    let tree = empty.to_layout_node(&[]).unwrap();
+    assert_eq!(
+        tree,
+        LayoutNode::Split(SplitNode {
+            direction: SplitDirection::Horizontal,
+            children: Vec::new(),
+            weights: Vec::new(),
+            active: 0,
+        })
+    );
+}
+
+#[test]
 fn too_few_ids_is_a_count_mismatch() {
     let template = nested_template();
     let err = template.to_layout_node(&[PaneId::new()]).unwrap_err();

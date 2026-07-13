@@ -75,7 +75,10 @@ pub enum SessionConsistencyError {
         pane: PaneId,
     },
 
-    /// A client's active tab is not one of the session's tabs.
+    /// A client's active tab is not one of the session's tabs. Reported only
+    /// while the session still has tabs; a session emptied by its last tab
+    /// closing is quitting, and its viewers' active-tab references dangle by
+    /// definition until the transport disconnects them.
     #[error("client {client:?} active tab {tab:?} is not in the session")]
     ActiveTabMissing { client: ClientId, tab: TabId },
 

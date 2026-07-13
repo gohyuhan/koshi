@@ -145,7 +145,11 @@ impl TerminalState {
     /// narrow width wrapped. Rows past the new height scroll into history
     /// (trailing blank padding rows drop instead), a taller screen pulls
     /// history back in, and the cursor stays on its logical line at its
-    /// content offset. The alternate screen has no history and its apps
+    /// content offset. Cursor-line tracking holds for heights of one row or
+    /// more; a zero-row resize parks every row in history without panicking,
+    /// and after regrowing the cursor restarts on the first logical line
+    /// (real terminals are never zero-sized — koshi's PTY floor is 2×1).
+    /// The alternate screen has no history and its apps
     /// repaint on resize: each row crops on the right or pads with the
     /// screen's own background (a wide glyph whose right half is cut off is
     /// blanked), and a height shrink crops off the top. Scroll margins index

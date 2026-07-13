@@ -262,6 +262,19 @@ fn a_sequence_at_the_cap_parses() {
 }
 
 #[test]
+fn a_cap_of_zero_rejects_every_sequence() {
+    // A one-chord sequence still holds one chord, which is already past a
+    // cap of zero.
+    assert_eq!(
+        parse_sequence("a", ctrl_leader(), 0),
+        Err(KeyParseError {
+            token: "a".to_string(),
+            kind: KeyParseErrorKind::SequenceTooLong { len: 1, max: 0 },
+        })
+    );
+}
+
+#[test]
 fn a_sequence_past_the_cap_is_rejected() {
     assert_eq!(
         parse_sequence("abcde", ctrl_leader(), 4),

@@ -270,6 +270,22 @@ fn a_repeated_modifier_is_refused() {
 }
 
 #[test]
+fn a_digit_run_with_a_trailing_letter_is_not_a_function_key() {
+    // `F1a` starts with `F` and digits, but the trailing `a` means the
+    // digit-only check fails, so it falls through to the named-key table
+    // and is refused there, not as an out-of-range function key.
+    assert_eq!(
+        parse_chord("<F1a>"),
+        Err(KeyParseError {
+            token: "<F1a>".to_string(),
+            kind: KeyParseErrorKind::UnknownNamedKey {
+                name: "F1a".to_string()
+            },
+        })
+    );
+}
+
+#[test]
 fn an_unknown_key_name_is_refused() {
     assert_eq!(
         parse_chord("<Nope>"),

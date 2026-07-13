@@ -519,3 +519,184 @@ fn registry_refresh_turns_an_orphan_binding_live() {
         }
     );
 }
+
+/// A runtime with no bootstrapped session — zero live clients to notify.
+fn runtime_with_no_sessions() -> Runtime {
+    let (tx, rx) = mpsc::channel();
+    Runtime::new(
+        Arc::new(FakePtyBackend::new()),
+        Arc::new(NullSnapshotProvider),
+        Arc::new(NullStorage),
+        rx,
+        tx,
+        TerminalCleanupGuard::new(),
+        Direction::Right,
+    )
+}
+
+#[test]
+fn reload_with_no_live_sessions_emits_no_events_but_still_applies() {
+    let mut runtime = runtime_with_no_sessions();
+
+    let events = runtime.reload_theme(PartialThemeConfig {
+        name: None,
+        colors: Some(PartialColorPalette {
+            ramp_start: Some(RgbColor::new(0x01, 0x02, 0x03)),
+            ..PartialColorPalette::default()
+        }),
+    });
+
+    // No session means no one to notify, but the config and theme still swap.
+    assert_eq!(events, Vec::new());
+    assert_eq!(runtime.theme.ramp_start, (0x01, 0x02, 0x03));
+}
+
+#[test]
+fn reload_rejection_with_no_live_sessions_emits_no_events() {
+    let mut runtime = runtime_with_no_sessions();
+    let before = runtime.config.clone();
+
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        max_chord_depth: Some(0),
+        ..PartialKeybindingsConfig::default()
+    });
+
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Reject);
+    assert_eq!(outcome.events, Vec::new());
+    assert_eq!(runtime.config, before);
+}
+
+#[test]
+fn a_second_keybinding_reload_fully_replaces_the_firsts_bindings() {
+    let (mut runtime, _client) = runtime();
+    let first_key = sequence(ModFlags::CTRL, 'y');
+    let second_key = sequence(ModFlags::CTRL, 'z');
+
+    runtime.reload_keybindings(candidate_binding("normal", new_tab_ref()));
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &first_key)
+            .exact,
+        Some(BoundAction {
+            action: new_tab_ref(),
+            args: ActionArgs::None,
+        })
+    );
+
+    // A second reload with a completely different key: the first candidate's
+    // whole layer is replaced, not merged onto.
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        second_key.clone(),
+        BoundAction {
+            action: new_tab_ref(),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    });
+
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Apply);
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &first_key),
+        KeyMatch::default(),
+        "the first reload's binding must not survive the second"
+    );
+    assert_eq!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &second_key)
+            .exact,
+        Some(BoundAction {
+            action: new_tab_ref(),
+            args: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
+fn registry_refresh_clears_pending_sequences_when_the_keymap_reapplies() {
+    let (mut runtime, client) = runtime();
+    runtime.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+        vec![0x10],
+        Instant::now(),
+    );
+    let has_pending = |runtime: &Runtime| {
+        runtime
+            .session_for_client(client)
+            .expect("session")
+            .clients
+            .get(client)
+            .expect("client")
+            .pending_key_sequence()
+            .is_some()
+    };
+    assert!(has_pending(&runtime));
+
+    let report = runtime.refresh_keymap_for_registry();
+
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+    assert!(!has_pending(&runtime));
+}
+
+#[test]
+fn keybinding_reload_can_remove_a_default_binding_scoped_to_its_own_mode() {
+    let (mut runtime, _client) = runtime();
+    let quit = sequence(ModFlags::CTRL, 'q');
+    assert!(runtime
+        .keymap_hints
+        .match_sequence(LockMode::Normal, &quit)
+        .exact
+        .is_some());
+    assert!(runtime
+        .keymap_hints
+        .match_sequence(LockMode::Locked, &quit)
+        .exact
+        .is_some());
+
+    let mut removed = BTreeSet::new();
+    removed.insert(quit.clone());
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed,
+        },
+    );
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    });
+
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Apply);
+    // Removed in `normal`...
+    assert_eq!(
+        runtime.keymap_hints.match_sequence(LockMode::Normal, &quit),
+        KeyMatch::default()
+    );
+    let hints = runtime.keymap_hints.hints_for(LockMode::Normal);
+    assert!(hints.removed.contains(&quit));
+    // ...but `locked` mode's own quit binding is untouched: removal is
+    // scoped to the mode that declares it.
+    assert!(runtime
+        .keymap_hints
+        .match_sequence(LockMode::Locked, &quit)
+        .exact
+        .is_some());
+}

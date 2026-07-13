@@ -271,6 +271,42 @@ fn absorbed_by_includes_resized_panes_beyond_the_freed_rect() {
 }
 
 #[test]
+fn absorbed_by_keeps_layout_order_on_an_exact_tie() {
+    let (a, x, b) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(x), leaf(b)],
+    ));
+    let wide = Rect::new(Point { x: 0, y: 0 }, Size { cols: 90, rows: 24 });
+
+    // Three even 30-column panes; removing the middle one leaves a 50/50
+    // split where both survivors absorb exactly 15 of its freed columns —
+    // an exact tie, broken by layout order.
+    let (removed, info) = remove_pane(&tree, wide, x).unwrap();
+    assert_eq!(removed.leaf_panes(), [a, b]);
+    assert_eq!(info.absorbed_by, [a, b]);
+}
+
+#[test]
+fn removing_a_suppressed_pane_reports_a_zero_area_old_rect() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b), leaf(c)],
+    ));
+    // Three bordered panes need twelve columns; nine fits only a and b, so
+    // c solves to a zero-area suppressed rect before removal.
+    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 9, rows: 24 });
+
+    let (removed, info) = remove_pane(&tree, narrow, c).unwrap();
+    assert_eq!(removed.leaf_panes(), [a, b]);
+    assert_eq!(info.old_rect, Rect::zero());
+    // a and b were already at their final floor-clamped sizes; losing the
+    // already-invisible c changes nothing about them.
+    assert!(info.absorbed_by.is_empty());
+}
+
+#[test]
 fn removing_the_active_stack_child_activates_the_next_one() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));

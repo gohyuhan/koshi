@@ -141,3 +141,91 @@ fn a_panicking_hook_during_panic_handling_does_not_abort() {
 
     panic::set_hook(saved);
 }
+
+#[test]
+fn drop_with_no_registered_hooks_is_a_noop() {
+    let guard = TerminalCleanupGuard::new();
+    drop(guard); // must not panic on an empty registry
+}
+
+// A hook registered after a panic already drained the registry must still run
+// on the guard's later normal drop: the registry is reusable, not left
+// permanently drained by the earlier panic.
+#[test]
+fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = Arc::new(AtomicUsize::new(0));
+    let after = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    {
+        let guard = TerminalCleanupGuard::new();
+        let before_counter = Arc::clone(&before);
+        guard.register_cleanup(Box::new(move || {
+            before_counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        let _panic_guard = install_panic_hook(&guard);
+
+        let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+        assert!(result.is_err());
+        assert_eq!(
+            before.load(Ordering::SeqCst),
+            1,
+            "the pre-panic hook should have run via the panic hook"
+        );
+
+        // Registry was drained by the panic; register a new hook into it.
+        let after_counter = Arc::clone(&after);
+        guard.register_cleanup(Box::new(move || {
+            after_counter.fetch_add(1, Ordering::SeqCst);
+        }));
+    } // normal drop: only the post-panic hook remains registered
+
+    assert_eq!(
+        before.load(Ordering::SeqCst),
+        1,
+        "the pre-panic hook must not run a second time on drop"
+    );
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        1,
+        "a hook registered after the panic drain must still run on drop"
+    );
+
+    panic::set_hook(saved);
+}
+
+// Dropping the `PanicHookGuard` without a panic having occurred restores the
+// previously installed hook, so a later panic no longer chains into cleanup.
+#[test]
+fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let counter = Arc::new(AtomicUsize::new(0));
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    let guard = TerminalCleanupGuard::new();
+    let hook_counter = Arc::clone(&counter);
+    guard.register_cleanup(Box::new(move || {
+        hook_counter.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let panic_guard = install_panic_hook(&guard);
+    drop(panic_guard); // restores the silent no-op hook set above
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
+    assert!(result.is_err());
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "cleanup must not run: the panic hook was unchained before this panic fired"
+    );
+
+    panic::set_hook(saved);
+    drop(guard);
+}
