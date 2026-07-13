@@ -169,6 +169,83 @@ fn user_vs_session_same_key_different_action_collides() {
 }
 
 #[test]
+fn three_layers_with_three_distinct_actions_all_appear_in_the_collision() {
+    // Two claimants is the minimum for a collision; a third distinct
+    // claimant must still be listed, not silently dropped after the pair.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer(
+            LayerOrigin::Layout,
+            "normal",
+            vec![(key.clone(), bound("quit"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::KeyCollision {
+            mode: mode("normal"),
+            key,
+            claims: vec![
+                (LayerOrigin::User, bound("new-tab")),
+                (LayerOrigin::Session, bound("lock")),
+                (LayerOrigin::Layout, bound("quit")),
+            ],
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::RevertToDefaults);
+}
+
+#[test]
+fn a_repeated_claim_across_nonadjacent_layers_dedups_against_a_third_distinct_one() {
+    // User and Layout bind the identical action (restating one intent);
+    // Session's differing claim sits between them. Dedup must compare
+    // against every earlier distinct claim, not just the immediately
+    // preceding one, so the result is exactly two distinct claims.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+        layer(
+            LayerOrigin::Layout,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::KeyCollision {
+            mode: mode("normal"),
+            key,
+            claims: vec![
+                (LayerOrigin::User, bound("new-tab")),
+                (LayerOrigin::Session, bound("lock")),
+            ],
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::RevertToDefaults);
+}
+
+#[test]
 fn steal_of_a_defaulted_key_is_not_a_collision() {
     // `<A-t>` is the default new-tab key; one user layer takes it.
     let report = detect(&[
@@ -769,6 +846,119 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
             ambiguous(Key::Named(NamedKey::Down), "focus-pane"),
         ]
     );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn a_three_deep_prefix_chain_reports_every_pair() {
+    // `<C-y>`, `<C-y> n`, and `<C-y> n o` are each a prefix of the ones
+    // longer than it: three pairs total, not just the two adjacent ones.
+    let short = seq(ModFlags::CTRL, 'y');
+    let mid = seq2(chord(ModFlags::CTRL, 'y'), chord(ModFlags::NONE, 'n'));
+    let long = KeySequence::new(
+        chord(ModFlags::CTRL, 'y'),
+        vec![chord(ModFlags::NONE, 'n'), chord(ModFlags::NONE, 'o')],
+    );
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![
+                (short.clone(), bound("lock")),
+                (mid.clone(), bound("new-tab")),
+                (long.clone(), bound("quit")),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![
+            ConflictDiagnostic::AmbiguousPrefix {
+                mode: mode("normal"),
+                prefix: short.clone(),
+                prefix_action: core("lock"),
+                longer: mid.clone(),
+                longer_action: core("new-tab"),
+            },
+            ConflictDiagnostic::AmbiguousPrefix {
+                mode: mode("normal"),
+                prefix: short,
+                prefix_action: core("lock"),
+                longer: long.clone(),
+                longer_action: core("quit"),
+            },
+            ConflictDiagnostic::AmbiguousPrefix {
+                mode: mode("normal"),
+                prefix: mid,
+                prefix_action: core("new-tab"),
+                longer: long,
+                longer_action: core("quit"),
+            },
+        ]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn the_reserved_chord_opening_a_normal_mode_sequence_is_an_ordinary_prefix_pair() {
+    // The reserved chord is only swallowed in LOCKED mode; the identical
+    // chord opening a longer sequence in NORMAL mode is an ordinary
+    // ambiguous-prefix warning, not a dead binding.
+    let short = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let long = seq2(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        chord(ModFlags::NONE, 'x'),
+    );
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "normal",
+            vec![(long.clone(), bound("new-tab"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::AmbiguousPrefix {
+            mode: mode("normal"),
+            prefix: short,
+            prefix_action: core("lock"),
+            longer: long,
+            longer_action: core("new-tab"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn a_later_redundant_remove_voids_a_rebind_that_an_earlier_remove_would_not() {
+    // Two layers remove the same key; only the LAST (highest-index) remove
+    // determines what index a claim must beat. User removes the key (index
+    // 1, no bind), Session rebinds it without removing (index 2), Layout
+    // redundantly removes it again (index 3, no bind), Manual rebinds with a
+    // different action (index 4). If `removal_index` recorded the first
+    // remove (index 1) instead of the last (index 3), Session's rebind at
+    // index 2 would wrongly survive (1 is not > 2) and collide with
+    // Manual's claim; recording the last remove correctly voids it, leaving
+    // Manual's claim alone.
+    let key = seq(ModFlags::CTRL, 't');
+    let report = detect(&[
+        defaults(),
+        layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
+        layer(
+            LayerOrigin::Session,
+            "normal",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+        layer_with_removed(LayerOrigin::Layout, "normal", Vec::new(), vec![key.clone()]),
+        layer(
+            LayerOrigin::Manual,
+            "normal",
+            vec![(key.clone(), bound("lock"))],
+        ),
+    ]);
+    assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
 }
 

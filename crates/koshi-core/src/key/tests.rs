@@ -227,3 +227,46 @@ fn fold_uppercase_folds_single_char_lowercase_letters_only() {
     // stands as it is, unshifted.
     assert_eq!(fold_uppercase('İ'), ('İ', false));
 }
+
+#[test]
+fn fold_uppercase_folds_uppercase_letters_outside_latin_script() {
+    // Greek capital sigma lowercases to one char: folds like any other letter.
+    assert_eq!(fold_uppercase('Σ'), ('σ', true));
+    // Capital sharp S (`ẞ`) lowercases to the single-char `ß`, even though
+    // `ß` itself uppercases to the two-char `SS` — the fold only cares about
+    // the *lowercase* mapping's length, not the reverse direction.
+    assert_eq!(fold_uppercase('ẞ'), ('ß', true));
+    // Roman numeral four is an uppercase letter whose lowercase form is a
+    // single different character, not a case variant of a Latin letter.
+    assert_eq!(fold_uppercase('Ⅳ'), ('ⅳ', true));
+}
+
+#[test]
+fn fold_uppercase_at_the_top_of_the_char_range_is_a_no_op() {
+    // `char::MAX` is unassigned, so it is not uppercase and stands as-is —
+    // exercises the boundary of the full `char` domain the function accepts.
+    assert_eq!(fold_uppercase(char::MAX), (char::MAX, false));
+}
+
+#[test]
+fn named_key_f_key_number_boundaries_display_exactly() {
+    assert_eq!(NamedKey::F(0).to_string(), "F0");
+    assert_eq!(NamedKey::F(255).to_string(), "F255");
+}
+
+#[test]
+fn every_combination_of_non_text_modifiers_makes_a_chord_untypeable() {
+    let non_text_combos = [
+        ModFlags::CTRL | ModFlags::ALT,
+        ModFlags::CTRL | ModFlags::SUPER,
+        ModFlags::ALT | ModFlags::SUPER,
+        ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER,
+        ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER | ModFlags::SHIFT,
+    ];
+    for mods in non_text_combos {
+        assert!(
+            !KeyChord::new(mods, Key::Char('p')).is_typeable(),
+            "{mods} should be untypeable"
+        );
+    }
+}

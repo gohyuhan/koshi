@@ -32,3 +32,18 @@ fn a_lock_mode_survives_a_serde_round_trip() {
         assert_eq!(mode, restored);
     }
 }
+
+#[test]
+fn serde_wire_form_is_the_pascal_case_variant_not_the_keymap_name() {
+    // The wire form comes from the derive (variant name, e.g. `Locked`), which
+    // is distinct from `name()` (the keymap grouping key, e.g. `locked`). A
+    // caller must not conflate the two.
+    assert_eq!(
+        serde_json::to_string(&LockMode::Locked).expect("serialize"),
+        "\"Locked\""
+    );
+    assert_eq!(
+        serde_json::to_string(&LockMode::ScrollMode).expect("serialize"),
+        "\"ScrollMode\""
+    );
+}

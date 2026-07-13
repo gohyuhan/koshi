@@ -281,6 +281,27 @@ fn register_rejects_a_sequence_handler_naming_the_callers_own_actions() {
 }
 
 #[test]
+fn register_prioritizes_foreign_namespace_over_a_disagreeing_metadata_namespace() {
+    // Two rejection reasons are true at once here: `caller` does not own
+    // `action`'s namespace (`ForeignNamespace`, step 1 of `register`), *and*
+    // `metadata.namespace` disagrees with `action.namespace`
+    // (`NamespaceMismatch`, step 2). The check order in `register` means
+    // `ForeignNamespace` wins.
+    let mut registry = ActionRegistry::new();
+    let caller = plugin_id(1);
+    let victim = plugin_id(2);
+    let action = ActionRef::plugin(victim, "open-status").expect("valid plugin action name");
+    let mut metadata = plugin_metadata(victim);
+    metadata.namespace = ActionNamespace::Core;
+
+    assert_eq!(
+        registry.register(caller, action.clone(), metadata),
+        Err(RegistryError::ForeignNamespace { action, caller })
+    );
+    assert_eq!(registry.version(), 0);
+}
+
+#[test]
 fn register_rejects_a_duplicate_ref_without_bumping_the_version() {
     let mut registry = ActionRegistry::new();
     let plugin = plugin_id(1);

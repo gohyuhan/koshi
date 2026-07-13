@@ -100,6 +100,24 @@ fn exhausted_combinations_wrap_with_a_numeric_suffix() {
 }
 
 #[test]
+fn wrap_suffix_numbering_matches_the_actual_wrap_round() {
+    // `is_taken` rejects by STRUCTURE — a round-0 name has exactly two
+    // hyphens (`T-word-word`), a wrapped one has three (`T-word-word-N`) —
+    // never by the specific number the assertion expects. A predicate like
+    // `!name.ends_with("-2")` instead describes the accepted *shape*, so a
+    // walk that reaches that shape at the wrong round (e.g. round 1 emitting
+    // "-1" instead of "-2") still satisfies it; this one does not.
+    let round0_shape = |name: &str| name.matches('-').count() == 2;
+
+    let first_wrap = generate_name_from(NameKind::Tab, round0_shape, 0);
+    assert_eq!(first_wrap, "T-swift-otter-2");
+
+    let round0_or_first_wrap_shape = |name: &str| round0_shape(name) || name.ends_with("-2");
+    let second_wrap = generate_name_from(NameKind::Tab, round0_or_first_wrap_shape, 0);
+    assert_eq!(second_wrap, "T-swift-otter-3");
+}
+
+#[test]
 fn same_start_and_taken_set_always_yield_the_same_name() {
     let first = generate_name_from(NameKind::Tab, |name| name.starts_with("T-s"), 4242);
     let second = generate_name_from(NameKind::Tab, |name| name.starts_with("T-s"), 4242);

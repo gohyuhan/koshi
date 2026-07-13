@@ -4,6 +4,7 @@
 
 use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
+use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::state::Charset;
 use crate::style::{Color, Style, UnderlineStyle};
 use koshi_core::process::PtySize;
@@ -1168,6 +1169,23 @@ fn decstbm_with_an_invalid_range_is_ignored() {
     advance(&mut state, b"\x1b[2;4r"); // valid region (1, 3)
     advance(&mut state, b"\x1b[4;2r"); // top not above bottom -> ignored
     assert_eq!(state.primary_scroll_region, Some((1, 3)));
+}
+
+#[test]
+fn decstbm_top_equal_bottom_is_ignored() {
+    // A degenerate single-row request (`top == bottom`) is adjacent to, but
+    // distinct from, the already-covered `top > bottom` case: the region
+    // setter requires a strict `top < bottom`, so this boundary must be
+    // rejected too, and — since the whole `if top < bottom` block (region
+    // update AND cursor home) is skipped — the cursor must be left exactly
+    // where it was, not homed.
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[2;4r"); // valid region (1, 3)
+    advance(&mut state, b"\x1b[3;3H"); // move the cursor away from home
+    advance(&mut state, b"\x1b[3;3r"); // top == bottom (both 0-based 2) -> ignored
+    assert_eq!(state.primary_scroll_region, Some((1, 3))); // region unchanged
+    let cur = state.active_cursor();
+    assert_eq!((cur.row, cur.col), (2, 2)); // cursor NOT homed by the ignored request
 }
 
 #[test]
@@ -2897,6 +2915,60 @@ fn successive_bottom_linefeeds_accumulate_scrollback() {
     state.linefeed();
     state.linefeed();
     assert_eq!(state.scrollback().len(), 3);
+}
+
+#[test]
+fn linefeed_on_a_full_height_single_row_screen_always_scrolls() {
+    // rows == 1: region_bounds() always resolves to (0, 0) -- a degenerate
+    // top == bottom, full-height region reachable purely by construction,
+    // with no DECSTBM needed. Every linefeed must scroll, never treat the
+    // one row as "not yet at the bottom".
+    let mut state = state(2, 1);
+    print_str(&mut state, "aa"); // fills the only row; cursor parks (pending wrap)
+    state.execute(b'\n');
+    state.execute(b'\r');
+    print_str(&mut state, "bb");
+    assert_eq!(row_text(&state, 0), "bb");
+    assert_eq!(state.scrollback().len(), 1);
+    let captured = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row")
+        .0
+        .as_slice();
+    assert_eq!(captured[0].ch(), 'a');
+    assert_eq!(captured[1].ch(), 'a');
+    assert_eq!(state.active_cursor().row, 0); // pinned to the only row
+}
+
+#[test]
+fn ordinary_linefeeds_evict_the_oldest_scrollback_row_at_the_line_cap() {
+    // A 1-row screen scrolls on every linefeed, so three linefeeds push
+    // three rows through scrollback via the normal print/linefeed path (not
+    // a resize reflow) -- a cap of 1 must keep only the newest and tally the
+    // rest as dropped, the same as the Scrollback unit tests verify in
+    // isolation, but exercised here through the real dispatch path.
+    let mut state = state(2, 1);
+    state.scrollback = Scrollback::new(ScrollbackLimit::new(1, 100_000));
+    for row in ["aa", "bb", "cc"] {
+        print_str(&mut state, row);
+        state.execute(b'\n');
+        state.execute(b'\r');
+    }
+    assert_eq!(state.scrollback().len(), 1);
+    let history: String = state
+        .scrollback()
+        .lines()
+        .front()
+        .expect("one retained row")
+        .0
+        .iter()
+        .map(Cell::ch)
+        .collect();
+    assert_eq!(history, "cc");
+    assert_eq!(state.scrollback().dropped_lines(), 2);
+    assert_eq!(row_text(&state, 0), "  "); // the only row is blank after the last scroll
 }
 
 #[test]

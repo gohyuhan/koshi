@@ -83,6 +83,17 @@ fn ids_are_orderable() {
 }
 
 #[test]
+fn default_mints_a_fresh_id_not_a_fixed_one() {
+    // `Default` delegates to `new()`, not to a fixed/nil id: two calls yield
+    // distinct ids, and neither is the nil UUID.
+    let a = PaneId::default();
+    let b = PaneId::default();
+    assert_ne!(a, b);
+    assert_ne!(a, PaneId::from_uuid(Uuid::nil()));
+    assert_ne!(b, PaneId::from_uuid(Uuid::nil()));
+}
+
+#[test]
 fn generated_ids_are_unique() {
     const N: usize = 10_000;
     let ids: HashSet<PaneId> = (0..N).map(|_| PaneId::new()).collect();

@@ -99,6 +99,40 @@ fn pty_output_is_forwarded_into_the_inbox() {
 }
 
 #[test]
+fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let mut rt = runtime_with(fake.clone());
+    let client_id = rt
+        .bootstrap_local(VIEWPORT, SystemTime::now())
+        .expect("bootstrap");
+    let pane_id = fake.spawned_panes()[0];
+
+    // Full slice: fake child writes bytes -> forwarder thread relays them
+    // through the real inbox channel -> the dispatcher applies them to the
+    // pane's terminal engine -> a client-facing snapshot shows the result.
+    fake.push_output(pane_id, b"hi".to_vec()).expect("push");
+    let event = recv_matching(&rt, |e| matches!(e, RuntimeEvent::PtyOutput { .. }));
+    let RuntimeEvent::PtyOutput {
+        pane_id: got_pane,
+        bytes,
+    } = event
+    else {
+        unreachable!("matched above")
+    };
+    rt.handle_pty_output(got_pane, &bytes);
+
+    let snapshot = rt.build_snapshot(client_id).expect("snapshot");
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("pane in snapshot");
+    let grid = &pane.grid_view.as_ref().expect("grid view").grid;
+    assert_eq!(grid.cell(0, 0).map(|c| c.ch()), Some('h'));
+    assert_eq!(grid.cell(0, 1).map(|c| c.ch()), Some('i'));
+}
+
+#[test]
 fn outer_input_writes_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());

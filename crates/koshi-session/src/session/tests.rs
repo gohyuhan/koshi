@@ -163,6 +163,84 @@ fn focus_mru_is_capped_dropping_the_oldest() {
 }
 
 #[test]
+fn focus_mru_at_exactly_the_cap_evicts_nothing() {
+    // The boundary just below the eviction case above: recording exactly
+    // `MAX_TAB_FOCUS_MRU` distinct panes must keep every one of them.
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let cap = MAX_TAB_FOCUS_MRU as usize;
+
+    let panes: Vec<PaneId> = (0..cap).map(|_| PaneId::new()).collect();
+    for &pane in &panes {
+        tab.record_focus_mru(pane);
+    }
+
+    let mru = tab.focus_mru();
+    assert_eq!(mru.len(), cap);
+    for pane in &panes {
+        assert!(mru.contains(pane));
+    }
+}
+
+#[test]
+fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
+    // A full MRU that re-focuses one of its own entries must not first grow
+    // past the cap and then evict a *different* victim — `retain` drops the
+    // duplicate before the length check ever runs.
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let cap = MAX_TAB_FOCUS_MRU as usize;
+    let panes: Vec<PaneId> = (0..cap).map(|_| PaneId::new()).collect();
+    for &pane in &panes {
+        tab.record_focus_mru(pane);
+    }
+    // Pick a pane from the *middle* of the history, not the back: re-recording
+    // the back element would coincidentally be popped by the cap eviction even
+    // without the dedup, so it would not actually prove `retain` ran.
+    let middle = panes[cap / 2];
+
+    tab.record_focus_mru(middle);
+
+    let mru = tab.focus_mru();
+    assert_eq!(mru.len(), cap);
+    assert_eq!(mru[0], middle);
+    for pane in &panes {
+        assert!(mru.contains(pane));
+    }
+}
+
+#[test]
+fn remove_focus_mru_drops_only_the_named_pane() {
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    tab.record_focus_mru(a);
+    tab.record_focus_mru(b);
+    tab.record_focus_mru(c); // newest first: [c, b, a]
+
+    tab.remove_focus_mru(b);
+
+    assert_eq!(tab.focus_mru().to_vec(), vec![c, a]);
+}
+
+#[test]
+fn remove_focus_mru_for_a_pane_never_recorded_is_a_noop() {
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let recorded = PaneId::new();
+    tab.record_focus_mru(recorded);
+
+    tab.remove_focus_mru(PaneId::new());
+
+    assert_eq!(tab.focus_mru().to_vec(), vec![recorded]);
+}
+
+#[test]
+fn remove_focus_mru_on_an_empty_history_is_a_noop() {
+    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
+
+    tab.remove_focus_mru(PaneId::new());
+
+    assert!(tab.focus_mru().is_empty());
+}
+
+#[test]
 fn a_tab_survives_a_serde_round_trip() {
     let root = PaneId::new();
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 2, root);

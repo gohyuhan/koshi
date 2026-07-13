@@ -140,6 +140,19 @@ fn list_yields_every_record() {
 }
 
 #[test]
+fn a_removed_id_can_be_registered_again() {
+    let mut registry = PaneRegistry::new();
+    let id = PaneId::new();
+    registry.insert(terminal_record(id)).expect("first insert");
+    registry.remove(id).expect("present");
+
+    // The id is free again: a fresh record registers under it without error.
+    registry.insert(terminal_record(id)).expect("reinsert");
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.get(id), Some(&terminal_record(id)));
+}
+
+#[test]
 fn a_pane_record_survives_a_serde_round_trip() {
     let mut env = BTreeMap::new();
     env.insert("EDITOR".to_owned(), "nvim".to_owned());

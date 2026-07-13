@@ -29,6 +29,22 @@ fn messages(source: &str) -> Vec<String> {
     }
 }
 
+/// The diagnostics of an `Invalid` outcome, as the exact source text each
+/// one's caret span covers.
+fn span_texts(source: &str) -> Vec<String> {
+    match parse(source) {
+        Err(LayoutError::Invalid { diagnostics, .. }) => diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let span = diagnostic.span();
+                source[span.offset()..span.offset() + span.len()].to_string()
+            })
+            .collect(),
+        Err(LayoutError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
+        Ok(_) => panic!("expected schema diagnostics, got a template"),
+    }
+}
+
 fn shell_leaf() -> TemplateNode {
     TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate::default()))
 }
@@ -282,6 +298,62 @@ fn older_version_is_accepted() {
 }
 
 #[test]
+fn min_and_max_percent_size_are_accepted() {
+    // 0% and 101% are already proven invalid; 1% and 100% are the boundary
+    // just inside the valid range on either side.
+    let low = parse("version 1\ntab { horizontal { pane { size \"1%\" }; pane } }").unwrap();
+    let TemplateNode::Split(split) = &low.tabs[0].root else {
+        panic!("expected split root");
+    };
+    assert_eq!(
+        split.weights[0],
+        SizeWeight::new(SizeConstraint::Percent(1))
+    );
+
+    let high = parse("version 1\ntab { horizontal { pane { size \"100%\" }; pane } }").unwrap();
+    let TemplateNode::Split(split) = &high.tabs[0].root else {
+        panic!("expected split root");
+    };
+    assert_eq!(
+        split.weights[0],
+        SizeWeight::new(SizeConstraint::Percent(100))
+    );
+}
+
+#[test]
+fn min_and_max_cell_size_are_accepted() {
+    // 0 and 70000 are already proven invalid; 1 and 65535 (u16::MAX) are the
+    // boundary just inside the valid range on either side.
+    let low = parse("version 1\ntab { horizontal { pane { size 1 }; pane } }").unwrap();
+    let TemplateNode::Split(split) = &low.tabs[0].root else {
+        panic!("expected split root");
+    };
+    assert_eq!(split.weights[0], SizeWeight::new(SizeConstraint::Fixed(1)));
+
+    let high = parse("version 1\ntab { horizontal { pane { size 65535 }; pane } }").unwrap();
+    let TemplateNode::Split(split) = &high.tabs[0].root else {
+        panic!("expected split root");
+    };
+    assert_eq!(
+        split.weights[0],
+        SizeWeight::new(SizeConstraint::Fixed(65535))
+    );
+}
+
+#[test]
+fn unicode_plugin_name_is_accepted() {
+    let template = parse("version 1\ntab { horizontal { plugin \"\u{1f389}\"; pane } }").unwrap();
+    let TemplateNode::Split(split) = &template.tabs[0].root else {
+        panic!("expected split root");
+    };
+    assert!(matches!(
+        &split.children[0].node,
+        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { name }))
+            if name == "\u{1f389}"
+    ));
+}
+
+#[test]
 fn plugin_carries_sizing_and_focus_in_a_split() {
     let source = r#"
 version 1
@@ -371,6 +443,14 @@ fn duplicate_version_is_reported() {
 fn non_integer_version_is_reported() {
     assert_eq!(
         messages("version \"one\"\ntab { pane }"),
+        ["`version` must be a non-negative integer"]
+    );
+}
+
+#[test]
+fn negative_version_is_reported() {
+    assert_eq!(
+        messages("version -1\ntab { pane }"),
         ["`version` must be a non-negative integer"]
     );
 }
@@ -716,6 +796,42 @@ fn weight_arity_is_reported() {
 }
 
 #[test]
+fn min_as_a_property_is_reported() {
+    // A named property (`m=5`) is not a positional argument: `single_argument`
+    // must reject it the same way it rejects extra positional arguments.
+    assert_eq!(
+        messages("version 1\ntab { horizontal { pane { min m=5 }; pane } }"),
+        ["`min` takes exactly one value"]
+    );
+}
+
+#[test]
+fn two_sizing_violations_outside_directional_context_are_both_reported() {
+    // Each sizing child of a leaf outside a directional split is checked and
+    // reset independently, so two sizing nodes on the same leaf draw two
+    // separate diagnostics, not one aggregated report.
+    assert_eq!(
+        messages("version 1\ntab { stack { pane { size 30; min 5 }; pane } }"),
+        [
+            "sizing applies only to children of `horizontal` or `vertical`",
+            "sizing applies only to children of `horizontal` or `vertical`",
+        ]
+    );
+}
+
+#[test]
+fn each_sizing_violation_points_its_caret_at_its_own_node() {
+    // The per-node sizing reset keeps every diagnostic's caret on the node
+    // that raised it: the second report points at `min 5`, not back at the
+    // first node's `size 30`. (A kdl node's span runs to the next node or
+    // closing brace, so the last node carries its trailing space.)
+    assert_eq!(
+        span_texts("version 1\ntab { stack { pane { size 30; min 5 }; pane } }"),
+        ["size 30", "min 5 "]
+    );
+}
+
+#[test]
 fn size_with_children_is_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { pane { size 30 { } }; pane } }"),
@@ -804,6 +920,29 @@ fn command_with_children_is_reported() {
 fn env_arity_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { env \"RUST_LOG\" } }"),
+        ["`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`"]
+    );
+}
+
+#[test]
+fn non_string_env_name_is_reported() {
+    // A non-string entry is filtered out of the collected values, so its
+    // count no longer matches `node.entries().len()`, and the mismatch
+    // reports as the generic arity error rather than a name-specific one.
+    assert_eq!(
+        messages("version 1\ntab { pane { env 1 \"x\" } }"),
+        ["`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`"]
+    );
+}
+
+#[test]
+fn a_third_non_string_entry_is_reported_even_though_two_valid_strings_remain() {
+    // Filtering the non-string third entry leaves exactly two strings, which
+    // would coincidentally match the name/value shape; the entry-count
+    // cross-check must still catch the extra entry rather than silently
+    // accepting the first two and dropping it.
+    assert_eq!(
+        messages("version 1\ntab { pane { env \"A\" \"B\" 5 } }"),
         ["`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`"]
     );
 }

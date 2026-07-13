@@ -24,7 +24,10 @@ impl TerminalState {
     /// Rebuild the primary screen and its scrollback for `size` by re-wrapping
     /// every logical line to the new width. The cursor stays on its logical
     /// line at its content offset; rows past the new height scroll into
-    /// history and trailing blank padding rows are dropped instead.
+    /// history and trailing blank padding rows are dropped instead. Cursor
+    /// tracking needs at least one row: a zero-row size parks every row in
+    /// history (the cursor has no row to sit on), and the next non-zero
+    /// reflow restarts the cursor on the first logical line.
     pub(super) fn reflow_primary(&mut self, size: PtySize) {
         let fill = self.primary_render.style.bg_fill();
 

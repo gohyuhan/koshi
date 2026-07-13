@@ -190,3 +190,44 @@ fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
     // Solving is deterministic: solving the same tree and rect twice must produce the same placements.
     assert_eq!(solve(tree, tab), result);
 }
+
+/// Property: after any random edit sequence, normalizing the resulting tree
+/// is idempotent — normalizing a normalized tree returns it unchanged.
+///
+/// This does NOT assert that normalizing preserves the solved layout
+/// (`solve(tree) == solve(normalize(tree))`) — that stronger claim is
+/// false: normalize's same-direction merge can change which panes a
+/// too-small tab suppresses, by flattening a nested split's children into
+/// direct siblings of a pane that previously sat outside the nested
+/// split's own (failing) trailing-suppression run. See the suspected-defect
+/// writeup for a minimal repro.
+#[test]
+fn normalizing_after_any_random_edit_sequence_is_idempotent() {
+    let config = Config {
+        cases: 2_000,
+        source_file: Some(file!()),
+        ..Config::default()
+    };
+    let strategy = (
+        prop::collection::vec(op_strategy(), 1..12),
+        4..=120u16,
+        2..=40u16,
+    );
+
+    TestRunner::new(config)
+        .run(&strategy, |(ops, cols, rows)| {
+            let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols, rows });
+            let first = PaneId::new();
+            let mut tree = LayoutNode::Pane(first);
+            let mut live: HashSet<PaneId> = HashSet::from([first]);
+            for op in &ops {
+                apply(op, &mut tree, tab, &mut live);
+            }
+
+            let normalized =
+                normalize(&tree, &live).expect("at least one live pane always survives");
+            prop_assert_eq!(normalize(&normalized, &live), Some(normalized));
+            Ok(())
+        })
+        .unwrap();
+}

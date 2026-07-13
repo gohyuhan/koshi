@@ -541,6 +541,37 @@ fn validate_accepts_consistent_envelope() {
 }
 
 #[test]
+fn command_envelope_error_message_is_human() {
+    assert_eq!(
+        CommandEnvelopeError::ClientIdMismatch.to_string(),
+        "envelope client_id does not match its source"
+    );
+}
+
+#[test]
+fn deserialize_rejects_a_missing_client_id_when_the_source_names_one() {
+    // The mirror case of `deserialize_rejects_client_id_mismatch`: a source
+    // that names a client (`KeyBinding`) but a wire `client_id` of `null`
+    // (rather than a *different* client) must also fail to decode.
+    let valid = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding {
+            client_id: ClientId::new(),
+        },
+        fixed_time(),
+        Command::ToggleLockMode,
+    );
+    let mut value = serde_json::to_value(&valid).expect("serialize");
+    value["client_id"] = serde_json::Value::Null;
+
+    let decoded: Result<CommandEnvelope, _> = serde_json::from_value(value);
+    assert!(
+        decoded.is_err(),
+        "an envelope missing its client_id while the source names one must not deserialize"
+    );
+}
+
+#[test]
 fn reject_reason_roundtrips() {
     roundtrip(&RejectReason::TargetGone);
     roundtrip(&RejectReason::TargetAmbiguous);

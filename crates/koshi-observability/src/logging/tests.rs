@@ -173,3 +173,64 @@ fn a_filter_enables_the_standard_log_file() {
     assert_eq!(opts.filter, "koshi=debug");
     assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
 }
+
+// `from_env` pre-filters an empty `KOSHI_LOG` to `None` before calling this,
+// but `from_filter` is a public, directly-callable mapping in its own right:
+// called with `Some(String::new())` it must NOT fall back to `Disabled`
+// (only `None` does), and must keep the empty string rather than substituting
+// the "info" default (only a missing filter substitutes that).
+#[test]
+fn from_filter_with_empty_string_keeps_empty_filter_and_enables_file_destination() {
+    let opts = TracingOptions::from_filter(Some(String::new()));
+    assert_eq!(opts.destination, LogDestination::File(default_log_path()));
+    assert_eq!(opts.filter, "");
+    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
+}
+
+#[test]
+fn log_format_parse_is_case_sensitive_and_rejects_empty_string() {
+    assert_eq!(LogFormat::parse(Some("JSON")), LogFormat::Pretty);
+    assert_eq!(LogFormat::parse(Some("")), LogFormat::Pretty);
+}
+
+#[test]
+fn redacted_env_field_of_empty_map_is_empty_string() {
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    assert_eq!(redacted_env_field(&env), "");
+}
+
+// Boundary: a zero retention count is a legal `usize` input. Called directly
+// (bypassing `init_tracing`'s single-shot global subscriber, which only one
+// test in this file may claim), this proves sink construction still succeeds
+// at that boundary.
+#[test]
+fn file_writer_accepts_zero_max_log_files_without_erroring() {
+    let dir = std::env::temp_dir().join(format!("koshi-log-clamp-test-{}", std::process::id()));
+    let path = dir.join("koshi.log");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let result = file_writer(&path, 0);
+    assert!(
+        result.is_ok(),
+        "max_log_files=0 must clamp to 1, not fail sink construction"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn file_writer_with_no_file_name_returns_sink_error() {
+    // `Path::file_name()` returns `None` when a path terminates in `..`,
+    // regardless of platform; this exercises the `ok_or_else` error arm
+    // before any directory is created.
+    let path = PathBuf::from("..");
+    match file_writer(&path, 7) {
+        Err(TracingError::Sink(msg)) => {
+            assert_eq!(
+                msg,
+                format!("log path has no file name: {}", path.display())
+            );
+        }
+        other => panic!("expected Sink error, got {other:?}"),
+    }
+}

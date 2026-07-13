@@ -38,6 +38,15 @@ fn the_dim_variant_darkens_every_channel() {
 }
 
 #[test]
+fn a_zero_count_run_returns_the_start_end_without_dividing_by_zero() {
+    // `count == 0` drives `den == 0` inside `lerp`; the explicit guard there
+    // must return the start channel rather than dividing by zero.
+    let theme = Theme::default();
+    assert_eq!(theme.ramp(0, 0), Color::Rgb(0x58, 0x1c, 0x87));
+    assert_eq!(theme.ramp(7, 0), Color::Rgb(0x58, 0x1c, 0x87));
+}
+
+#[test]
 fn custom_endpoints_drive_the_ramp() {
     let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),

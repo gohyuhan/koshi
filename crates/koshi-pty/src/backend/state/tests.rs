@@ -29,6 +29,32 @@ fn drained_handle_yields_none() {
 }
 
 #[test]
+fn a_disconnected_channel_reads_as_none_not_a_panic() {
+    let (handle, output_tx, exit_tx) = PtyHandle::new(PaneId::new());
+
+    drop(output_tx);
+    drop(exit_tx);
+
+    // A hung-up backend looks the same as "nothing pending".
+    assert_eq!(handle.try_read_output(), None);
+    assert_eq!(handle.try_exit_status(), None);
+}
+
+#[test]
+fn output_chunks_arrive_in_send_order() {
+    let id = PaneId::new();
+    let (handle, output_tx, _exit_tx) = PtyHandle::new(id);
+
+    output_tx.send(b"first".to_vec()).expect("send first");
+    output_tx.send(b"second".to_vec()).expect("send second");
+
+    assert_eq!(handle.pane_id(), id);
+    assert_eq!(handle.try_read_output(), Some(b"first".to_vec()));
+    assert_eq!(handle.try_read_output(), Some(b"second".to_vec()));
+    assert_eq!(handle.try_read_output(), None);
+}
+
+#[test]
 fn try_reads_work_while_receivers_are_held() {
     let (handle, output_tx, exit_tx) = PtyHandle::new(PaneId::new());
 

@@ -6,6 +6,7 @@
 //! without losing information.
 
 use super::*;
+use std::error::Error as StdError;
 
 #[test]
 fn config_error_classifies_and_displays() {
@@ -109,4 +110,177 @@ fn aggregate_delegates_and_is_transparent() {
 
     let corrupt: KoshiError = StorageError::Corrupt { detail: "x".into() }.into();
     assert_eq!(corrupt.severity(), Severity::SessionFatal);
+}
+
+// The tests above exercise `KoshiError` through only 2 of its 8 `#[from]`
+// variants (Pty, Storage). The rest are covered here: every variant's `.into()`
+// must produce the exact same `to_string()`/`category()`/`severity()` as
+// calling those methods on the unwrapped inner error directly — proving the
+// `#[error(transparent)]` + delegating `DomainError` impl actually wires up
+// for that arm, not just compiles.
+
+#[test]
+fn aggregate_wraps_and_delegates_config_error() {
+    let inner = ConfigError::NotFound {
+        path: "/etc/koshi/config.kdl".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Config);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_wraps_and_delegates_ipc_error() {
+    let inner = IpcError::Transport {
+        detail: "socket reset".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Ipc);
+    assert_eq!(err.severity(), Severity::ClientFatal);
+}
+
+#[test]
+fn aggregate_wraps_and_delegates_terminal_error() {
+    let inner = TerminalError::Parse {
+        detail: "unterminated CSI".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Terminal);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_wraps_and_delegates_layout_error() {
+    let inner = LayoutError::Solve {
+        detail: "no feasible split".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Layout);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_wraps_and_delegates_plugin_error() {
+    let inner = PluginError::Load {
+        name: "statusbar".into(),
+        detail: "missing manifest".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Plugin);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_wraps_storage_io_variant_as_recoverable() {
+    // `aggregate_delegates_and_is_transparent` above only ever wraps
+    // `StorageError::Corrupt` (SessionFatal). `StorageError`'s severity is NOT
+    // constant per-type like the others above — it varies per variant — so the
+    // `Io` arm must be checked through the aggregate too, or a bug that made
+    // every wrapped `StorageError` report SessionFatal would slip through.
+    let inner = StorageError::Io {
+        detail: "disk full".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Storage);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+// `CliError::category()` is the one wrapped type whose category is NOT
+// constant per-type: `UnknownCommand`/`UnknownAction`/`InvalidArgs` classify as
+// `DomainCategory::Cli`, but `IpcUnavailable` classifies as `DomainCategory::Ipc`
+// and `Runtime` classifies as `DomainCategory::Session` — despite ALL of them
+// living inside `KoshiError::Cli(..)`. E.g. `KoshiError::from(CliError::IpcUnavailable
+// { detail: "..." })` + `.category()` returns `DomainCategory::Ipc`, NOT
+// `DomainCategory::Cli`, which is wrong to assume from the wrapping variant's
+// name alone. Every arm is checked below so a regression that collapses this
+// back to a constant `DomainCategory::Cli` is caught.
+
+#[test]
+fn aggregate_cli_unknown_command_classifies_as_cli() {
+    let err: KoshiError = CliError::UnknownCommand {
+        name: "frobnicate".into(),
+    }
+    .into();
+    assert_eq!(err.category(), DomainCategory::Cli);
+}
+
+#[test]
+fn aggregate_cli_unknown_action_classifies_as_cli() {
+    let inner = CliError::UnknownAction {
+        name: "pane.split".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Cli);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_cli_invalid_args_classifies_as_cli() {
+    let inner = CliError::InvalidArgs {
+        detail: "missing --session".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Cli);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_cli_ipc_unavailable_classifies_as_ipc_not_cli() {
+    let inner = CliError::IpcUnavailable {
+        detail: "no socket".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Ipc);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_cli_runtime_classifies_as_session_not_cli() {
+    let inner = CliError::Runtime {
+        detail: "action rejected".into(),
+    };
+    let want = inner.to_string();
+    let err: KoshiError = inner.into();
+    assert_eq!(err.to_string(), want);
+    assert_eq!(err.category(), DomainCategory::Session);
+    assert_eq!(err.severity(), Severity::Recoverable);
+}
+
+#[test]
+fn aggregate_source_is_none_for_a_transparent_variant_with_no_sourced_inner() {
+    // `#[error(transparent)]` forwards `source()` to the WRAPPED error's own
+    // `source()`, not `Some(&wrapped)`. None of `koshi-error`'s wrapped enums
+    // mark any field `#[source]`/`#[from]` inside their own variants, so their
+    // own `.source()` is `None` — e.g. `PtyError::Spawn { .. }.source()` is
+    // `None` because `PtyError` never wraps a further inner error. Therefore
+    // `KoshiError::from(PtyError::Spawn { .. }).source()` must also be `None`,
+    // not `Some(&PtyError::Spawn { .. })` — the two are easy to conflate and
+    // only one is what `#[error(transparent)]` actually does.
+    let err: KoshiError = PtyError::Spawn {
+        detail: "no such shell".into(),
+    }
+    .into();
+    assert!(
+        err.source().is_none(),
+        "transparent source must delegate to the inner error's own source(), \
+         which PtyError has none of"
+    );
 }

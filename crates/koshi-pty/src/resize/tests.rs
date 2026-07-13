@@ -98,6 +98,21 @@ fn compute_pty_size_floors_each_dimension_independently() {
 }
 
 #[test]
+fn compute_pty_size_leaves_the_exact_minimum_unchanged() {
+    assert_eq!(compute_pty_size(rect(2, 1)), PtySize { cols: 2, rows: 1 });
+}
+
+#[test]
+fn an_empty_batch_yields_no_results_and_no_backend_calls() {
+    let backend = RecordingBackend::new();
+
+    let results = resize_for_layout_change(&backend, Vec::<(PaneId, Option<Rect>)>::new());
+
+    assert_eq!(results, Vec::new());
+    assert!(backend.calls().is_empty());
+}
+
+#[test]
 fn a_none_pane_is_skipped_without_a_backend_call() {
     let backend = RecordingBackend::new();
     let pane = PaneId::new();

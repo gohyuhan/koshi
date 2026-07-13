@@ -199,6 +199,71 @@ fn plugin_events_roundtrip() {
     })));
 }
 
+/// The variant-name test below constructs one instance of every `Event`
+/// variant and checks its `Debug` repr, but `Debug` does not exercise serde —
+/// several variants (unit payloads, `Option` fields, enum-typed fields) are
+/// otherwise never round-tripped through JSON by any other test in this file.
+/// This closes that gap for every variant `lifecycle_events_roundtrip` and its
+/// siblings above do not already cover.
+#[test]
+fn remaining_event_variants_survive_a_json_round_trip() {
+    roundtrip(&Event::PaneClosing(PaneClosing {
+        pane_id: PaneId::new(),
+    }));
+    roundtrip(&Event::PaneFocused(PaneFocused {
+        client_id: ClientId::new(),
+        tab_id: TabId::new(),
+        pane_id: PaneId::new(),
+        prior_pane: Some(PaneId::new()),
+    }));
+    roundtrip(&Event::PaneFocused(PaneFocused {
+        client_id: ClientId::new(),
+        tab_id: TabId::new(),
+        pane_id: PaneId::new(),
+        prior_pane: None,
+    }));
+    roundtrip(&Event::LayoutChanged(LayoutChanged {
+        tab_id: TabId::new(),
+    }));
+    roundtrip(&Event::TabCreated(TabCreated {
+        tab_id: TabId::new(),
+    }));
+    roundtrip(&Event::TabClosed(TabClosed {
+        tab_id: TabId::new(),
+    }));
+    roundtrip(&Event::TabFocused(TabFocused {
+        client_id: ClientId::new(),
+        tab_id: TabId::new(),
+        prior_tab: TabId::new(),
+    }));
+    roundtrip(&Event::KeybindingMatched(KeybindingMatched {
+        client_id: ClientId::new(),
+        command_id: CommandId::new(),
+    }));
+    roundtrip(&Event::MouseReleased(MouseReleased {
+        client_id: ClientId::new(),
+        pane: Some(PaneId::new()),
+        position: Point { x: 1, y: 2 },
+        button: MouseButton::Right,
+    }));
+    roundtrip(&Event::MouseDragged(MouseDragged {
+        client_id: ClientId::new(),
+        pane: None,
+        position: Point { x: 0, y: 0 },
+        button: MouseButton::Middle,
+    }));
+    roundtrip(&Event::PaneMouseForwarded(PaneMouseForwarded {
+        pane_id: PaneId::new(),
+    }));
+    roundtrip(&Event::CopyModeEntered(CopyModeEntered {
+        pane_id: PaneId::new(),
+    }));
+    roundtrip(&Event::CopyModeExited(CopyModeExited {
+        pane_id: PaneId::new(),
+    }));
+    roundtrip(&Event::Quit);
+}
+
 /// The privacy guarantee is structural, not advisory. The tier of an input
 /// event is the payload variant itself — there is no independent `tier` field
 /// that could be set to `SensitiveBlocked` alongside a character or line of

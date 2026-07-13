@@ -5,6 +5,7 @@
 use super::*;
 
 use koshi_core::geometry::Point;
+use koshi_terminal::grid::state::Cell;
 use koshi_terminal::style::Style;
 
 /// A 24-row × 80-column blank grid, shared for cheap cloning.
@@ -203,5 +204,36 @@ fn cloning_shares_the_grid_by_reference() {
 #[test]
 fn clone_equals_original() {
     let snap = fixture(fixture_grid());
+    assert_eq!(snap, snap.clone());
+}
+
+#[test]
+fn snapshots_differing_by_one_grid_cell_are_not_equal() {
+    // Derived `PartialEq` recurses into the grid; a single-cell difference
+    // deep inside it must still make the two snapshots unequal, not just a
+    // difference at the top-level fields.
+    let grid_a = Grid::blank(24, 80, Style::default());
+    let snap_a = fixture(Arc::new(grid_a));
+
+    let mut grid_b = Grid::blank(24, 80, Style::default());
+    *grid_b.cell_mut(0, 0).unwrap() = Cell::new('x', 1, Style::default());
+    let snap_b = fixture(Arc::new(grid_b));
+
+    assert_ne!(snap_a, snap_b);
+}
+
+#[test]
+fn snapshot_with_no_panes_or_tabs_is_valid_and_equals_its_clone() {
+    // An empty snapshot (no panes, no layout slots, no tabs, no focus) must
+    // still construct and compare without panicking — the degenerate state
+    // right after a session's last pane closes.
+    let mut snap = fixture(fixture_grid());
+    snap.panes.clear();
+    snap.session.active_tab.layout_solved.clear();
+    snap.session.tabs_metadata.clear();
+    snap.client.focused_pane = None;
+
+    assert!(snap.panes.is_empty());
+    assert!(snap.session.active_tab.layout_solved.is_empty());
     assert_eq!(snap, snap.clone());
 }

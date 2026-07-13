@@ -243,6 +243,91 @@ fn normalization_is_idempotent() {
 }
 
 #[test]
+fn an_empty_split_normalizes_to_nothing() {
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        Vec::new(),
+    ));
+    assert_eq!(normalize(&empty, &HashSet::new()), None);
+}
+
+#[test]
+fn merge_is_skipped_when_inner_flex_weights_would_overflow_their_sum() {
+    // Hand-built: the inner split's own flex weights sum past u32::MAX by
+    // 4 (not a round wrap to zero, so a naive wrapping add would produce a
+    // nonzero — and wrong — factor instead of catching the overflow). The
+    // merge factor cannot be computed, so the merge aborts instead of
+    // panicking, leaving the nested split intact.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut inner =
+        SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(b), leaf(c)]);
+    inner.weights = vec![
+        SizeWeight::new(SizeConstraint::Flex(u32::MAX)),
+        SizeWeight::new(SizeConstraint::Flex(5)),
+    ];
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(LayoutNode::Split(inner))],
+    ));
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    let LayoutNode::Split(outer) = &normalized else {
+        panic!("expected a split");
+    };
+    assert_eq!(outer.children.len(), 2);
+    assert!(matches!(outer.children[1].node, LayoutNode::Split(_)));
+    assert_eq!(normalized.leaf_panes(), [a, b, c]);
+}
+
+#[test]
+fn merge_is_skipped_when_the_slot_weight_carries_a_min_overlay() {
+    // The nested split's own weights are plain flex, but the slot that
+    // holds the split in the outer split carries a min overlay — not a
+    // plain flex share — so `plain_flex` rejects it and the merge aborts.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), leaf(c)],
+    ));
+    let mut outer = SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(inner)],
+    );
+    outer.weights[1] = outer.weights[1].with_min(10).unwrap();
+    let tree = LayoutNode::Split(outer);
+
+    let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
+    let LayoutNode::Split(result) = &normalized else {
+        panic!("expected a split");
+    };
+    assert_eq!(result.children.len(), 2);
+    assert!(matches!(result.children[1].node, LayoutNode::Split(_)));
+}
+
+#[test]
+fn canonical_weight_clamps_every_zero_variant_up_to_one() {
+    let panes: Vec<PaneId> = (0..4).map(|_| PaneId::new()).collect();
+    let mut split = SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        panes.iter().map(|&p| leaf(p)).collect(),
+    );
+    split.weights[0].primary = SizeConstraint::Percent(0);
+    split.weights[1].primary = SizeConstraint::Fixed(0);
+    split.weights[2].primary = SizeConstraint::Min(0);
+    split.weights[3].primary = SizeConstraint::Preferred(0);
+    let tree = LayoutNode::Split(split);
+
+    let normalized = normalize(&tree, &live(&panes)).unwrap();
+    let LayoutNode::Split(result) = &normalized else {
+        panic!("expected a split");
+    };
+    assert_eq!(result.weights[0].primary, SizeConstraint::Percent(1));
+    assert_eq!(result.weights[1].primary, SizeConstraint::Fixed(1));
+    assert_eq!(result.weights[2].primary, SizeConstraint::Min(1));
+    assert_eq!(result.weights[3].primary, SizeConstraint::Preferred(1));
+}
+
+#[test]
 fn an_already_canonical_tree_is_returned_unchanged() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let column = LayoutNode::Split(SplitNode::with_equal_weights(

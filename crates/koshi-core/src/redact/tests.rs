@@ -117,3 +117,16 @@ fn redact_string_is_noop_without_markers() {
 fn redact_string_ignores_empty_marker() {
     assert_eq!(redact_string("keep me", &[Marker::literal("")]), "keep me");
 }
+
+#[test]
+fn redact_string_on_empty_input_is_empty() {
+    assert_eq!(redact_string("", &[Marker::literal("x")]), "");
+}
+
+#[test]
+fn redact_string_scrubs_a_multibyte_unicode_marker() {
+    // The marker and the surrounding text are both multi-byte UTF-8, so a
+    // byte-unsafe span calculation would panic or corrupt the output.
+    let out = redact_string("token=秘密 and again 秘密 done", &[Marker::literal("秘密")]);
+    assert_eq!(out, "token=*** and again *** done");
+}

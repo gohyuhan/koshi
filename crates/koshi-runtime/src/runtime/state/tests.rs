@@ -104,3 +104,34 @@ fn holds_one_session_with_one_tab_and_pane() {
     assert_eq!(rt.terminal_engines().len(), 1);
     assert!(rt.terminal_engines().contains_key(&pane_id));
 }
+
+#[test]
+fn a_fresh_runtime_has_no_draining_or_quit_flags_set() {
+    let (rt, _tx) = new_runtime();
+
+    assert!(!rt.is_draining());
+    assert!(!rt.quit_requested());
+}
+
+#[test]
+fn constructor_seeds_the_app_config_with_the_given_default_new_pane_direction() {
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
+    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
+    let (tx, inbox_rx) = mpsc::channel();
+
+    // Every other test in this crate seeds `Direction::Right`; a different
+    // value here proves the constructor actually honors its parameter rather
+    // than a hardcoded default.
+    let rt = Runtime::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        tx,
+        TerminalCleanupGuard::new(),
+        Direction::Down,
+    );
+
+    assert_eq!(rt.config.layout.new_pane_direction, Direction::Down);
+}

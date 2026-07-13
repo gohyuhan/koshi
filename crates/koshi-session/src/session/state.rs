@@ -391,8 +391,12 @@ impl Session {
                 });
             }
 
-            // The tab a client is currently showing must exist.
-            if !self.tabs.contains_key(&client.active_tab()) {
+            // The tab a client is currently showing must exist. The check is
+            // scoped to sessions that still have tabs: closing the last tab
+            // quits the session with no successor to point viewers at, so
+            // until the transport disconnects them every client's
+            // `active_tab` names the closed tab by definition.
+            if !self.tabs.is_empty() && !self.tabs.contains_key(&client.active_tab()) {
                 consistency_error.push(SessionConsistencyError::ActiveTabMissing {
                     client: client.id(),
                     tab: client.active_tab(),

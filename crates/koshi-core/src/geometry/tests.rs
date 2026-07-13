@@ -73,6 +73,17 @@ fn intersection_table() {
 }
 
 #[test]
+fn intersection_touching_only_at_a_corner_is_not_an_overlap() {
+    // Documented explicitly on `intersection`: two rects sharing only a
+    // corner point do not overlap, distinct from the edge-adjacency cases
+    // already covered above.
+    let base = rect(2, 2, 4, 4); // [2,6) x [2,6)
+    let corner_only = rect(6, 6, 4, 4); // [6,10) x [6,10), touches at (6,6)
+    assert_eq!(base.intersection(corner_only), None);
+    assert!(!base.intersects(corner_only));
+}
+
+#[test]
 fn intersects_matches_intersection() {
     let base = rect(2, 2, 4, 4);
     assert!(base.intersects(rect(4, 4, 4, 4)));

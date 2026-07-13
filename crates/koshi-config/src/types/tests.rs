@@ -100,12 +100,54 @@ fn from_hex_rejects_wrong_length() {
 }
 
 #[test]
+fn from_hex_rejects_empty_value() {
+    assert_eq!(
+        RgbColor::from_hex(""),
+        Err(ColorParseError::BadLength { got: 0 })
+    );
+    assert_eq!(
+        RgbColor::from_hex("#"),
+        Err(ColorParseError::BadLength { got: 0 })
+    );
+}
+
+#[test]
+fn from_hex_rejects_too_long_value() {
+    assert_eq!(
+        RgbColor::from_hex("#1234567"),
+        Err(ColorParseError::BadLength { got: 7 })
+    );
+}
+
+#[test]
 fn from_hex_rejects_non_hex_digit() {
     assert_eq!(
         RgbColor::from_hex("#gggggg"),
         Err(ColorParseError::BadDigit {
             value: "gggggg".to_string()
         })
+    );
+}
+
+#[test]
+fn from_hex_classifies_a_six_character_multibyte_value_as_bad_digit() {
+    // "12345é" is exactly six characters (the é is multi-byte), so the
+    // documented length rule passes and the non-hex `é` is the real fault.
+    assert_eq!(
+        RgbColor::from_hex("12345\u{e9}"),
+        Err(ColorParseError::BadDigit {
+            value: "12345\u{e9}".to_string()
+        })
+    );
+}
+
+#[test]
+fn from_hex_counts_length_in_characters_for_multibyte_values() {
+    // "café" is four characters (five bytes); the reported length matches
+    // what the user typed, not the byte count.
+    assert_eq!(
+        RgbColor::from_hex("caf\u{e9}"),
+        Err(ColorParseError::BadLength { got: 4 })
     );
 }
 

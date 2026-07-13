@@ -692,6 +692,106 @@ fn resolve_error_is_a_recoverable_config_error() {
 }
 
 #[test]
+fn coming_soon_status_is_checked_before_args_mismatch() {
+    // `copy-mode-enter` is seeded `ComingSoon` and takes `ActionArgs::None`.
+    // The status check runs before the handler is even matched on, so a
+    // shape that would otherwise be an `ArgsMismatch` still reports
+    // `ComingSoon` first.
+    let registry = ActionRegistry::new();
+    let action = core("copy-mode-enter");
+    let wrong_args = ActionArgs::ClosePane {
+        force: true,
+        tree: false,
+    };
+
+    assert_eq!(
+        resolve_action(&action, &wrong_args, &registry),
+        Err(ResolveError::ComingSoon {
+            action: action.clone()
+        })
+    );
+}
+
+#[test]
+fn coming_soon_status_is_checked_before_the_plugin_route() {
+    // A plugin action seeded `ComingSoon` must still refuse with
+    // `ComingSoon`, never routing through as a `PluginHostCall`: the status
+    // check runs before the handler match.
+    let owner = plugin_id(1);
+    let action = ActionRef::plugin(owner, "open-status").expect("valid name");
+    let mut metadata = plugin_metadata(owner);
+    metadata.status = ActionStatus::ComingSoon;
+    let mut registry = ActionRegistry::new();
+    insert_unchecked(&mut registry, action.clone(), metadata);
+
+    assert_eq!(
+        resolve_action(&action, &ActionArgs::None, &registry),
+        Err(ResolveError::ComingSoon { action })
+    );
+}
+
+#[test]
+fn an_empty_sequence_resolves_to_an_empty_plan() {
+    let registry = registry_with_macro("noop", vec![]);
+    let macro_ref = user("noop");
+
+    assert_eq!(
+        resolve_action(&macro_ref, &ActionArgs::None, &registry),
+        Ok(DispatchPlan::Sequence(vec![]))
+    );
+}
+
+#[test]
+fn plugin_action_forwards_no_arguments_untouched() {
+    // A plugin route accepts any `ActionArgs`, uninterpreted, including
+    // `None` — there is no schema check on the resolver's side.
+    let owner = plugin_id(1);
+    let action = ActionRef::plugin(owner, "open-status").expect("valid name");
+    let mut registry = ActionRegistry::new();
+    registry
+        .register(owner, action.clone(), plugin_metadata(owner))
+        .expect("plugin registers its own action");
+
+    assert_eq!(
+        resolve_action(&action, &ActionArgs::None, &registry),
+        Ok(DispatchPlan::PluginHostCall {
+            plugin: owner,
+            action,
+            args: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
+fn an_unhandled_core_action_name_falls_through_to_args_mismatch() {
+    // A `core:` entry whose name is not one of `resolve_core`'s match arms
+    // (e.g. a seed added to the registry table without a matching resolver
+    // arm) is refused as `ArgsMismatch`, not a panic or a silent no-op.
+    let mut registry = ActionRegistry::new();
+    let action = core("bogus-unhandled-action");
+    insert_unchecked(
+        &mut registry,
+        action.clone(),
+        ActionMetadata {
+            namespace: ActionNamespace::Core,
+            display_name: "Bogus".to_string(),
+            description: "Not in the resolve_core table".to_string(),
+            scope_class: ActionScope::Global,
+            target_compat: vec![],
+            args_schema: None,
+            handler: ActionHandlerRef::CoreCommand(CommandKind::Quit),
+            status: ActionStatus::Available,
+            continuous: false,
+        },
+    );
+
+    assert_eq!(
+        resolve_action(&action, &ActionArgs::None, &registry),
+        Err(ResolveError::ArgsMismatch { action })
+    );
+}
+
+#[test]
 fn command_kind_alone_cannot_pick_the_command() {
     let registry = ActionRegistry::new();
     let lock = registry.lookup(&core("lock")).expect("seeded");

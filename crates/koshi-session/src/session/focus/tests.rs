@@ -351,6 +351,51 @@ fn all_panes_suppressed_reports_terminal_too_small() {
 }
 
 #[test]
+fn an_ineligible_spatial_neighbor_falls_through_to_the_absorbed_pane() {
+    // The spatial-neighbor candidate is present but `Removed`, so it must be
+    // skipped — the recovery order still has an eligible pane at the next
+    // step (`absorbed_space`), and that one must win, not a no-pane verdict.
+    let (spatial, absorbed) = (PaneId::new(), PaneId::new());
+    let tab = tab_with_root(spatial); // no focus history recorded
+    let registry = registry_with(vec![
+        record(spatial, PaneLifecycle::Removed),
+        record(absorbed, PaneLifecycle::Running),
+    ]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(Some(spatial), Some(absorbed), vec![spatial, absorbed]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::Focused(absorbed));
+}
+
+#[test]
+fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
+    // Both ranked candidates are ineligible; the last-resort layout-order
+    // scan must still find the one live pane rather than reporting
+    // `TerminalTooSmall` while a focusable pane is actually present.
+    let (spatial, absorbed, live) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tab = tab_with_root(live);
+    let registry = registry_with(vec![
+        record(spatial, PaneLifecycle::Removed),
+        record(absorbed, PaneLifecycle::Removed),
+        record(live, PaneLifecycle::Running),
+    ]);
+
+    let result = repair_focus(
+        &tab,
+        &registry,
+        candidates(Some(spatial), Some(absorbed), vec![spatial, absorbed, live]),
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(result, FocusRepairResult::Focused(live));
+}
+
+#[test]
 fn an_empty_tab_reports_the_empty_tab_policy() {
     // A tab with no leaves at all falls to its empty-tab policy, carried out.
     let mut tab = tab_with_root(PaneId::new());

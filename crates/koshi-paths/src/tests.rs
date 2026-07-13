@@ -112,6 +112,34 @@ fn relative_override_is_ignored() {
 }
 
 #[test]
+fn whitespace_only_override_is_ignored() {
+    // `" "` is a distinct code path from `""`: `OsString::is_empty` is false
+    // for it (length 1), so it falls through to the `is_absolute()` check
+    // instead — that check must also reject it, exactly as an empty value
+    // does. `KOSHI_CONFIG_DIR=" "` must not create a directory literally
+    // named a single space next to the working directory.
+    let mut env = EnvGuard::new();
+    env.set("KOSHI_CONFIG_DIR", " ");
+
+    assert_eq!(
+        config_dir(),
+        project_dirs().map(|d| d.config_dir().to_path_buf())
+    );
+}
+
+#[test]
+fn unicode_override_is_used_verbatim() {
+    // An absolute override is passed straight through with no normalization:
+    // `KOSHI_CONFIG_DIR=/o/café/設定` must resolve to exactly that path, not a
+    // mangled or truncated one.
+    let mut env = EnvGuard::new();
+    let unicode = abs("café/設定");
+    env.set("KOSHI_CONFIG_DIR", &unicode);
+
+    assert_eq!(config_dir(), Some(unicode));
+}
+
+#[test]
 fn defaults_use_the_platform_config_location() {
     let mut env = EnvGuard::new();
     env.unset("KOSHI_CONFIG_DIR");
@@ -197,6 +225,44 @@ fn runtime_dir_falls_back_to_data_dir_run() {
 }
 
 #[test]
+fn empty_runtime_dir_override_is_ignored_not_just_unset_ones() {
+    // `runtime_dir_falls_back_to_data_dir_run` above only ever tests an
+    // *unset* `KOSHI_RUNTIME_DIR`. An explicitly *empty* override
+    // (`KOSHI_RUNTIME_DIR=""`) is a different code path — it must be rejected
+    // by `env_dir`'s `is_empty()` check, not merely absent from the
+    // environment — before falling through to the same XDG/data-dir chain.
+    let mut env = EnvGuard::new();
+    env.set("KOSHI_RUNTIME_DIR", "");
+    env.set("KOSHI_DATA_DIR", abs("data"));
+    #[cfg(target_os = "linux")]
+    env.unset("XDG_RUNTIME_DIR");
+
+    assert_eq!(runtime_dir(), Some(abs("data").join("run")));
+}
+
+#[test]
+fn runtime_dir_with_zero_overrides_falls_back_to_platform_data_dir_run() {
+    // No test above exercises `runtime_dir()` with every `KOSHI_*` override
+    // unset: `runtime_dir_falls_back_to_data_dir_run` always pins
+    // `KOSHI_DATA_DIR` to a fixture path. This drives the full un-overridden
+    // chain end to end — env override (absent) -> `ProjectDirs::runtime_dir()`
+    // (Linux XDG only; unset here so it also misses) -> the platform default
+    // `data_dir` + `"run"` — so a break in any link show up here, not just in
+    // the fixture-pinned path.
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+    env.unset("KOSHI_DATA_DIR");
+    #[cfg(target_os = "linux")]
+    env.unset("XDG_RUNTIME_DIR");
+
+    let dirs = project_dirs().expect("test machine has a home directory");
+    assert_eq!(
+        runtime_dir(),
+        Some(dirs.data_dir().to_path_buf().join("run"))
+    );
+}
+
+#[test]
 fn ensure_dir_creates_nested_and_accepts_existing() {
     let root = tempfile::tempdir().expect("tempdir");
     let nested = root.path().join("a").join("b");
@@ -234,4 +300,35 @@ fn ensure_private_dir_creates_owner_only() {
             .mode();
         assert_eq!(mode & 0o777, 0o700);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_private_dir_repairs_a_pre_existing_wide_open_directory() {
+    // `ensure_dir_creates_nested_and_accepts_existing` proves the *directory*
+    // half of "already existing is success" for `ensure_dir`. This is the
+    // matching case for `ensure_private_dir`'s *permission* half: the prior
+    // state is "the directory is already there, but at mode 0755 (world
+    // readable/executable) from some earlier run" — `create_dir_all` alone
+    // would silently leave it wide open. `ensure_private_dir` must reset it
+    // to 0700 on every call, not just on first creation.
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let private = root.path().join("run");
+    std::fs::create_dir_all(&private).expect("pre-create");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755))
+        .expect("plant wide-open mode");
+
+    ensure_private_dir(&private).expect("repair");
+
+    let mode = std::fs::metadata(&private)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o700,
+        "a pre-existing 0755 dir must be tightened to 0700, not left as-is"
+    );
 }

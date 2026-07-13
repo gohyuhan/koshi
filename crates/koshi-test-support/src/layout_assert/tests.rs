@@ -143,6 +143,77 @@ fn dead_pane_ref_is_detected() {
 }
 
 #[test]
+fn empty_pane_list_fails_occupancy_against_nonempty_tab() {
+    let panes: Vec<PlacedPane> = Vec::new();
+    let err = assert_all_space_occupied(&panes, tab()).unwrap_err();
+    assert_eq!(
+        err,
+        LayoutAssertionError::SpaceNotFullyOccupied {
+            tab_area: 80 * 24,
+            occupied_area: 0,
+        }
+    );
+}
+
+#[test]
+fn empty_pane_list_vacuously_passes_overlap_outside_and_min_size() {
+    let panes: Vec<PlacedPane> = Vec::new();
+    assert_no_overlap(&panes).unwrap();
+    assert_no_outside(&panes, tab()).unwrap();
+    assert_min_size_respected(&panes, Size { cols: 2, rows: 1 }).unwrap();
+}
+
+#[test]
+fn single_pane_exactly_fills_tab_passes_all_invariants() {
+    let panes = vec![(PaneId::new(), tab())];
+    assert_all_space_occupied(&panes, tab()).unwrap();
+    assert_no_overlap(&panes).unwrap();
+    assert_no_outside(&panes, tab()).unwrap();
+    assert_min_size_respected(&panes, Size { cols: 2, rows: 1 }).unwrap();
+}
+
+#[test]
+fn corner_touching_panes_do_not_overlap() {
+    // Two panes sharing only the single corner point (10, 10). The half-open
+    // rect semantics exclude the shared point from both, so no cell is
+    // double-counted.
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let panes = vec![(a, rect(0, 0, 10, 10)), (b, rect(10, 10, 10, 10))];
+    assert_no_overlap(&panes).unwrap();
+}
+
+#[test]
+fn pane_at_exact_minimum_size_passes() {
+    let pane = PaneId::new();
+    let min = Size { cols: 2, rows: 1 };
+    let panes = vec![(pane, rect(0, 0, 2, 1))];
+    assert_min_size_respected(&panes, min).unwrap();
+}
+
+#[test]
+fn overlap_check_reports_first_pair_found_in_iteration_order() {
+    // A and B do not overlap; A and C do. Iteration is `i` then `panes[i+1..]`,
+    // so scanning from A must find the A-C overlap before ever comparing B-C.
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let c = PaneId::new();
+    let panes = vec![
+        (a, rect(0, 0, 10, 10)),
+        (b, rect(20, 20, 10, 10)),
+        (c, rect(5, 5, 10, 10)),
+    ];
+    let err = assert_no_overlap(&panes).unwrap_err();
+    match err {
+        LayoutAssertionError::Overlap { a: ea, b: eb, .. } => {
+            assert_eq!(ea, a);
+            assert_eq!(eb, c);
+        }
+        other => panic!("expected overlap between a and c, got {other:?}"),
+    }
+}
+
+#[test]
 fn suppressed_panes_are_exempt() {
     // A live pane filling the tab plus a suppressed (zero-area) pane.
     let live = rect(0, 0, 80, 24);
