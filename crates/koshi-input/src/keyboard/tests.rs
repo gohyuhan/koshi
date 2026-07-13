@@ -64,6 +64,42 @@ fn uppercase_host_forms_normalize_to_shift_plus_lowercase() {
 }
 
 #[test]
+fn a_capital_that_cannot_be_rebuilt_is_never_folded() {
+    // `ẞ` (capital sharp S) lowercases to the single char `ß`, but `ß`
+    // uppercases to "SS" — so `Shift + ß` cannot rebuild it. Folding it would
+    // send the pane `ß` for a typed `ẞ`, silently altering the user's text, so
+    // it stands for itself instead, as `İ` already does.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('ẞ'), KeyModifiers::NONE)),
+        chord(ModFlags::NONE, Key::Char('ẞ'))
+    );
+    assert_eq!(bytes(ModFlags::NONE, Key::Char('ẞ')), "ẞ".as_bytes());
+
+    // The same for `İ`, whose lowercase is two chars.
+    assert_eq!(
+        decode_key(press(KeyCode::Char('İ'), KeyModifiers::NONE)),
+        chord(ModFlags::NONE, Key::Char('İ'))
+    );
+    assert_eq!(bytes(ModFlags::NONE, Key::Char('İ')), "İ".as_bytes());
+}
+
+#[test]
+fn every_folded_capital_reaches_the_pane_as_the_character_typed() {
+    // The fold is only safe when it is reversible. Whatever the decoder folds
+    // to `lowercase + Shift`, the encoder must rebuild byte-for-byte — the
+    // chord is all the input layer keeps of the press.
+    for typed in ['A', 'Z', 'É', 'Ø', 'ẞ', 'İ', 'Å'] {
+        let chord = decode_key(press(KeyCode::Char(typed), KeyModifiers::NONE)).expect("decodes");
+        assert_eq!(
+            encode(chord, false),
+            typed.to_string().as_bytes(),
+            "{typed} (U+{:04X}) must reach the pane unchanged",
+            typed as u32
+        );
+    }
+}
+
+#[test]
 fn shifted_non_letter_stands_for_itself() {
     // Shift+1 is `!`, not Shift plus `1`.
     assert_eq!(
@@ -206,10 +242,56 @@ fn control_characters_fold_into_their_c0_byte() {
 
 #[test]
 fn control_plus_a_character_with_no_c0_byte_sends_the_character() {
-    // `<C-1>` is a bindable chord, but a terminal has no byte for it and
-    // sends the digit alone — the key must still reach the pane.
+    // `<C-1>` is a bindable chord, but no control code stands for it and a
+    // terminal sends the digit alone — the key must still reach the pane.
     assert_eq!(bytes(ModFlags::CTRL, Key::Char('1')), vec![b'1']);
+    assert_eq!(bytes(ModFlags::CTRL, Key::Char('9')), vec![b'9']);
     assert_eq!(bytes(ModFlags::CTRL, Key::Char(';')), vec![b';']);
+}
+
+#[test]
+fn the_control_digits_carry_the_codes_the_letter_run_cannot_reach() {
+    // Control clears the top bits, which covers `@`..`_` — and terminals hand
+    // the leftover control codes to the digit row. `2` is NUL, `3` is ESC,
+    // `4`..`7` are 0x1c..0x1f, and `8` is DEL.
+    let cases = [
+        ('2', 0x00),
+        ('3', 0x1b),
+        ('4', 0x1c),
+        ('5', 0x1d),
+        ('6', 0x1e),
+        ('7', 0x1f),
+        ('8', 0x7f),
+    ];
+    for (digit, byte) in cases {
+        assert_eq!(
+            bytes(ModFlags::CTRL, Key::Char(digit)),
+            vec![byte],
+            "<C-{digit}>"
+        );
+    }
+
+    // Alt composes with them exactly as it does with a letter.
+    assert_eq!(
+        bytes(ModFlags::ALT | ModFlags::CTRL, Key::Char('4')),
+        vec![ESC, 0x1c]
+    );
+}
+
+#[test]
+fn the_two_spellings_of_one_control_code_send_the_same_byte() {
+    // A host reports the SAME key press differently: on unix crossterm decodes
+    // the terminal's `0x1c` back to `Char('4')`, so `Ctrl-\` arrives as
+    // `<C-4>`; on Windows the key's own character arrives, so it is `<C-\>`.
+    // Both must leave here as `0x1c`, or the chord reaches the pane as a
+    // literal `4` and a program watching for the control code never sees it.
+    for (digit, punctuation) in [('4', '\\'), ('5', ']'), ('6', '^'), ('7', '_')] {
+        assert_eq!(
+            bytes(ModFlags::CTRL, Key::Char(digit)),
+            bytes(ModFlags::CTRL, Key::Char(punctuation)),
+            "<C-{digit}> and <C-{punctuation}> are one key press"
+        );
+    }
 }
 
 #[test]

@@ -20,8 +20,10 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 
+use koshi_terminal::state::CursorShape;
+
 use crate::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, KeymapHints, PaneSlot, PaneSnapshot,
+    ClientSnapshot, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot, PaneSnapshot,
     PluginUiSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_layout::mode::LayoutMode;
@@ -71,7 +73,7 @@ fn build(
                 col: 0,
                 visible: true,
                 blink: false,
-                shape: CursorShape::default(),
+                shape: None,
             },
             grid_view: None,
             reverse_video: false,
@@ -746,7 +748,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
         col: 5,
         visible: true,
         blink: false,
-        shape: CursorShape::default(),
+        shape: None,
     };
     assert_eq!(
         cursor_position(&snap, viewport_area(&snap)),
@@ -771,7 +773,7 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
         col: 99,
         visible: true,
         blink: false,
-        shape: CursorShape::default(),
+        shape: None,
     };
     assert_eq!(
         cursor_position(&snap, viewport_area(&snap)),
@@ -794,9 +796,30 @@ fn cursor_style_reports_the_focused_panes_shape_and_blink() {
         col: 0,
         visible: true,
         blink: true,
-        shape: CursorShape::Bar,
+        shape: Some(CursorShape::Bar),
     };
-    assert_eq!(cursor_style(&snap), Some((CursorShape::Bar, true)));
+    assert_eq!(
+        cursor_style(&snap),
+        Some(CursorStyle::Shaped {
+            shape: CursorShape::Bar,
+            blink: true
+        })
+    );
+}
+
+#[test]
+fn a_pane_that_asked_for_no_shape_leaves_the_users_own_cursor_alone() {
+    // A plain shell never sends DECSCUSR. Focusing it must NOT stamp a block
+    // over the cursor the user configured in their own terminal — it hands the
+    // cursor back to them.
+    let snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    assert_eq!(snap.panes[0].cursor.shape, None);
+    assert_eq!(cursor_style(&snap), Some(CursorStyle::UserDefault));
 }
 
 #[test]
@@ -807,11 +830,11 @@ fn cursor_style_is_none_without_a_focused_terminal_pane() {
         false,
         Size { cols: 40, rows: 8 },
     );
-    // No focused pane: nothing asked for a style.
+    // No focused pane: nobody speaks for the cursor, so it is left as it is.
     let focused = snap.client.focused_pane.take();
     assert_eq!(cursor_style(&snap), None);
 
-    // A plugin pane (no terminal grid) has no DECSCUSR style of its own.
+    // A plugin pane has no terminal, so it has no opinion on the cursor either.
     snap.client.focused_pane = focused;
     snap.panes[0].grid_view = None;
     assert_eq!(cursor_style(&snap), None);
@@ -927,10 +950,11 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
 
 #[test]
 fn cursor_style_follows_focus_between_panes() {
-    // Pane A runs vim in insert mode (blinking bar); pane B runs a shell
-    // (steady block). The style belongs to the outer terminal, not to a pane's
-    // cells, so moving focus must hand it the OTHER pane's style — otherwise
-    // focusing the shell leaves vim's bar sitting on the shell's prompt.
+    // Pane A runs vim in insert mode (it asked for a blinking bar); pane B runs
+    // a plain shell (it asked for nothing). The style belongs to the outer
+    // terminal, not to a pane's cells, so moving focus must hand it the OTHER
+    // pane's answer — otherwise focusing the shell leaves vim's bar sitting on
+    // the shell's prompt.
     let a = PaneId::new();
     let b = PaneId::new();
     let mut snap = build(
@@ -947,15 +971,20 @@ fn cursor_style_follows_focus_between_panes() {
             view_offset: 0,
         });
     }
-    snap.panes[0].cursor.shape = CursorShape::Bar;
+    snap.panes[0].cursor.shape = Some(CursorShape::Bar);
     snap.panes[0].cursor.blink = true;
-    snap.panes[1].cursor.shape = CursorShape::Block;
-    snap.panes[1].cursor.blink = false;
+    snap.panes[1].cursor.shape = None;
 
-    assert_eq!(cursor_style(&snap), Some((CursorShape::Bar, true)));
+    assert_eq!(
+        cursor_style(&snap),
+        Some(CursorStyle::Shaped {
+            shape: CursorShape::Bar,
+            blink: true
+        })
+    );
 
     snap.client.focused_pane = Some(b);
-    assert_eq!(cursor_style(&snap), Some((CursorShape::Block, false)));
+    assert_eq!(cursor_style(&snap), Some(CursorStyle::UserDefault));
 }
 
 /// A snapshot whose active tab has no room for any pane: every slot suppressed
@@ -1136,7 +1165,7 @@ fn cursor_shifts_into_centered_content() {
         col: 5,
         visible: true,
         blink: false,
-        shape: CursorShape::default(),
+        shape: None,
     };
 
     // Content origin offset (10,2); pane inner origin (1,1) places to (11,3);

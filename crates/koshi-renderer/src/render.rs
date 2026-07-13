@@ -31,10 +31,9 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::PaneId;
 use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
-use koshi_terminal::state::CursorShape;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::{PaneSnapshot, RenderSnapshot};
+use crate::snapshot::{CursorStyle, PaneSnapshot, RenderSnapshot};
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
 
@@ -171,10 +170,15 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
     Some(Position::new(x, y))
 }
 
-/// How the focused pane wants its cursor drawn: the [shape][CursorShape] it set
-/// with DECSCUSR, and whether it blinks. `None` when the client has no focused
-/// pane, or that pane runs a plugin rather than a terminal — nothing asked for a
-/// style, so the caller leaves the outer terminal's cursor as it is.
+/// How the outer terminal's cursor should look this frame:
+/// [`Shaped`](CursorStyle::Shaped) with what the focused pane asked for via
+/// DECSCUSR, or [`UserDefault`](CursorStyle::UserDefault) when it asked for
+/// nothing — a plain shell never sends DECSCUSR, and its cursor is whatever the
+/// user configured, not a block koshi invented.
+///
+/// `None` — meaning "leave the cursor as it is" — only when there is no focused
+/// terminal pane to speak for it: no focused pane at all, or a plugin pane,
+/// which has no terminal and so no opinion.
 ///
 /// Companion to [`cursor_position`], which says *where* the cursor goes; this
 /// says what it looks like once it is there. The caller applies it to the outer
@@ -186,10 +190,17 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
 /// [`cursor_position`]'s guard chain here would be a second copy of it to keep in
 /// step.
 #[must_use]
-pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<(CursorShape, bool)> {
+pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<CursorStyle> {
     let pane = find_pane(snapshot, snapshot.client.focused_pane?)?;
     pane.grid_view.as_ref()?;
-    Some((pane.cursor.shape, pane.cursor.blink))
+    let style = match pane.cursor.shape {
+        Some(shape) => CursorStyle::Shaped {
+            shape,
+            blink: pane.cursor.blink,
+        },
+        None => CursorStyle::UserDefault,
+    };
+    Some(style)
 }
 
 /// Find the [`PaneSnapshot`] with the given id in this frame.

@@ -32,7 +32,7 @@ use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, TracingOptions};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::RenderSnapshot;
+use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -320,7 +320,7 @@ fn render<B: Backend>(
     runtime: &Runtime,
     client_id: ClientId,
     last_title: &mut String,
-    last_cursor: &mut Option<(CursorShape, bool)>,
+    last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), B::Error> {
     let Some(snapshot) = runtime.build_snapshot(client_id) else {
         return Ok(());
@@ -352,10 +352,16 @@ fn render<B: Backend>(
     Ok(())
 }
 
-/// The crossterm command for one pane's cursor style. Its six variants are the
-/// same six DECSCUSR styles a pane can ask for, so each pair maps to exactly
-/// one: a blinking [`Bar`](CursorShape::Bar) is vim's insert-mode cursor.
-fn set_cursor_style((shape, blink): (CursorShape, bool)) -> SetCursorStyle {
+/// The crossterm command for one pane's cursor style. Crossterm's six shaped
+/// variants are the same six styles a pane can ask for via DECSCUSR, so each
+/// maps to exactly one: a blinking [`Bar`](CursorShape::Bar) is vim's
+/// insert-mode cursor. A pane that asked for nothing maps to `DefaultUserShape`,
+/// which hands the cursor back to whatever the user configured in their own
+/// terminal.
+fn set_cursor_style(style: CursorStyle) -> SetCursorStyle {
+    let CursorStyle::Shaped { shape, blink } = style else {
+        return SetCursorStyle::DefaultUserShape;
+    };
     match (shape, blink) {
         (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
         (CursorShape::Block, false) => SetCursorStyle::SteadyBlock,

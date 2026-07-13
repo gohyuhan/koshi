@@ -353,10 +353,11 @@ impl TerminalState {
         self.modes.cursor_blink
     }
 
-    /// The shape the cursor is drawn as (DECSCUSR) — the renderer reads this to
-    /// pick the outer terminal's cursor style, so vim's insert-mode bar shows
-    /// as a bar.
-    pub fn cursor_shape(&self) -> CursorShape {
+    /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane has
+    /// asked for no shape — the renderer reads this to pick the outer terminal's
+    /// cursor style, so vim's insert-mode bar shows as a bar, and a pane that
+    /// never asked leaves the user's own cursor alone.
+    pub fn cursor_shape(&self) -> Option<CursorShape> {
         self.modes.cursor_shape
     }
 

@@ -4240,18 +4240,19 @@ fn cursor_blink_toggles() {
 // --- DECSCUSR cursor style ---
 
 #[test]
-fn the_cursor_starts_as_a_steady_block() {
+fn a_fresh_pane_has_asked_for_no_cursor_shape() {
+    // Not "a block" — NOTHING. A pane that never sends DECSCUSR must not
+    // override the cursor the user configured in their own terminal.
     let state = state(5, 3);
-    assert_eq!(state.cursor_shape(), CursorShape::Block);
+    assert_eq!(state.cursor_shape(), None);
     assert!(!state.cursor_blink());
 }
 
 #[test]
 fn decscusr_sets_every_style_it_names() {
-    // The six styles of `CSI Ps SP q`: odd values blink, even are steady, and
-    // `0` means what `1` means. This is the table vim drives its modes with.
+    // The six styles of `CSI Ps SP q`: the odd values blink, the even ones are
+    // steady. This is the table vim drives its modes with.
     let cases = [
-        (&b"\x1b[0 q"[..], CursorShape::Block, true),
         (&b"\x1b[1 q"[..], CursorShape::Block, true),
         (&b"\x1b[2 q"[..], CursorShape::Block, false),
         (&b"\x1b[3 q"[..], CursorShape::Underline, true),
@@ -4262,18 +4263,26 @@ fn decscusr_sets_every_style_it_names() {
     for (bytes, shape, blink) in cases {
         let mut state = state(5, 3);
         advance(&mut state, bytes);
-        assert_eq!(state.cursor_shape(), shape, "{bytes:?}");
+        assert_eq!(state.cursor_shape(), Some(shape), "{bytes:?}");
         assert_eq!(state.cursor_blink(), blink, "{bytes:?}");
     }
 }
 
 #[test]
-fn decscusr_with_no_parameter_is_the_blinking_block() {
-    // An omitted parameter is `0`.
-    let mut state = state(5, 3);
-    advance(&mut state, b"\x1b[ q");
-    assert_eq!(state.cursor_shape(), CursorShape::Block);
-    assert!(state.cursor_blink());
+fn decscusr_zero_gives_the_cursor_back_to_the_user() {
+    // `CSI 0 SP q` (and the same sequence with the parameter omitted) is what a
+    // program sends to undo its own cursor on the way out. It returns the pane
+    // to asking for nothing, so the user's own configured cursor stands again —
+    // it does not impose a blinking block on them.
+    for bytes in [&b"\x1b[0 q"[..], &b"\x1b[ q"[..]] {
+        let mut state = state(5, 3);
+        advance(&mut state, b"\x1b[5 q"); // vim's insert-mode blinking bar
+        assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+
+        advance(&mut state, bytes);
+        assert_eq!(state.cursor_shape(), None, "{bytes:?}");
+        assert!(!state.cursor_blink(), "{bytes:?}");
+    }
 }
 
 #[test]
@@ -4282,7 +4291,7 @@ fn an_unknown_decscusr_value_changes_nothing() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[5 q"); // blinking bar
     advance(&mut state, b"\x1b[9 q");
-    assert_eq!(state.cursor_shape(), CursorShape::Bar);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
     assert!(state.cursor_blink());
 }
 
@@ -4294,7 +4303,7 @@ fn a_steady_style_stops_a_blink_that_mode_12_started() {
     advance(&mut state, b"\x1b[?12h");
     assert!(state.cursor_blink());
     advance(&mut state, b"\x1b[2 q");
-    assert_eq!(state.cursor_shape(), CursorShape::Block);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Block));
     assert!(!state.cursor_blink());
 }
 
@@ -4305,10 +4314,10 @@ fn mode_12_blinks_the_shape_decscusr_chose() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[6 q"); // steady bar
     advance(&mut state, b"\x1b[?12h");
-    assert_eq!(state.cursor_shape(), CursorShape::Bar);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
     assert!(state.cursor_blink());
     advance(&mut state, b"\x1b[?12l");
-    assert_eq!(state.cursor_shape(), CursorShape::Bar);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
     assert!(!state.cursor_blink());
 }
 
@@ -4334,9 +4343,9 @@ fn a_cursor_style_survives_the_alternate_screen() {
     let mut state = state(5, 3);
     advance(&mut state, b"\x1b[?1049h");
     advance(&mut state, b"\x1b[5 q");
-    assert_eq!(state.cursor_shape(), CursorShape::Bar);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
     advance(&mut state, b"\x1b[?1049l");
-    assert_eq!(state.cursor_shape(), CursorShape::Bar);
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
     assert!(state.cursor_blink());
 }
 

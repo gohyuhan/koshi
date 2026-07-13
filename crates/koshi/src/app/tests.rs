@@ -100,22 +100,31 @@ fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
     // Nothing else in the suite would catch a swapped arm: a `Bar` sent as
     // `BlinkingUnderScore` renders vim's insert cursor as an underline while
     // every test still passes.
+    let shaped = |shape, blink| CursorStyle::Shaped { shape, blink };
     let cases = [
-        ((CursorShape::Block, true), SetCursorStyle::BlinkingBlock),
-        ((CursorShape::Block, false), SetCursorStyle::SteadyBlock),
+        // A pane that asked for nothing hands the cursor back to the user.
+        (CursorStyle::UserDefault, SetCursorStyle::DefaultUserShape),
         (
-            (CursorShape::Underline, true),
+            shaped(CursorShape::Block, true),
+            SetCursorStyle::BlinkingBlock,
+        ),
+        (
+            shaped(CursorShape::Block, false),
+            SetCursorStyle::SteadyBlock,
+        ),
+        (
+            shaped(CursorShape::Underline, true),
             SetCursorStyle::BlinkingUnderScore,
         ),
         (
-            (CursorShape::Underline, false),
+            shaped(CursorShape::Underline, false),
             SetCursorStyle::SteadyUnderScore,
         ),
-        ((CursorShape::Bar, true), SetCursorStyle::BlinkingBar),
-        ((CursorShape::Bar, false), SetCursorStyle::SteadyBar),
+        (shaped(CursorShape::Bar, true), SetCursorStyle::BlinkingBar),
+        (shaped(CursorShape::Bar, false), SetCursorStyle::SteadyBar),
     ];
-    for (pair, expected) in cases {
-        assert_eq!(set_cursor_style(pair), expected, "{pair:?}");
+    for (style, expected) in cases {
+        assert_eq!(set_cursor_style(style), expected, "{style:?}");
     }
 }
 

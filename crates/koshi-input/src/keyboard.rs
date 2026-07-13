@@ -157,8 +157,9 @@ fn normalize(key: Key, mods: ModFlags, modifiers: KeyModifiers) -> KeyChord {
 /// into its C0 byte, and Alt prefixes `ESC`.
 ///
 /// `<C-a>` → `0x01`. `<A-a>` → `ESC a`. `<A-C-a>` → `ESC 0x01`. `<S-a>` → `A`.
-/// `<C-1>` → `1`, because no C0 byte stands for Control plus a digit and a
-/// terminal sends the digit alone.
+/// `<C-4>` → `0x1c`, one of the control codes the digit row carries (see
+/// [`control_byte`]). `<C-1>` → `1`: no control code stands for it, so the
+/// character goes as itself.
 fn encode_char(c: char, mods: ModFlags) -> Vec<u8> {
     let c = if mods.contains(ModFlags::SHIFT) {
         unfold_shift(c)
@@ -331,12 +332,41 @@ fn unfold_shift(c: char) -> char {
 }
 
 /// The C0 control byte Control plus this character sends, when one stands for
-/// it. `'a'` → `0x01`; `'['` → `0x1b`; a digit has none.
+/// it. `'a'` → `0x01`; `'['` → `0x1b`; `'4'` → `0x1c`; `'1'` has none.
+///
+/// # The letter run, and the digits that finish it
+///
+/// Control clears the top bits of the character: `'A' & 0x1f` is `0x01`. That
+/// covers `@` through `_` — 32 characters for the 32 C0 codes — and a letter is
+/// just its capital's version of that.
+///
+/// The digit row is the awkward part. A terminal has to deliver the control
+/// codes whose punctuation is hard to reach, so it spreads the leftovers across
+/// `2`–`8`: `2` sends NUL, `3` sends ESC, `4`–`7` send `0x1c`–`0x1f`, and `8`
+/// sends DEL. The same byte therefore has two spellings — `<C-4>` and `<C-\>`
+/// both send `0x1c` — and which one arrives depends on the host:
+///
+/// - On unix the terminal sends the byte, and crossterm decodes `0x1c`–`0x1f`
+///   back to `Char('4')`–`Char('7')` — so `Ctrl+\` reaches koshi as `<C-4>`.
+///   (`0x00`, `0x1b`, `0x7f` never reach the digit arm there: Space, Esc, and
+///   Backspace claim them first.)
+/// - On Windows there is no byte to decode; crossterm reports the key's own
+///   character, so `Ctrl+4` arrives as `<C-4>` and `Ctrl+\` as `<C-\>`.
+///
+/// Both spellings must leave here as the same byte, or a control chord the user
+/// pressed reaches the pane as a literal digit.
 fn control_byte(c: char) -> Option<u8> {
     match c {
         '@'..='_' => Some((c as u8) & 0x1f),
         'a'..='z' => Some((c.to_ascii_uppercase() as u8) & 0x1f),
         '?' => Some(0x7f),
+        '2' => Some(0x00),
+        '3' => Some(0x1b),
+        '4' => Some(0x1c),
+        '5' => Some(0x1d),
+        '6' => Some(0x1e),
+        '7' => Some(0x1f),
+        '8' => Some(0x7f),
         _ => None,
     }
 }

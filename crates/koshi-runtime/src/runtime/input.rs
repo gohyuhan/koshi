@@ -1,9 +1,16 @@
 //! Outer keyboard routing: multi-chord keybinding resolution first, transparent
 //! fallthrough to the focused terminal pane second.
 //!
-//! A chord that no binding consumes becomes bytes here, at the write, rather
-//! than back at the decoder: the bytes a pane expects depend on the mode that
-//! pane is in, which only the moment of writing knows.
+//! A chord that no binding consumes becomes bytes here rather than back at the
+//! decoder: the bytes a pane expects depend on which pane receives them and
+//! what mode it is in, and the decoder, sitting at the host boundary, knows
+//! neither.
+//!
+//! Both are read at the PRESS and carried on it. A key held as a pending prefix
+//! is written later, and the world moves in between — the pane's child can exit
+//! or a command can move focus (so the *recipient* changes), and the pane can
+//! flip its own cursor-key mode (so the *encoding* changes). Carrying both means
+//! an abandoned key lands where and as it would have landed unbuffered.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -13,7 +20,7 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_input::keyboard::encode;
-use koshi_session::client::PendingKeySequence;
+use koshi_session::client::{PendingKeySequence, PressedKey};
 
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::state::Runtime;
@@ -23,11 +30,18 @@ const ESCAPE: KeyChord = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)
 
 impl Runtime {
     /// Resolve one normalized key against the client's current mode, buffering
-    /// prefixes and writing only unconsumed chords to the focused pane.
+    /// prefixes and writing only unconsumed presses to the focused pane.
     pub fn handle_key_input(&mut self, client_id: ClientId, chord: KeyChord, now: Instant) {
         let Some((mode, pending)) = self.take_pending(client_id) else {
             return;
         };
+        // The recipient pane AND its cursor-key mode are both read HERE, at the
+        // press, and travel with the chord. A buffered key is written later,
+        // and by then focus may have moved (the pane's child can exit, or a
+        // command can move it) and the pane may have flipped its own mode — so
+        // an abandoned key must be delivered as the press that was made, to the
+        // pane the user was typing into.
+        let pressed = self.press(client_id, chord);
         let mut chords = pending
             .as_ref()
             .map(|pending| pending.sequence.chords().to_vec())
@@ -37,10 +51,10 @@ impl Runtime {
             .map(|pending| pending.fallback.clone())
             .unwrap_or_default();
         chords.push(chord);
-        fallback.push(chord);
+        fallback.push(pressed);
 
         if chords.len() > self.keymap_hints.max_chord_depth() {
-            self.flush_pending(client_id, mode, fallback);
+            self.flush_pending(mode, fallback);
             return;
         }
 
@@ -86,11 +100,11 @@ impl Runtime {
                 if let Some(bound) = self.keymap_hints.match_sequence(mode, &held.sequence).exact {
                     self.fire_binding(client_id, bound);
                 } else {
-                    self.flush_pending(client_id, mode, held.fallback);
+                    self.flush_pending(mode, held.fallback);
                 }
                 self.handle_key_input(client_id, chord, now);
             }
-            (None, false) => self.fall_through(client_id, mode, chord),
+            (None, false) => self.fall_through(mode, pressed),
         }
     }
 
@@ -134,7 +148,7 @@ impl Runtime {
                 self.fire_binding(client_id, bound.clone());
                 self.rearm_continuous(client_id, &bound, &pending.sequence);
             } else {
-                self.flush_pending(client_id, mode, pending.fallback);
+                self.flush_pending(mode, pending.fallback);
             }
             self.render_scheduler
                 .invalidate(InvalidationReason::StatusChanged);
@@ -150,21 +164,34 @@ impl Runtime {
         let _ = self.pty_backend().write(pane_id, bytes);
     }
 
-    /// Write one unconsumed chord to `client_id`'s focused pane, encoded for
-    /// the pane as it stands right now: a program that turned on
-    /// application-cursor-keys mode reads `<Up>` as `ESC O A`, one that did not
-    /// reads it as `ESC [ A`, so the pane's mode — not the press — picks the
-    /// bytes. A pane with no terminal engine yet has not turned anything on,
-    /// which is the same answer as the mode being off.
-    fn write_chord(&mut self, client_id: ClientId, chord: KeyChord) {
-        let Some(pane_id) = self.focused_pane(client_id) else {
+    /// Capture one key press: the chord, the pane it was typed into, and that
+    /// pane's cursor-key mode at this instant. A pane with no terminal engine
+    /// has turned nothing on, which reads the same as the mode being off.
+    fn press(&self, client_id: ClientId, chord: KeyChord) -> PressedKey {
+        let pane = self.focused_pane(client_id);
+        let app_cursor_keys = pane
+            .and_then(|pane_id| self.terminal_engines.get(&pane_id))
+            .is_some_and(|engine| engine.state().app_cursor_keys());
+        PressedKey {
+            chord,
+            pane,
+            app_cursor_keys,
+        }
+    }
+
+    /// Write one unconsumed press to the pane it was typed into, encoded for the
+    /// cursor-key mode that pane was in at the time — both carried by
+    /// [`PressedKey`], so a key held in a pending sequence still lands where and
+    /// as it would have landed unbuffered. A program in application-cursor-keys
+    /// mode reads `<Up>` as `ESC O A`, one outside it reads `ESC [ A`.
+    ///
+    /// A press whose pane has since closed writes nothing: the process it was
+    /// typed at is gone, and its keystrokes go with it.
+    fn write_press(&mut self, pressed: PressedKey) {
+        let Some(pane_id) = pressed.pane else {
             return;
         };
-        let app_cursor_keys = self
-            .terminal_engines
-            .get(&pane_id)
-            .is_some_and(|engine| engine.state().app_cursor_keys());
-        let bytes = encode(chord, app_cursor_keys);
+        let bytes = encode(pressed.chord, pressed.app_cursor_keys);
         let _ = self.pty_backend().write(pane_id, &bytes);
     }
 
@@ -221,19 +248,19 @@ impl Runtime {
         Some((client.lock_mode(), client.take_pending_key_sequence()))
     }
 
-    fn flush_pending(&mut self, client_id: ClientId, mode: LockMode, fallback: Vec<KeyChord>) {
+    fn flush_pending(&mut self, mode: LockMode, fallback: Vec<PressedKey>) {
         if transparent(mode) {
-            for chord in fallback {
-                self.write_chord(client_id, chord);
+            for pressed in fallback {
+                self.write_press(pressed);
             }
         }
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
     }
 
-    fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
+    fn fall_through(&mut self, mode: LockMode, pressed: PressedKey) {
         if transparent(mode) {
-            self.write_chord(client_id, chord);
+            self.write_press(pressed);
         }
     }
 

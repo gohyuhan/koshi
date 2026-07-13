@@ -10,6 +10,7 @@ use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{BoundAction, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
+use koshi_core::command::{Command, FocusPaneArgs, FocusTarget};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::resolve::ActionArgs;
@@ -42,6 +43,16 @@ fn chord(mods: ModFlags, key: char) -> KeyChord {
     KeyChord::new(mods, Key::Char(key))
 }
 
+/// A press typed into `pane` while it was in ordinary (non-application)
+/// cursor-key mode — every pane's state until a program changes it.
+fn pressed(pane: koshi_core::ids::PaneId, chord: KeyChord) -> PressedKey {
+    PressedKey {
+        chord,
+        pane: Some(pane),
+        app_cursor_keys: false,
+    }
+}
+
 fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
@@ -71,6 +82,106 @@ fn an_unbound_arrow_follows_the_focused_panes_application_cursor_mode() {
     assert_eq!(
         fake.writes(pane).expect("writes"),
         vec![b"\x1b[A".to_vec(), b"\x1bOA".to_vec()]
+    );
+}
+
+#[test]
+fn a_buffered_key_goes_to_the_pane_it_was_typed_into_even_after_focus_moves() {
+    // A key held as a pending prefix is written LATER, and focus can move in
+    // between from something that is not a keypress at all — a `core:focus-pane`
+    // command over IPC, or the focused pane's child exiting. The press belongs
+    // to the pane the user was typing into: it must land THERE, encoded for THAT
+    // pane's mode. Writing it to whoever holds focus at flush time would deliver
+    // an arrow typed into vim (`ESC O A`, application mode) to a shell that
+    // expects `ESC [ A` — and to the wrong process entirely.
+    let (mut runtime, fake, client) = runtime();
+    let first = only_pane(&runtime);
+    let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
+    let now = Instant::now();
+
+    // A second pane, which takes focus. It runs vim: application-cursor-keys on.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'n'), now);
+    let second = focused_pane(&runtime, client);
+    assert_ne!(second, first);
+    runtime.handle_pty_output(second, b"\x1b[?1h");
+
+    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it buffers.
+    bind_normal(
+        &mut runtime,
+        KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
+        ActionRef::core("new-tab").expect("valid core action name"),
+        ActionArgs::None,
+    );
+    runtime.handle_key_input(client, up, now);
+
+    // Focus moves off that pane WITHOUT a keypress: a `core:focus-pane` command
+    // from another source entirely. Only a keypress clears a pending sequence,
+    // so the buffered `<Up>` is still waiting when the recipient changes.
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::Mouse { client_id: client },
+        SystemTime::now(),
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(first),
+            client: Some(client),
+        }),
+    );
+    let result = runtime.dispatch(envelope);
+    assert_eq!(focused_pane(&runtime, client), first, "{result:?}");
+
+    // A mismatching key abandons the sequence. The buffered `<Up>` goes to the
+    // pane it was typed into, in that pane's application mode; the new `z` goes
+    // to the pane now focused.
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(
+        fake.writes(second).expect("writes"),
+        vec![b"\x1bOA".to_vec()],
+        "the buffered arrow belongs to the pane it was typed into"
+    );
+    assert_eq!(
+        fake.writes(first).expect("writes"),
+        vec![b"z".to_vec()],
+        "only the new press goes to the newly focused pane"
+    );
+}
+
+#[test]
+fn a_buffered_arrow_reaches_the_pane_as_the_key_that_was_pressed() {
+    // A key held as a pending prefix is written to the pane LATER, and the pane
+    // can change its cursor-key mode in between — its own output is applied on
+    // the same loop. The press must survive that: pressed in normal mode, it
+    // reaches the pane as `ESC [ A`, even though the pane is in application mode
+    // by the time the sequence is abandoned. Re-reading the mode at the write
+    // would deliver `ESC O A` — bytes for a mode that was not active when the
+    // user pressed the key.
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+    let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
+
+    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it buffers instead of
+    // passing straight through.
+    bind_normal(
+        &mut runtime,
+        KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
+        ActionRef::core("new-tab").expect("valid core action name"),
+        ActionArgs::None,
+    );
+
+    // Press `<Up>` while the pane is a plain shell: buffered, nothing written.
+    let now = Instant::now();
+    runtime.handle_key_input(client, up, now);
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+
+    // The pane now turns application-cursor-keys mode ON, mid-sequence.
+    runtime.handle_pty_output(pane, b"\x1b[?1h");
+
+    // A mismatching key abandons the sequence and flushes it. The buffered
+    // `<Up>` goes out in the mode it was PRESSED in; the `z` goes out as itself.
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1b[A".to_vec(), b"z".to_vec()]
     );
 }
 
@@ -682,10 +793,10 @@ fn a_pending_sequence_beyond_max_chord_depth_flushes_the_whole_buffer_without_fi
         .update_pending_key_sequence(Some(PendingKeySequence {
             sequence: long,
             fallback: vec![
-                chord(ModFlags::CTRL, 'y'),
-                chord(ModFlags::NONE, 'a'),
-                chord(ModFlags::NONE, 'b'),
-                chord(ModFlags::NONE, 'c'),
+                pressed(pane, chord(ModFlags::CTRL, 'y')),
+                pressed(pane, chord(ModFlags::NONE, 'a')),
+                pressed(pane, chord(ModFlags::NONE, 'b')),
+                pressed(pane, chord(ModFlags::NONE, 'c')),
             ],
             deadline: None,
         }));

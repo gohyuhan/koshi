@@ -851,24 +851,33 @@ impl TerminalState {
     /// block) for normal mode and `CSI 5 SP q` (blinking bar) for insert.
     ///
     /// One value carries both halves of the look: the shape, and whether it
-    /// blinks. The odd values blink and the even ones are steady, and `0` means
-    /// what `1` means. The blink half is written into
+    /// blinks. Values `1`–`6` name a style, the odd ones blinking and the even
+    /// ones steady. The blink half is written into
     /// [`cursor_blink`](crate::state::TerminalState::cursor_blink) — the same
     /// field `?12` writes — because a cursor either blinks or it does not, and
     /// the two sequences are two writers of that one answer: `CSI 2 SP q`
     /// ("steady block") must stop a blink an earlier `CSI ? 12 h` started, or
     /// "steady" would be a lie.
     ///
-    /// An unknown value leaves both halves alone: `CSI 9 SP q` names no style,
-    /// so there is nothing to apply.
+    /// `0` gives the cursor back: the pane returns to asking for no style, and
+    /// the user's own configured cursor stands again. This is what the programs
+    /// that send it mean by it — an editor writes `CSI 0 SP q` on exit to undo
+    /// its own cursor — and what the terminals koshi runs inside do with it.
+    /// (The xterm reference reads `0` as a second spelling of `1`, blinking
+    /// block; following that would make an editor's exit sequence *impose* a
+    /// blinking block on a user who never asked for one.)
+    ///
+    /// An unknown value changes nothing: `CSI 9 SP q` names no style, so there
+    /// is nothing to apply, and the style already set stands.
     fn set_cursor_style(&mut self, params: &vte::Params) {
         let (shape, blink) = match first_param(params).unwrap_or(0) {
-            0 | 1 => (CursorShape::Block, true),
-            2 => (CursorShape::Block, false),
-            3 => (CursorShape::Underline, true),
-            4 => (CursorShape::Underline, false),
-            5 => (CursorShape::Bar, true),
-            6 => (CursorShape::Bar, false),
+            0 => (None, false),
+            1 => (Some(CursorShape::Block), true),
+            2 => (Some(CursorShape::Block), false),
+            3 => (Some(CursorShape::Underline), true),
+            4 => (Some(CursorShape::Underline), false),
+            5 => (Some(CursorShape::Bar), true),
+            6 => (Some(CursorShape::Bar), false),
             _ => return,
         };
         self.modes.cursor_shape = shape;
