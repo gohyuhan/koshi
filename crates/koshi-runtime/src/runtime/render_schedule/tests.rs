@@ -69,11 +69,8 @@ fn a_real_reason_gates_at_the_frame_interval() {
     assert!(s.poll(t0));
 
     s.invalidate(InvalidationReason::PtyOutput);
-    assert!(
-        !s.poll(at(t0, 15)),
-        "too soon: 15 ms < 16 ms frame interval"
-    );
-    assert!(s.poll(at(t0, 16)), "16 ms frame interval elapsed");
+    assert!(!s.poll(at(t0, 7)), "too soon: 7 ms < 8 ms frame interval");
+    assert!(s.poll(at(t0, 8)), "8 ms frame interval elapsed");
 }
 
 #[test]
@@ -85,14 +82,14 @@ fn blink_only_gates_at_the_slow_blink_interval() {
 
     s.invalidate(InvalidationReason::BlinkTick);
     assert!(
-        !s.poll(at(t0, 16)),
+        !s.poll(at(t0, 8)),
         "frame interval must not fire a blink-only render"
     );
     assert!(
-        !s.poll(at(t0, 499)),
-        "too soon: 499 ms < 500 ms blink interval"
+        !s.poll(at(t0, 249)),
+        "too soon: 249 ms < 250 ms blink interval"
     );
-    assert!(s.poll(at(t0, 500)), "500 ms blink interval elapsed");
+    assert!(s.poll(at(t0, 250)), "250 ms blink interval elapsed");
 }
 
 #[test]
@@ -104,33 +101,35 @@ fn a_real_reason_alongside_blink_uses_the_fast_cadence() {
 
     s.invalidate(InvalidationReason::BlinkTick);
     s.invalidate(InvalidationReason::PtyOutput);
-    assert!(!s.poll(at(t0, 15)));
+    assert!(!s.poll(at(t0, 7)));
     assert!(
-        s.poll(at(t0, 16)),
-        "a real reason forces the 16 ms gate even with blink pending"
+        s.poll(at(t0, 8)),
+        "a real reason forces the 8 ms gate even with blink pending"
     );
 }
 
 #[test]
-fn idle_five_seconds_of_blink_ticks_renders_ten_times() {
+fn idle_five_seconds_of_blink_ticks_renders_twenty_times() {
     let t0 = Instant::now();
     let mut s = RenderScheduler::new();
     // Establish the baseline frame at t0, then measure the next 5 s.
     s.invalidate(InvalidationReason::BlinkTick);
     assert!(s.poll(t0));
 
+    // Poll every 50 ms — finer than the blink cadence, so the count measures
+    // the gate rather than the sampling grain.
     let mut renders = 0;
-    let mut ms = 100;
+    let mut ms = 50;
     while ms <= 5000 {
         s.invalidate(InvalidationReason::BlinkTick);
         if s.poll(at(t0, ms)) {
             renders += 1;
         }
-        ms += 100;
+        ms += 50;
     }
     assert_eq!(
-        renders, 10,
-        "blink coalesces to one render per 500 ms over 5 s"
+        renders, 20,
+        "blink coalesces to one render per 250 ms over 5 s"
     );
 }
 
@@ -157,7 +156,7 @@ fn next_wakeup_reports_the_remaining_frame_time() {
     assert!(s.poll(t0));
 
     s.invalidate(InvalidationReason::PtyOutput);
-    assert_eq!(s.next_wakeup(at(t0, 10)), Some(Duration::from_millis(6)));
+    assert_eq!(s.next_wakeup(at(t0, 3)), Some(Duration::from_millis(5)));
 }
 
 #[test]
@@ -168,7 +167,7 @@ fn next_wakeup_reports_the_remaining_blink_time() {
     assert!(s.poll(t0));
 
     s.invalidate(InvalidationReason::BlinkTick);
-    assert_eq!(s.next_wakeup(at(t0, 100)), Some(Duration::from_millis(400)));
+    assert_eq!(s.next_wakeup(at(t0, 100)), Some(Duration::from_millis(150)));
 }
 
 #[test]

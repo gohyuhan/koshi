@@ -37,11 +37,38 @@ pub enum MouseEncoding {
     Urxvt,
 }
 
+/// The shape the cursor is drawn as, set by DECSCUSR (`CSI Ps SP q`). An
+/// editor switches it to tell its modes apart: vim draws a [`Block`][Self::Block]
+/// while it is in normal mode and a [`Bar`][Self::Bar] while it is inserting.
+///
+/// There is deliberately no `Default` variant, and the stored shape is an
+/// `Option`: a pane that has never sent DECSCUSR has asked for *nothing*, which
+/// is not the same as asking for a block. Only a pane that actually requested a
+/// shape may override the cursor the user configured in their own terminal.
+///
+/// Whether the cursor *blinks* is likewise not part of this. DECSCUSR carries
+/// the shape and the blink together in one value (`2` = steady block, `1` =
+/// blinking block), but `?12` (att610) sets blinking on its own — so blinking is
+/// one piece of state with two writers, read back through
+/// [`TerminalState::cursor_blink`](crate::state::TerminalState::cursor_blink).
+/// Storing a second blink flag here would let the two disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    /// A box filling the whole cell.
+    Block,
+    /// A line along the bottom of the cell.
+    Underline,
+    /// A vertical bar at the cell's left edge — what an editor shows while
+    /// inserting text.
+    Bar,
+}
+
 /// Terminal mode flags the renderer and input/mouse layers consult: autowrap
 /// (`?7`), application cursor keys (`?1`), reverse video (`?5`), cursor blink
-/// (`?12`), bracketed paste (`?2004`), the mouse [tracking][MouseTracking] level
-/// and [encoding][MouseEncoding] (`?9`/`?1000`/`?1002`/`?1003` and
-/// `?1005`/`?1006`/`?1015`), and alternate-scroll (`?1007`).
+/// (`?12`), cursor [shape][CursorShape] (DECSCUSR), bracketed paste (`?2004`),
+/// the mouse [tracking][MouseTracking] level and [encoding][MouseEncoding]
+/// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), and
+/// alternate-scroll (`?1007`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalModes {
     /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
@@ -64,7 +91,14 @@ pub struct TerminalModes {
     /// background across the whole screen.
     pub(in crate::state) reverse_video: bool,
     /// `?12` (att610) — cursor blink: the renderer blinks the cursor cell.
+    /// Written by `?12` AND by DECSCUSR, whose value says both shape and
+    /// blink; the last of the two to arrive wins.
     pub(in crate::state) cursor_blink: bool,
+    /// DECSCUSR (`CSI Ps SP q`) — the shape the cursor is drawn as, or `None`
+    /// while the pane has asked for no shape at all (its state at startup, and
+    /// again after `CSI 0 SP q`). `None` leaves the user's own terminal cursor
+    /// untouched; see [`CursorShape`].
+    pub(in crate::state) cursor_shape: Option<CursorShape>,
 }
 
 impl Default for TerminalModes {
@@ -78,6 +112,7 @@ impl Default for TerminalModes {
             app_cursor_keys: false,
             reverse_video: false,
             cursor_blink: false,
+            cursor_shape: None,
         }
     }
 }

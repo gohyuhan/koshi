@@ -230,15 +230,23 @@ fn fold_uppercase_folds_single_char_lowercase_letters_only() {
 
 #[test]
 fn fold_uppercase_folds_uppercase_letters_outside_latin_script() {
-    // Greek capital sigma lowercases to one char: folds like any other letter.
+    // Greek capital sigma lowercases to one char, and uppercases back to
+    // itself: folds like any other letter.
     assert_eq!(fold_uppercase('Σ'), ('σ', true));
-    // Capital sharp S (`ẞ`) lowercases to the single-char `ß`, even though
-    // `ß` itself uppercases to the two-char `SS` — the fold only cares about
-    // the *lowercase* mapping's length, not the reverse direction.
-    assert_eq!(fold_uppercase('ẞ'), ('ß', true));
     // Roman numeral four is an uppercase letter whose lowercase form is a
-    // single different character, not a case variant of a Latin letter.
+    // single different character, not a case variant of a Latin letter. It
+    // uppercases back to itself, so it folds.
     assert_eq!(fold_uppercase('Ⅳ'), ('ⅳ', true));
+}
+
+#[test]
+fn fold_uppercase_refuses_a_fold_it_could_not_undo() {
+    // Capital sharp S (`ẞ`) lowercases to the single-char `ß` — but `ß`
+    // uppercases to the two-char `"SS"`, so `Shift + ß` cannot rebuild `ẞ`.
+    // A chord is all the input layer keeps of a key press: if it folded here,
+    // an unbound `ẞ` would reach the pane as `ß` and silently change the user's
+    // text. So the fold only happens when the capital comes back.
+    assert_eq!(fold_uppercase('ẞ'), ('ẞ', false));
 }
 
 #[test]

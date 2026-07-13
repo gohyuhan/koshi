@@ -33,7 +33,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::{PaneSnapshot, RenderSnapshot};
+use crate::snapshot::{CursorStyle, PaneSnapshot, RenderSnapshot};
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
 
@@ -168,6 +168,39 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
     let x = (inner.x + pane.cursor.col).min(inner.right().saturating_sub(1));
     let y = (inner.y + pane.cursor.row).min(inner.bottom().saturating_sub(1));
     Some(Position::new(x, y))
+}
+
+/// How the outer terminal's cursor should look this frame:
+/// [`Shaped`](CursorStyle::Shaped) with what the focused pane asked for via
+/// DECSCUSR, or [`UserDefault`](CursorStyle::UserDefault) when it asked for
+/// nothing — a plain shell never sends DECSCUSR, and its cursor is whatever the
+/// user configured, not a block koshi invented.
+///
+/// `None` — meaning "leave the cursor as it is" — only when there is no focused
+/// terminal pane to speak for it: no focused pane at all, or a plugin pane,
+/// which has no terminal and so no opinion.
+///
+/// Companion to [`cursor_position`], which says *where* the cursor goes; this
+/// says what it looks like once it is there. The caller applies it to the outer
+/// terminal (crossterm's `SetCursorStyle`), which is what makes vim's
+/// insert-mode bar show as a bar instead of a block.
+///
+/// Deliberately not gated on the cursor being visible or the view being scrolled
+/// back: a cursor that is not drawn has no look to get wrong, and re-deriving
+/// [`cursor_position`]'s guard chain here would be a second copy of it to keep in
+/// step.
+#[must_use]
+pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<CursorStyle> {
+    let pane = find_pane(snapshot, snapshot.client.focused_pane?)?;
+    pane.grid_view.as_ref()?;
+    let style = match pane.cursor.shape {
+        Some(shape) => CursorStyle::Shaped {
+            shape,
+            blink: pane.cursor.blink,
+        },
+        None => CursorStyle::UserDefault,
+    };
+    Some(style)
 }
 
 /// Find the [`PaneSnapshot`] with the given id in this frame.

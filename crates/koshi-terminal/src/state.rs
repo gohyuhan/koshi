@@ -40,7 +40,7 @@ mod screen;
 pub use clipped_row::ClippedRow;
 pub use cursor::{Cursor, SavedCursor};
 pub use cwd::ReportedCwd;
-pub use modes::{MouseEncoding, MouseTracking, TerminalModes};
+pub use modes::{CursorShape, MouseEncoding, MouseTracking, TerminalModes};
 pub use render::{Charset, RenderState};
 pub use screen::Screen;
 
@@ -346,10 +346,19 @@ impl TerminalState {
         self.modes.reverse_video
     }
 
-    /// Whether cursor-blink mode (`?12`) is active — the renderer reads this to
-    /// blink the cursor cell.
+    /// Whether cursor-blink mode is active — the renderer reads this to blink
+    /// the cursor cell. Set by `?12` (att610) and by DECSCUSR, whose style
+    /// value says both shape and blink; the last of the two to arrive wins.
     pub fn cursor_blink(&self) -> bool {
         self.modes.cursor_blink
+    }
+
+    /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane has
+    /// asked for no shape — the renderer reads this to pick the outer terminal's
+    /// cursor style, so vim's insert-mode bar shows as a bar, and a pane that
+    /// never asked leaves the user's own cursor alone.
+    pub fn cursor_shape(&self) -> Option<CursorShape> {
+        self.modes.cursor_shape
     }
 
     /// The pane's scrollback history. The runtime reads its truncation tallies

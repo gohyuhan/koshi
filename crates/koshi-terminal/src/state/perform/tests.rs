@@ -4237,6 +4237,118 @@ fn cursor_blink_toggles() {
     assert!(!state.cursor_blink());
 }
 
+// --- DECSCUSR cursor style ---
+
+#[test]
+fn a_fresh_pane_has_asked_for_no_cursor_shape() {
+    // Not "a block" — NOTHING. A pane that never sends DECSCUSR must not
+    // override the cursor the user configured in their own terminal.
+    let state = state(5, 3);
+    assert_eq!(state.cursor_shape(), None);
+    assert!(!state.cursor_blink());
+}
+
+#[test]
+fn decscusr_sets_every_style_it_names() {
+    // The six styles of `CSI Ps SP q`: the odd values blink, the even ones are
+    // steady. This is the table vim drives its modes with.
+    let cases = [
+        (&b"\x1b[1 q"[..], CursorShape::Block, true),
+        (&b"\x1b[2 q"[..], CursorShape::Block, false),
+        (&b"\x1b[3 q"[..], CursorShape::Underline, true),
+        (&b"\x1b[4 q"[..], CursorShape::Underline, false),
+        (&b"\x1b[5 q"[..], CursorShape::Bar, true),
+        (&b"\x1b[6 q"[..], CursorShape::Bar, false),
+    ];
+    for (bytes, shape, blink) in cases {
+        let mut state = state(5, 3);
+        advance(&mut state, bytes);
+        assert_eq!(state.cursor_shape(), Some(shape), "{bytes:?}");
+        assert_eq!(state.cursor_blink(), blink, "{bytes:?}");
+    }
+}
+
+#[test]
+fn decscusr_zero_gives_the_cursor_back_to_the_user() {
+    // `CSI 0 SP q` (and the same sequence with the parameter omitted) is what a
+    // program sends to undo its own cursor on the way out. It returns the pane
+    // to asking for nothing, so the user's own configured cursor stands again —
+    // it does not impose a blinking block on them.
+    for bytes in [&b"\x1b[0 q"[..], &b"\x1b[ q"[..]] {
+        let mut state = state(5, 3);
+        advance(&mut state, b"\x1b[5 q"); // vim's insert-mode blinking bar
+        assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+
+        advance(&mut state, bytes);
+        assert_eq!(state.cursor_shape(), None, "{bytes:?}");
+        assert!(!state.cursor_blink(), "{bytes:?}");
+    }
+}
+
+#[test]
+fn an_unknown_decscusr_value_changes_nothing() {
+    // `CSI 9 SP q` names no style, so it leaves the one already set alone.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[5 q"); // blinking bar
+    advance(&mut state, b"\x1b[9 q");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+    assert!(state.cursor_blink());
+}
+
+#[test]
+fn a_steady_style_stops_a_blink_that_mode_12_started() {
+    // Blinking is ONE piece of state with two writers. `?12 h` starts a blink;
+    // a following "steady block" must stop it, or "steady" would be a lie.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?12h");
+    assert!(state.cursor_blink());
+    advance(&mut state, b"\x1b[2 q");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Block));
+    assert!(!state.cursor_blink());
+}
+
+#[test]
+fn mode_12_blinks_the_shape_decscusr_chose() {
+    // The other writer, in the other order: `?12` says whether the cursor
+    // blinks and says nothing about its shape, so the bar stays a bar.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[6 q"); // steady bar
+    advance(&mut state, b"\x1b[?12h");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+    assert!(state.cursor_blink());
+    advance(&mut state, b"\x1b[?12l");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+    assert!(!state.cursor_blink());
+}
+
+#[test]
+fn a_decrqm_query_for_mode_12_answers_what_decscusr_left_behind() {
+    // `?12` is queryable, so the one blink state must read back consistently
+    // however it was written: after a blinking bar, an app asking "is the
+    // cursor blinking?" is told yes.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[5 q"); // blinking bar
+    advance(&mut state, b"\x1b[?12$p");
+    assert_eq!(state.take_replies(), b"\x1b[?12;1$y".to_vec());
+
+    advance(&mut state, b"\x1b[2 q"); // steady block
+    advance(&mut state, b"\x1b[?12$p");
+    assert_eq!(state.take_replies(), b"\x1b[?12;2$y".to_vec());
+}
+
+#[test]
+fn a_cursor_style_survives_the_alternate_screen() {
+    // The style is one global setting, not per-screen: vim sets its bar on the
+    // alternate screen and the shape does not reset under it.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1049h");
+    advance(&mut state, b"\x1b[5 q");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+    advance(&mut state, b"\x1b[?1049l");
+    assert_eq!(state.cursor_shape(), Some(CursorShape::Bar));
+    assert!(state.cursor_blink());
+}
+
 #[test]
 fn unsupported_dec_modes_are_ignored() {
     // ?2 (VT52), ?3 (132-column), ?8 (auto-repeat): traced no-ops. They must not

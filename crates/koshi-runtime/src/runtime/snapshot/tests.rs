@@ -20,6 +20,7 @@ use koshi_renderer::theme::Theme;
 use koshi_session::client::{Client, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use ratatui::style::Color;
 
@@ -281,6 +282,41 @@ fn build_snapshot_carries_the_live_terminal_grid_and_cursor() {
     assert!(!pane.reverse_video);
     assert_eq!(pane.scrollback.retained_lines, 0);
     assert!(!pane.scrollback.truncated);
+
+    // A shell that never sent DECSCUSR has asked for no shape at all.
+    assert_eq!(pane.cursor.shape, None);
+    assert!(!pane.cursor.blink);
+}
+
+#[test]
+fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
+    // The bytes vim writes on entering insert mode: DECSCUSR "blinking bar".
+    // They must reach the snapshot, which is what lets the app style the outer
+    // terminal's cursor to match — a block in normal mode, a bar in insert.
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+    rt.terminal_engines
+        .insert(pane_id, TerminalEngine::new(PtySize { cols: 80, rows: 24 }));
+
+    rt.handle_pty_output(pane_id, b"\x1b[5 q");
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.panes[0].cursor.shape, Some(CursorShape::Bar));
+    assert!(snap.panes[0].cursor.blink);
+
+    // Leaving insert mode: back to a steady block.
+    rt.handle_pty_output(pane_id, b"\x1b[2 q");
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.panes[0].cursor.shape, Some(CursorShape::Block));
+    assert!(!snap.panes[0].cursor.blink);
+
+    // vim exiting: `CSI 0 SP q` undoes its cursor, and the pane is back to
+    // asking for nothing — the user's own terminal cursor stands again.
+    rt.handle_pty_output(pane_id, b"\x1b[0 q");
+    let snap = rt.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(snap.panes[0].cursor.shape, None);
+    assert!(!snap.panes[0].cursor.blink);
 }
 
 #[test]

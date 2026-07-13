@@ -64,6 +64,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
             col: 5,
             visible: true,
             blink: false,
+            shape: None,
         },
         grid_view: Some(GridView {
             grid,
@@ -147,6 +148,7 @@ fn builds_from_fixture_with_exact_values() {
             col: 5,
             visible: true,
             blink: false,
+            shape: None,
         }
     );
     assert!(!pane.reverse_video);

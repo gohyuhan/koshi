@@ -1,6 +1,6 @@
 //! `keys.rs` is a compatibility re-export (`pub use
-//! koshi_input::keyboard::{decode_key, DecodedKey};`) with no logic of its
-//! own — the decoding rules are `koshi-input`'s and are exhaustively tested
+//! koshi_input::keyboard::decode_key;`) with no logic of its own — the
+//! decoding rules are `koshi-input`'s and are exhaustively tested
 //! there. This is a wiring test only: it proves the re-exported path
 //! (`crate::keys::decode_key`) produces exactly what calling
 //! `koshi_input::keyboard::decode_key` directly produces, for one
@@ -23,10 +23,7 @@ fn the_reexport_decodes_a_press_identically_to_the_wrapped_function() {
     assert_eq!(via_wrapped, via_reexport, "the re-export must not diverge");
     assert_eq!(
         via_reexport,
-        Some(DecodedKey {
-            chord: KeyChord::new(ModFlags::CTRL, Key::Char('q')),
-            raw_bytes: vec![0x11],
-        })
+        Some(KeyChord::new(ModFlags::CTRL, Key::Char('q')))
     );
 }
 

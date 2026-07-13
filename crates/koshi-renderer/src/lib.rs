@@ -10,4 +10,4 @@ pub mod snapshot;
 pub mod statusline_hints;
 pub mod theme;
 
-pub use render::{cursor_position, render_frame};
+pub use render::{cursor_position, cursor_style, render_frame};

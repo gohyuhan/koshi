@@ -16,6 +16,7 @@ use std::time::{Instant, SystemTime};
 
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -31,11 +32,12 @@ use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, TracingOptions};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::RenderSnapshot;
-use koshi_renderer::{cursor_position, render_frame};
+use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
+use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::state::Runtime;
+use koshi_terminal::state::CursorShape;
 
 use crate::keys::decode_key;
 
@@ -60,6 +62,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cleanup = TerminalCleanupGuard::new();
     cleanup.register_cleanup(Box::new(|| {
         let _ = disable_raw_mode();
+        // The cursor style koshi last copied out of a pane belongs to that pane,
+        // not to the shell koshi exits back to: quitting while vim was inserting
+        // would otherwise leave the user's own prompt wearing vim's blinking bar.
+        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }));
     let _panic_guard = install_panic_hook(&cleanup);
@@ -163,14 +169,10 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
     thread::spawn(move || loop {
         let runtime_event = match event::read() {
             Ok(Event::Key(key)) => {
-                let Some(decoded) = decode_key(key) else {
+                let Some(chord) = decode_key(key) else {
                     continue;
                 };
-                Some(RuntimeEvent::KeyInput {
-                    client_id,
-                    chord: decoded.chord,
-                    raw_bytes: decoded.raw_bytes,
-                })
+                Some(RuntimeEvent::KeyInput { client_id, chord })
             }
             Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
                 client_id,
@@ -199,6 +201,7 @@ fn run_loop<B: Backend>(
     client_id: ClientId,
 ) -> Result<(), B::Error> {
     let mut last_title = String::new();
+    let mut last_cursor = None;
     loop {
         let now = Instant::now();
         let next = earliest(
@@ -229,7 +232,13 @@ fn run_loop<B: Backend>(
         }
         runtime.expire_key_sequences(Instant::now());
         if runtime.poll_render(Instant::now()) {
-            render(terminal, runtime, client_id, &mut last_title)?;
+            render(
+                terminal,
+                runtime,
+                client_id,
+                &mut last_title,
+                &mut last_cursor,
+            )?;
         }
         if !runtime.has_active_panes() {
             break;
@@ -254,11 +263,9 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         } => {
             let _ = runtime.handle_child_exit(pane_id, status, exited_at);
         }
-        RuntimeEvent::KeyInput {
-            client_id,
-            chord,
-            raw_bytes,
-        } => runtime.handle_key_input(client_id, chord, raw_bytes, Instant::now()),
+        RuntimeEvent::KeyInput { client_id, chord } => {
+            runtime.handle_key_input(client_id, chord, Instant::now());
+        }
         RuntimeEvent::OuterInput { client_id, bytes } => {
             runtime.handle_outer_input(client_id, &bytes);
         }
@@ -302,16 +309,18 @@ fn earliest(
     }
 }
 
-/// Paint one frame for `client_id`'s viewport, placing the hardware cursor
-/// and keeping the outer terminal emulator's window title on
-/// `<session> | <focused pane title>`. Generic over the backend so a test can
-/// render into an in-memory buffer; the title escape goes to the real stdout
-/// and is skipped when unchanged, so frames that move nothing emit nothing.
+/// Paint one frame for `client_id`'s viewport, placing the hardware cursor,
+/// matching its style to the focused pane's, and keeping the outer terminal
+/// emulator's window title on `<session> | <focused pane title>`. Generic over
+/// the backend so a test can render into an in-memory buffer; the title and
+/// cursor-style escapes go to the real stdout and are skipped when unchanged,
+/// so frames that move nothing emit nothing.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     runtime: &Runtime,
     client_id: ClientId,
     last_title: &mut String,
+    last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), B::Error> {
     let Some(snapshot) = runtime.build_snapshot(client_id) else {
         return Ok(());
@@ -321,6 +330,18 @@ fn render<B: Backend>(
         let _ = execute!(io::stdout(), SetTitle(&title));
         *last_title = title;
     }
+    // The pane owns the look of the cursor sitting in it, so koshi passes the
+    // focused pane's DECSCUSR style straight out to the terminal it is itself
+    // running in: the bar vim asked its "terminal" for is the bar the user sees.
+    // Focus moving to a pane with a different style re-emits it, since the style
+    // is a property of the outer terminal, not of the frame.
+    let cursor = cursor_style(&snapshot);
+    if cursor != *last_cursor {
+        if let Some(style) = cursor.map(set_cursor_style) {
+            let _ = execute!(io::stdout(), style);
+        }
+        *last_cursor = cursor;
+    }
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(SnapshotWidget(&snapshot), area);
@@ -329,6 +350,26 @@ fn render<B: Backend>(
         }
     })?;
     Ok(())
+}
+
+/// The crossterm command for one pane's cursor style. Crossterm's six shaped
+/// variants are the same six styles a pane can ask for via DECSCUSR, so each
+/// maps to exactly one: a blinking [`Bar`](CursorShape::Bar) is vim's
+/// insert-mode cursor. A pane that asked for nothing maps to `DefaultUserShape`,
+/// which hands the cursor back to whatever the user configured in their own
+/// terminal.
+fn set_cursor_style(style: CursorStyle) -> SetCursorStyle {
+    let CursorStyle::Shaped { shape, blink } = style else {
+        return SetCursorStyle::DefaultUserShape;
+    };
+    match (shape, blink) {
+        (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
+        (CursorShape::Block, false) => SetCursorStyle::SteadyBlock,
+        (CursorShape::Underline, true) => SetCursorStyle::BlinkingUnderScore,
+        (CursorShape::Underline, false) => SetCursorStyle::SteadyUnderScore,
+        (CursorShape::Bar, true) => SetCursorStyle::BlinkingBar,
+        (CursorShape::Bar, false) => SetCursorStyle::SteadyBar,
+    }
 }
 
 /// The outer emulator's window title for one frame: the session name, plus

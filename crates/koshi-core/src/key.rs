@@ -179,12 +179,24 @@ impl fmt::Display for Key {
 /// [`Key::Char`] chord is stored in — the one rule shared by the config
 /// parser and the input decoder.
 ///
-/// - `'A'` → `('a', true)` — the `true` means "Shift is part of this key".
+/// The fold is **reversible or it does not happen**. A chord is all the input
+/// layer keeps of a key press: when no binding consumes the key, it rebuilds
+/// the typed character from `lowercase + Shift` to send it to the pane. A fold
+/// whose capital cannot be recovered would change the user's text, so a letter
+/// only folds when uppercasing the lowercase form gives the original character
+/// back.
+///
+/// - `'A'` → `('a', true)` — the `true` means "Shift is part of this key";
+///   `'a'` uppercases back to `'A'`, so the fold is safe.
 /// - `'a'`, `'!'`, `'1'` → unchanged, `false` — nothing to fold.
 /// - `'İ'` → `('İ', false)` — Unicode lowercasing can produce MORE than one
 ///   character (`'İ'` lowercases to `'i'` plus a combining dot), and a
 ///   [`Key::Char`] holds exactly one, so such a letter cannot be modeled as
 ///   `Shift + one lowercase char` and stands as it is.
+/// - `'ẞ'` → `('ẞ', false)` — capital sharp S lowercases to the single char
+///   `'ß'`, but `'ß'` uppercases to `"SS"`, so the capital cannot be rebuilt
+///   from `Shift + 'ß'`. Folding it would send the pane `'ß'` for a typed
+///   `'ẞ'`, so it stands as it is instead.
 #[must_use]
 pub fn fold_uppercase(c: char) -> (char, bool) {
     if !c.is_uppercase() {
@@ -193,8 +205,14 @@ pub fn fold_uppercase(c: char) -> (char, bool) {
     // `to_lowercase()` is an iterator because a lowercase mapping may be
     // several chars; `(Some(l), None)` = the mapping is exactly one char.
     let mut lower = c.to_lowercase();
-    match (lower.next(), lower.next()) {
-        (Some(l), None) => (l, true),
+    let (Some(lowered), None) = (lower.next(), lower.next()) else {
+        return (c, false);
+    };
+    // Fold only when the capital comes back: uppercasing the lowered form must
+    // yield exactly the character that was typed.
+    let mut upper = lowered.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(restored), None) if restored == c => (lowered, true),
         _ => (c, false),
     }
 }

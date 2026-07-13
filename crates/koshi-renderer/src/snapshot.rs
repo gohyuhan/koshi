@@ -29,6 +29,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
+use koshi_terminal::state::CursorShape;
 
 use crate::theme::Theme;
 
@@ -169,7 +170,7 @@ pub struct PaneSnapshot {
 }
 
 /// The cursor's on-screen position, relative to the content area's origin, plus
-/// whether it is shown.
+/// how it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorSnapshot {
     /// The cursor's row within the content area, starting at 0.
@@ -180,6 +181,30 @@ pub struct CursorSnapshot {
     pub visible: bool,
     /// Whether the cursor blinks.
     pub blink: bool,
+    /// The shape the cursor is drawn as (DECSCUSR) — a program in the pane
+    /// switches it to show its own mode, as vim does between a normal-mode
+    /// block and an insert-mode bar — or `None` while the pane has asked for no
+    /// shape at all.
+    pub shape: Option<CursorShape>,
+}
+
+/// How the outer terminal's cursor should look for one frame.
+///
+/// The distinction that matters is between a pane that *asked* for a look and a
+/// pane that asked for nothing: only the first may override the cursor the user
+/// configured in their own terminal. A plain shell never sends DECSCUSR, so
+/// focusing one must not repaint the user's blinking bar into a steady block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorStyle {
+    /// The pane asked for no style — the user's own configured cursor stands.
+    UserDefault,
+    /// The pane asked for this shape, blinking or steady.
+    Shaped {
+        /// The requested shape.
+        shape: CursorShape,
+        /// Whether the requested cursor blinks.
+        blink: bool,
+    },
 }
 
 /// The visible cells for one pane: the live screen grid, plus how far the view
