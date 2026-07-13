@@ -16,13 +16,15 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
-    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, RemoveKeyBindingArgs, RenamePaneArgs, RenameSessionArgs,
+    RenameTabArgs, ResetKeyBindingsArgs, ResizePaneArgs, RunCommandPaneArgs, SetKeyBindingArgs,
+    TabTarget,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -104,10 +106,10 @@ pub enum FormatArg {
 /// with the IPC client. The discovery queries (`inspect`, the `list-*`
 /// verbs) carry typed target and `--format` arguments; their answers are
 /// rendered by [`crate::output`]. `actions` introspects the action registry
-/// through its `list`/`explain` subcommands. The remaining verbs (`config`,
-/// `plugin`, `keys`) are declared bare so the full grammar is visible in
-/// `--help`; each gains its argument surface with the work that implements
-/// it.
+/// through its `list`/`explain` subcommands, and `keys` inspects and mutates
+/// the keymap through its own subcommand tree. The remaining verbs (`config`,
+/// `plugin`) are declared bare so the full grammar is visible in `--help`;
+/// each gains its argument surface with the work that implements it.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// Create a new session (its name is system-generated).
@@ -313,7 +315,107 @@ pub enum CliCommand {
         command: Vec<String>,
     },
     /// Inspect and manage keybindings.
-    Keys,
+    Keys {
+        /// What to do.
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
+}
+
+/// Which keymap layer authored a binding, as typed on the command line. A
+/// separate type from the config crate's `LayerOrigin` so `koshi-config`
+/// stays free of clap derives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScopeArg {
+    /// The built-in default binding table.
+    Default,
+    /// The user's keybinding file.
+    User,
+    /// Per-named-session overrides.
+    Session,
+    /// Bindings a layout file declares.
+    Layout,
+    /// Runtime edits made through `koshi keys set`/`remove`.
+    Manual,
+}
+
+/// The `koshi keys` subcommands: inspect the effective keymap, mutate it for
+/// the running session, or dry-run a keybinding file. The read-only queries
+/// (`list`, `describe`, `conflicts`, `validate`) render locally from the
+/// built-in defaults plus the user's keybinding file; the mutations (`set`,
+/// `remove`, `reset`) map to core commands via [`CliCommand::to_action`] and
+/// execute in the running session once the IPC client carries them.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum KeysCommand {
+    /// List effective keybindings per mode.
+    List {
+        /// Limit the listing to one input mode.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// Limit the listing to bindings authored by one layer.
+        #[arg(long, value_enum, value_name = "SCOPE")]
+        scope: Option<ScopeArg>,
+        /// List plugin-recommended bindings instead of effective ones.
+        #[arg(long)]
+        recommended: bool,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Describe a key sequence: its action, source layer, and metadata.
+    Describe {
+        /// The key sequence, in the angle grammar (`"<C-p> n"`).
+        #[arg(value_name = "KEY_SEQUENCE")]
+        sequence: String,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Report keybinding conflicts, dead bindings, and warnings.
+    Conflicts {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Drop keybinding customization in the running session, restoring the
+    /// built-in defaults.
+    Reset {
+        /// Limit the reset to one input mode.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+    },
+    /// Bind a key sequence to an action in the running session only; the
+    /// binding is not written to any file and ends with the session.
+    Set {
+        /// The key sequence, in the angle grammar (`"<C-p> n"`).
+        #[arg(value_name = "KEY_SEQUENCE")]
+        sequence: String,
+        /// Full action reference, like `core:new-tab`.
+        #[arg(value_parser = parse_action_ref, value_name = "ACTION")]
+        action: ActionRef,
+        /// Input mode the binding lands in; defaults to `normal`.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+    },
+    /// Remove a key sequence's binding in the running session only.
+    Remove {
+        /// The key sequence, in the angle grammar.
+        #[arg(value_name = "KEY_SEQUENCE")]
+        sequence: String,
+        /// Input mode the removal applies in; defaults to `normal`.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+    },
+    /// Dry-run a keybinding file: parse and conflict-check it without
+    /// applying anything.
+    Validate {
+        /// Path of the keybinding KDL file to check.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
 }
 
 /// The entity kinds `koshi inspect` reports on. Each takes the id exactly as
@@ -388,8 +490,9 @@ impl CliCommand {
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
     /// discovery and introspection queries (`inspect`, the `list-*` verbs,
-    /// `actions`), and the verbs whose argument surfaces are not built yet
-    /// (`config`, `plugin`, `keys`).
+    /// `actions`, and the `keys` queries `list`/`describe`/`conflicts`/
+    /// `validate`, all rendered locally), and the verbs whose argument
+    /// surfaces are not built yet (`config`, `plugin`).
     #[must_use]
     pub fn to_action(&self) -> Option<(ActionRef, Command)> {
         let (name, command) = match self {
@@ -516,6 +619,35 @@ impl CliCommand {
                     stacked: *stacked,
                 }),
             ),
+            CliCommand::Keys { command } => match command {
+                KeysCommand::Set {
+                    sequence,
+                    action,
+                    mode,
+                } => (
+                    "set-key-binding",
+                    Command::SetKeyBinding(SetKeyBindingArgs {
+                        mode: mode.clone(),
+                        sequence: sequence.clone(),
+                        action: action.clone(),
+                    }),
+                ),
+                KeysCommand::Remove { sequence, mode } => (
+                    "remove-key-binding",
+                    Command::RemoveKeyBinding(RemoveKeyBindingArgs {
+                        mode: mode.clone(),
+                        sequence: sequence.clone(),
+                    }),
+                ),
+                KeysCommand::Reset { mode } => (
+                    "reset-key-bindings",
+                    Command::ResetKeyBindings(ResetKeyBindingsArgs { mode: mode.clone() }),
+                ),
+                KeysCommand::List { .. }
+                | KeysCommand::Describe { .. }
+                | KeysCommand::Conflicts { .. }
+                | KeysCommand::Validate { .. } => return None,
+            },
             CliCommand::New
             | CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
@@ -526,8 +658,7 @@ impl CliCommand {
             | CliCommand::Inspect { .. }
             | CliCommand::ListTabs { .. }
             | CliCommand::ListPanes { .. }
-            | CliCommand::ListClients { .. }
-            | CliCommand::Keys => return None,
+            | CliCommand::ListClients { .. } => return None,
         };
         let action = ActionRef::core(name)
             .expect("CLI action names are constants satisfying the action-name grammar");
@@ -580,6 +711,13 @@ fn parse_session_id(value: &str) -> Result<SessionId, String> {
 /// Parse a `--client` flag value into a [`ClientId`].
 fn parse_client_id(value: &str) -> Result<ClientId, String> {
     parse_prefixed_uuid(value, "client").map(ClientId::from_uuid)
+}
+
+/// Parse a `keys set` action argument into an [`ActionRef`], requiring the
+/// full namespaced form.
+fn parse_action_ref(value: &str) -> Result<ActionRef, String> {
+    ActionRef::from_str(value)
+        .map_err(|err| format!("{err}; write the full reference, like `core:new-tab`"))
 }
 
 #[cfg(test)]

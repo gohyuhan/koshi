@@ -196,10 +196,160 @@ fn flagless_subcommands_parse_to_their_variants() {
                 format: FormatArg::Table,
             },
         ),
-        ("keys", CliCommand::Keys),
     ];
     for (name, expected) in cases {
         assert_eq!(parse(&["koshi", name]).command.as_ref(), Some(expected));
+    }
+}
+
+// --- Keys subcommands ---
+
+#[test]
+fn bare_keys_requires_a_subcommand() {
+    let err = parse_err(&["koshi", "keys"]);
+    assert_eq!(
+        err.kind(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+}
+
+#[test]
+fn keys_list_parses_its_filters_and_format() {
+    assert_eq!(
+        command(&["koshi", "keys", "list"]),
+        CliCommand::Keys {
+            command: KeysCommand::List {
+                mode: None,
+                scope: None,
+                recommended: false,
+                format: FormatArg::Table,
+            }
+        }
+    );
+    assert_eq!(
+        command(&[
+            "koshi",
+            "keys",
+            "list",
+            "--mode",
+            "locked",
+            "--scope",
+            "user",
+            "--recommended",
+            "--format",
+            "json",
+        ]),
+        CliCommand::Keys {
+            command: KeysCommand::List {
+                mode: Some("locked".to_string()),
+                scope: Some(ScopeArg::User),
+                recommended: true,
+                format: FormatArg::Json,
+            }
+        }
+    );
+}
+
+#[test]
+fn keys_describe_parses_the_sequence() {
+    assert_eq!(
+        command(&["koshi", "keys", "describe", "<C-p> n"]),
+        CliCommand::Keys {
+            command: KeysCommand::Describe {
+                sequence: "<C-p> n".to_string(),
+                format: FormatArg::Table,
+            }
+        }
+    );
+}
+
+#[test]
+fn keys_conflicts_parses_a_format() {
+    assert_eq!(
+        command(&["koshi", "keys", "conflicts", "--format", "json"]),
+        CliCommand::Keys {
+            command: KeysCommand::Conflicts {
+                format: FormatArg::Json,
+            }
+        }
+    );
+}
+
+#[test]
+fn keys_validate_parses_the_path() {
+    assert_eq!(
+        command(&["koshi", "keys", "validate", "my-keys.kdl"]),
+        CliCommand::Keys {
+            command: KeysCommand::Validate {
+                path: PathBuf::from("my-keys.kdl"),
+                format: FormatArg::Table,
+            }
+        }
+    );
+}
+
+#[test]
+fn keys_set_maps_to_the_set_key_binding_command() {
+    let (action, cmd) = action_of(&[
+        "koshi",
+        "keys",
+        "set",
+        "<C-y>",
+        "core:new-tab",
+        "--mode",
+        "normal",
+    ]);
+    assert_eq!(action, ActionRef::core("set-key-binding").unwrap());
+    assert_eq!(
+        cmd,
+        Command::SetKeyBinding(SetKeyBindingArgs {
+            mode: Some("normal".to_string()),
+            sequence: "<C-y>".to_string(),
+            action: ActionRef::core("new-tab").unwrap(),
+        })
+    );
+}
+
+#[test]
+fn keys_set_rejects_a_bare_action_name() {
+    let err = parse_err(&["koshi", "keys", "set", "<C-y>", "new-tab"]);
+    assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn keys_remove_maps_to_the_remove_key_binding_command() {
+    let (action, cmd) = action_of(&["koshi", "keys", "remove", "<C-y>"]);
+    assert_eq!(action, ActionRef::core("remove-key-binding").unwrap());
+    assert_eq!(
+        cmd,
+        Command::RemoveKeyBinding(RemoveKeyBindingArgs {
+            mode: None,
+            sequence: "<C-y>".to_string(),
+        })
+    );
+}
+
+#[test]
+fn keys_reset_maps_to_the_reset_key_bindings_command() {
+    let (action, cmd) = action_of(&["koshi", "keys", "reset", "--mode", "locked"]);
+    assert_eq!(action, ActionRef::core("reset-key-bindings").unwrap());
+    assert_eq!(
+        cmd,
+        Command::ResetKeyBindings(ResetKeyBindingsArgs {
+            mode: Some("locked".to_string()),
+        })
+    );
+}
+
+#[test]
+fn keys_queries_map_to_no_action() {
+    for argv in [
+        vec!["koshi", "keys", "list"],
+        vec!["koshi", "keys", "describe", "<C-y>"],
+        vec!["koshi", "keys", "conflicts"],
+        vec!["koshi", "keys", "validate", "f.kdl"],
+    ] {
+        assert_eq!(command(&argv).to_action(), None);
     }
 }
 
@@ -1161,7 +1311,7 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "list-tabs"],
         &["koshi", "list-panes"],
         &["koshi", "list-clients"],
-        &["koshi", "keys"],
+        &["koshi", "keys", "list"],
     ];
     for argv in argvs {
         assert_eq!(command(argv).to_action(), None, "for {argv:?}");

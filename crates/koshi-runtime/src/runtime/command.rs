@@ -15,21 +15,29 @@ use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 
+use koshi_config::conflict::{detect_conflicts, KeymapVerdict};
+use koshi_config::key_sequence::parse_sequence;
+use koshi_config::layer::PartialKoshiConfig;
+use koshi_config::types::{BoundAction, ModeBindings, ModeName};
 use koshi_core::{
+    action::ActionStatus,
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
         CopyModeCommand, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
-        NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, TabTarget, WriteToPaneArgs,
+        NewPaneArgs, NewTabArgs, RemoveKeyBindingArgs, RenamePaneArgs, RenameSessionArgs,
+        RenameTabArgs, ResetKeyBindingsArgs, ResizePaneArgs, RunCommandPaneArgs, SetKeyBindingArgs,
+        TabTarget, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
     },
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+    key::KeySequence,
     lock::LockMode,
     naming::{generate_name, NameKind},
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
+    resolve::ActionArgs,
 };
 use koshi_layout::{
     content::content_rects,
@@ -56,7 +64,11 @@ use koshi_session::session::{
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::runtime::{
-    render_schedule::InvalidationReason, snapshot::solve_tab, state::Runtime,
+    hints::{built_in_modes, keymap_layers, KeymapHintCatalog},
+    reload::rejection_reason,
+    render_schedule::InvalidationReason,
+    snapshot::solve_tab,
+    state::Runtime,
     transaction::TransactionScope,
 };
 
@@ -230,6 +242,9 @@ impl Runtime {
             Command::RenameSession(args) => {
                 self.handle_rename_session(command_id, &envelope.source, &args)
             }
+            Command::SetKeyBinding(args) => self.handle_set_key_binding(command_id, &args),
+            Command::RemoveKeyBinding(args) => self.handle_remove_key_binding(command_id, &args),
+            Command::ResetKeyBindings(args) => self.handle_reset_key_bindings(command_id, &args),
         };
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
@@ -1737,6 +1752,237 @@ impl Runtime {
         }
     }
 
+    /// Handle [`Command::SetKeyBinding`]: bind a key sequence to an action in
+    /// the manual keymap layer, for this process only.
+    ///
+    /// The action must be registered and implemented — an explicit request
+    /// naming an unknown or not-yet-implemented action is rejected rather
+    /// than committed as a binding that can never fire. The sequence string
+    /// parses against the effective leader and chord-depth settings. The new
+    /// layer commits through [`Self::commit_manual_layer`], so a binding the
+    /// conflict verdict refuses (a cross-layer collision, a reserved-unlock
+    /// shadow) leaves the running keymap untouched.
+    fn handle_set_key_binding(
+        &mut self,
+        command_id: CommandId,
+        args: &SetKeyBindingArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let mode = Self::known_mode(args.mode.as_deref())?;
+        let sequence = self.parse_manual_sequence(&args.sequence)?;
+        let metadata = self.action_registry.lookup(&args.action).ok_or_else(|| {
+            Rejection::new(
+                RejectReason::TargetNotFound,
+                &format!("no action named `{}` is registered", args.action),
+            )
+        })?;
+        if metadata.status == ActionStatus::ComingSoon {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                &format!("action `{}` is not implemented yet", args.action),
+            ));
+        }
+        let mut manual = self.manual_bindings.clone();
+        manual.entry(mode).or_default().keys.insert(
+            sequence,
+            BoundAction {
+                action: args.action.clone(),
+                args: ActionArgs::None,
+            },
+        );
+        self.commit_manual_layer(command_id, manual)
+    }
+
+    /// Handle [`Command::RemoveKeyBinding`]: void a key sequence through the
+    /// manual keymap layer, for this process only.
+    ///
+    /// The sequence must currently fire in the given mode — removing a key
+    /// nothing answers to is rejected as a missing target. The removal
+    /// enters the manual layer's removed set (voiding whatever any lower
+    /// layer bound) and drops any manual binding on the key, then commits
+    /// through [`Self::commit_manual_layer`] — removing the locked-mode
+    /// unlock is refused there by the conflict verdict.
+    fn handle_remove_key_binding(
+        &mut self,
+        command_id: CommandId,
+        args: &RemoveKeyBindingArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let mode = Self::known_mode(args.mode.as_deref())?;
+        let sequence = self.parse_manual_sequence(&args.sequence)?;
+        let lock_mode = Self::lock_mode_named(&mode);
+        if self
+            .keymap_hints
+            .match_sequence(lock_mode, &sequence)
+            .exact
+            .is_none()
+        {
+            return Err(Rejection::new(
+                RejectReason::TargetNotFound,
+                &format!(
+                    "nothing is bound on `{}` in `{}` mode",
+                    args.sequence,
+                    mode.as_str()
+                ),
+            ));
+        }
+        let mut manual = self.manual_bindings.clone();
+        let bindings = manual.entry(mode).or_default();
+        bindings.keys.remove(&sequence);
+        bindings.removed.insert(sequence);
+        self.commit_manual_layer(command_id, manual)
+    }
+
+    /// Handle [`Command::ResetKeyBindings`]: drop keybinding customization,
+    /// restoring the built-in defaults.
+    ///
+    /// With a mode, that one mode's manual edits and user-file bindings are
+    /// dropped — resetting `locked` also clears the unlock alternative,
+    /// which exists only to replace the locked-mode escape. With no mode,
+    /// the whole keybindings section resets: every mode's customization plus
+    /// the timing, leader, and unlock settings. The stored keybinding file
+    /// layer changes with it, so a later registry refresh re-merges from the
+    /// reset state; the file on disk is untouched and returns on its next
+    /// reload.
+    fn handle_reset_key_bindings(
+        &mut self,
+        command_id: CommandId,
+        args: &ResetKeyBindingsArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let mut manual = self.manual_bindings.clone();
+        let mut stored = self.config_layers.clone();
+        match &args.mode {
+            None => {
+                manual.clear();
+                stored.keybindings = PartialKoshiConfig::default();
+            }
+            Some(name) => {
+                let mode = Self::known_mode(Some(name))?;
+                manual.remove(&mode);
+                if let Some(section) = stored.keybindings.keybindings.as_mut() {
+                    if let Some(modes) = section.modes.as_mut() {
+                        modes.remove(&mode);
+                        if modes.is_empty() {
+                            section.modes = None;
+                        }
+                    }
+                    if mode.as_str() == "locked" {
+                        section.unlock_alternative = None;
+                    }
+                }
+            }
+        }
+        let tentative = stored.effective();
+        let user_modes = stored
+            .keybindings
+            .keybindings
+            .as_ref()
+            .and_then(|keybindings| keybindings.modes.clone());
+        let layers = keymap_layers(user_modes, &manual);
+        let report = detect_conflicts(
+            &layers,
+            tentative.keybindings.leader,
+            tentative.keybindings.unlock_alternative,
+            tentative.keybindings.max_chord_depth,
+            &self.action_registry,
+            &built_in_modes(),
+        );
+        if report.verdict() != KeymapVerdict::Apply {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                &rejection_reason(&report),
+            ));
+        }
+        self.manual_bindings = manual;
+        self.config_layers = stored;
+        self.config = tentative;
+        self.keymap_hints =
+            KeymapHintCatalog::from_parts(&layers, &self.config.keybindings, &self.action_registry);
+        self.clear_pending_key_sequences();
+        Ok(CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        })
+    }
+
+    /// Commit `manual` as the new manual keymap layer, all-or-nothing: run
+    /// conflict detection over the full layer stack, and only a clean
+    /// [`KeymapVerdict::Apply`] stores the layer, rebuilds the hint catalog,
+    /// and clears every client's pending key sequence. Any other verdict
+    /// keeps the running keymap and rejects with every collision and fatal
+    /// finding's message.
+    fn commit_manual_layer(
+        &mut self,
+        command_id: CommandId,
+        manual: BTreeMap<ModeName, ModeBindings>,
+    ) -> Result<CommandResult, Rejection> {
+        let user_modes = self
+            .config_layers
+            .keybindings
+            .keybindings
+            .as_ref()
+            .and_then(|keybindings| keybindings.modes.clone());
+        let layers = keymap_layers(user_modes, &manual);
+        let report = detect_conflicts(
+            &layers,
+            self.config.keybindings.leader,
+            self.config.keybindings.unlock_alternative,
+            self.config.keybindings.max_chord_depth,
+            &self.action_registry,
+            &built_in_modes(),
+        );
+        if report.verdict() != KeymapVerdict::Apply {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                &rejection_reason(&report),
+            ));
+        }
+        self.manual_bindings = manual;
+        self.keymap_hints =
+            KeymapHintCatalog::from_parts(&layers, &self.config.keybindings, &self.action_registry);
+        self.clear_pending_key_sequences();
+        Ok(CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        })
+    }
+
+    /// The built-in mode `name` refers to, `normal` when absent. An explicit
+    /// name matching no built-in mode is rejected rather than accepted as a
+    /// mode nothing reads.
+    fn known_mode(name: Option<&str>) -> Result<ModeName, Rejection> {
+        let name = name.unwrap_or("normal");
+        let mode = ModeName::new(name);
+        if built_in_modes().contains(&mode) {
+            Ok(mode)
+        } else {
+            Err(Rejection::new(
+                RejectReason::TargetNotFound,
+                &format!("no mode named `{name}`; built-in modes are `normal` and `locked`"),
+            ))
+        }
+    }
+
+    /// The [`LockMode`] whose name is `mode`. Callers pass only names
+    /// validated by [`Self::known_mode`], which accepts exactly the built-in
+    /// mode set.
+    fn lock_mode_named(mode: &ModeName) -> LockMode {
+        LockMode::ALL
+            .into_iter()
+            .find(|candidate| candidate.name() == mode.as_str())
+            .expect("known_mode accepts exactly the built-in mode names")
+    }
+
+    /// Parse a manual binding's key sequence against the effective leader
+    /// and chord-depth settings, rejecting an invalid or overlong one with
+    /// the parser's exact reason.
+    fn parse_manual_sequence(&self, raw: &str) -> Result<KeySequence, Rejection> {
+        parse_sequence(
+            raw,
+            self.config.keybindings.leader,
+            self.config.keybindings.max_chord_depth,
+        )
+        .map_err(|err| Rejection::new(RejectReason::InvalidState, &err.to_string()))
+    }
+
     /// Handle [`Command::SetLockMode`]: set the acting client to
     /// [`LockMode::Locked`] when `args.locked`, else [`LockMode::Normal`].
     ///
@@ -2280,7 +2526,13 @@ impl Runtime {
             Command::RenameSession(args) => self
                 .resolve_session_target(args.session, source, session)
                 .map(drop),
-            Command::Plugin(_) | Command::Quit => Ok(()),
+            // Keybinding edits act on the process-wide keymap: no pane, tab,
+            // session, or client to resolve.
+            Command::Plugin(_)
+            | Command::Quit
+            | Command::SetKeyBinding(_)
+            | Command::RemoveKeyBinding(_)
+            | Command::ResetKeyBindings(_) => Ok(()),
         }
     }
 

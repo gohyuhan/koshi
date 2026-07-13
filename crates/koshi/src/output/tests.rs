@@ -601,3 +601,202 @@ examples: core:rename-session, koshi rename-session
         Some(expected.to_string())
     );
 }
+
+// --- Keys rendering ---
+
+/// Parse a test key sequence with the default leader and depth.
+fn keyseq(s: &str) -> koshi_core::key::KeySequence {
+    koshi_config::key_sequence::parse_sequence(
+        s,
+        koshi_config::types::KeybindingsConfig::default().leader,
+        8,
+    )
+    .expect("test sequence parses")
+}
+
+/// The offline view for one `normal`-mode user binding of `key` to `action`.
+fn view_with_binding(key: &str, action: &str) -> crate::keymap::KeymapView {
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        keyseq(key),
+        koshi_config::types::BoundAction {
+            action: koshi_core::action::ActionRef::from_str(action).expect("valid ref"),
+            args: koshi_core::resolve::ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        koshi_config::types::ModeName::new("normal"),
+        koshi_config::types::ModeBindings {
+            keys,
+            removed: Default::default(),
+        },
+    );
+    crate::keymap::view_from_partial(
+        Some(koshi_config::layer::PartialKeybindingsConfig {
+            modes: Some(modes),
+            ..Default::default()
+        }),
+        None,
+        None,
+    )
+}
+
+#[test]
+fn keys_list_shows_a_steal_and_its_unbound_default() {
+    let view = view_with_binding("<A-t>", "core:close-pane");
+    let rendered = render_keys_list(&view, Some("normal"), None, FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    let bindings = value["bindings"].as_array().expect("array");
+    assert!(
+        bindings.contains(&serde_json::json!({
+            "mode": "normal",
+            "key": "<A-t>",
+            "action": "core:close-pane",
+            "source": "user",
+        })),
+        "got: {rendered}"
+    );
+    assert!(
+        bindings.contains(&serde_json::json!({
+            "mode": "normal",
+            "key": "<A-t>",
+            "action": "core:new-tab",
+            "source": "defaults (unbound)",
+        })),
+        "got: {rendered}"
+    );
+}
+
+#[test]
+fn keys_list_scope_filter_keeps_only_the_named_layer() {
+    let view = view_with_binding("<C-y>", "core:new-tab");
+    let rendered = render_keys_list(&view, None, Some(ScopeArg::User), FormatArg::Table);
+    let lines: Vec<&str> = rendered.lines().collect();
+    assert_eq!(lines.len(), 2, "header plus the one user row: {rendered}");
+    assert_eq!(lines[1], "normal  <C-y>  core:new-tab  user");
+}
+
+#[test]
+fn keys_list_mode_filter_keeps_only_the_named_mode() {
+    let view = crate::keymap::view_from_partial(None, None, None);
+    let rendered = render_keys_list(&view, Some("locked"), None, FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value["reverted"], serde_json::json!(false));
+    let bindings = value["bindings"].as_array().expect("array");
+    assert!(!bindings.is_empty());
+    assert!(bindings
+        .iter()
+        .all(|binding| binding["mode"] == serde_json::json!("locked")));
+}
+
+#[test]
+fn keys_recommended_is_empty_until_plugins_exist() {
+    assert_eq!(render_keys_recommended(FormatArg::Json), "[]\n");
+    assert_eq!(
+        render_keys_recommended(FormatArg::Table),
+        "key  action  plugin\n"
+    );
+}
+
+#[test]
+fn keys_describe_renders_the_preset_args_and_source() {
+    let view = crate::keymap::view_from_partial(None, None, None);
+    let rendered = render_keys_describe(&view, "<C-p> x", FormatArg::Table)
+        .expect("sequence parses")
+        .expect("bound in normal mode");
+    let expected = "\
+key: <C-p> x
+mode: normal
+action: core:close-pane
+display_name: Close Pane
+description: Close the focused pane
+scope: pane-session
+args: {\"ClosePane\":{\"force\":false,\"tree\":true}}
+source: defaults
+continuous: false
+";
+    assert_eq!(rendered, expected);
+}
+
+#[test]
+fn keys_describe_renders_missing_args_as_null() {
+    let view = crate::keymap::view_from_partial(None, None, None);
+    let rendered = render_keys_describe(&view, "<A-t>", FormatArg::Json)
+        .expect("sequence parses")
+        .expect("bound in normal mode");
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value[0]["args"], serde_json::Value::Null);
+    assert_eq!(value[0]["action"], serde_json::json!("core:new-tab"));
+}
+
+#[test]
+fn keys_describe_reports_unbound_and_malformed_sequences() {
+    let view = crate::keymap::view_from_partial(None, None, None);
+    assert_eq!(
+        render_keys_describe(&view, "<C-z>", FormatArg::Table),
+        Ok(None)
+    );
+    assert!(render_keys_describe(&view, "Ctrl-g", FormatArg::Table).is_err());
+}
+
+#[test]
+fn keys_conflicts_renders_the_verdict_and_findings() {
+    // Binding an unregistered action is an orphan warning; the verdict
+    // still applies.
+    let view = view_with_binding("<C-y>", "core:not-a-real-action");
+    let rendered = render_keys_conflicts(&view, FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value["verdict"], serde_json::json!("apply"));
+    assert_eq!(value["file_error"], serde_json::Value::Null);
+    let findings = value["findings"].as_array().expect("array");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
+}
+
+#[test]
+fn keys_conflicts_carries_an_ignored_file_on_both_formats() {
+    // An unparseable file leaves the defaults running; the answer itself
+    // says so, so a stdout-only consumer never mistakes it for a clean file.
+    let view = crate::keymap::view_from_partial(None, None, Some("boom".to_string()));
+    let table_rendered = render_keys_conflicts(&view, FormatArg::Table);
+    assert_eq!(table_rendered, "file: ignored (boom)\nverdict: apply\n");
+    let value: serde_json::Value =
+        serde_json::from_str(&render_keys_conflicts(&view, FormatArg::Json)).expect("valid JSON");
+    assert_eq!(value["file_error"], serde_json::json!("boom"));
+    assert_eq!(value["verdict"], serde_json::json!("apply"));
+}
+
+#[test]
+fn keys_validate_renders_both_outcome_shapes() {
+    let failed = crate::keymap::ValidationOutcome::ParseFailed(vec!["bad node".to_string()]);
+    assert_eq!(
+        render_keys_validate(&failed, FormatArg::Table),
+        "invalid: the file does not parse\nerror: bad node\n"
+    );
+    let failed_json: serde_json::Value =
+        serde_json::from_str(&render_keys_validate(&failed, FormatArg::Json)).expect("valid JSON");
+    assert_eq!(
+        failed_json,
+        serde_json::json!({
+            "valid": false,
+            "applies": false,
+            "errors": ["bad node"],
+            "findings": [],
+        })
+    );
+
+    let clean = crate::keymap::view_from_partial(None, None, None);
+    let checked = crate::keymap::ValidationOutcome::Checked {
+        report: clean.report,
+        applies: true,
+    };
+    assert_eq!(
+        render_keys_validate(&checked, FormatArg::Table),
+        "valid: a reload would apply this file\n"
+    );
+    assert!(validation_applies(&checked));
+    assert!(!validation_applies(&failed));
+}

@@ -1,16 +1,18 @@
 //! `koshi-config` — koshi's configuration system: the typed config schema and
 //! its built-in defaults, folding user override layers onto those defaults,
-//! parsing keybinding chord, sequence, and leader syntax, detecting
-//! keybinding conflicts across keymap layers, merging keymap layers into the
-//! per-mode lookup tables, parsing layout files into layout templates, and
-//! reporting config parse and validation errors. Discovering and reading
-//! config files from disk, full schema validation, and migrating older
-//! config files forward are also part of this system.
+//! parsing keybinding chord, sequence, and leader syntax, parsing keybinding
+//! files into keymap layers, detecting keybinding conflicts across keymap
+//! layers, merging keymap layers into the per-mode lookup tables, parsing
+//! layout files into layout templates, and reporting config parse and
+//! validation errors. Discovering and reading config files from disk, full
+//! schema validation, and migrating older config files forward are also part
+//! of this system.
 
 pub mod conflict;
 pub mod error;
 pub mod key;
 pub mod key_sequence;
+pub mod keybinding;
 pub mod keymap_merge;
 pub mod layer;
 pub mod layout;

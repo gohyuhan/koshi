@@ -13,6 +13,7 @@
 //! No raw OS handles, no `&mut` references, and command identity is never a
 //! free-form `String`.
 
+use crate::action::ActionRef;
 use crate::event::RejectReason;
 use crate::geometry::Direction;
 use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId, TabId};
@@ -66,6 +67,12 @@ pub enum Command {
     RenameSession(RenameSessionArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
+    /// Add a runtime-only keybinding to the manual keymap layer.
+    SetKeyBinding(SetKeyBindingArgs),
+    /// Remove a keybinding through the manual keymap layer.
+    RemoveKeyBinding(RemoveKeyBindingArgs),
+    /// Drop runtime keybinding customization, restoring built-in defaults.
+    ResetKeyBindings(ResetKeyBindingsArgs),
 }
 
 /// The payload-free discriminant of a [`Command`] — one unit variant per
@@ -118,6 +125,12 @@ pub enum CommandKind {
     RenameSession,
     /// Discriminant of [`Command::Quit`].
     Quit,
+    /// Discriminant of [`Command::SetKeyBinding`].
+    SetKeyBinding,
+    /// Discriminant of [`Command::RemoveKeyBinding`].
+    RemoveKeyBinding,
+    /// Discriminant of [`Command::ResetKeyBindings`].
+    ResetKeyBindings,
 }
 
 impl Command {
@@ -144,6 +157,9 @@ impl Command {
             Command::MoveTab(_) => CommandKind::MoveTab,
             Command::RenameSession(_) => CommandKind::RenameSession,
             Command::Quit => CommandKind::Quit,
+            Command::SetKeyBinding(_) => CommandKind::SetKeyBinding,
+            Command::RemoveKeyBinding(_) => CommandKind::RemoveKeyBinding,
+            Command::ResetKeyBindings(_) => CommandKind::ResetKeyBindings,
         }
     }
 }
@@ -336,6 +352,40 @@ pub struct MoveTabArgs {
 pub struct RenameSessionArgs {
     /// Session to rename; `None` targets the source's own session context.
     pub session: Option<SessionId>,
+}
+
+/// Arguments for [`Command::SetKeyBinding`]. The key sequence travels as the
+/// string the caller typed: what a sequence means (its `<leader>` token)
+/// depends on the effective leader configuration, so the runtime parses it
+/// against its own settings rather than trusting the sender's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetKeyBindingArgs {
+    /// Input mode the binding lands in; `None` binds in `normal`.
+    pub mode: Option<String>,
+    /// The key sequence to bind, in the angle grammar (`"<C-p> n"`).
+    pub sequence: String,
+    /// The action the sequence fires. No arguments travel with it — a manual
+    /// binding is the action reference alone, like any user-authored binding.
+    pub action: ActionRef,
+}
+
+/// Arguments for [`Command::RemoveKeyBinding`]. The key sequence travels as
+/// a string for the same reason as [`SetKeyBindingArgs::sequence`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveKeyBindingArgs {
+    /// Input mode the removal applies in; `None` removes in `normal`.
+    pub mode: Option<String>,
+    /// The key sequence to remove, in the angle grammar.
+    pub sequence: String,
+}
+
+/// Arguments for [`Command::ResetKeyBindings`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetKeyBindingsArgs {
+    /// Input mode to reset; `None` resets the whole keybindings section —
+    /// every mode's runtime and user-file customization plus the timing,
+    /// leader, and unlock-alternative settings.
+    pub mode: Option<String>,
 }
 
 /// Copy mode, selection, and search commands.

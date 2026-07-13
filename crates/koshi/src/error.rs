@@ -25,6 +25,12 @@ pub enum CliError {
     /// Arguments were missing or invalid for the chosen command.
     #[error("invalid arguments: {detail}")]
     InvalidArgs { detail: String },
+    /// The described key sequence is not bound in any mode.
+    #[error("nothing is bound on `{sequence}` in any mode")]
+    UnboundKey { sequence: String },
+    /// A keybinding file dry-run found problems.
+    #[error("keybinding file {path} failed validation")]
+    InvalidKeymapFile { path: String },
     /// The runtime IPC endpoint could not be reached.
     #[error("IPC unavailable: {detail}")]
     IpcUnavailable { detail: String },
@@ -38,7 +44,9 @@ impl DomainError for CliError {
         match self {
             CliError::UnknownCommand { .. }
             | CliError::UnknownAction { .. }
-            | CliError::InvalidArgs { .. } => DomainCategory::Cli,
+            | CliError::InvalidArgs { .. }
+            | CliError::UnboundKey { .. }
+            | CliError::InvalidKeymapFile { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
             CliError::Runtime { .. } => DomainCategory::Session,
         }
@@ -58,7 +66,9 @@ impl From<&CliError> for CliExitCode {
         match err {
             CliError::UnknownCommand { .. }
             | CliError::UnknownAction { .. }
-            | CliError::InvalidArgs { .. } => CliExitCode::UsageOrConfig,
+            | CliError::InvalidArgs { .. }
+            | CliError::UnboundKey { .. }
+            | CliError::InvalidKeymapFile { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
             CliError::Runtime { .. } => CliExitCode::RuntimeAction,
         }

@@ -1,0 +1,156 @@
+//! Offline keymap view tests: defaults-only and user-layer folding, the
+//! all-or-nothing revert, steal visibility, and the file dry-run.
+
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use koshi_config::key_sequence::parse_sequence;
+use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
+use koshi_core::action::ActionRef;
+use koshi_core::key::KeySequence;
+use koshi_core::resolve::ActionArgs;
+
+use super::*;
+
+/// Parse a test key sequence with the default leader and depth.
+fn seq(s: &str) -> KeySequence {
+    parse_sequence(s, KeybindingsConfig::default().leader, 8).expect("test sequence parses")
+}
+
+/// A user partial holding one `normal`-mode binding of `key` to `action`.
+fn partial_binding(key: &str, action: &str) -> PartialKeybindingsConfig {
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        seq(key),
+        BoundAction {
+            action: ActionRef::from_str(action).expect("valid ref"),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: Default::default(),
+        },
+    );
+    PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    }
+}
+
+#[test]
+fn defaults_only_view_is_not_reverted_and_lists_the_shipped_bindings() {
+    let view = view_from_partial(None, None, None);
+    assert!(!view.reverted);
+    assert_eq!(view.config, KeybindingsConfig::default());
+    let normal = &view.merged.modes[&ModeName::new("normal")];
+    assert_eq!(
+        normal.defaults[&seq("<Tab>")].action,
+        ActionRef::core("next-tab").unwrap()
+    );
+    assert!(normal.user_set.is_empty());
+}
+
+#[test]
+fn an_admitted_user_layer_appears_as_user_set() {
+    let view = view_from_partial(Some(partial_binding("<C-y>", "core:new-tab")), None, None);
+    assert!(!view.reverted);
+    let normal = &view.merged.modes[&ModeName::new("normal")];
+    let binding = &normal.user_set[&seq("<C-y>")];
+    assert_eq!(binding.bound.action, ActionRef::core("new-tab").unwrap());
+    assert_eq!(binding.source, LayerOrigin::User);
+}
+
+#[test]
+fn a_steal_moves_the_default_to_unbound() {
+    let view = view_from_partial(
+        Some(partial_binding("<A-t>", "core:close-pane")),
+        None,
+        None,
+    );
+    let normal = &view.merged.modes[&ModeName::new("normal")];
+    assert_eq!(
+        normal.user_set[&seq("<A-t>")].bound.action,
+        ActionRef::core("close-pane").unwrap()
+    );
+    assert!(!normal.defaults.contains_key(&seq("<A-t>")));
+    assert_eq!(
+        normal.unbound_defaults[&seq("<A-t>")].action,
+        ActionRef::core("new-tab").unwrap()
+    );
+}
+
+#[test]
+fn a_fatal_user_layer_reverts_the_view_to_defaults() {
+    // Removing the locked-mode reserved unlock is a fatal finding.
+    let mut modes = BTreeMap::new();
+    let mut removed = std::collections::BTreeSet::new();
+    removed.insert(seq("<C-l>"));
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed,
+        },
+    );
+    let partial = PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    };
+
+    let view = view_from_partial(Some(partial), None, None);
+    assert!(view.reverted);
+    assert_ne!(view.report.verdict(), KeymapVerdict::Apply);
+    // The defaults survive: the reserved unlock still fires.
+    let locked = &view.merged.modes[&ModeName::new("locked")];
+    assert_eq!(
+        locked.defaults[&seq("<C-l>")].action,
+        ActionRef::core("unlock").unwrap()
+    );
+}
+
+#[test]
+fn a_file_error_reverts_the_view_and_carries_the_reason() {
+    let view = view_from_partial(None, None, Some("boom".to_string()));
+    assert!(view.reverted);
+    assert_eq!(view.file_error.as_deref(), Some("boom"));
+    assert_eq!(view.config, KeybindingsConfig::default());
+}
+
+#[test]
+fn validate_file_reports_parse_failures_and_clean_files() {
+    let dir = std::env::temp_dir();
+    let good = dir.join("koshi-keymap-test-good.kdl");
+    let bad = dir.join("koshi-keymap-test-bad.kdl");
+    std::fs::write(
+        &good,
+        "mode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        &bad,
+        "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
+    )
+    .expect("write");
+
+    match validate_file(&good).expect("readable") {
+        ValidationOutcome::Checked { applies, report } => {
+            assert!(applies);
+            assert_eq!(report.verdict(), KeymapVerdict::Apply);
+        }
+        ValidationOutcome::ParseFailed(errors) => panic!("expected clean check, got {errors:?}"),
+    }
+    match validate_file(&bad).expect("readable") {
+        ValidationOutcome::ParseFailed(errors) => {
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].contains("<C-"), "got: {}", errors[0]);
+        }
+        ValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
+    }
+
+    std::fs::remove_file(&good).expect("cleanup");
+    std::fs::remove_file(&bad).expect("cleanup");
+}

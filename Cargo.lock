@@ -666,6 +666,7 @@ name = "koshi"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "koshi-config",
  "koshi-core",
  "koshi-input",
  "koshi-observability",
