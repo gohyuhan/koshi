@@ -39,7 +39,7 @@
 //! here as the dispatch surface.
 
 use crate::grid::state::{Cell, RowEnd};
-use crate::state::{MouseEncoding, MouseTracking, Screen, TerminalState};
+use crate::state::{CursorShape, MouseEncoding, MouseTracking, Screen, TerminalState};
 use unicode_width::UnicodeWidthChar;
 
 use self::motion::{next_tab_stop, prev_tab_stop};
@@ -280,6 +280,9 @@ impl vte::Perform for TerminalState {
             (b"?$", 'p') => return self.report_dec_mode(params),
             // RQM, ANSI form — request ANSI mode state.
             (b"$", 'p') => return self.report_ansi_mode(params),
+            // DECSCUSR — set the cursor style. The SPACE intermediate is part
+            // of the sequence (`CSI Ps SP q`), not padding.
+            (b" ", 'q') => return self.set_cursor_style(params),
             _ => {}
         }
 
@@ -839,6 +842,37 @@ impl vte::Perform for TerminalState {
         // callback is this one — it does not route through `esc_dispatch`/`execute`,
         // so without this the cluster would survive such a DCS.
         self.reset_cluster();
+    }
+}
+
+impl TerminalState {
+    /// Apply DECSCUSR (`CSI Ps SP q`) — the sequence an editor sends to change
+    /// the cursor's look as it changes mode: vim sends `CSI 2 SP q` (steady
+    /// block) for normal mode and `CSI 5 SP q` (blinking bar) for insert.
+    ///
+    /// One value carries both halves of the look: the shape, and whether it
+    /// blinks. The odd values blink and the even ones are steady, and `0` means
+    /// what `1` means. The blink half is written into
+    /// [`cursor_blink`](crate::state::TerminalState::cursor_blink) — the same
+    /// field `?12` writes — because a cursor either blinks or it does not, and
+    /// the two sequences are two writers of that one answer: `CSI 2 SP q`
+    /// ("steady block") must stop a blink an earlier `CSI ? 12 h` started, or
+    /// "steady" would be a lie.
+    ///
+    /// An unknown value leaves both halves alone: `CSI 9 SP q` names no style,
+    /// so there is nothing to apply.
+    fn set_cursor_style(&mut self, params: &vte::Params) {
+        let (shape, blink) = match first_param(params).unwrap_or(0) {
+            0 | 1 => (CursorShape::Block, true),
+            2 => (CursorShape::Block, false),
+            3 => (CursorShape::Underline, true),
+            4 => (CursorShape::Underline, false),
+            5 => (CursorShape::Bar, true),
+            6 => (CursorShape::Bar, false),
+            _ => return,
+        };
+        self.modes.cursor_shape = shape;
+        self.modes.cursor_blink = blink;
     }
 }
 

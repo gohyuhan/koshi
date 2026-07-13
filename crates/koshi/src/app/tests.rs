@@ -76,12 +76,47 @@ fn pty_output_event_renders_to_the_screen() {
     .is_continue());
 
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    render(&mut terminal, &runtime, client_id, &mut String::new()).expect("render");
+    render(
+        &mut terminal,
+        &runtime,
+        client_id,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("render");
 
     assert!(
         screen_text(&terminal).contains("hello"),
         "the shell's output should appear on the rendered screen"
     );
+}
+
+#[test]
+fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
+    // koshi copies the focused pane's DECSCUSR style out to the terminal it is
+    // itself running in, and crossterm writes these commands as the very same
+    // DECSCUSR sequences. So each pair must map to the command whose bytes are
+    // the sequence that produced it — `CSI 5 SP q` in, `CSI 5 SP q` out.
+    // Nothing else in the suite would catch a swapped arm: a `Bar` sent as
+    // `BlinkingUnderScore` renders vim's insert cursor as an underline while
+    // every test still passes.
+    let cases = [
+        ((CursorShape::Block, true), SetCursorStyle::BlinkingBlock),
+        ((CursorShape::Block, false), SetCursorStyle::SteadyBlock),
+        (
+            (CursorShape::Underline, true),
+            SetCursorStyle::BlinkingUnderScore,
+        ),
+        (
+            (CursorShape::Underline, false),
+            SetCursorStyle::SteadyUnderScore,
+        ),
+        ((CursorShape::Bar, true), SetCursorStyle::BlinkingBar),
+        ((CursorShape::Bar, false), SetCursorStyle::SteadyBar),
+    ];
+    for (pair, expected) in cases {
+        assert_eq!(set_cursor_style(pair), expected, "{pair:?}");
+    }
 }
 
 #[test]
@@ -296,7 +331,6 @@ fn explicit_quit_teardown_group_kills_without_grace_delay() {
     runtime.handle_key_input(
         client_id,
         KeyChord::new(ModFlags::CTRL, Key::Char('q')),
-        vec![0x11],
         Instant::now(),
     );
     run_loop(&mut runtime, &mut terminal, client_id).expect("loop");

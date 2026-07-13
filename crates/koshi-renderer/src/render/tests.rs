@@ -71,6 +71,7 @@ fn build(
                 col: 0,
                 visible: true,
                 blink: false,
+                shape: CursorShape::default(),
             },
             grid_view: None,
             reverse_video: false,
@@ -745,6 +746,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
         col: 5,
         visible: true,
         blink: false,
+        shape: CursorShape::default(),
     };
     assert_eq!(
         cursor_position(&snap, viewport_area(&snap)),
@@ -769,11 +771,50 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
         col: 99,
         visible: true,
         blink: false,
+        shape: CursorShape::default(),
     };
     assert_eq!(
         cursor_position(&snap, viewport_area(&snap)),
         Some(Position::new(38, 5))
     );
+}
+
+#[test]
+fn cursor_style_reports_the_focused_panes_shape_and_blink() {
+    // vim in insert mode asked for a blinking bar; the caller passes that style
+    // out to the terminal koshi is running in.
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].cursor = CursorSnapshot {
+        row: 0,
+        col: 0,
+        visible: true,
+        blink: true,
+        shape: CursorShape::Bar,
+    };
+    assert_eq!(cursor_style(&snap), Some((CursorShape::Bar, true)));
+}
+
+#[test]
+fn cursor_style_is_none_without_a_focused_terminal_pane() {
+    let mut snap = content_snap(
+        Grid::blank(4, 38, TermStyle::default()),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    // No focused pane: nothing asked for a style.
+    let focused = snap.client.focused_pane.take();
+    assert_eq!(cursor_style(&snap), None);
+
+    // A plugin pane (no terminal grid) has no DECSCUSR style of its own.
+    snap.client.focused_pane = focused;
+    snap.panes[0].grid_view = None;
+    assert_eq!(cursor_style(&snap), None);
 }
 
 #[test]
@@ -882,6 +923,39 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
         cursor_position(&snap, viewport_area(&snap)),
         Some(Position::new(1, 2))
     );
+}
+
+#[test]
+fn cursor_style_follows_focus_between_panes() {
+    // Pane A runs vim in insert mode (blinking bar); pane B runs a shell
+    // (steady block). The style belongs to the outer terminal, not to a pane's
+    // cells, so moving focus must hand it the OTHER pane's style — otherwise
+    // focusing the shell leaves vim's bar sitting on the shell's prompt.
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[("t", true)],
+        &[(a, rect(0, 1, 20, 6), true), (b, rect(20, 1, 20, 6), true)],
+        Some(a),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    for pane in &mut snap.panes {
+        pane.grid_view = Some(GridView {
+            grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+            view_offset: 0,
+        });
+    }
+    snap.panes[0].cursor.shape = CursorShape::Bar;
+    snap.panes[0].cursor.blink = true;
+    snap.panes[1].cursor.shape = CursorShape::Block;
+    snap.panes[1].cursor.blink = false;
+
+    assert_eq!(cursor_style(&snap), Some((CursorShape::Bar, true)));
+
+    snap.client.focused_pane = Some(b);
+    assert_eq!(cursor_style(&snap), Some((CursorShape::Block, false)));
 }
 
 /// A snapshot whose active tab has no room for any pane: every slot suppressed
@@ -1062,6 +1136,7 @@ fn cursor_shifts_into_centered_content() {
         col: 5,
         visible: true,
         blink: false,
+        shape: CursorShape::default(),
     };
 
     // Content origin offset (10,2); pane inner origin (1,1) places to (11,3);

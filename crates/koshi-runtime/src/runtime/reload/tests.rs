@@ -356,7 +356,6 @@ fn keybinding_reload_clears_pending_sequences() {
     runtime.handle_key_input(
         client,
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
-        vec![0x10],
         Instant::now(),
     );
     let has_pending = |runtime: &Runtime, client: ClientId| {
@@ -633,7 +632,6 @@ fn registry_refresh_clears_pending_sequences_when_the_keymap_reapplies() {
     runtime.handle_key_input(
         client,
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
-        vec![0x10],
         Instant::now(),
     );
     let has_pending = |runtime: &Runtime| {

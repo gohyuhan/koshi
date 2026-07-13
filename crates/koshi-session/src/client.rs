@@ -12,7 +12,7 @@ use std::{
 use koshi_core::{
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
-    key::KeySequence,
+    key::{KeyChord, KeySequence},
     lock::LockMode,
 };
 
@@ -286,13 +286,18 @@ impl ClientRegistry {
     }
 }
 
-/// One incomplete multi-chord keybinding plus its passthrough bytes and expiry.
+/// One incomplete multi-chord keybinding plus its passthrough chords and expiry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.
     pub sequence: KeySequence,
-    /// Terminal bytes for each chord, retained for transparent-mode fallback.
-    pub raw_bytes: Vec<Vec<u8>>,
+    /// The chords whose bytes go to the pane if this sequence is abandoned,
+    /// in press order. Usually every chord in `sequence`; empty when the press
+    /// already fired an action and left its prefix armed, so that abandoning
+    /// the prefix writes nothing. Held as chords rather than bytes because the
+    /// bytes a chord sends depend on the receiving pane's mode at the moment
+    /// they are written.
+    pub fallback: Vec<KeyChord>,
     /// Disambiguation instant, set only when the chords so far are BOTH a
     /// complete binding and the prefix of a longer one — reaching it fires the
     /// complete binding. A prefix-only sequence carries `None` and waits for

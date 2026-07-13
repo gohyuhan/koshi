@@ -29,7 +29,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
-use koshi_terminal::state::Screen;
+use koshi_terminal::state::{CursorShape, Screen};
 use ratatui::style::Color;
 
 use crate::runtime::state::Runtime;
@@ -187,6 +187,7 @@ impl Runtime {
                     col: 0,
                     visible: false,
                     blink: false,
+                    shape: CursorShape::default(),
                 },
                 grid_view: None,
                 reverse_video: false,
@@ -224,6 +225,7 @@ impl Runtime {
                 col,
                 visible: state.cursor_visible(),
                 blink: state.cursor_blink(),
+                shape: state.cursor_shape(),
             },
             grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),

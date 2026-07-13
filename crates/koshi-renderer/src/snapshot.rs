@@ -29,6 +29,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
+use koshi_terminal::state::CursorShape;
 
 use crate::theme::Theme;
 
@@ -169,7 +170,7 @@ pub struct PaneSnapshot {
 }
 
 /// The cursor's on-screen position, relative to the content area's origin, plus
-/// whether it is shown.
+/// how it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorSnapshot {
     /// The cursor's row within the content area, starting at 0.
@@ -180,6 +181,10 @@ pub struct CursorSnapshot {
     pub visible: bool,
     /// Whether the cursor blinks.
     pub blink: bool,
+    /// The shape the cursor is drawn as (DECSCUSR) — a program in the pane
+    /// switches it to show its own mode, as vim does between a normal-mode
+    /// block and an insert-mode bar.
+    pub shape: CursorShape,
 }
 
 /// The visible cells for one pane: the live screen grid, plus how far the view

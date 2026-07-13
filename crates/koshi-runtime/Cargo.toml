@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 koshi-config = { version = "0.1.0", path = "../koshi-config" }
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-input = { version = "0.1.0", path = "../koshi-input" }
 koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
 koshi-observability = { version = "0.1.0", path = "../koshi-observability" }
 koshi-pane = { version = "0.1.0", path = "../koshi-pane" }

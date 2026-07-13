@@ -31,6 +31,7 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::PaneId;
 use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
+use koshi_terminal::state::CursorShape;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::{PaneSnapshot, RenderSnapshot};
@@ -168,6 +169,27 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
     let x = (inner.x + pane.cursor.col).min(inner.right().saturating_sub(1));
     let y = (inner.y + pane.cursor.row).min(inner.bottom().saturating_sub(1));
     Some(Position::new(x, y))
+}
+
+/// How the focused pane wants its cursor drawn: the [shape][CursorShape] it set
+/// with DECSCUSR, and whether it blinks. `None` when the client has no focused
+/// pane, or that pane runs a plugin rather than a terminal — nothing asked for a
+/// style, so the caller leaves the outer terminal's cursor as it is.
+///
+/// Companion to [`cursor_position`], which says *where* the cursor goes; this
+/// says what it looks like once it is there. The caller applies it to the outer
+/// terminal (crossterm's `SetCursorStyle`), which is what makes vim's
+/// insert-mode bar show as a bar instead of a block.
+///
+/// Deliberately not gated on the cursor being visible or the view being scrolled
+/// back: a cursor that is not drawn has no look to get wrong, and re-deriving
+/// [`cursor_position`]'s guard chain here would be a second copy of it to keep in
+/// step.
+#[must_use]
+pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<(CursorShape, bool)> {
+    let pane = find_pane(snapshot, snapshot.client.focused_pane?)?;
+    pane.grid_view.as_ref()?;
+    Some((pane.cursor.shape, pane.cursor.blink))
 }
 
 /// Find the [`PaneSnapshot`] with the given id in this frame.

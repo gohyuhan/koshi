@@ -674,6 +674,7 @@ dependencies = [
  "koshi-pty",
  "koshi-renderer",
  "koshi-runtime",
+ "koshi-terminal",
  "koshi-test-support",
  "ratatui",
  "serde",
@@ -822,6 +823,7 @@ version = "0.1.0"
 dependencies = [
  "koshi-config",
  "koshi-core",
+ "koshi-input",
  "koshi-layout",
  "koshi-observability",
  "koshi-pane",

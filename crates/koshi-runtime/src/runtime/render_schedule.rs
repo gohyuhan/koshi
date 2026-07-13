@@ -11,9 +11,9 @@
 //! # Two cadences
 //!
 //! A real change (cell output, layout, focus, resize, …) may render as fast as
-//! [`FRAME_INTERVAL`] (~one frame / 16 ms). When the *only* pending reason is
+//! [`FRAME_INTERVAL`] (~one frame / 8 ms). When the *only* pending reason is
 //! the cursor blink, the scheduler drops to the far slower [`BLINK_INTERVAL`]
-//! (~500 ms) — that lane is what keeps an idle session near 0% CPU while the
+//! (~250 ms) — that lane is what keeps an idle session near 0% CPU while the
 //! cursor still blinks.
 //!
 //! # Time is injected, never read
@@ -29,12 +29,12 @@
 
 use std::time::{Duration, Instant};
 
-/// Fastest cadence for a real (non-blink) change: ~one frame per 16 ms tick.
-pub const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Fastest cadence for a real (non-blink) change: ~one frame per 8 ms tick.
+pub const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Cadence when only the cursor blink is pending: slow enough that an idle
 /// session stays near 0% CPU.
-pub const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+pub const BLINK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Why the rendered frame is stale.
 ///

@@ -1,13 +1,18 @@
 //! Outer keyboard routing: multi-chord keybinding resolution first, transparent
 //! fallthrough to the focused terminal pane second.
+//!
+//! A chord that no binding consumes becomes bytes here, at the write, rather
+//! than back at the decoder: the bytes a pane expects depend on the mode that
+//! pane is in, which only the moment of writing knows.
 
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{CommandEnvelope, CommandSource};
-use koshi_core::ids::{ClientId, CommandId};
+use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
+use koshi_input::keyboard::encode;
 use koshi_session::client::PendingKeySequence;
 
 use crate::runtime::render_schedule::InvalidationReason;
@@ -18,14 +23,8 @@ const ESCAPE: KeyChord = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)
 
 impl Runtime {
     /// Resolve one normalized key against the client's current mode, buffering
-    /// prefixes and writing only unconsumed bytes to the focused pane.
-    pub fn handle_key_input(
-        &mut self,
-        client_id: ClientId,
-        chord: KeyChord,
-        raw_bytes: Vec<u8>,
-        now: Instant,
-    ) {
+    /// prefixes and writing only unconsumed chords to the focused pane.
+    pub fn handle_key_input(&mut self, client_id: ClientId, chord: KeyChord, now: Instant) {
         let Some((mode, pending)) = self.take_pending(client_id) else {
             return;
         };
@@ -33,15 +32,15 @@ impl Runtime {
             .as_ref()
             .map(|pending| pending.sequence.chords().to_vec())
             .unwrap_or_default();
-        let mut bytes = pending
+        let mut fallback = pending
             .as_ref()
-            .map(|pending| pending.raw_bytes.clone())
+            .map(|pending| pending.fallback.clone())
             .unwrap_or_default();
         chords.push(chord);
-        bytes.push(raw_bytes.clone());
+        fallback.push(chord);
 
         if chords.len() > self.keymap_hints.max_chord_depth() {
-            self.flush_pending(client_id, mode, bytes);
+            self.flush_pending(client_id, mode, fallback);
             return;
         }
 
@@ -61,7 +60,7 @@ impl Runtime {
                     .then(|| now + self.keymap_hints.chord_timeout());
                 let pending = PendingKeySequence {
                     sequence,
-                    raw_bytes: bytes,
+                    fallback,
                     deadline,
                 };
                 if let Some(session) = self.session_for_client_mut(client_id) {
@@ -82,16 +81,16 @@ impl Runtime {
                     return;
                 }
                 // A held sequence that was itself a complete binding fires
-                // on the mismatch; otherwise its bytes fall through. The
+                // on the mismatch; otherwise its chords fall through. The
                 // mismatching chord then restarts resolution on its own.
                 if let Some(bound) = self.keymap_hints.match_sequence(mode, &held.sequence).exact {
                     self.fire_binding(client_id, bound);
                 } else {
-                    self.flush_pending(client_id, mode, held.raw_bytes);
+                    self.flush_pending(client_id, mode, held.fallback);
                 }
-                self.handle_key_input(client_id, chord, raw_bytes, now);
+                self.handle_key_input(client_id, chord, now);
             }
-            (None, false) => self.fall_through(client_id, mode, &raw_bytes),
+            (None, false) => self.fall_through(client_id, mode, chord),
         }
     }
 
@@ -135,7 +134,7 @@ impl Runtime {
                 self.fire_binding(client_id, bound.clone());
                 self.rearm_continuous(client_id, &bound, &pending.sequence);
             } else {
-                self.flush_pending(client_id, mode, pending.raw_bytes);
+                self.flush_pending(client_id, mode, pending.fallback);
             }
             self.render_scheduler
                 .invalidate(InvalidationReason::StatusChanged);
@@ -145,19 +144,36 @@ impl Runtime {
     /// Write outer-input bytes to `client_id`'s focused pane. Does nothing if
     /// the client is gone or has no focused pane in its active tab.
     pub fn handle_outer_input(&mut self, client_id: ClientId, bytes: &[u8]) {
-        let pane_id = {
-            let Some(session) = self.session_for_client(client_id) else {
-                return;
-            };
-            let Some(client) = session.clients.get(client_id) else {
-                return;
-            };
-            match client.focused_pane(client.active_tab()) {
-                Some(pane_id) => pane_id,
-                None => return,
-            }
+        let Some(pane_id) = self.focused_pane(client_id) else {
+            return;
         };
         let _ = self.pty_backend().write(pane_id, bytes);
+    }
+
+    /// Write one unconsumed chord to `client_id`'s focused pane, encoded for
+    /// the pane as it stands right now: a program that turned on
+    /// application-cursor-keys mode reads `<Up>` as `ESC O A`, one that did not
+    /// reads it as `ESC [ A`, so the pane's mode — not the press — picks the
+    /// bytes. A pane with no terminal engine yet has not turned anything on,
+    /// which is the same answer as the mode being off.
+    fn write_chord(&mut self, client_id: ClientId, chord: KeyChord) {
+        let Some(pane_id) = self.focused_pane(client_id) else {
+            return;
+        };
+        let app_cursor_keys = self
+            .terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| engine.state().app_cursor_keys());
+        let bytes = encode(chord, app_cursor_keys);
+        let _ = self.pty_backend().write(pane_id, &bytes);
+    }
+
+    /// The pane `client_id` has focused in its active tab, if the client is
+    /// still attached and its tab holds one.
+    fn focused_pane(&self, client_id: ClientId) -> Option<PaneId> {
+        let session = self.session_for_client(client_id)?;
+        let client = session.clients.get(client_id)?;
+        client.focused_pane(client.active_tab())
     }
 
     /// Re-arm a continuous binding's prefix after it fires: the sequence
@@ -165,7 +181,7 @@ impl Runtime {
     /// fires the sibling binding (`<C-s> h h h` resizes three times). Only
     /// actions the registry marks `continuous` re-arm, and only multi-chord
     /// sequences have a prefix to hold. The re-armed pending carries no
-    /// fallback bytes — the original press was consumed by the fired action,
+    /// fallback chords — the original press was consumed by the fired action,
     /// so abandoning the held prefix later writes nothing to the pane.
     fn rearm_continuous(
         &mut self,
@@ -184,7 +200,7 @@ impl Runtime {
         let prefix = KeySequence::new(chords[0], chords[1..chords.len() - 1].to_vec());
         let pending = PendingKeySequence {
             sequence: prefix,
-            raw_bytes: Vec::new(),
+            fallback: Vec::new(),
             deadline: None,
         };
         if let Some(session) = self.session_for_client_mut(client_id) {
@@ -205,19 +221,19 @@ impl Runtime {
         Some((client.lock_mode(), client.take_pending_key_sequence()))
     }
 
-    fn flush_pending(&mut self, client_id: ClientId, mode: LockMode, bytes: Vec<Vec<u8>>) {
+    fn flush_pending(&mut self, client_id: ClientId, mode: LockMode, fallback: Vec<KeyChord>) {
         if transparent(mode) {
-            for raw in bytes {
-                self.handle_outer_input(client_id, &raw);
+            for chord in fallback {
+                self.write_chord(client_id, chord);
             }
         }
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
     }
 
-    fn fall_through(&mut self, client_id: ClientId, mode: LockMode, raw_bytes: &[u8]) {
+    fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
         if transparent(mode) {
-            self.handle_outer_input(client_id, raw_bytes);
+            self.write_chord(client_id, chord);
         }
     }
 
