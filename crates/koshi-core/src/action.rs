@@ -631,34 +631,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::RunCommandPane),
             Available,
         ),
-        // --- Keybindings ---
-        core_seed(
-            "set-key-binding",
-            "Set Key Binding",
-            "Bind a key sequence to an action for this runtime only",
-            Global,
-            vec![Session],
-            CoreCommand(CommandKind::SetKeyBinding),
-            Available,
-        ),
-        core_seed(
-            "remove-key-binding",
-            "Remove Key Binding",
-            "Remove a key sequence's binding for this runtime only",
-            Global,
-            vec![Session],
-            CoreCommand(CommandKind::RemoveKeyBinding),
-            Available,
-        ),
-        core_seed(
-            "reset-key-bindings",
-            "Reset Key Bindings",
-            "Drop keybinding customization, restoring the built-in defaults",
-            Global,
-            vec![Session],
-            CoreCommand(CommandKind::ResetKeyBindings),
-            Available,
-        ),
     ];
 
     // --- Copy mode --- (all: PaneSession scope, Pane target, CopyMode command, ComingSoon)

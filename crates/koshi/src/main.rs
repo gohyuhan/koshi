@@ -39,16 +39,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Keys { command }) = &cli.command {
-        // The read-only keys queries fold the user's keybinding file onto the
-        // built-in defaults locally; the mutations (`set`/`remove`/`reset`)
-        // act on a running session, so they fall through to the IPC path.
-        match command {
-            KeysCommand::List { .. }
-            | KeysCommand::Describe { .. }
-            | KeysCommand::Conflicts { .. }
-            | KeysCommand::Validate { .. } => return run_keys_query(command),
-            KeysCommand::Set { .. } | KeysCommand::Remove { .. } | KeysCommand::Reset { .. } => {}
-        }
+        // Every keys verb is a read-only query folding the user's keybinding
+        // file onto the built-in defaults locally.
+        return run_keys_query(command);
     }
 
     if cli.is_interactive_launch() {
@@ -86,10 +79,9 @@ fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
     }
 }
 
-/// Serve a read-only `koshi keys` query from the offline keymap view: the
-/// user's keybinding file folded onto the built-in defaults. The running
-/// session's own layers (`session`, `layout`, `manual`) arrive with the IPC
-/// client.
+/// Serve a `koshi keys` query from the offline keymap view: the user's
+/// keybinding file folded onto the built-in defaults. The running session's
+/// own layers (`session`, `layout`) arrive with the IPC client.
 fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
     match command {
         KeysCommand::List {
@@ -143,9 +135,6 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
                     path: path.display().to_string(),
                 })
             }
-        }
-        KeysCommand::Set { .. } | KeysCommand::Remove { .. } | KeysCommand::Reset { .. } => {
-            unreachable!("run routes only the read-only keys queries here")
         }
     }
 }

@@ -5,8 +5,8 @@
 //! one exists in the koshi config directory) onto the built-in defaults, runs
 //! conflict detection against the core action table, and merges the layers
 //! into the per-mode lookup the renderers read. The running session's layers
-//! (`session`, `layout`, and the `manual` edits made by `keys set`/`remove`)
-//! are not visible here; querying them arrives with the IPC client.
+//! (`session`, `layout`) are not visible here; querying them arrives with
+//! the IPC client.
 //!
 //! The keybinding section applies all-or-nothing: a user file that fails to
 //! parse, or whose conflict verdict refuses it, leaves the view on the

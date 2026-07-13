@@ -511,8 +511,8 @@ struct KeyBindingSummary {
     /// The action reference the key fires.
     action: String,
     /// The layer that authored the winning entry: `defaults`, `user`,
-    /// `session`, `layout`, or `manual` — or `defaults (unbound)` for a
-    /// shipped binding a user surface displaced.
+    /// `session`, or `layout` — or `defaults (unbound)` for a shipped
+    /// binding a user surface displaced.
     source: String,
 }
 
@@ -881,7 +881,6 @@ fn scope_arg_label(scope: ScopeArg) -> &'static str {
         ScopeArg::User => "user",
         ScopeArg::Session => "session",
         ScopeArg::Layout => "layout",
-        ScopeArg::Manual => "manual",
     }
 }
 

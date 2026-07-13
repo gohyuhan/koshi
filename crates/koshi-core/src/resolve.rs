@@ -40,9 +40,8 @@ use std::path::PathBuf;
 use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveTabArgs, NewPaneArgs, NewTabArgs, RemoveKeyBindingArgs, RenamePaneArgs, RenameSessionArgs,
-    RenameTabArgs, ResetKeyBindingsArgs, ResizePaneArgs, RunCommandPaneArgs, SetKeyBindingArgs,
-    TabTarget,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
+    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -144,28 +143,6 @@ pub enum ActionArgs {
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
         stacked: bool,
-    },
-    /// Arguments for `core:set-key-binding`. The sequence is the string the
-    /// caller typed; the runtime parses it against its own effective leader.
-    SetKeyBinding {
-        /// Input mode the binding lands in; `None` binds in `normal`.
-        mode: Option<String>,
-        /// The key sequence to bind, in the angle grammar (`"<C-p> n"`).
-        sequence: String,
-        /// The action the sequence fires, carried without arguments.
-        action: ActionRef,
-    },
-    /// Arguments for `core:remove-key-binding`.
-    RemoveKeyBinding {
-        /// Input mode the removal applies in; `None` removes in `normal`.
-        mode: Option<String>,
-        /// The key sequence to remove, in the angle grammar.
-        sequence: String,
-    },
-    /// Arguments for `core:reset-key-bindings`.
-    ResetKeyBindings {
-        /// Input mode to reset; `None` resets the whole keybindings section.
-        mode: Option<String>,
     },
 }
 
@@ -432,32 +409,6 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             direction: *direction,
             stacked: *stacked,
         }),
-
-        // --- Keybindings ---
-        (
-            "set-key-binding",
-            ActionArgs::SetKeyBinding {
-                mode,
-                sequence,
-                action: bound,
-            },
-        ) => Command::SetKeyBinding(SetKeyBindingArgs {
-            mode: mode.clone(),
-            sequence: sequence.clone(),
-            action: bound.clone(),
-        }),
-        ("remove-key-binding", ActionArgs::RemoveKeyBinding { mode, sequence }) => {
-            Command::RemoveKeyBinding(RemoveKeyBindingArgs {
-                mode: mode.clone(),
-                sequence: sequence.clone(),
-            })
-        }
-        ("reset-key-bindings", ActionArgs::None) => {
-            Command::ResetKeyBindings(ResetKeyBindingsArgs { mode: None })
-        }
-        ("reset-key-bindings", ActionArgs::ResetKeyBindings { mode }) => {
-            Command::ResetKeyBindings(ResetKeyBindingsArgs { mode: mode.clone() })
-        }
 
         _ => {
             return Err(ResolveError::ArgsMismatch {

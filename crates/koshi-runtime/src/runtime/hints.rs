@@ -55,7 +55,7 @@ impl KeymapHintCatalog {
     /// live action table.
     pub(crate) fn from_registry(registry: &ActionRegistry) -> Self {
         Self::from_parts(
-            &keymap_layers(None, &BTreeMap::new()),
+            &keymap_layers(None),
             &KeybindingsConfig::default(),
             registry,
         )
@@ -154,14 +154,12 @@ impl KeymapHintCatalog {
     }
 }
 
-/// The ordered keymap layers: the built-in default binding table, the user's
-/// `keybinding.kdl` modes when present, and the manual layer's runtime edits
-/// when any exist — highest precedence last. Every user-authored layer
-/// passes through [`KeyMapLayer::with_user_args_stripped`], so binding
-/// arguments smuggled into a user surface are dropped rather than honored.
+/// The ordered keymap layers: the built-in default binding table, plus the
+/// user's `keybinding.kdl` modes when present. The user layer passes through
+/// [`KeyMapLayer::with_user_args_stripped`], so binding arguments in a user
+/// file are dropped rather than honored.
 pub(crate) fn keymap_layers(
     user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
-    manual_modes: &BTreeMap<ModeName, ModeBindings>,
 ) -> Vec<KeyMapLayer> {
     let mut layers = vec![KeyMapLayer {
         origin: LayerOrigin::Defaults,
@@ -172,15 +170,6 @@ pub(crate) fn keymap_layers(
             KeyMapLayer {
                 origin: LayerOrigin::User,
                 modes,
-            }
-            .with_user_args_stripped(),
-        );
-    }
-    if !manual_modes.is_empty() {
-        layers.push(
-            KeyMapLayer {
-                origin: LayerOrigin::Manual,
-                modes: manual_modes.clone(),
             }
             .with_user_args_stripped(),
         );

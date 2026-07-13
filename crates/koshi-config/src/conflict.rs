@@ -1,7 +1,7 @@
 //! Keybinding conflict detection over ordered keymap layers.
 //!
 //! Bindings arrive in layers — the built-in defaults, then the user's own
-//! surfaces (user file, session, layout, manual `koshi keys` edits), lowest
+//! surfaces (user file, session, layout), lowest
 //! first. Before the keymap-merge pass folds them into the
 //! runtime lookup map, [`detect_conflicts`] inspects the layers and reports
 //! every finding as a typed [`ConflictDiagnostic`]. The report's
@@ -73,8 +73,6 @@ pub enum LayerOrigin {
     Session,
     /// Bindings a layout file declares for itself.
     Layout,
-    /// Runtime edits made through the `koshi keys` CLI.
-    Manual,
 }
 
 impl LayerOrigin {
@@ -94,7 +92,6 @@ impl fmt::Display for LayerOrigin {
             Self::User => "user",
             Self::Session => "session",
             Self::Layout => "layout",
-            Self::Manual => "manual",
         })
     }
 }

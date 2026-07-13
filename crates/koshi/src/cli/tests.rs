@@ -289,56 +289,13 @@ fn keys_validate_parses_the_path() {
 }
 
 #[test]
-fn keys_set_maps_to_the_set_key_binding_command() {
-    let (action, cmd) = action_of(&[
-        "koshi",
-        "keys",
-        "set",
-        "<C-y>",
-        "core:new-tab",
-        "--mode",
-        "normal",
-    ]);
-    assert_eq!(action, ActionRef::core("set-key-binding").unwrap());
-    assert_eq!(
-        cmd,
-        Command::SetKeyBinding(SetKeyBindingArgs {
-            mode: Some("normal".to_string()),
-            sequence: "<C-y>".to_string(),
-            action: ActionRef::core("new-tab").unwrap(),
-        })
-    );
-}
-
-#[test]
-fn keys_set_rejects_a_bare_action_name() {
-    let err = parse_err(&["koshi", "keys", "set", "<C-y>", "new-tab"]);
-    assert_eq!(err.kind(), ErrorKind::ValueValidation);
-}
-
-#[test]
-fn keys_remove_maps_to_the_remove_key_binding_command() {
-    let (action, cmd) = action_of(&["koshi", "keys", "remove", "<C-y>"]);
-    assert_eq!(action, ActionRef::core("remove-key-binding").unwrap());
-    assert_eq!(
-        cmd,
-        Command::RemoveKeyBinding(RemoveKeyBindingArgs {
-            mode: None,
-            sequence: "<C-y>".to_string(),
-        })
-    );
-}
-
-#[test]
-fn keys_reset_maps_to_the_reset_key_bindings_command() {
-    let (action, cmd) = action_of(&["koshi", "keys", "reset", "--mode", "locked"]);
-    assert_eq!(action, ActionRef::core("reset-key-bindings").unwrap());
-    assert_eq!(
-        cmd,
-        Command::ResetKeyBindings(ResetKeyBindingsArgs {
-            mode: Some("locked".to_string()),
-        })
-    );
+fn keys_mutation_verbs_do_not_exist() {
+    // Keybindings mutate through `keybinding.kdl` only; the `keys` tree is
+    // read-only introspection.
+    for verb in ["set", "remove", "reset"] {
+        let err = parse_err(&["koshi", "keys", verb]);
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand, "for {verb}");
+    }
 }
 
 #[test]
