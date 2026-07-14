@@ -40,8 +40,8 @@ use std::path::PathBuf;
 use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
-    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
+    NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
+    RunCommandPaneArgs, TabTarget,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -61,23 +61,18 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 /// The arguments bound to an action at its call site — a keymap entry, or a step
 /// of a macro.
 ///
-/// # What a variant may carry
+/// Bindings themselves carry no arguments: an action choice with a small fixed
+/// set of values lives in the action NAME (`core:new-pane-left`,
+/// `core:close-pane-tree`), and a value with an open range (a tab index, a
+/// program to run) is reachable only through a CLI command. A variant here is a
+/// SYSTEM-authored preset — nothing a user writes in `keybinding.kdl` produces
+/// one, and user-authored layers have their args stripped to [`ActionArgs::None`]
+/// on load.
 ///
-/// Exactly what the invoker chooses, which is three things and no others:
-///
-/// - **Non-target knobs** — a split direction, a resize amount, a force flag.
-/// - **Required targets** — a target the command has no default for, so the
-///   invoker must name it. [`FocusPaneArgs::target`](crate::command::FocusPaneArgs)
-///   is a [`FocusTarget`], not an `Option`, so [`ActionArgs::FocusPane`]
-///   carries one — a pane id, or a direction the runtime resolves against
-///   the layout.
-/// - **Nothing else.**
-///
-/// An **optional** target is never here: `None` already reads as "the focused
-/// one" in each argument struct, and the runtime resolves it from the command's
-/// source. Nor is a field the issuing boundary owns: a pane's `cwd` and `env`
-/// are captured where the command is issued, which is why [`ActionArgs::Run`]
-/// names a program and its arguments rather than a whole [`SpawnSpec`].
+/// A field the issuing boundary owns never appears in a variant: a pane's `cwd`
+/// and `env` are captured where the command is issued, which is why
+/// [`ActionArgs::Run`] names a program and its arguments rather than a whole
+/// [`SpawnSpec`].
 ///
 /// [`ActionArgs::None`] means no arguments were given. Actions whose every field
 /// is optional accept it and fall back to their defaults; actions with a
@@ -86,52 +81,6 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 pub enum ActionArgs {
     /// No arguments supplied.
     None,
-    /// Arguments for `core:new-pane`.
-    NewPane {
-        /// Split direction; `None` uses the runtime's default split
-        /// direction. Ignored when `stacked`.
-        direction: Option<Direction>,
-        /// Stack onto the source pane instead of splitting space.
-        stacked: bool,
-    },
-    /// Arguments for `core:close-pane`.
-    ClosePane {
-        /// Kill the pane's child immediately, overriding its close policy.
-        force: bool,
-        /// Widen the kill to the child's whole process group.
-        #[serde(default)]
-        tree: bool,
-    },
-    /// Arguments for `core:resize-pane`.
-    ResizePane {
-        /// Which of the pane's borders moves.
-        direction: Direction,
-        /// Signed cell count the border moves; zero is rejected at dispatch.
-        size: i16,
-    },
-    /// Arguments for `core:focus-pane`.
-    FocusPane {
-        /// The pane to focus, by id or by direction from the focused pane.
-        target: FocusTarget,
-    },
-    /// Arguments for `core:close-tab`.
-    CloseTab {
-        /// Kill every pane's child immediately, overriding each close policy.
-        force: bool,
-        /// Widen every kill to its child's whole process group.
-        #[serde(default)]
-        tree: bool,
-    },
-    /// Arguments for `core:focus-tab`.
-    FocusTab {
-        /// Which tab to focus.
-        target: TabTarget,
-    },
-    /// Arguments for `core:move-tab`.
-    MoveTab {
-        /// Destination zero-based index.
-        index: usize,
-    },
     /// Arguments for `core:run`.
     Run {
         /// The program to execute.
@@ -315,48 +264,38 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
     let command = match (action.name.as_str(), args) {
         // --- Panes ---
         ("new-pane", ActionArgs::None) => Command::NewPane(NewPaneArgs::default()),
-        ("new-pane", ActionArgs::NewPane { direction, stacked }) => Command::NewPane(NewPaneArgs {
+        ("new-pane-left", ActionArgs::None) => new_pane_toward(Direction::Left),
+        ("new-pane-down", ActionArgs::None) => new_pane_toward(Direction::Down),
+        ("new-pane-up", ActionArgs::None) => new_pane_toward(Direction::Up),
+        ("new-pane-right", ActionArgs::None) => new_pane_toward(Direction::Right),
+        ("new-pane-stacked", ActionArgs::None) => Command::NewPane(NewPaneArgs {
             source: None,
-            direction: *direction,
-            stacked: *stacked,
+            direction: None,
+            stacked: true,
             cwd: None,
             command: None,
             client: None,
         }),
         ("close-pane", ActionArgs::None) => Command::ClosePane(ClosePaneArgs::default()),
-        ("close-pane", ActionArgs::ClosePane { force, tree }) => {
-            Command::ClosePane(ClosePaneArgs {
-                pane: None,
-                force: *force,
-                tree: *tree,
-            })
-        }
-        ("resize-pane", ActionArgs::ResizePane { direction, size }) => {
-            Command::ResizePane(ResizePaneArgs {
-                pane: None,
-                direction: *direction,
-                size: *size,
-            })
-        }
-        ("focus-pane", ActionArgs::FocusPane { target }) => Command::FocusPane(FocusPaneArgs {
-            target: *target,
-            client: None,
+        ("close-pane-tree", ActionArgs::None) => Command::ClosePane(ClosePaneArgs {
+            pane: None,
+            force: false,
+            tree: true,
         }),
+        ("resize-pane-left", ActionArgs::None) => resize_toward(Direction::Left),
+        ("resize-pane-down", ActionArgs::None) => resize_toward(Direction::Down),
+        ("resize-pane-up", ActionArgs::None) => resize_toward(Direction::Up),
+        ("resize-pane-right", ActionArgs::None) => resize_toward(Direction::Right),
+        ("focus-pane-left", ActionArgs::None) => focus_toward(Direction::Left),
+        ("focus-pane-down", ActionArgs::None) => focus_toward(Direction::Down),
+        ("focus-pane-up", ActionArgs::None) => focus_toward(Direction::Up),
+        ("focus-pane-right", ActionArgs::None) => focus_toward(Direction::Right),
         ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
         ("rename-pane", ActionArgs::None) => Command::RenamePane(RenamePaneArgs { pane: None }),
 
         // --- Tabs ---
         ("new-tab", ActionArgs::None) => Command::NewTab(NewTabArgs::default()),
         ("close-tab", ActionArgs::None) => Command::CloseTab(CloseTabArgs::default()),
-        ("close-tab", ActionArgs::CloseTab { force, tree }) => Command::CloseTab(CloseTabArgs {
-            tab: None,
-            force: *force,
-            tree: *tree,
-        }),
-        ("focus-tab", ActionArgs::FocusTab { target }) => Command::FocusTab(FocusTabArgs {
-            target: *target,
-            client: None,
-        }),
         ("next-tab", ActionArgs::None) => Command::FocusTab(FocusTabArgs {
             target: TabTarget::Next,
             client: None,
@@ -366,10 +305,6 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             client: None,
         }),
         ("rename-tab", ActionArgs::None) => Command::RenameTab(RenameTabArgs { tab: None }),
-        ("move-tab", ActionArgs::MoveTab { index }) => Command::MoveTab(MoveTabArgs {
-            tab: None,
-            index: *index,
-        }),
 
         // --- Session ---
         ("rename-session", ActionArgs::None) => {
@@ -417,6 +352,38 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         }
     };
     Ok(command)
+}
+
+/// The command a `new-pane-<direction>` action builds: split the focused pane
+/// and open the new one toward `direction`.
+fn new_pane_toward(direction: Direction) -> Command {
+    Command::NewPane(NewPaneArgs {
+        source: None,
+        direction: Some(direction),
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    })
+}
+
+/// The command a `resize-pane-<direction>` action builds: move the focused
+/// pane's border one cell toward `direction`.
+fn resize_toward(direction: Direction) -> Command {
+    Command::ResizePane(ResizePaneArgs {
+        pane: None,
+        direction,
+        size: 1,
+    })
+}
+
+/// The command a `focus-pane-<direction>` action builds: move the issuing
+/// client's focus to the neighboring pane toward `direction`.
+fn focus_toward(direction: Direction) -> Command {
+    Command::FocusPane(FocusPaneArgs {
+        target: FocusTarget::Direction(direction),
+        client: None,
+    })
 }
 
 #[cfg(test)]

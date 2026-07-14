@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use koshi_core::action::ActionRef;
-use koshi_core::command::FocusTarget;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::resolve::ActionArgs;
@@ -176,10 +175,12 @@ impl ModeName {
 /// The action a key sequence triggers: the action reference plus the
 /// arguments bound at the binding site.
 ///
-/// The arguments are a fixed preset authored by the binding table itself —
-/// the built-in defaults pair `focus-pane` with a direction, for example.
-/// User keybinding surfaces bind a key to an action reference only;
-/// arguments are reachable exclusively through CLI commands.
+/// Bindings carry no arguments in practice: an action choice with a fixed
+/// set of values lives in the action name (`new-pane-left`,
+/// `close-pane-tree`), and open-range values are reachable only through CLI
+/// commands. The `args` field remains for system-authored presets — plugin
+/// manifests may pair their own actions with arguments; user keybinding
+/// surfaces bind a key to an action reference only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAction {
     /// The action to resolve when the sequence fires.
@@ -192,8 +193,8 @@ pub struct BoundAction {
 ///
 /// The map key is the sequence, so one sequence resolves to exactly one
 /// action by construction — the hard binding invariant. Several sequences
-/// may name the same action (`<C-Left>` and `<A-h>` both focus the left
-/// neighbor in the defaults).
+/// may name the same action (`<C-p> <Left>` and `<A-h>` both bind
+/// `focus-pane-left` in the defaults).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModeBindings {
     /// Key sequence → the action it triggers.
@@ -215,11 +216,14 @@ pub struct ModeBindings {
 /// may be a plain key, since it is only read while the pending sequence is
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
-/// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle and
-/// directional focus — live under the `<C-p>` prefix and resize under the
-/// `<C-s>` prefix. Action names here are compile-time constants known to
-/// satisfy the action-name grammar; an invalid one is a bug in this table
-/// and is caught by its tests.
+/// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
+/// splits, and directional focus — live under the `<C-p>` prefix and resize
+/// under the `<C-s>` prefix. Every binding is argless: an action choice with
+/// a fixed set of values is part of the action name (`new-pane-left`,
+/// `close-pane-tree`), so any key here can be rebound from `keybinding.kdl`.
+/// Action names here are compile-time constants known to satisfy the
+/// action-name grammar; an invalid one is a bug in this table and is caught
+/// by its tests.
 fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     let seq = |mods: ModFlags, key: Key| KeySequence::from(KeyChord::new(mods, key));
     let ctrl_then = |prefix: char, key: Key| {
@@ -228,117 +232,79 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             vec![KeyChord::new(ModFlags::NONE, key)],
         )
     };
-    let bound = |name: &str, args: ActionArgs| BoundAction {
+    let bound = |name: &str| BoundAction {
         action: ActionRef::core(name)
             .expect("default binding action name must satisfy the action-name grammar"),
-        args,
+        args: ActionArgs::None,
     };
-    let focus = |direction: Direction| ActionArgs::FocusPane {
-        target: FocusTarget::Direction(direction),
-    };
-    let resize = |direction: Direction| ActionArgs::ResizePane { direction, size: 1 };
 
     let normal: BTreeMap<KeySequence, BoundAction> = [
         // Lock and quit. The lock chord IS the reserved unlock chord: it
         // locks here and unlocks in locked mode, so one key flips both ways.
         (
             KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-            bound("lock", ActionArgs::None),
+            bound("lock"),
         ),
-        (
-            seq(ModFlags::CTRL, Key::Char('q')),
-            bound("quit", ActionArgs::None),
-        ),
-        // Pane lifecycle, under the pane prefix. New panes split in the
-        // configured default direction; directional splits are CLI-only.
-        (
-            ctrl_then('p', Key::Char('n')),
-            bound("new-pane", ActionArgs::None),
-        ),
+        (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
+        // Pane lifecycle, under the pane prefix. `n` splits in the
+        // configured default direction; the vim letters pick the side the
+        // new pane opens on.
+        (ctrl_then('p', Key::Char('n')), bound("new-pane")),
+        (ctrl_then('p', Key::Char('h')), bound("new-pane-left")),
+        (ctrl_then('p', Key::Char('j')), bound("new-pane-down")),
+        (ctrl_then('p', Key::Char('k')), bound("new-pane-up")),
+        (ctrl_then('p', Key::Char('l')), bound("new-pane-right")),
         // The close key kills the pane's whole process group — nothing the
         // pane spawned survives it. The CLI close keeps the leader-only
         // scope.
-        (
-            ctrl_then('p', Key::Char('x')),
-            bound(
-                "close-pane",
-                ActionArgs::ClosePane {
-                    force: false,
-                    tree: true,
-                },
-            ),
-        ),
+        (ctrl_then('p', Key::Char('x')), bound("close-pane-tree")),
         (
             seq(ModFlags::ALT, Key::Char('f')),
-            bound("toggle-pane-fullscreen", ActionArgs::None),
+            bound("toggle-pane-fullscreen"),
         ),
-        // Directional focus: arrows under the pane prefix, and vim style.
-        // Both fire continuous actions, so the prefix stays armed after each
-        // press — `<C-p> ← ← ←` walks focus left three panes.
+        // Directional focus: arrows under the pane prefix, and Alt+vim
+        // letters. Both fire continuous actions, so the prefix stays armed
+        // after each press — `<C-p> ← ← ←` walks focus left three panes.
         (
             ctrl_then('p', Key::Named(NamedKey::Left)),
-            bound("focus-pane", focus(Direction::Left)),
+            bound("focus-pane-left"),
         ),
         (
             ctrl_then('p', Key::Named(NamedKey::Down)),
-            bound("focus-pane", focus(Direction::Down)),
+            bound("focus-pane-down"),
         ),
         (
             ctrl_then('p', Key::Named(NamedKey::Up)),
-            bound("focus-pane", focus(Direction::Up)),
+            bound("focus-pane-up"),
         ),
         (
             ctrl_then('p', Key::Named(NamedKey::Right)),
-            bound("focus-pane", focus(Direction::Right)),
+            bound("focus-pane-right"),
         ),
-        (
-            seq(ModFlags::ALT, Key::Char('h')),
-            bound("focus-pane", focus(Direction::Left)),
-        ),
-        (
-            seq(ModFlags::ALT, Key::Char('j')),
-            bound("focus-pane", focus(Direction::Down)),
-        ),
-        (
-            seq(ModFlags::ALT, Key::Char('k')),
-            bound("focus-pane", focus(Direction::Up)),
-        ),
+        (seq(ModFlags::ALT, Key::Char('h')), bound("focus-pane-left")),
+        (seq(ModFlags::ALT, Key::Char('j')), bound("focus-pane-down")),
+        (seq(ModFlags::ALT, Key::Char('k')), bound("focus-pane-up")),
         (
             seq(ModFlags::ALT, Key::Char('l')),
-            bound("focus-pane", focus(Direction::Right)),
+            bound("focus-pane-right"),
         ),
         // Resize: one cell per press, under the resize prefix.
-        (
-            ctrl_then('s', Key::Char('h')),
-            bound("resize-pane", resize(Direction::Left)),
-        ),
-        (
-            ctrl_then('s', Key::Char('j')),
-            bound("resize-pane", resize(Direction::Down)),
-        ),
-        (
-            ctrl_then('s', Key::Char('k')),
-            bound("resize-pane", resize(Direction::Up)),
-        ),
-        (
-            ctrl_then('s', Key::Char('l')),
-            bound("resize-pane", resize(Direction::Right)),
-        ),
+        (ctrl_then('s', Key::Char('h')), bound("resize-pane-left")),
+        (ctrl_then('s', Key::Char('j')), bound("resize-pane-down")),
+        (ctrl_then('s', Key::Char('k')), bound("resize-pane-up")),
+        (ctrl_then('s', Key::Char('l')), bound("resize-pane-right")),
         // Tabs. Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
         // exception to the non-typeable-opening rule (2026-07-12): outside
         // locked mode the keymap owns Tab, so a shell only sees a literal Tab
         // while the client is locked.
-        (
-            seq(ModFlags::ALT, Key::Char('t')),
-            bound("new-tab", ActionArgs::None),
-        ),
+        (seq(ModFlags::ALT, Key::Char('t')), bound("new-tab")),
         (
             seq(ModFlags::NONE, Key::Named(NamedKey::Tab)),
-            bound("next-tab", ActionArgs::None),
+            bound("next-tab"),
         ),
         (
             seq(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
-            bound("previous-tab", ActionArgs::None),
+            bound("previous-tab"),
         ),
     ]
     .into_iter()
@@ -351,12 +317,9 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     let locked: BTreeMap<KeySequence, BoundAction> = [
         (
             KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-            bound("unlock", ActionArgs::None),
+            bound("unlock"),
         ),
-        (
-            seq(ModFlags::CTRL, Key::Char('q')),
-            bound("quit", ActionArgs::None),
-        ),
+        (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
     ]
     .into_iter()
     .collect();
@@ -406,7 +369,8 @@ pub fn default_prefix_labels() -> BTreeMap<KeyChord, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDefaults {
     /// Direction a new pane spawns relative to the focused pane when the command
-    /// omits one. The CLI new-pane command may override it per call.
+    /// omits one. The CLI new-pane command and the `new-pane-<direction>`
+    /// actions name their own direction and bypass it.
     pub new_pane_direction: Direction,
     /// A named layout to load at startup, if any.
     pub default_layout: Option<String>,

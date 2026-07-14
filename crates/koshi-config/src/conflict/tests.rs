@@ -3,9 +3,9 @@
 //! alternative, verdict precedence, and the exact user-facing messages.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use koshi_core::action::ActionRef;
-use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::ActionArgs;
@@ -99,29 +99,28 @@ fn detect(layers: &[KeyMapLayer]) -> ConflictReport {
 #[test]
 fn user_layer_args_are_stripped_to_the_action_mapping() {
     // Even if a user file somehow smuggles arguments into a binding
-    // ("new-pane, direction left"), only the key → action mapping survives:
-    // the binding runs bare and the action falls back to its system preset
-    // (the configured default split direction).
+    // ("run, program htop"), only the key → action mapping survives: the
+    // binding runs bare, and a bare `run` names no program, so it can never
+    // fire with the smuggled value.
     let key = seq(ModFlags::ALT, 'n');
     let smuggled = BoundAction {
-        action: core("new-pane"),
-        args: ActionArgs::NewPane {
-            direction: Some(Direction::Left),
+        action: core("run"),
+        args: ActionArgs::Run {
+            program: PathBuf::from("/usr/bin/htop"),
+            args: vec![],
+            direction: None,
             stacked: false,
         },
     };
     let stripped =
         layer(LayerOrigin::User, "normal", vec![(key.clone(), smuggled)]).with_user_args_stripped();
-    assert_eq!(
-        stripped.modes[&mode("normal")].keys[&key],
-        bound("new-pane")
-    );
+    assert_eq!(stripped.modes[&mode("normal")].keys[&key], bound("run"));
 }
 
 #[test]
-fn stripping_leaves_the_defaults_layer_presets_alone() {
-    // The defaults' arguments ARE the system presets (focus directions, the
-    // tree-scoped close); stripping is a user-surface guard only.
+fn stripping_leaves_the_defaults_layer_alone() {
+    // Stripping is a user-surface guard only; the defaults layer passes
+    // through untouched.
     assert_eq!(defaults().with_user_args_stripped(), defaults());
 }
 
@@ -282,22 +281,30 @@ fn identical_bound_action_in_two_user_layers_passes() {
 
 #[test]
 fn same_action_with_different_args_collides() {
+    // Unrepresentable from user files (their args are stripped), but the
+    // type still allows it for system-authored layers, so the collision is
+    // judged on the whole bound value, args included.
     let key = seq(ModFlags::CTRL, 'e');
-    let resize = |direction: Direction| BoundAction {
-        action: core("resize-pane"),
-        args: ActionArgs::ResizePane { direction, size: 1 },
+    let run_with = |program: &str| BoundAction {
+        action: core("run"),
+        args: ActionArgs::Run {
+            program: PathBuf::from(program),
+            args: vec![],
+            direction: None,
+            stacked: false,
+        },
     };
     let layers = [
         defaults(),
         layer(
             LayerOrigin::User,
             "normal",
-            vec![(key.clone(), resize(Direction::Left))],
+            vec![(key.clone(), run_with("/usr/bin/htop"))],
         ),
         layer(
             LayerOrigin::Layout,
             "normal",
-            vec![(key.clone(), resize(Direction::Right))],
+            vec![(key.clone(), run_with("/usr/bin/btop"))],
         ),
     ];
     let report = detect(&layers);
@@ -307,8 +314,8 @@ fn same_action_with_different_args_collides() {
             mode: mode("normal"),
             key,
             claims: vec![
-                (LayerOrigin::User, resize(Direction::Left)),
-                (LayerOrigin::Layout, resize(Direction::Right)),
+                (LayerOrigin::User, run_with("/usr/bin/htop")),
+                (LayerOrigin::Layout, run_with("/usr/bin/btop")),
             ],
         }]
     );
@@ -480,8 +487,11 @@ fn unresolvable_args_binding_warns_and_does_not_collide() {
     let key = seq(ModFlags::CTRL, 't');
     let broken = BoundAction {
         action: core("lock"),
-        args: ActionArgs::FocusPane {
-            target: koshi_core::command::FocusTarget::Direction(Direction::Left),
+        args: ActionArgs::Run {
+            program: PathBuf::from("/usr/bin/htop"),
+            args: vec![],
+            direction: None,
+            stacked: false,
         },
     };
     let report = detect(&[
@@ -543,8 +553,11 @@ fn unlock_with_wrong_arguments_is_dead_not_a_shadow() {
                 key.clone(),
                 BoundAction {
                     action: core("unlock"),
-                    args: ActionArgs::FocusPane {
-                        target: koshi_core::command::FocusTarget::Direction(Direction::Left),
+                    args: ActionArgs::Run {
+                        program: PathBuf::from("/usr/bin/htop"),
+                        args: vec![],
+                        direction: None,
+                        stacked: false,
                     },
                 },
             )],
@@ -855,8 +868,9 @@ fn no_layers_report_the_unlock_missing() {
 
 #[test]
 fn user_prefix_of_default_sequences_warns_without_revert() {
-    // The defaults bind `<C-p> n`, `<C-p> x`, and the four `<C-p>` arrow
-    // focus sequences; the user binds bare `<C-p>`.
+    // The defaults bind `<C-p> n`, the four `<C-p>` vim-letter splits,
+    // `<C-p> x`, and the four `<C-p>` arrow focus sequences; the user binds
+    // bare `<C-p>`.
     let prefix = seq(ModFlags::CTRL, 'p');
     let report = detect(&[
         defaults(),
@@ -879,12 +893,16 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
     assert_eq!(
         report.diagnostics,
         vec![
+            ambiguous(Key::Char('h'), "new-pane-left"),
+            ambiguous(Key::Char('j'), "new-pane-down"),
+            ambiguous(Key::Char('k'), "new-pane-up"),
+            ambiguous(Key::Char('l'), "new-pane-right"),
             ambiguous(Key::Char('n'), "new-pane"),
-            ambiguous(Key::Char('x'), "close-pane"),
-            ambiguous(Key::Named(NamedKey::Left), "focus-pane"),
-            ambiguous(Key::Named(NamedKey::Right), "focus-pane"),
-            ambiguous(Key::Named(NamedKey::Up), "focus-pane"),
-            ambiguous(Key::Named(NamedKey::Down), "focus-pane"),
+            ambiguous(Key::Char('x'), "close-pane-tree"),
+            ambiguous(Key::Named(NamedKey::Left), "focus-pane-left"),
+            ambiguous(Key::Named(NamedKey::Right), "focus-pane-right"),
+            ambiguous(Key::Named(NamedKey::Up), "focus-pane-up"),
+            ambiguous(Key::Named(NamedKey::Down), "focus-pane-down"),
         ]
     );
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -1393,20 +1411,24 @@ fn display_messages_are_exact() {
             (
                 LayerOrigin::User,
                 BoundAction {
-                    action: core("resize-pane"),
-                    args: ActionArgs::ResizePane {
-                        direction: Direction::Left,
-                        size: 1,
+                    action: core("run"),
+                    args: ActionArgs::Run {
+                        program: PathBuf::from("/usr/bin/htop"),
+                        args: vec![],
+                        direction: None,
+                        stacked: false,
                     },
                 },
             ),
             (
                 LayerOrigin::Layout,
                 BoundAction {
-                    action: core("resize-pane"),
-                    args: ActionArgs::ResizePane {
-                        direction: Direction::Right,
-                        size: 1,
+                    action: core("run"),
+                    args: ActionArgs::Run {
+                        program: PathBuf::from("/usr/bin/btop"),
+                        args: vec![],
+                        direction: None,
+                        stacked: false,
                     },
                 },
             ),
@@ -1414,8 +1436,8 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         same_action_collision.to_string(),
-        "key `<C-e>` in mode `normal` is bound by user to `core:resize-pane` and by \
-         layout to `core:resize-pane` with different arguments; all user keybindings \
+        "key `<C-e>` in mode `normal` is bound by user to `core:run` and by \
+         layout to `core:run` with different arguments; all user keybindings \
          revert to defaults"
     );
 

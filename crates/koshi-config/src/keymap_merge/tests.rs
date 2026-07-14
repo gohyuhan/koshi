@@ -97,8 +97,8 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge(&[defaults()]);
     let normal = &merged.modes[&mode("normal")];
 
-    // All 20 shipped normal-mode defaults fire in this build.
-    assert_eq!(normal.defaults.len(), 20);
+    // All 24 shipped normal-mode defaults fire in this build.
+    assert_eq!(normal.defaults.len(), 24);
     assert_eq!(normal.defaults[&default_new_tab_key()], bound("new-tab"));
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.removed_keys, BTreeSet::new());
@@ -153,7 +153,7 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             source: LayerOrigin::User,
         }
     );
-    assert_eq!(normal.defaults.len(), 20);
+    assert_eq!(normal.defaults.len(), 24);
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
@@ -180,7 +180,7 @@ fn user_binding_steals_a_defaulted_key() {
     assert_eq!(normal.defaults.get(&key), None);
     assert_eq!(normal.unbound_defaults[&key], bound("new-tab"));
     // Sibling defaults untouched.
-    assert_eq!(normal.defaults.len(), 19);
+    assert_eq!(normal.defaults.len(), 23);
     assert_eq!(normal.defaults[&seq(ModFlags::CTRL, 'l')], bound("lock"));
 }
 
@@ -295,7 +295,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.removed_keys, BTreeSet::from([key]));
-    assert_eq!(normal.defaults.len(), 20);
+    assert_eq!(normal.defaults.len(), 24);
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
@@ -477,16 +477,7 @@ fn sequences_merge_per_key_like_single_chords() {
             source: LayerOrigin::User,
         }
     );
-    assert_eq!(
-        normal.unbound_defaults[&close],
-        BoundAction {
-            action: core("close-pane"),
-            args: ActionArgs::ClosePane {
-                force: false,
-                tree: true,
-            },
-        }
-    );
+    assert_eq!(normal.unbound_defaults[&close], bound("close-pane-tree"));
     assert_eq!(normal.defaults[&new_pane], bound("new-pane"));
 }
 
@@ -500,14 +491,7 @@ fn named_key_defaults_survive_untouched() {
             KeyChord::new(ModFlags::CTRL, Key::Char('p')),
             vec![KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left))],
         )],
-        BoundAction {
-            action: core("focus-pane"),
-            args: ActionArgs::FocusPane {
-                target: koshi_core::command::FocusTarget::Direction(
-                    koshi_core::geometry::Direction::Left
-                ),
-            },
-        }
+        bound("focus-pane-left")
     );
 }
 

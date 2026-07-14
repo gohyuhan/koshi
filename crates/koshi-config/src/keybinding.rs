@@ -7,9 +7,10 @@
 //! optional `version 1`) sit beside `mode "name"` blocks holding the
 //! bindings: `bind "<C-t>" "core:new-tab"` maps a key sequence to a full
 //! action reference, and `remove "Tab"` clears the key in that mode, voiding
-//! whatever a lower layer bound on it. A `bind` carries no arguments —
-//! argument presets are authored by the built-in binding table, so a user
-//! binding is the action reference alone.
+//! whatever a lower layer bound on it. A `bind` carries no arguments and
+//! needs none — an action choice with a fixed set of values is part of the
+//! action name (`bind "<A-n>" "core:new-pane-left"`), so a user binding is
+//! the action reference alone.
 //!
 //! Key sequences use the angle grammar (`<C-p> n`); `<leader>` resolves
 //! against this file's own `leader` node when present, the built-in leader

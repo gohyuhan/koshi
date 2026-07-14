@@ -435,12 +435,12 @@ fn core_seed(
 
 /// The built-in action table, loaded into the runtime registry at startup.
 ///
-/// Every entry is in the `core:` namespace. Some user-facing actions share a
-/// [`CommandKind`] and differ only by a preset argument the resolver supplies
-/// later — `lock`/`unlock` both build `SetLockMode`; `next-tab`/`previous-tab`/
-/// `focus-tab` all build `FocusTab`; the `copy-mode-*` actions all build
-/// `CopyMode`. Those presets are carried by the (currently deferred)
-/// [`ActionArgsSchema`], not duplicated into [`CommandKind`].
+/// Every entry is in the `core:` namespace. Actions sharing a [`CommandKind`]
+/// differ only by the values their NAME bakes into the command the resolver
+/// builds — `lock`/`unlock` both build `SetLockMode`; the `new-pane-*`,
+/// `focus-pane-*`, and `resize-pane-*` families each build their family's
+/// command with the named direction; `next-tab`/`previous-tab`/`focus-tab`
+/// all build `FocusTab`; the `copy-mode-*` actions all build `CopyMode`.
 ///
 /// Each entry declares its own [`ActionStatus`]. The `copy-mode-*` and
 /// `plugin-*` actions have no runtime handler yet and are seeded
@@ -466,9 +466,63 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         core_seed(
+            "new-pane-left",
+            "New Pane Left",
+            "Split the focused pane and open the new one on the left",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+            Available,
+        ),
+        core_seed(
+            "new-pane-down",
+            "New Pane Down",
+            "Split the focused pane and open the new one below",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+            Available,
+        ),
+        core_seed(
+            "new-pane-up",
+            "New Pane Up",
+            "Split the focused pane and open the new one above",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+            Available,
+        ),
+        core_seed(
+            "new-pane-right",
+            "New Pane Right",
+            "Split the focused pane and open the new one on the right",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+            Available,
+        ),
+        core_seed(
+            "new-pane-stacked",
+            "New Stacked Pane",
+            "Add a new pane to the focused pane's stack, sharing its space",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+            Available,
+        ),
+        core_seed(
             "close-pane",
             "Close Pane",
             "Close the focused pane",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::ClosePane),
+            Available,
+        ),
+        core_seed(
+            "close-pane-tree",
+            "Close Pane Tree",
+            "Close the focused pane and kill every process it started",
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ClosePane),
@@ -484,11 +538,83 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         core_seed(
+            "resize-pane-left",
+            "Resize Pane Left",
+            "Move the focused pane's border one cell to the left",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::ResizePane),
+            Available,
+        ),
+        core_seed(
+            "resize-pane-down",
+            "Resize Pane Down",
+            "Move the focused pane's border one cell down",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::ResizePane),
+            Available,
+        ),
+        core_seed(
+            "resize-pane-up",
+            "Resize Pane Up",
+            "Move the focused pane's border one cell up",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::ResizePane),
+            Available,
+        ),
+        core_seed(
+            "resize-pane-right",
+            "Resize Pane Right",
+            "Move the focused pane's border one cell to the right",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::ResizePane),
+            Available,
+        ),
+        core_seed(
             "focus-pane",
             "Focus Pane",
             "Move the issuing client's focus to a pane",
             Client,
             vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+            Available,
+        ),
+        core_seed(
+            "focus-pane-left",
+            "Focus Pane Left",
+            "Move the issuing client's focus to the pane on the left",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+            Available,
+        ),
+        core_seed(
+            "focus-pane-down",
+            "Focus Pane Down",
+            "Move the issuing client's focus to the pane below",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+            Available,
+        ),
+        core_seed(
+            "focus-pane-up",
+            "Focus Pane Up",
+            "Move the issuing client's focus to the pane above",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+            Available,
+        ),
+        core_seed(
+            "focus-pane-right",
+            "Focus Pane Right",
+            "Move the issuing client's focus to the pane on the right",
+            Client,
+            vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
             Available,
         ),
@@ -731,7 +857,19 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     // `<C-p> ← ← ←`). A system property of the action, never authored in a
     // binding.
     for (action, metadata) in &mut seeds {
-        if matches!(action.name.as_str(), "resize-pane" | "focus-pane") {
+        if matches!(
+            action.name.as_str(),
+            "resize-pane"
+                | "resize-pane-left"
+                | "resize-pane-down"
+                | "resize-pane-up"
+                | "resize-pane-right"
+                | "focus-pane"
+                | "focus-pane-left"
+                | "focus-pane-down"
+                | "focus-pane-up"
+                | "focus-pane-right"
+        ) {
             metadata.continuous = true;
         }
     }

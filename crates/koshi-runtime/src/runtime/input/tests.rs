@@ -15,6 +15,7 @@ use koshi_core::command::{Command, FocusPaneArgs, FocusTarget};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::resolve::ActionArgs;
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_session::client::Client;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -433,6 +434,55 @@ fn directional_focus_binding_moves_focus_across_a_split() {
     // `<A-l>` returns to the right pane.
     runtime.handle_key_input(client, chord(ModFlags::ALT, 'l'), now);
     assert_eq!(focused_pane(&runtime, client), focused_after_split);
+}
+
+#[test]
+fn directional_new_pane_binding_splits_on_that_side() {
+    let (mut runtime, _fake, client) = runtime();
+    let original = only_pane(&runtime);
+    let now = Instant::now();
+
+    // `<C-p> h` opens a new pane on the LEFT of the focused one, and the new
+    // pane takes focus.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    assert_eq!(runtime.pty_handles.len(), 2);
+    let new_pane = focused_pane(&runtime, client);
+    assert_ne!(new_pane, original);
+
+    // The original pane is the new pane's RIGHT neighbor — exactly where a
+    // left split puts it. A wrong split side leaves nothing to the right and
+    // this focus move would stay put.
+    runtime.handle_key_input(client, chord(ModFlags::ALT, 'l'), now);
+    assert_eq!(focused_pane(&runtime, client), original);
+}
+
+#[test]
+fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
+    let (mut runtime, _fake, client) = runtime();
+    let original = only_pane(&runtime);
+    let now = Instant::now();
+
+    // `new-pane-stacked` ships with no default key; a user binds their own.
+    bind_normal(
+        &mut runtime,
+        KeySequence::from(chord(ModFlags::ALT, 's')),
+        ActionRef::core("new-pane-stacked").expect("valid name"),
+        ActionArgs::None,
+    );
+    runtime.handle_key_input(client, chord(ModFlags::ALT, 's'), now);
+
+    // The leaf becomes a two-member stack: the source collapses to a header
+    // and the new pane is the expanded, focused member.
+    assert_eq!(runtime.pty_handles.len(), 2);
+    let new_pane = focused_pane(&runtime, client);
+    assert_ne!(new_pane, original);
+    let session = runtime.session_for_client(client).expect("session");
+    let tab = session.clients.get(client).expect("client").active_tab();
+    assert_eq!(
+        session.tabs[&tab].layout(),
+        &LayoutNode::Split(SplitNode::stack(vec![original, new_pane], 1))
+    );
 }
 
 #[test]

@@ -5,13 +5,16 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use koshi_config::types::{BoundAction, ModeName};
 use koshi_core::action::{
-    core_action_seeds, ActionHandlerRef, ActionScope, ActionStatus, TargetKind,
+    core_action_seeds, ActionHandlerRef, ActionRef, ActionScope, ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
+use koshi_core::resolve::ActionArgs;
 use uuid::Uuid;
 
 use super::*;
@@ -702,7 +705,7 @@ fn keys_recommended_is_empty_until_plugins_exist() {
 }
 
 #[test]
-fn keys_describe_renders_the_preset_args_and_source() {
+fn keys_describe_renders_the_binding_and_source() {
     let view = crate::keymap::view_from_partial(None, None, None);
     let rendered = render_keys_describe(&view, "<C-p> x", FormatArg::Table)
         .expect("sequence parses")
@@ -710,15 +713,56 @@ fn keys_describe_renders_the_preset_args_and_source() {
     let expected = "\
 key: <C-p> x
 mode: normal
-action: core:close-pane
-display_name: Close Pane
-description: Close the focused pane
+action: core:close-pane-tree
+display_name: Close Pane Tree
+description: Close the focused pane and kill every process it started
 scope: pane-session
-args: {\"ClosePane\":{\"force\":false,\"tree\":true}}
+args: -
 source: defaults
 continuous: false
 ";
     assert_eq!(rendered, expected);
+}
+
+#[test]
+fn keys_describe_renders_system_authored_args_as_json() {
+    // No shipped binding carries arguments; system-authored layers (plugin
+    // manifests) may. Build that state directly to pin the args rendering.
+    let mut view = crate::keymap::view_from_partial(None, None, None);
+    let key = KeySequence::from(KeyChord::new(ModFlags::ALT, Key::Char('r')));
+    view.merged
+        .modes
+        .get_mut(&ModeName::new("normal"))
+        .expect("normal mode is merged")
+        .defaults
+        .insert(
+            key,
+            BoundAction {
+                action: ActionRef::core("run").expect("valid name"),
+                args: ActionArgs::Run {
+                    program: PathBuf::from("/usr/bin/htop"),
+                    args: vec!["--tree".to_string()],
+                    direction: None,
+                    stacked: false,
+                },
+            },
+        );
+    let rendered = render_keys_describe(&view, "<A-r>", FormatArg::Json)
+        .expect("sequence parses")
+        .expect("bound in normal mode");
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value[0]["action"], serde_json::json!("core:run"));
+    assert_eq!(
+        value[0]["args"],
+        serde_json::json!({
+            "Run": {
+                "program": "/usr/bin/htop",
+                "args": ["--tree"],
+                "direction": null,
+                "stacked": false,
+            }
+        })
+    );
 }
 
 #[test]
