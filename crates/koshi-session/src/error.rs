@@ -75,6 +75,17 @@ pub enum SessionConsistencyError {
         pane: PaneId,
     },
 
+    /// A client is zoomed on a pane that is not a live leaf of the tab it is
+    /// zoomed in — the pane has no registry record, the tab is gone, or the pane
+    /// is not in that tab's layout. A zoom on a pane that is not there has
+    /// nothing to draw, so it must have been dropped when the pane went.
+    #[error("client {client:?} is zoomed on pane {pane:?}, not a live leaf of tab {tab:?}")]
+    ZoomTargetMissing {
+        client: ClientId,
+        tab: TabId,
+        pane: PaneId,
+    },
+
     /// A client's active tab is not one of the session's tabs. Reported only
     /// while the session still has tabs; a session emptied by its last tab
     /// closing is quitting, and its viewers' active-tab references dangle by

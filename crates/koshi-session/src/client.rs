@@ -15,6 +15,7 @@ use koshi_core::{
     key::KeySequence,
     lock::LockMode,
 };
+use koshi_layout::mode::LayoutMode;
 
 /// Convert a full client terminal viewport into the middle pane region by
 /// reserving one top tabline row and one bottom key-hint row.
@@ -48,6 +49,16 @@ pub struct Client {
     /// lives on the client because scrolling is per-view — two clients scroll a
     /// shared pane independently.
     scroll_by_pane: HashMap<PaneId, usize>,
+    /// The pane this client has zoomed in each tab: the one pane filling the tab
+    /// while the others are hidden. A tab absent from the map (the default) is
+    /// tiled for this client.
+    ///
+    /// Zoom lives on the client, beside focus, because it is a property of one
+    /// view rather than of the tab: two clients on the same tab zoom
+    /// independently, and one zooming a pane leaves the other's tiled view
+    /// untouched. The tab's layout tree is never rewritten either way — a zoom
+    /// only changes how that tree is solved for this client.
+    zoom_by_tab: HashMap<TabId, PaneId>,
 }
 
 impl Client {
@@ -75,6 +86,7 @@ impl Client {
             pending_resize_drag: None,
             pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
+            zoom_by_tab: HashMap::new(),
         }
     }
 
@@ -130,6 +142,52 @@ impl Client {
         &self.focus_by_tab
     }
 
+    /// How `tab_id` is laid out **for this client**: zoomed on one pane, or
+    /// tiled. The tab's tree is the same either way; this only says how this
+    /// client solves it, so another client can be tiled on the same tab at the
+    /// same moment.
+    #[must_use]
+    pub fn layout_mode(&self, tab_id: TabId) -> LayoutMode {
+        self.zoom_by_tab
+            .get(&tab_id)
+            .map_or(LayoutMode::Tiled, |&focused| LayoutMode::Fullscreen {
+                focused,
+            })
+    }
+
+    /// The pane this client has zoomed in `tab_id`, if any.
+    #[must_use]
+    pub fn zoomed_pane(&self, tab_id: TabId) -> Option<PaneId> {
+        self.zoom_by_tab.get(&tab_id).copied()
+    }
+
+    /// Every pane this client has zoomed, keyed by tab id. A tab with no entry is
+    /// tiled for this client.
+    #[must_use]
+    pub fn zoomed_panes(&self) -> &HashMap<TabId, PaneId> {
+        &self.zoom_by_tab
+    }
+
+    /// Zoom `pane_id` for this client in `tab_id`: it fills the tab and the
+    /// tab's other panes are hidden, for this client's view alone.
+    pub fn zoom_pane(&mut self, tab_id: TabId, pane_id: PaneId) {
+        self.zoom_by_tab.insert(tab_id, pane_id);
+    }
+
+    /// Leave zoom in `tab_id`: this client sees the tab tiled again.
+    pub fn clear_zoom(&mut self, tab_id: TabId) {
+        self.zoom_by_tab.remove(&tab_id);
+    }
+
+    /// Leave zoom in every tab where this client was zoomed on `pane_id`.
+    ///
+    /// Called when a pane is removed: a zoom on a pane that no longer exists has
+    /// nothing to show, so the client falls back to its tiled view rather than
+    /// silently zooming whatever pane inherits the focus.
+    pub fn clear_zoom_of_pane(&mut self, pane_id: PaneId) {
+        self.zoom_by_tab.retain(|_, zoomed| *zoomed != pane_id);
+    }
+
     /// This client's mouse interaction state.
     #[must_use]
     pub fn mouse_state(&self) -> &MouseState {
@@ -183,13 +241,24 @@ impl Client {
     }
 
     /// Set the pane this client has focused in `tab_id`, returning the prior pane if one was set.
+    ///
+    /// **Zoom follows focus.** When this client has `tab_id` zoomed, the zoom
+    /// moves to the newly focused pane: the zoomed view swaps its content and
+    /// stays on. Doing it here means every path that moves focus — a keybinding,
+    /// a `focus-pane` command, focus repair after a close — keeps the two in step
+    /// without having to remember to.
     pub fn update_focused_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
+        if let Some(zoomed) = self.zoom_by_tab.get_mut(&tab_id) {
+            *zoomed = pane_id;
+        }
         self.focus_by_tab.insert(tab_id, pane_id)
     }
 
-    /// Forget the pane this client focused in `tab_id`.
+    /// Forget the pane this client focused in `tab_id`, and leave any zoom there:
+    /// with no focused pane there is no pane for a zoom to show.
     pub fn remove_focused_pane(&mut self, tab_id: TabId) {
         self.focus_by_tab.remove(&tab_id);
+        self.zoom_by_tab.remove(&tab_id);
     }
 
     /// Switch this client to viewing `tab_id`.

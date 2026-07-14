@@ -521,6 +521,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "doctor",
         "focus-pane",
         "focus-tab",
+        "input",
         "inspect",
         "keys",
         "kill-session",
@@ -741,6 +742,92 @@ fn rename_pane_and_rename_tab_take_optional_targets() {
         CliCommand::RenameTab {
             tab: Some(TabId::from_uuid(fixed_uuid())),
         }
+    );
+}
+
+#[test]
+fn input_parses_its_text_target_and_enter_flag() {
+    assert_eq!(
+        command(&["koshi", "input", "ls"]),
+        CliCommand::Input {
+            text: "ls".to_string(),
+            pane: None,
+            no_enter: false,
+        }
+    );
+    let pane_flag = format!("pane-{}", fixed_uuid());
+    assert_eq!(
+        command(&[
+            "koshi",
+            "input",
+            "--pane",
+            &pane_flag,
+            "--no-enter",
+            "ls -la"
+        ]),
+        CliCommand::Input {
+            text: "ls -la".to_string(),
+            pane: Some(PaneId::from_uuid(fixed_uuid())),
+            no_enter: true,
+        }
+    );
+}
+
+/// Text that starts with `-` is text, not a flag: a script piping arbitrary
+/// lines into a pane cannot control whether one begins with a dash, and
+/// `koshi input "-la"` must type `-la` rather than fail as an unknown flag.
+/// The real flags keep working on both sides of it.
+#[test]
+fn input_takes_text_that_starts_with_a_dash() {
+    assert_eq!(
+        command(&["koshi", "input", "-la"]),
+        CliCommand::Input {
+            text: "-la".to_string(),
+            pane: None,
+            no_enter: false,
+        }
+    );
+
+    // A flag AFTER the text is still a flag, not more text.
+    assert_eq!(
+        command(&["koshi", "input", "ls", "--no-enter"]),
+        CliCommand::Input {
+            text: "ls".to_string(),
+            pane: None,
+            no_enter: true,
+        }
+    );
+}
+
+#[test]
+fn input_requires_its_text() {
+    let err = parse_err(&["koshi", "input"]);
+    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+/// The text is sent as typed, and Enter — the carriage return a shell reads as
+/// "run this line" — is appended unless `--no-enter` holds it back.
+#[test]
+fn input_appends_enter_unless_no_enter_is_given() {
+    let pane_flag = format!("pane-{}", fixed_uuid());
+
+    let (action, command) = action_of(&["koshi", "input", "--pane", &pane_flag, "ls"]);
+    assert_eq!(action, ActionRef::core("write-to-pane").expect("valid"));
+    assert_eq!(
+        command,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(PaneId::from_uuid(fixed_uuid())),
+            data: b"ls\r".to_vec(),
+        })
+    );
+
+    let (_, command) = action_of(&["koshi", "input", "--no-enter", "ls"]);
+    assert_eq!(
+        command,
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: None,
+            data: b"ls".to_vec(),
+        })
     );
 }
 

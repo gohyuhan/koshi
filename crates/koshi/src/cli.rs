@@ -22,7 +22,7 @@ use koshi_core::action::ActionRef;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
-    ResizePaneArgs, RunCommandPaneArgs, TabTarget,
+    ResizePaneArgs, RunCommandPaneArgs, TabTarget, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -172,6 +172,21 @@ pub enum CliCommand {
         /// Pane to rename; defaults to the focused pane.
         #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane: Option<PaneId>,
+    },
+    /// Type text into a pane's shell, as if it had been typed there. The text
+    /// is followed by Enter, so the shell runs it; `--no-enter` leaves it
+    /// waiting at the prompt.
+    Input {
+        /// Text to type into the pane. Text starting with `-` is taken as text,
+        /// not as a flag, so a scripted line is passed through whatever it says.
+        #[arg(value_name = "TEXT", allow_hyphen_values = true)]
+        text: String,
+        /// Pane to type into; defaults to the focused pane.
+        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane: Option<PaneId>,
+        /// Leave the text at the prompt instead of pressing Enter after it.
+        #[arg(long)]
+        no_enter: bool,
     },
     /// Open a new tab; its first pane inherits the issuing terminal's
     /// working directory and environment.
@@ -502,6 +517,23 @@ impl CliCommand {
                 "rename-pane",
                 Command::RenamePane(RenamePaneArgs { pane: *pane }),
             ),
+            CliCommand::Input {
+                text,
+                pane,
+                no_enter,
+            } => {
+                // A shell runs a line when it reads a carriage return — the
+                // byte the Enter key sends — so the text alone sits at the
+                // prompt and the text plus `\r` runs.
+                let mut data = text.clone().into_bytes();
+                if !no_enter {
+                    data.push(b'\r');
+                }
+                (
+                    "write-to-pane",
+                    Command::WriteToPane(WriteToPaneArgs { pane: *pane, data }),
+                )
+            }
             CliCommand::NewTab => ("new-tab", Command::NewTab(NewTabArgs::default())),
             CliCommand::CloseTab { tab, force } => (
                 "close-tab",

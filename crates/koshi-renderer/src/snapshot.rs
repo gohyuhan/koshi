@@ -104,7 +104,9 @@ pub struct TabSnapshot {
     pub effective_size: Size,
     /// Header strips for stacked panes (title bars for collapsed stack members).
     pub stack_headers: Vec<StackHeader>,
-    /// Whether the tab is tiled or a single pane is fullscreen.
+    /// Whether **this snapshot's client** sees the tab tiled, or sees a single
+    /// pane zoomed to fill it. Zoom is per-client, so another client viewing the
+    /// same tab in the same frame can carry a different value here.
     pub layout_mode: LayoutMode,
     /// True when every pane is suppressed because the tab has no room to draw —
     /// the renderer fills the whole frame with the "terminal too small" overlay.

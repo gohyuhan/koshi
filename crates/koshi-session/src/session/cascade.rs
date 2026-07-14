@@ -88,13 +88,6 @@ pub fn remove_pane_cascade(
             let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
             let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
             tab.update_layout(canonical);
-            // A layout edit returns the tab to the tiled view: removing a
-            // pane from a fullscreen tab drops the fullscreen, and focus
-            // repair below ranks candidates against the layout the clients
-            // now see.
-            if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
-                tab.update_layout_mode(LayoutMode::Tiled);
-            }
             Some(info)
         }
         Err(RemoveError::LastPane { .. }) => None,
@@ -103,6 +96,14 @@ pub fn remove_pane_cascade(
         // collapse; the removal events already emitted stand.
         Err(RemoveError::PaneNotFound { .. }) => return events,
     };
+
+    // A client zoomed on the removed pane has nothing left to show, so it drops
+    // back to its tiled view. A client zoomed on a pane that survives keeps its
+    // zoom: the pane it is looking at did not go anywhere, and one client
+    // closing a pane does not disturb another client's view.
+    for client in session.clients.list_attached_mut() {
+        client.clear_zoom_of_pane(pane_id);
+    }
 
     match removal {
         // The tab still has panes: repair focus for every client that was
@@ -114,7 +115,11 @@ pub fn remove_pane_cascade(
 
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
-                let solved = solve_with_mode(tab.layout(), tab.layout_mode(), tab_rect);
+                // Candidates are ranked in the tiled view. Every client repaired
+                // here was focused on the removed pane, and zoom follows focus,
+                // so any zoom of theirs was on that pane and has just been
+                // dropped: the layout they are about to see is the tiled one.
+                let solved = solve_with_mode(tab.layout(), LayoutMode::Tiled, tab_rect);
                 let candidates =
                     focus_candidates(info.old_rect, &solved.panes, &solved.stack_headers);
                 session

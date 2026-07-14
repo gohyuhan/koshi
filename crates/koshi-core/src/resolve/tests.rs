@@ -41,11 +41,17 @@ fn spawn_spec() -> SpawnSpec {
 
 /// The `Available` core actions that no binding can invoke: each has a
 /// required value with an open range (a resize amount, a pane id, a tab
-/// index), so it is reachable only through a CLI command, which builds its
-/// [`Command`] directly. `resolve_action` refuses every one of them whatever
-/// the arguments. Pinned against the seed table by
+/// index, the text to type), so it is reachable only through a CLI command,
+/// which builds its [`Command`] directly. `resolve_action` refuses every one
+/// of them whatever the arguments. Pinned against the seed table by
 /// [`available_table_matches_seeds`].
-const CLI_ONLY: [&str; 4] = ["resize-pane", "focus-pane", "focus-tab", "move-tab"];
+const CLI_ONLY: [&str; 5] = [
+    "resize-pane",
+    "focus-pane",
+    "focus-tab",
+    "move-tab",
+    "write-to-pane",
+];
 
 /// Every binding-invocable `Available` core action, the arguments it is
 /// invoked with, and the exact command it must produce. Together with

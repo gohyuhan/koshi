@@ -20,6 +20,13 @@
 //! Because a buffered chord never reaches a pane, only an unconsumed press does
 //! — and that press is written at the instant it is made, so the pane and its
 //! cursor-key mode are both read then and cannot drift out from under it.
+//!
+//! **A press reaches only a pane the client can see, and only a terminal.** A
+//! focused pane the tab draws no content for — suppressed for want of space,
+//! hidden behind a fullscreen pane, collapsed to a stack header — takes
+//! nothing, and neither does a plugin pane, which has no PTY to write to. The
+//! pane a press may reach is the one `Runtime::typed_pane` names; when it names
+//! none, the press is dropped.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,9 +38,12 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::{resolve_action, ActionArgs, DispatchPlan};
 use koshi_input::keyboard::encode;
+use koshi_layout::content::content_rects;
+use koshi_pane::pane::state::PaneKind;
 use koshi_session::client::PendingKeySequence;
 
 use crate::runtime::render_schedule::InvalidationReason;
+use crate::runtime::snapshot::solve_tab;
 use crate::runtime::state::Runtime;
 
 /// The chord that backs out of an open multi-chord sequence.
@@ -152,15 +162,6 @@ impl Runtime {
         }
     }
 
-    /// Write outer-input bytes to `client_id`'s focused pane. Does nothing if
-    /// the client is gone or has no focused pane in its active tab.
-    pub fn handle_outer_input(&mut self, client_id: ClientId, bytes: &[u8]) {
-        let Some(pane_id) = self.focused_pane(client_id) else {
-            return;
-        };
-        let _ = self.pty_backend().write(pane_id, bytes);
-    }
-
     /// Write one unconsumed press to the pane the client is typing into,
     /// encoded for the cursor-key mode that pane is in at this instant: a
     /// program in application-cursor-keys mode reads `<Up>` as `ESC O A`, one
@@ -169,13 +170,12 @@ impl Runtime {
     ///
     /// An opaque mode writes nothing: the mode owns the keyboard while it is
     /// held, and a key it does not bind is not the pane's to see. Nothing is
-    /// written either when the client has no focused pane — there is nobody to
-    /// type at.
+    /// written either when [`Self::typed_pane`] finds no pane to type at.
     fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
         if !transparent(mode) {
             return;
         }
-        let Some(pane_id) = self.focused_pane(client_id) else {
+        let Some(pane_id) = self.typed_pane(client_id) else {
             return;
         };
         let app_cursor_keys = self
@@ -186,12 +186,46 @@ impl Runtime {
         let _ = self.pty_backend().write(pane_id, &bytes);
     }
 
-    /// The pane `client_id` has focused in its active tab, if the client is
-    /// still attached and its tab holds one.
-    fn focused_pane(&self, client_id: ClientId) -> Option<PaneId> {
+    /// The pane a keystroke from `client_id` types into: the pane it has focused
+    /// in its active tab, when that pane can take a keystroke at all.
+    ///
+    /// Two focused panes take none, and both yield `None`:
+    ///
+    /// - **A pane this client draws no content for** — suppressed for want of
+    ///   space, hidden behind a pane this client has zoomed, or collapsed to a
+    ///   stack header. A keystroke is aimed at what the client can see, so a
+    ///   pane it cannot see receives nothing: shrink the terminal until the
+    ///   focused pane is suppressed, type `l`, and the shell inside it stays
+    ///   untouched. The question is asked with [`content_rects`], the same
+    ///   function the renderer asks, so what a client can type into and what it
+    ///   can see cannot drift apart. It is asked in THIS client's layout mode —
+    ///   zoom is per-client, so another client's zoom never silences this
+    ///   client's keys.
+    /// - **A plugin pane**, which has no PTY behind it. The bytes a chord
+    ///   encodes are a terminal's to read; a plugin surface reads its input
+    ///   through the plugin host.
+    ///
+    /// The tab is solved against [`Session::tab_viewport`] — the size every
+    /// client viewing it shares — so all its viewers agree on which panes are
+    /// drawn, exactly as they agree on the frame.
+    ///
+    /// [`Session::tab_viewport`]: koshi_session::session::state::Session::tab_viewport
+    fn typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
-        client.focused_pane(client.active_tab())
+        let tab_id = client.active_tab();
+        let pane_id = client.focused_pane(tab_id)?;
+
+        if !matches!(session.panes.get(pane_id)?.kind(), PaneKind::Terminal) {
+            return None;
+        }
+
+        let tab = session.tabs.get(&tab_id)?;
+        let viewport = session.tab_viewport(tab_id)?;
+        content_rects(&solve_tab(tab, client.layout_mode(tab_id), viewport))
+            .into_iter()
+            .any(|(pane, content)| pane == pane_id && content.is_some())
+            .then_some(pane_id)
     }
 
     /// Re-arm a continuous binding's prefix after it fires: the sequence minus

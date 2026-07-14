@@ -340,6 +340,7 @@ fn core_seed_snapshot_is_stable() {
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",
+        "core:write-to-pane",
     ];
     assert_eq!(names, expected);
 }

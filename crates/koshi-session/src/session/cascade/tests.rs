@@ -623,8 +623,11 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
     );
 }
 
+/// Removing a pane a client cannot even see — it is zoomed on another one —
+/// leaves that client's zoom alone. The pane it is looking at did not go
+/// anywhere, so its view has no reason to change.
 #[test]
-fn removing_a_pane_from_a_fullscreen_tab_returns_it_to_tiled() {
+fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
     let mut session = session_with(
@@ -634,15 +637,12 @@ fn removing_a_pane_from_a_fullscreen_tab_returns_it_to_tiled() {
             record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
         ],
     );
-    session.attach_client(focused_client(session.id, tab_id, a));
-    session
-        .tabs
-        .get_mut(&tab_id)
-        .expect("tab")
-        .update_layout_mode(LayoutMode::Fullscreen { focused: a });
+    let mut client = focused_client(session.id, tab_id, a);
+    let client_id = client.id();
+    client.zoom_pane(tab_id, a);
+    session.attach_client(client);
 
-    // Removing the hidden pane drops the fullscreen along with the leaf;
-    // the focus was on the survivor, so no repair events follow.
+    // The focus was on the survivor, so no repair events follow.
     let events = remove_pane_cascade(&mut session, tab_id, b, rect(), EmptyTabPolicy::CloseTab);
 
     assert_eq!(
@@ -653,6 +653,48 @@ fn removing_a_pane_from_a_fullscreen_tab_returns_it_to_tiled() {
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ]
     );
-    assert_eq!(session.tabs[&tab_id].layout_mode(), LayoutMode::Tiled);
     assert_eq!(*session.tabs[&tab_id].layout(), LayoutNode::Pane(a));
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .layout_mode(tab_id),
+        LayoutMode::Fullscreen { focused: a },
+        "the pane this client is zoomed on still exists, so its zoom stands"
+    );
+}
+
+/// Removing the very pane a client is zoomed on leaves that zoom with nothing
+/// to show, so the client drops back to its tiled view — it does not silently
+/// zoom whichever pane inherits the focus.
+#[test]
+fn removing_the_zoomed_pane_drops_that_clients_zoom() {
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let mut client = focused_client(session.id, tab_id, b);
+    let client_id = client.id();
+    client.zoom_pane(tab_id, b);
+    session.attach_client(client);
+
+    let _ = remove_pane_cascade(&mut session, tab_id, b, rect(), EmptyTabPolicy::CloseTab);
+
+    let client = session.clients.get(client_id).expect("client");
+    assert_eq!(
+        client.layout_mode(tab_id),
+        LayoutMode::Tiled,
+        "the zoomed pane is gone, so the zoom is gone"
+    );
+    assert_eq!(
+        client.focused_pane(tab_id),
+        Some(a),
+        "focus repair moves to the survivor"
+    );
 }

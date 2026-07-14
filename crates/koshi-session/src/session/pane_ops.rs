@@ -13,7 +13,6 @@ use std::time::SystemTime;
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, PaneRenamed, TabFocused};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::process::SpawnSpec;
-use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
@@ -99,17 +98,22 @@ pub fn commit_new_pane(
     let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
     let _ = session.panes.insert(record);
 
-    // Swap in the pre-built tree and record focus history. A layout edit
-    // returns the tab to the tiled view: a pane added to a fullscreen tab
-    // drops the fullscreen, so the new pane lands visible in the tiled
-    // layout the caller sized it against.
+    // Swap in the pre-built tree and record focus history.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.update_layout(candidate);
-        if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
-            tab.update_layout_mode(LayoutMode::Tiled);
-        }
         if focus.is_some() {
             tab.record_focus_mru(new_pane_id);
+        }
+    }
+
+    // Splitting drops the zoom of the client that split, and of that client
+    // only: the new pane lands in the tiled layout it was sized against, and the
+    // splitter sees it. Any other client zoomed on a pane of this tab keeps its
+    // zoom — its pane still exists, and one client splitting does not disturb
+    // another client's view.
+    if let Some(client_id) = focus {
+        if let Some(client) = session.clients.get_mut(client_id) {
+            client.clear_zoom(tab_id);
         }
     }
 
