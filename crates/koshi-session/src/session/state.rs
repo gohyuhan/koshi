@@ -9,7 +9,7 @@ use koshi_core::{
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
 };
-use koshi_layout::{mode::LayoutMode, tree::LayoutNode};
+use koshi_layout::tree::LayoutNode;
 use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
 use serde::{Deserialize, Serialize};
 
@@ -19,15 +19,20 @@ use crate::{
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle},
 };
 
-/// One tab: its name, bar position, layout tree and mode, lifecycle, and the
-/// panes it focused, most-recent first.
+/// One tab: its name, bar position, layout tree, lifecycle, and the panes it
+/// focused, most-recent first.
+///
+/// A tab holds no layout **mode**. Whether a pane is zoomed is a property of a
+/// client's view, not of the tab — it lives on [`crate::client::Client`]
+/// (`zoom_by_tab`), so two clients on this tab can disagree about it. The tree
+/// here is what every client solves; the mode each client solves it with is
+/// theirs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
     id: TabId,
     name: String,
     index: usize,
     layout: LayoutNode,
-    layout_mode: LayoutMode,
     lifecycle: TabLifecycle,
     /// Panes this tab has focused, most-recent first, with at most one entry
     /// per pane — re-focusing moves a pane to the front instead of adding a
@@ -47,7 +52,6 @@ impl Tab {
             name,
             index: tab_index,
             layout: LayoutNode::Pane(root_pane),
-            layout_mode: LayoutMode::Tiled,
             lifecycle: TabLifecycle::Creating,
             focus_mru: Vec::new(),
         }
@@ -78,12 +82,6 @@ impl Tab {
         &self.layout
     }
 
-    /// How this tab's layout is arranged.
-    #[must_use]
-    pub fn layout_mode(&self) -> LayoutMode {
-        self.layout_mode
-    }
-
     /// Rename this tab.
     pub fn update_name(&mut self, name: String) {
         self.name = name;
@@ -98,13 +96,6 @@ impl Tab {
     /// Replace this tab's layout tree.
     pub fn update_layout(&mut self, layout: LayoutNode) {
         self.layout = layout;
-    }
-
-    /// Set how this tab's layout is solved. The tree itself is untouched:
-    /// entering fullscreen hides the other panes at solve time, and leaving
-    /// it restores the exact prior layout.
-    pub fn update_layout_mode(&mut self, mode: LayoutMode) {
-        self.layout_mode = mode;
     }
 
     /// Records `pane` as the most-recently focused: moves it to the front,
@@ -427,6 +418,26 @@ impl Session {
                         });
                     }
                     Some(_) => {}
+                }
+            }
+
+            // A zoom is the same kind of reference as a focus — one client, one
+            // tab, one pane — so it answers to the same rule: the pane it names
+            // must be a live leaf of the tab it is zoomed in. A zoom left behind
+            // on a removed pane would draw nothing, so it is dropped when the
+            // pane goes; this catches it if that ever stops happening.
+            for (&tab_id, &zoomed_pane_id) in client.zoomed_panes() {
+                let live_leaf = self.panes.get(zoomed_pane_id).is_some()
+                    && self
+                        .tabs
+                        .get(&tab_id)
+                        .is_some_and(|tab| tab.layout.contains_pane(zoomed_pane_id));
+                if !live_leaf {
+                    consistency_error.push(SessionConsistencyError::ZoomTargetMissing {
+                        client: client.id(),
+                        tab: tab_id,
+                        pane: zoomed_pane_id,
+                    });
                 }
             }
         }

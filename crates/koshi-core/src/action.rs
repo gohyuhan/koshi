@@ -636,6 +636,15 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             CoreCommand(CommandKind::RenamePane),
             Available,
         ),
+        core_seed(
+            "write-to-pane",
+            "Write To Pane",
+            "Send text to a pane's shell, as if it had been typed there",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::WriteToPane),
+            Available,
+        ),
         // --- Tabs ---
         core_seed(
             "new-tab",

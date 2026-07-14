@@ -20,6 +20,7 @@ use koshi_config::types::{RgbColor, ThemeConfig};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_layout::content::content_rects;
+use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_with_mode, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
@@ -84,10 +85,15 @@ impl Runtime {
 
         // Solve the active tab's layout over a rect at origin (0, 0) sized to the
         // shared effective size; the renderer offsets it into the client viewport.
+        //
+        // The solve uses THIS client's layout mode: zoom is per-client, so a pane
+        // filling the tab for this client can be one tile among several for
+        // another client viewing the same tab at the same moment.
         let effective_size = session
             .tab_viewport(active_tab_id)
             .expect("the requesting client views its own active tab, so tab_viewport is Some");
-        let solve = solve_tab(tab, effective_size);
+        let layout_mode = client.layout_mode(active_tab_id);
+        let solve = solve_tab(tab, layout_mode, effective_size);
         let content = content_rects(&solve);
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
@@ -126,7 +132,7 @@ impl Runtime {
             layout_solved,
             effective_size,
             stack_headers: solve.stack_headers,
-            layout_mode: tab.layout_mode(),
+            layout_mode,
             all_suppressed: solve.all_suppressed,
         };
 
@@ -297,14 +303,16 @@ fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
     text
 }
 
-/// Solve `tab`'s current layout over a `viewport`-sized rect at origin `(0, 0)`
-/// — the space `PaneSlot`/content rects live in. Shared with the runtime's
-/// pane-resize path (`tab_content_rects`) so the two never drift on how a tab
-/// is solved.
-pub(crate) fn solve_tab(tab: &Tab, viewport: Size) -> SolveResult {
+/// Solve `tab`'s current layout in `mode` over a `viewport`-sized rect at origin
+/// `(0, 0)` — the space `PaneSlot`/content rects live in.
+///
+/// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
+/// and whether a pane is zoomed is a fact about one client's view. Two clients
+/// on this tab can pass different modes for the same tree in the same frame.
+pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size) -> SolveResult {
     solve_with_mode(
         tab.layout(),
-        tab.layout_mode(),
+        mode,
         Rect::new(Point { x: 0, y: 0 }, viewport),
     )
 }

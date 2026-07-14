@@ -3,6 +3,7 @@
 use super::*;
 use koshi_core::command::{Command, CommandSource};
 use koshi_core::ids::CommandId;
+use koshi_core::key::{Key, ModFlags};
 use std::time::SystemTime;
 
 /// A deterministic, boundary-free envelope for the IPC/plugin variants.
@@ -65,20 +66,6 @@ fn resize_carries_its_client_and_size() {
 }
 
 #[test]
-fn outer_input_carries_its_client_and_bytes() {
-    let client = ClientId::new();
-    let event = RuntimeEvent::OuterInput {
-        client_id: client,
-        bytes: vec![0x1b, b'[', b'A'],
-    };
-    let RuntimeEvent::OuterInput { client_id, bytes } = &event else {
-        panic!("expected OuterInput");
-    };
-    assert_eq!(*client_id, client);
-    assert_eq!(bytes, &[0x1b, b'[', b'A']);
-}
-
-#[test]
 fn ipc_and_plugin_carry_their_envelope() {
     let env = envelope();
     let ipc = RuntimeEvent::Ipc(env.clone());
@@ -113,9 +100,9 @@ fn distinct_variants_compare_unequal() {
     let client = ClientId::new();
     assert_ne!(
         RuntimeEvent::Timer,
-        RuntimeEvent::OuterInput {
+        RuntimeEvent::KeyInput {
             client_id: client,
-            bytes: Vec::new(),
+            chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
         },
     );
 }

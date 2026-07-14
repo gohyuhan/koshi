@@ -14,7 +14,7 @@ use ratatui::backend::TestBackend;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::ids::{CommandId, PaneId};
-use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -129,22 +129,25 @@ fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
 }
 
 #[test]
-fn outer_input_event_writes_to_the_focused_pane() {
+fn key_input_events_write_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut runtime, _tx, client_id, pane_id) = boot(&fake);
 
-    assert!(handle_event(
-        &mut runtime,
-        RuntimeEvent::OuterInput {
-            client_id,
-            bytes: b"ls\r".to_vec(),
-        },
-    )
-    .is_continue());
+    // Typing `ls` + Enter: three unbound presses, each written as it is made.
+    for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
+        assert!(handle_event(
+            &mut runtime,
+            RuntimeEvent::KeyInput {
+                client_id,
+                chord: KeyChord::new(ModFlags::NONE, key),
+            },
+        )
+        .is_continue());
+    }
 
     assert_eq!(
         fake.writes(pane_id).expect("writes"),
-        vec![b"ls\r".to_vec()]
+        vec![b"l".to_vec(), b"s".to_vec(), b"\r".to_vec()]
     );
 }
 

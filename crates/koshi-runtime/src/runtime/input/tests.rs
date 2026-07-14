@@ -11,12 +11,14 @@ use koshi_config::conflict::{KeyMapLayer, KeymapVerdict, LayerOrigin};
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
-use koshi_core::command::{Command, FocusPaneArgs, FocusTarget};
+use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
 use koshi_core::geometry::{Direction, Size};
+use koshi_core::ids::PluginId;
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::Client;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -48,6 +50,23 @@ fn chord(mods: ModFlags, key: char) -> KeyChord {
 
 fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
+}
+
+/// Run `command` as if `client` had issued it from a keybinding, asserting it
+/// was applied — a test that silently dispatched a rejected command would be
+/// asserting against a state it never reached.
+fn dispatch(runtime: &mut Runtime, client: ClientId, command: Command) {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        command,
+    );
+    let result = runtime.dispatch(envelope);
+    assert!(
+        matches!(result, CommandResult::Ok { .. }),
+        "test setup: command was rejected: {result:?}"
+    );
 }
 
 #[test]
@@ -731,17 +750,17 @@ fn bind_normal_all(runtime: &mut Runtime, bindings: Vec<(KeySequence, ActionRef,
 }
 
 #[test]
-fn outer_input_writes_nothing_for_an_unknown_client() {
+fn a_key_from_an_unknown_client_writes_nothing() {
     let (mut runtime, fake, _client) = runtime();
     let pane = only_pane(&runtime);
 
-    runtime.handle_outer_input(ClientId::new(), b"x");
+    runtime.handle_key_input(ClientId::new(), chord(ModFlags::NONE, 'x'), Instant::now());
 
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
-fn outer_input_writes_nothing_when_the_client_has_no_focused_pane() {
+fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
     let (mut runtime, fake, client) = runtime();
     let pane = only_pane(&runtime);
     let tab = runtime
@@ -759,9 +778,215 @@ fn outer_input_writes_nothing_when_the_client_has_no_focused_pane() {
         .expect("client")
         .remove_focused_pane(tab);
 
-    runtime.handle_outer_input(client, b"x");
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'x'), Instant::now());
 
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+/// A pane the tab has no room to draw takes no keystroke: the client cannot see
+/// it, so a key aimed at the screen is not aimed at it. The terminal shrinks
+/// below the pane's minimum, the pane is suppressed, and `l` reaches no shell.
+#[test]
+fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+
+    // Shrink the terminal until the sole pane no longer fits: a pane needs
+    // MIN_PANE_SIZE plus its one-cell border, and 3x3 leaves less than that.
+    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 });
+    assert!(
+        runtime
+            .build_snapshot(client)
+            .expect("snapshot")
+            .session
+            .active_tab
+            .all_suppressed,
+        "test setup: the sole pane must be suppressed at this size"
+    );
+
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'l'), Instant::now());
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+/// A key still reaches the pane once the terminal grows back: suppression
+/// blocks the write while it lasts, and leaves nothing latched behind it.
+#[test]
+fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+
+    runtime.handle_client_resize(client, Size { cols: 3, rows: 3 });
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'l'), Instant::now());
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+
+    runtime.handle_client_resize(client, Size { cols: 80, rows: 24 });
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'l'), Instant::now());
+
+    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![b'l']]);
+}
+
+/// A plugin pane has no PTY behind it, so the bytes a chord encodes are not
+/// its to read — even though it is focused, on screen, and its id has a live
+/// PTY handle in the backend from when it was a terminal pane.
+#[test]
+fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+
+    // Re-file the focused pane's record under `Plugin`, keeping its id: the
+    // layout leaf, the focus, and the PTY handle all stay exactly as they were,
+    // so only the pane's KIND can explain a missing write.
+    let session_id = runtime.session_for_client(client).expect("session").id;
+    let session = runtime.sessions.get_mut(&session_id).expect("session");
+    let created_at = session.panes.get(pane).expect("pane record").created_at;
+    session.panes.remove(pane);
+    session
+        .panes
+        .insert(PaneRecord::new_with_kind(
+            pane,
+            PaneKind::Plugin {
+                plugin_id: PluginId::new(),
+            },
+            created_at,
+        ))
+        .expect("re-inserting a removed pane id");
+
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'l'), Instant::now());
+
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+/// Zoom is per-client, so one client zooming a pane does not silence another
+/// client's keys. A zooms its pane; B, tiled on the same tab, keeps typing into
+/// the pane B can still see.
+///
+/// The guard asks "does the layout draw this pane FOR THIS CLIENT" — if it asked
+/// the tab instead, B's pane would look hidden behind A's zoom and B's keystrokes
+/// would vanish.
+#[test]
+fn one_clients_zoom_does_not_stop_another_clients_keys() {
+    let (mut runtime, fake, client_a) = runtime();
+    let now = Instant::now();
+    let first = only_pane(&runtime);
+
+    // Split so the tab has two panes; client A's focus lands on the new one.
+    runtime.handle_key_input(client_a, chord(ModFlags::CTRL, 'p'), now);
+    runtime.handle_key_input(client_a, chord(ModFlags::NONE, 'n'), now);
+    let second = focused_pane(&runtime, client_a);
+    assert_ne!(second, first);
+
+    // Client B joins the tab, focused on the first pane.
+    let (session_id, tab_id) = {
+        let session = runtime.session_for_client(client_a).expect("session");
+        (
+            session.id,
+            session.clients.get(client_a).expect("client").active_tab(),
+        )
+    };
+    let client_b = ClientId::new();
+    let mut joining = Client::new(
+        client_b,
+        session_id,
+        SystemTime::now(),
+        Size { cols: 80, rows: 24 },
+        tab_id,
+    );
+    joining.update_focused_pane(tab_id, first);
+    runtime
+        .sessions
+        .get_mut(&session_id)
+        .expect("session")
+        .attach_client(joining);
+
+    // Client A zooms its own pane, hiding `first` — from A's view only.
+    dispatch(&mut runtime, client_a, Command::TogglePaneFullscreen);
+
+    // B types. B is tiled and can see `first`, so its key lands there.
+    runtime.handle_key_input(client_b, chord(ModFlags::NONE, 'y'), now);
+    assert_eq!(fake.writes(first).expect("writes"), vec![vec![b'y']]);
+
+    // A types. A can see its zoomed pane, so its key lands there.
+    runtime.handle_key_input(client_a, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(fake.writes(second).expect("writes"), vec![vec![b'z']]);
+}
+
+/// Two clients view one tab holding a stack. Only the stack's active member is
+/// drawn; the others collapse to a one-line header. Focus is per-client but the
+/// active member is the tab's, so client B activating its member collapses the
+/// pane client A still has focused — and client A's keys stop reaching it.
+///
+/// This is the case a suppression-only check misses: the collapsed pane is not
+/// suppressed, it simply draws no content.
+#[test]
+fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
+    let (mut runtime, fake, client_a) = runtime();
+    let now = Instant::now();
+    let first = only_pane(&runtime);
+
+    // Stack a second pane onto the first. The new member becomes the active one
+    // and takes client A's focus; `first` collapses to a header.
+    dispatch(
+        &mut runtime,
+        client_a,
+        Command::NewPane(NewPaneArgs {
+            source: Some(first),
+            direction: None,
+            stacked: true,
+            cwd: None,
+            command: None,
+            client: Some(client_a),
+        }),
+    );
+    let second = focused_pane(&runtime, client_a);
+    assert_ne!(second, first, "test setup: the stacked pane took focus");
+
+    // Client B joins the same tab.
+    let (session_id, tab_id) = {
+        let session = runtime.session_for_client(client_a).expect("session");
+        (
+            session.id,
+            session.clients.get(client_a).expect("client").active_tab(),
+        )
+    };
+    let client_b = ClientId::new();
+    let mut joining = Client::new(
+        client_b,
+        session_id,
+        SystemTime::now(),
+        Size { cols: 80, rows: 24 },
+        tab_id,
+    );
+    joining.update_focused_pane(tab_id, second);
+    runtime
+        .sessions
+        .get_mut(&session_id)
+        .expect("session")
+        .attach_client(joining);
+
+    // Client B focuses the other member, which activates it — so `second`, the
+    // pane client A still has focused, collapses to a header.
+    dispatch(
+        &mut runtime,
+        client_b,
+        Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(first),
+            client: Some(client_b),
+        }),
+    );
+    assert_eq!(
+        focused_pane(&runtime, client_a),
+        second,
+        "test setup: client A's focus did not move"
+    );
+
+    // Client A types at a pane that now draws nothing; client B types at the
+    // member that is drawn.
+    runtime.handle_key_input(client_a, chord(ModFlags::NONE, 'z'), now);
+    runtime.handle_key_input(client_b, chord(ModFlags::NONE, 'y'), now);
+
+    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(fake.writes(first).expect("writes"), vec![vec![b'y']]);
 }
 
 #[test]

@@ -90,13 +90,6 @@ pub enum RuntimeEvent {
         /// Canonical chord used for keymap lookup.
         chord: KeyChord,
     },
-    /// Raw input bytes ready for direct pane passthrough.
-    OuterInput {
-        /// Client the input came from.
-        client_id: ClientId,
-        /// The raw terminal bytes, decoded later into a command or passthrough.
-        bytes: Vec<u8>,
-    },
     /// A command delivered over the IPC socket, from external or in-session CLI.
     Ipc(CommandEnvelope),
     /// A capability-checked command issued by a plugin.

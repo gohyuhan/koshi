@@ -1,5 +1,5 @@
 //! Integration smoke for the one-pane interactive slice: genesis, PTY output
-//! forwarding, outer input, child-exit forwarding, and shutdown kill — driven
+//! forwarding, typed input, child-exit forwarding, and shutdown kill — driven
 //! through a fake PTY backend, exercising the public `Runtime` surface the
 //! binary's loop uses.
 
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, Size};
+use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
@@ -133,7 +134,7 @@ fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
 }
 
 #[test]
-fn outer_input_writes_to_the_focused_pane() {
+fn typed_keys_write_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
     let client_id = rt
@@ -141,11 +142,19 @@ fn outer_input_writes_to_the_focused_pane() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    rt.handle_outer_input(client_id, b"ls\r");
+    // `ls` + Enter, key by key: none is bound, so each falls through to the
+    // focused pane and is written as it is pressed.
+    for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
+        rt.handle_key_input(
+            client_id,
+            KeyChord::new(ModFlags::NONE, key),
+            Instant::now(),
+        );
+    }
 
     assert_eq!(
         fake.writes(pane_id).expect("writes"),
-        vec![b"ls\r".to_vec()]
+        vec![b"l".to_vec(), b"s".to_vec(), b"\r".to_vec()]
     );
 }
 

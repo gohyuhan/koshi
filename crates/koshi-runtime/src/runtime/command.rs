@@ -40,7 +40,11 @@ use koshi_layout::{
     solver::{fits, solve, solve_with_mode, MIN_PANE_SIZE},
     tree::LayoutNode,
 };
-use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
+use koshi_pane::pane::{
+    lifecycle::PaneLifecycle,
+    policy::PaneClosePolicy,
+    state::{PaneKind, PaneRecord},
+};
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_session::client::{pane_viewport, Client, ClientRegistry};
@@ -317,10 +321,10 @@ impl Runtime {
     /// source, tab unviewed) the session's sole client; a session with several
     /// attached clients and no named target is rejected as ambiguous, and one with
     /// no attached client at all is rejected. The designated client is switched
-    /// onto the tab (if not already there) and the tab it left is reflowed. A
-    /// fullscreen tab drops its fullscreen at the commit, so the new pane
-    /// lands in the tiled view it was sized against. All events seal in one
-    /// transaction.
+    /// onto the tab (if not already there) and the tab it left is reflowed. That
+    /// client's zoom drops at the commit, so the new pane lands in the tiled view
+    /// it was sized against; any other client's zoom is left alone. All events
+    /// seal in one transaction.
     fn handle_new_pane(
         &mut self,
         command_id: CommandId,
@@ -348,13 +352,10 @@ impl Runtime {
             .tabs
             .get(&target.tab_id)
             .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-        // A pane added to a fullscreen tab lands in the tiled view — the
-        // commit drops the fullscreen — so the candidate is sized against the
-        // tiled solve the clients will see.
-        let layout_mode = match tab.layout_mode() {
-            LayoutMode::Fullscreen { .. } => LayoutMode::Tiled,
-            mode => mode,
-        };
+        // The new pane is sized against the tiled solve: splitting drops the
+        // splitting client's zoom, so that client sees the tiled layout the
+        // pane is sized for. Any other client zoomed on a pane of this tab
+        // does not draw the new pane at all and so asks nothing of its size.
         let new_pane_id = PaneId::new();
         let edited = if args.stacked {
             add_to_stack(tab.layout(), target.source_pane, new_pane_id)
@@ -383,7 +384,7 @@ impl Runtime {
         // rect; a solve that still gives it no area rejects defensively,
         // before any mutation.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        let rects = content_rects(&solve_with_mode(&candidate, layout_mode, tab_rect));
+        let rects = content_rects(&solve_with_mode(&candidate, LayoutMode::Tiled, tab_rect));
         let new_rect = rects
             .iter()
             .find(|(pane_id, _)| *pane_id == new_pane_id)
@@ -546,6 +547,18 @@ impl Runtime {
             Point { x: 0, y: 0 },
             Self::close_viewport(session, target.tab_id),
         );
+
+        // Closing drops the zoom of the client that closed, and of that client
+        // only: the tab it edited is the tiled one it now returns to. A client
+        // zoomed on a pane that survives keeps its zoom; the cascade separately
+        // drops the zoom of anyone zoomed on the pane being removed, which has
+        // nothing left to show. A pane closing on its own — a shell exiting, no
+        // client acting — disturbs nobody else's zoom.
+        if let Some(client_id) = source.client_id() {
+            if let Some(client) = session.clients.get_mut(client_id) {
+                client.clear_zoom(target.tab_id);
+            }
+        }
 
         // Commit the state removal: registry drop, layout collapse, per-client
         // focus repair, empty-tab close, last-tab quit — one shared cascade.
@@ -996,11 +1009,11 @@ impl Runtime {
     /// solved against that real viewport ([`Session::tab_viewport`]), so the
     /// donating side's spare cells are measured against the exact terminal
     /// displaying the result, and a tab no client currently views rejects.
-    /// On success the tab's tree is swapped in — a fullscreen tab drops its
-    /// fullscreen, making the moved border visible —
-    /// [`Event::LayoutChanged`] is emitted, and every live PTY whose solved
-    /// size changed is resized through the shared reflow path, one
-    /// [`Event::PtyResized`] each.
+    /// On success the tab's tree is swapped in — the resizing client's zoom drops,
+    /// making the moved border visible to the client that moved it, while any
+    /// other client's zoom stands — [`Event::LayoutChanged`] is emitted, and every
+    /// live PTY whose solved size changed is resized through the shared reflow
+    /// path, one [`Event::PtyResized`] each.
     fn handle_resize_pane(
         &mut self,
         command_id: CommandId,
@@ -1058,11 +1071,16 @@ impl Runtime {
         })
         .map_err(|error| Self::resize_rejection(&error))?;
         tab.update_layout(resized);
-        // A layout edit returns the tab to the tiled view: resizing a pane of
-        // a fullscreen tab drops the fullscreen, so the moved border is
-        // visible in the reflow below.
-        if matches!(tab.layout_mode(), LayoutMode::Fullscreen { .. }) {
-            tab.update_layout_mode(LayoutMode::Tiled);
+
+        // Resizing drops the zoom of the client that resized, and of that client
+        // only: a moved border is invisible under a zoom, so the client that
+        // moved it returns to the tiled view to see it. Another client zoomed on
+        // a pane of this tab keeps its zoom — its pane still exists, and one
+        // client resizing does not disturb another client's view.
+        if let Some(client_id) = source.client_id() {
+            if let Some(client) = session.clients.get_mut(client_id) {
+                client.clear_zoom(target.tab_id);
+            }
         }
 
         // The border moved: re-solve the tab and resize each live PTY whose
@@ -1093,12 +1111,12 @@ impl Runtime {
     /// [`RejectReason::InvalidState`]. A collapsed stack member is a valid
     /// target — focusing it activates its stack (the member expands, the
     /// previously active member collapses to a header) and the tab's PTYs
-    /// reflow to the new geometry. Fullscreen follows focus: on a fullscreen
-    /// tab, focusing a pane other than the promoted one retargets the
-    /// fullscreen to it — the zoomed view swaps content, the mode stays on.
-    /// Emits [`Event::LayoutChanged`] plus per-pane [`Event::PtyResized`]
-    /// when a stack activation or a fullscreen retarget changed the
-    /// geometry, and [`Event::PaneFocused`] when the client's focus actually
+    /// reflow to the new geometry. Zoom follows focus, per client: when the
+    /// target client has this tab zoomed, focusing another pane moves its zoom
+    /// onto that pane — its zoomed view swaps content and stays on, and no other
+    /// client's view moves. Emits [`Event::LayoutChanged`] plus per-pane
+    /// [`Event::PtyResized`] when a stack activation or a zoom retarget changed
+    /// the geometry, and [`Event::PaneFocused`] when the client's focus actually
     /// moved; focusing the already-focused pane of an already-active member
     /// completes with no events. A rejected focus mutates nothing.
     fn handle_focus_pane(
@@ -1122,15 +1140,17 @@ impl Runtime {
                 "pane's tab is not viewed by any client",
             )
         })?;
-        let tab = session
-            .tabs
-            .get_mut(&target.tab_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-
-        // Fullscreen follows focus: focusing a pane hidden behind a
-        // fullscreen tab retargets the fullscreen to it, so the mode the tab
-        // will show is solved and checked, not the one it left.
-        let effective_mode = match tab.layout_mode() {
+        // Zoom follows focus, and zoom is this client's own: a zoomed client
+        // focusing another pane swaps what its zoom shows, while every other
+        // client's view stays exactly as it was. The mode solved and checked
+        // below is therefore the one THIS client will display.
+        let client = session
+            .clients
+            .get(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let prior_pane = client.focused_pane(target.tab_id);
+        let client_mode = client.layout_mode(target.tab_id);
+        let effective_mode = match client_mode {
             LayoutMode::Fullscreen { focused } if focused != target.pane_id => {
                 LayoutMode::Fullscreen {
                     focused: target.pane_id,
@@ -1138,10 +1158,15 @@ impl Runtime {
             }
             mode => mode,
         };
-        let retargeted = effective_mode != tab.layout_mode();
+        let retargeted = effective_mode != client_mode;
 
-        // Solve the tab as it will display: a pane suppressed for lack of
-        // space cannot take focus.
+        let tab = session
+            .tabs
+            .get_mut(&target.tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+
+        // Solve the tab as this client will display it: a pane suppressed for
+        // lack of space cannot take focus.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         let solved = solve_with_mode(tab.layout(), effective_mode, tab_rect);
         if solved.suppressed.contains(&target.pane_id) {
@@ -1152,10 +1177,7 @@ impl Runtime {
         }
 
         // A collapsed stack member is a valid target: focusing it expands it.
-        // The activation mutates a candidate tree, swapped in whole, and the
-        // changed geometry — the activation, the fullscreen retarget, or both
-        // — reflows every affected PTY once.
-        let mut events = Vec::new();
+        // The activation mutates a candidate tree, swapped in whole.
         let mut candidate = tab.layout().clone();
         let activated = candidate
             .stack_containing_mut(target.pane_id)
@@ -1164,9 +1186,26 @@ impl Runtime {
         if activated {
             tab.update_layout(candidate);
         }
-        if retargeted {
-            tab.update_layout_mode(effective_mode);
+
+        if prior_pane == Some(target.pane_id) && !activated && !retargeted {
+            return Ok(TransactionScope::new().commit(command_id));
         }
+
+        // Move the focus — which carries this client's zoom with it — BEFORE the
+        // reflow: PTY sizes are solved from what every client now displays, so
+        // the zoom has to have landed on its new pane first.
+        let client = session
+            .clients
+            .get_mut(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        client.update_focused_pane(target.tab_id, target.pane_id);
+        if let Some(tab) = session.tabs.get_mut(&target.tab_id) {
+            tab.record_focus_mru(target.pane_id);
+        }
+
+        // The activation, the zoom retarget, or both changed what is drawn:
+        // announce the new geometry and resize each live PTY whose size changed.
+        let mut events = Vec::new();
         if activated || retargeted {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
@@ -1183,18 +1222,6 @@ impl Runtime {
             );
         }
 
-        let client = session
-            .clients
-            .get_mut(target.client_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
-        let prior_pane = client.focused_pane(target.tab_id);
-        if prior_pane == Some(target.pane_id) && !activated && !retargeted {
-            return Ok(TransactionScope::new().commit(command_id));
-        }
-        client.update_focused_pane(target.tab_id, target.pane_id);
-        if let Some(tab) = session.tabs.get_mut(&target.tab_id) {
-            tab.record_focus_mru(target.pane_id);
-        }
         if prior_pane != Some(target.pane_id) {
             events.push(Event::PaneFocused(PaneFocused {
                 client_id: target.client_id,
@@ -1605,20 +1632,25 @@ impl Runtime {
         Ok(Self::commit_events(command_id, events))
     }
 
-    /// Handle [`Command::TogglePaneFullscreen`]: switch the target pane's tab
-    /// between the tiled view and a fullscreen of that pane.
+    /// Handle [`Command::TogglePaneFullscreen`]: switch the **acting client's**
+    /// view of the target pane's tab between tiled and a zoom of that pane.
     ///
-    /// The target is the command's default pane — the in-session issuing
-    /// pane, else the source client's focused pane. A fullscreen tab toggles
-    /// back to tiled whichever pane resolved; a tiled tab fullscreens the
-    /// target and, when the acting client's focus was elsewhere, moves its
-    /// focus to the pane now filling the tab ([`Event::PaneFocused`]). The
-    /// mode is a solve-time overlay — the tree is untouched, so toggling out
-    /// restores the exact prior layout. The tab must be viewed by at least
-    /// one attached client (the mode change resizes real PTYs), and a
-    /// viewport too small to show the fullscreen pane at its content minimum
-    /// rejects. Emits [`Event::LayoutChanged`] plus one [`Event::PtyResized`]
-    /// per PTY whose solved size changed; a rejected toggle mutates nothing.
+    /// The zoom belongs to that one client. Another client viewing the same tab
+    /// keeps the view it had — its own tiled layout, its own focus, its own
+    /// keys reaching its own pane — so zooming never reaches across clients.
+    ///
+    /// The target is the command's default pane — the in-session issuing pane,
+    /// else the source client's focused pane. An already-zoomed client toggles
+    /// back to tiled whichever pane resolved; a tiled client zooms the target
+    /// and, when its focus was elsewhere, moves its focus to the pane now
+    /// filling its view ([`Event::PaneFocused`]). The zoom is a solve-time
+    /// overlay — the tree is untouched, so toggling out restores the exact prior
+    /// layout. The tab must be viewed by at least one attached client (the view
+    /// change can resize real PTYs), and a viewport too small to show the pane at
+    /// its content minimum rejects. Emits [`Event::LayoutChanged`] plus one
+    /// [`Event::PtyResized`] per PTY whose solved size changed — a pane another
+    /// client still draws tiled keeps the size that client can show, so a zoom
+    /// does not always resize the child. A rejected toggle mutates nothing.
     fn handle_toggle_pane_fullscreen(
         &mut self,
         command_id: CommandId,
@@ -1640,19 +1672,23 @@ impl Runtime {
                 "pane's tab is not viewed by any client",
             )
         })?;
+        let client = session
+            .clients
+            .get(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let client_mode = client.layout_mode(tab_id);
+        let prior_pane = client.focused_pane(tab_id);
+
         let tab = session
             .tabs
-            .get_mut(&tab_id)
+            .get(&tab_id)
             .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
 
-        // Flip the mode. Entering solves the candidate mode first: a viewport
-        // too small to show the pane at its content minimum rejects before
-        // anything mutates.
-        let entered = match tab.layout_mode() {
-            LayoutMode::Fullscreen { .. } => {
-                tab.update_layout_mode(LayoutMode::Tiled);
-                false
-            }
+        // Flip this client's zoom. Entering solves the zoomed view first: a
+        // viewport too small to show the pane at its content minimum rejects
+        // before anything mutates.
+        let entered = match client_mode {
+            LayoutMode::Fullscreen { .. } => false,
             LayoutMode::Tiled => {
                 let mode = LayoutMode::Fullscreen {
                     focused: target.pane_id,
@@ -1665,13 +1701,36 @@ impl Runtime {
                         "not enough space to fullscreen the pane",
                     ));
                 }
-                tab.update_layout_mode(mode);
                 true
             }
         };
 
-        // The mode changed: re-solve the tab and resize each live PTY whose
-        // size changed.
+        // Apply the zoom to the acting client, and to it alone — every other
+        // client viewing this tab keeps the view it already had. Entering also
+        // moves this client's focus to the zoomed pane, so its focus never sits
+        // on a pane its own zoom just hid. Both land BEFORE the reflow: PTY
+        // sizes come from what the clients now display.
+        let client = session
+            .clients
+            .get_mut(target.client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        let focus_moved = entered && prior_pane != Some(target.pane_id);
+        if entered {
+            client.zoom_pane(tab_id, target.pane_id);
+            if focus_moved {
+                client.update_focused_pane(tab_id, target.pane_id);
+            }
+        } else {
+            client.clear_zoom(tab_id);
+        }
+        if focus_moved {
+            if let Some(tab) = session.tabs.get_mut(&tab_id) {
+                tab.record_focus_mru(target.pane_id);
+            }
+        }
+
+        // This client's view changed: re-solve the tab and resize each live PTY
+        // whose size changed.
         let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
         let rects = Self::tab_content_rects(session, tab_id, viewport);
         Self::reflow_changed(
@@ -1684,24 +1743,13 @@ impl Runtime {
             &mut events,
         );
 
-        // Entering fullscreen watches the target pane: the acting client's
-        // focus moves to it when it was elsewhere.
-        if entered {
-            if let Some(client) = session.clients.get_mut(target.client_id) {
-                let prior_pane = client.focused_pane(tab_id);
-                if prior_pane != Some(target.pane_id) {
-                    client.update_focused_pane(tab_id, target.pane_id);
-                    if let Some(tab) = session.tabs.get_mut(&tab_id) {
-                        tab.record_focus_mru(target.pane_id);
-                    }
-                    events.push(Event::PaneFocused(PaneFocused {
-                        client_id: target.client_id,
-                        tab_id,
-                        pane_id: target.pane_id,
-                        prior_pane,
-                    }));
-                }
-            }
+        if focus_moved {
+            events.push(Event::PaneFocused(PaneFocused {
+                client_id: target.client_id,
+                tab_id,
+                pane_id: target.pane_id,
+                prior_pane,
+            }));
         }
 
         Ok(Self::commit_events(command_id, events))
@@ -1844,9 +1892,10 @@ impl Runtime {
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
     /// stdin. The target is an explicit `--pane` (resolved globally) or the
-    /// source's default pane, and must be live — a pane that has exited, is
-    /// closing, or is gone takes no input ([`RejectReason::InvalidState`]). A
-    /// plugin source is denied pending the `pane_write` capability.
+    /// source's default pane, and must be a terminal pane that is live — a
+    /// plugin pane, which has no PTY, and a pane that has exited, is closing,
+    /// or is gone all take no input ([`RejectReason::InvalidState`]). A plugin
+    /// source is denied pending the `pane_write` capability.
     ///
     /// The write is a side effect that changes no session state, so a
     /// successful write commits no events; the child's response returns
@@ -1877,6 +1926,14 @@ impl Runtime {
             .panes
             .get(target.pane_id)
             .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        // Only a terminal pane has a PTY for the bytes to land in; a plugin
+        // pane reads its input through the plugin host.
+        if !matches!(record.kind(), PaneKind::Terminal) {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "pane is not a terminal pane",
+            ));
+        }
         match record.lifecycle() {
             PaneLifecycle::Spawning | PaneLifecycle::Running => {}
             PaneLifecycle::Exited { .. }
@@ -2023,20 +2080,100 @@ impl Runtime {
         }
     }
 
-    /// The per-pane content rects of `tab_id`'s current layout solved against
-    /// `viewport`, or an empty vec when the tab is gone. Used to compare a tab's
-    /// geometry before and after a change so only panes whose rect actually
-    /// moved are resized.
+    /// The size each of `tab_id`'s panes must be given, once every client
+    /// viewing the tab has had its say. Empty when the tab is gone; `None` for a
+    /// pane no viewer draws, which keeps that pane's PTY at its current size.
+    ///
+    /// **A pane's PTY has exactly one size, but its viewers may disagree about
+    /// its rect** — zoom is per-client, so client A can have pane X filling the
+    /// tab while client B has it tiled in a corner. The size handed to X's child
+    /// is therefore the **smallest** rect among the clients who actually draw X,
+    /// which is the largest grid every one of them can show in full: nobody is
+    /// ever shown a grid too big to fit, so no client has to crop.
+    ///
+    /// A client zoomed on some *other* pane draws X not at all, so it does not
+    /// narrow X's rect here — it is not one of the viewers this minimum is taken
+    /// over. It still bounds X indirectly, and must: `viewport` is the tab's
+    /// shared [`Session::tab_viewport`] (the per-axis minimum terminal across
+    /// every client viewing the tab, zoomed or not), every pane is solved inside
+    /// it, and the renderer draws the whole tab at that size and letterboxes the
+    /// margin. A rect bigger than the tab has nowhere to be drawn, so no pane —
+    /// zoomed or tiled — may exceed it. Sizing a zoomed pane to its own client's
+    /// larger terminal instead would need the shared tab size to become
+    /// per-client, which is a rendering-model change, not a sizing one.
+    ///
+    /// When exactly one client views the tab (the common case), the minimum is
+    /// that client's own rect and a zoom gives its pane the whole tab, exactly as
+    /// before zoom became per-client.
+    ///
+    /// Only the returned rect's SIZE is meaningful: its origin is whatever the
+    /// first drawing viewer placed it at, and every consumer here reads the size
+    /// alone ([`compute_pty_size`]).
     fn tab_content_rects(
         session: &Session,
         tab_id: TabId,
         viewport: Size,
     ) -> Vec<(PaneId, Option<Rect>)> {
-        session
-            .tabs
-            .get(&tab_id)
-            .map(|tab| content_rects(&solve_tab(tab, viewport)))
-            .unwrap_or_default()
+        let Some(tab) = session.tabs.get(&tab_id) else {
+            return Vec::new();
+        };
+        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+
+        // One solve per viewer, each in that client's own layout mode.
+        let per_viewer: Vec<Vec<(PaneId, Option<Rect>)>> = session
+            .clients
+            .list_attached()
+            .filter(|client| client.active_tab() == tab_id)
+            .map(|client| {
+                content_rects(&solve_with_mode(
+                    tab.layout(),
+                    client.layout_mode(tab_id),
+                    tab_rect,
+                ))
+            })
+            .collect();
+
+        // No viewer: no client draws any of these panes, so none of them is
+        // resized and every PTY keeps the size it has. Unreachable from the
+        // callers, which all resolve a `tab_viewport` first — and that is `Some`
+        // only when this same filter finds a viewer.
+        let Some(first) = per_viewer.first() else {
+            return Vec::new();
+        };
+
+        // Merge by pane id, not by position: a pane's smallest rect across the
+        // viewers that draw it. Keying on the id means the merge cannot depend on
+        // two different solves listing their panes in the same order, so a change
+        // to either traversal can never quietly hand a pane another pane's size.
+        let mut smallest: HashMap<PaneId, Option<Rect>> = HashMap::new();
+        for viewer in &per_viewer {
+            for &(pane_id, content) in viewer {
+                let Some(rect) = content else {
+                    // This viewer draws no content for the pane, so it asks
+                    // nothing of its size.
+                    smallest.entry(pane_id).or_insert(None);
+                    continue;
+                };
+                let entry = smallest.entry(pane_id).or_insert(Some(rect));
+                *entry = Some(match *entry {
+                    Some(current) => Rect::new(
+                        current.origin,
+                        Size {
+                            cols: current.size.cols.min(rect.size.cols),
+                            rows: current.size.rows.min(rect.size.rows),
+                        },
+                    ),
+                    None => rect,
+                });
+            }
+        }
+
+        // Emit in the first viewer's solve order, so the result keeps the stable
+        // pane order every consumer of this function already sees.
+        first
+            .iter()
+            .map(|&(pane_id, _)| (pane_id, smallest.get(&pane_id).copied().flatten()))
+            .collect()
     }
 
     /// The viewport `tab_id` is solved against when a pane closes: the tab's
@@ -2623,7 +2760,10 @@ impl Runtime {
         let viewport = session
             .tab_viewport(tab_id)
             .ok_or_else(|| Rejection::bare(RejectReason::InvalidState))?;
-        let solve = solve_tab(tab, viewport);
+        // Directional focus moves within what THIS client sees, so the tab is
+        // solved in this client's own mode: a zoomed client draws one pane and
+        // has no neighbour to move to.
+        let solve = solve_tab(tab, client.layout_mode(tab_id), viewport);
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let from_rect = solve
             .panes

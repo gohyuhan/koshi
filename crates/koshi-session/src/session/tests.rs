@@ -11,7 +11,6 @@ use koshi_core::constant::MAX_TAB_FOCUS_MRU;
 use koshi_core::event::Event;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
@@ -90,9 +89,10 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
     assert_eq!(tab.id(), tab_id);
     assert_eq!(tab.name(), "code");
     assert_eq!(tab.index(), 0);
-    // A fresh tab shows exactly its root pane, tiled, mid-creation, no focus yet.
+    // A fresh tab shows exactly its root pane, mid-creation, no focus yet. It
+    // carries no layout mode of its own: whether a pane is zoomed belongs to a
+    // client's view, not to the tab.
     assert_eq!(*tab.layout(), LayoutNode::Pane(root));
-    assert_eq!(tab.layout_mode(), LayoutMode::Tiled);
     assert_eq!(*tab.lifecycle(), TabLifecycle::Creating);
     assert!(tab.focus_mru().is_empty());
 }
@@ -735,6 +735,57 @@ fn a_client_focus_on_a_pane_outside_its_tab_is_reported() {
         error,
         SessionConsistencyError::FocusPaneNotInRegistry { .. }
     )));
+}
+
+/// A zoom answers to the same rule as a focus: the pane it names must be a live
+/// leaf of the tab it is zoomed in. A zoom left behind on a pane that is not
+/// there would draw nothing, so a stale one is a real inconsistency.
+#[test]
+fn a_client_zoom_on_a_pane_outside_its_tab_is_reported() {
+    let mut session = empty_session();
+    let events_a = new_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
+    let pane_a = created_pane_id(&events_a);
+    let events_b = new_tab(&mut session, "b".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab_b = created_tab_id(&events_b);
+    let pane_b = created_pane_id(&events_b);
+
+    let client_id = attach_viewing(&mut session, tab_b);
+    let client = session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached");
+    // A legitimate focus in tab_b, but a zoom pointing at tab_a's pane.
+    client.update_focused_pane(tab_b, pane_b);
+    client.zoom_pane(tab_b, pane_a);
+
+    let errors = session
+        .validate()
+        .expect_err("a zoom on a pane outside its tab is inconsistent");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        SessionConsistencyError::ZoomTargetMissing { tab, pane, .. }
+            if *tab == tab_b && *pane == pane_a
+    )));
+}
+
+/// The everyday state — zoomed on the pane this client has focused, in the tab it
+/// is viewing — is consistent, so the check above does not fire on a real zoom.
+#[test]
+fn a_zoom_on_the_focused_pane_is_consistent() {
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
+
+    let client_id = attach_viewing(&mut session, tab);
+    let client = session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached");
+    client.update_focused_pane(tab, pane);
+    client.zoom_pane(tab, pane);
+
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]

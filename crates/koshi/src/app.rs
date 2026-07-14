@@ -266,9 +266,6 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         RuntimeEvent::KeyInput { client_id, chord } => {
             runtime.handle_key_input(client_id, chord, Instant::now());
         }
-        RuntimeEvent::OuterInput { client_id, bytes } => {
-            runtime.handle_outer_input(client_id, &bytes);
-        }
         RuntimeEvent::ClientAttached {
             session_id,
             client_id,
