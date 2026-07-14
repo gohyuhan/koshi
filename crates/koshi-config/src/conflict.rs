@@ -28,9 +28,10 @@
 //! binding fires when both halves hold: action resolution accepts it as
 //! written (each binding is handed to the real resolver), and a keypress
 //! can reach it — in locked mode the reserved unlock chord resolves
-//! instantly, so a longer sequence opening with it is unreachable, a
-//! sequence longer than the `max_chord_depth` cap is flushed by the input
-//! path before keymap lookup, and a
+//! instantly wherever it is pressed, so a multi-chord sequence holding it
+//! anywhere is unreachable, a
+//! sequence longer than the `max_chord_depth` cap is one the input path
+//! never accumulates, and a
 //! `remove` in a higher-precedence layer voids the binding outright. A
 //! binding that fails either half is warned per layer — exactly once, with
 //! the most specific reason — and is otherwise transparent: it claims no
@@ -203,8 +204,10 @@ pub enum ConflictDiagnostic {
         /// The configured alternative chord.
         chord: KeyChord,
     },
-    /// A locked-mode sequence opens with the reserved unlock chord, which
-    /// resolves instantly and never buffers, so the sequence cannot fire.
+    /// A locked-mode sequence holds the reserved unlock chord. The chord
+    /// resolves the instant it is pressed — ahead of the keymap, and whether
+    /// or not a sequence is open — so it can never be part of one, and the
+    /// sequence cannot fire. `<C-x> <C-l>` unlocks at the `<C-l>`.
     DeadUnderReservedUnlock {
         /// The layer that authored the dead binding.
         origin: LayerOrigin,
@@ -213,8 +216,8 @@ pub enum ConflictDiagnostic {
         /// The action it would have triggered.
         action: ActionRef,
     },
-    /// A binding's sequence is longer than the `max_chord_depth` cap, so
-    /// the input path flushes it before keymap lookup and it can never
+    /// A binding's sequence is longer than the `max_chord_depth` cap, so no
+    /// pending sequence ever grows long enough to reach it and it can never
     /// fire.
     ExceedsChordDepth {
         /// The layer holding the binding.
@@ -371,7 +374,8 @@ impl fmt::Display for ConflictDiagnostic {
             } => write!(
                 f,
                 "`{key}` ({origin}, `{action}`) in locked mode can never fire: \
-                 its first chord is the reserved unlock, which resolves instantly"
+                 it holds the reserved unlock chord, which resolves instantly \
+                 wherever it is pressed"
             ),
             Self::ExceedsChordDepth {
                 origin,
@@ -610,16 +614,24 @@ fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
     }
 }
 
-/// True when, in locked mode, `key` opens with the reserved unlock chord but
-/// is longer than one chord: the reserved chord resolves instantly and never
-/// buffers, so such a sequence can never fire.
-fn is_reserved_led(
+/// True when, in locked mode, a multi-chord `key` holds the reserved unlock
+/// chord anywhere in it: the input path resolves that chord the instant it is
+/// pressed — ahead of the keymap, and whether or not a sequence is already
+/// open — so it can never be a chord *of* a sequence, and a sequence holding
+/// it can never fire.
+///
+/// Position does not matter, and that is the whole rule. `<C-l> x` unlocks at
+/// the first chord; `<C-x> <C-l>` opens fine and then unlocks at the second,
+/// so `core:new-tab` bound to it would never run and the hint bar would offer
+/// a continuation that silently unlocks instead. A one-chord `<C-l>` is the
+/// unlock binding itself and stays live.
+fn holds_reserved_unlock(
     mode: &ModeName,
     key: &KeySequence,
     reserved: KeyChord,
     locked: &ModeName,
 ) -> bool {
-    mode == locked && key.chords().len() > 1 && key.chords()[0] == reserved
+    mode == locked && key.chords().len() > 1 && key.chords().contains(&reserved)
 }
 
 /// True when the binding participates in firing: the resolver accepts it as
@@ -639,13 +651,15 @@ pub(crate) fn is_firing(
     max_chord_depth: u8,
 ) -> bool {
     classify(bound, registry) == BindingState::Live
-        && !is_reserved_led(mode, key, reserved, locked)
+        && !holds_reserved_unlock(mode, key, reserved, locked)
         && !exceeds_chord_depth(key, max_chord_depth)
 }
 
-/// True when the sequence is longer than the `max_chord_depth` cap: the
-/// input path flushes a pending sequence past the cap before keymap lookup,
-/// so such a binding can never be reached.
+/// True when the sequence is longer than the `max_chord_depth` cap. Dropping
+/// such a binding here is what enforces the cap: the input path grows a
+/// pending sequence only while a longer *live* binding still starts with it,
+/// so once no live binding is deeper than the cap, no pending sequence can be
+/// either — and a binding past it can never be reached.
 fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
     key.chords().len() > usize::from(max_chord_depth)
 }
@@ -724,7 +738,7 @@ fn scan_layer(
                     continue;
                 }
             }
-            if is_reserved_led(mode, key, reserved, locked) {
+            if holds_reserved_unlock(mode, key, reserved, locked) {
                 out.push(ConflictDiagnostic::DeadUnderReservedUnlock {
                     origin: layer.origin,
                     key: key.clone(),

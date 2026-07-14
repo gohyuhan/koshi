@@ -1,4 +1,4 @@
-//! Outer keyboard routing: multi-chord keybinding resolution first, transparent
+//! Outer keyboard routing: keybinding resolution first, transparent
 //! fallthrough to the focused terminal pane second.
 //!
 //! A chord that no binding consumes becomes bytes here rather than back at the
@@ -6,21 +6,32 @@
 //! what mode it is in, and the decoder, sitting at the host boundary, knows
 //! neither.
 //!
-//! Both are read at the PRESS and carried on it. A key held as a pending prefix
-//! is written later, and the world moves in between — the pane's child can exit
-//! or a command can move focus (so the *recipient* changes), and the pane can
-//! flip its own cursor-key mode (so the *encoding* changes). Carrying both means
-//! an abandoned key lands where and as it would have landed unbuffered.
+//! **An open sequence captures the keyboard.** Once a chord opens a multi-chord
+//! binding, the client is inside that sequence's context, and every key belongs
+//! to Koshi until the sequence resolves: a key that continues it fires the
+//! binding, and a key that continues nothing is discarded while the sequence
+//! stands. Nothing typed into an open sequence reaches the pane, so a mistyped
+//! continuation cannot make the program underneath act on a key aimed at Koshi.
+//! Three keys leave the context: a continuation that completes a binding, `Esc`,
+//! and the reserved unlock chord. One thing that is not a key leaves it too — a
+//! sequence that is both a complete binding and a longer one's prefix closes on
+//! its ambiguity deadline, firing the complete binding.
+//!
+//! Because a buffered chord never reaches a pane, only an unconsumed press does
+//! — and that press is written at the instant it is made, so the pane and its
+//! cursor-key mode are both read then and cannot drift out from under it.
 
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_config::types::BoundAction;
+use koshi_core::action::ActionRef;
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
-use koshi_core::resolve::{resolve_action, DispatchPlan};
+use koshi_core::resolve::{resolve_action, ActionArgs, DispatchPlan};
 use koshi_input::keyboard::encode;
-use koshi_session::client::{PendingKeySequence, PressedKey};
+use koshi_session::client::PendingKeySequence;
 
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::state::Runtime;
@@ -29,34 +40,28 @@ use crate::runtime::state::Runtime;
 const ESCAPE: KeyChord = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc));
 
 impl Runtime {
-    /// Resolve one normalized key against the client's current mode, buffering
-    /// prefixes and writing only unconsumed presses to the focused pane.
+    /// Resolve one normalized key against the client's current mode: complete a
+    /// binding, hold an open sequence, or write the press to the focused pane.
     pub fn handle_key_input(&mut self, client_id: ClientId, chord: KeyChord, now: Instant) {
         let Some((mode, pending)) = self.take_pending(client_id) else {
             return;
         };
-        // The recipient pane AND its cursor-key mode are both read HERE, at the
-        // press, and travel with the chord. A buffered key is written later,
-        // and by then focus may have moved (the pane's child can exit, or a
-        // command can move it) and the pane may have flipped its own mode — so
-        // an abandoned key must be delivered as the press that was made, to the
-        // pane the user was typing into.
-        let pressed = self.press(client_id, chord);
+
+        // The guaranteed escape from locked mode, resolved before the keymap
+        // and before sequence buffering: whatever the client is in the middle
+        // of, this chord unlocks it. Any held chords go with it — they were
+        // typed at Koshi, and a client asking for Koshi back is not asking to
+        // type them at the pane.
+        if mode == LockMode::Locked && chord == self.keymap_hints.unlock_chord() {
+            self.fire_binding(client_id, unlock());
+            return;
+        }
+
         let mut chords = pending
             .as_ref()
             .map(|pending| pending.sequence.chords().to_vec())
             .unwrap_or_default();
-        let mut fallback = pending
-            .as_ref()
-            .map(|pending| pending.fallback.clone())
-            .unwrap_or_default();
         chords.push(chord);
-        fallback.push(pressed);
-
-        if chords.len() > self.keymap_hints.max_chord_depth() {
-            self.flush_pending(mode, fallback);
-            return;
-        }
 
         let sequence = sequence(chords);
         let matched = self.keymap_hints.match_sequence(mode, &sequence);
@@ -72,39 +77,26 @@ impl Runtime {
                 let deadline = exact
                     .is_some()
                     .then(|| now + self.keymap_hints.chord_timeout());
-                let pending = PendingKeySequence {
-                    sequence,
-                    fallback,
-                    deadline,
-                };
-                if let Some(session) = self.session_for_client_mut(client_id) {
-                    if let Some(client) = session.clients.get_mut(client_id) {
-                        client.update_pending_key_sequence(Some(pending));
-                    }
-                }
-                self.render_scheduler
-                    .invalidate(InvalidationReason::StatusChanged);
+                self.set_pending(client_id, PendingKeySequence { sequence, deadline });
             }
-            (None, false) if pending.is_some() => {
-                let held = pending.expect("guarded by the match arm");
-                // Escape backs out of an open sequence: the buffered chords
-                // are discarded, and the Escape itself is consumed.
-                if chord == ESCAPE {
+            (None, false) => match pending {
+                // Escape leaves an open sequence: the held chords are dropped
+                // and the Escape itself is consumed rather than typed at the
+                // pane.
+                Some(_) if chord == ESCAPE => {
                     self.render_scheduler
                         .invalidate(InvalidationReason::StatusChanged);
-                    return;
                 }
-                // A held sequence that was itself a complete binding fires
-                // on the mismatch; otherwise its chords fall through. The
-                // mismatching chord then restarts resolution on its own.
-                if let Some(bound) = self.keymap_hints.match_sequence(mode, &held.sequence).exact {
-                    self.fire_binding(client_id, bound);
-                } else {
-                    self.flush_pending(mode, held.fallback);
-                }
-                self.handle_key_input(client_id, chord, now);
-            }
-            (None, false) => self.fall_through(mode, pressed),
+                // A key that continues nothing is discarded, and the sequence
+                // stands unchanged: the client is inside a Koshi context, so a
+                // key that context cannot use goes nowhere rather than
+                // surprising the program underneath. The sequence goes back
+                // exactly as it was, deadline included, and nothing on screen
+                // changed — so this restore does not repaint.
+                Some(held) => self.hold_pending(client_id, held),
+                // No sequence is open, so the key is the user's own to type.
+                None => self.fall_through(client_id, mode, chord),
+            },
         }
     }
 
@@ -143,12 +135,17 @@ impl Runtime {
             let Some((mode, Some(pending))) = self.take_pending(client_id) else {
                 continue;
             };
-            let matched = self.keymap_hints.match_sequence(mode, &pending.sequence);
-            if let Some(bound) = matched.exact {
+            // The deadline was armed because the sequence was itself a complete
+            // binding, so it normally still is. A keybinding reload can retire
+            // that binding while the sequence waits; the held chords then
+            // resolve to nothing and are dropped, never typed at the pane.
+            if let Some(bound) = self
+                .keymap_hints
+                .match_sequence(mode, &pending.sequence)
+                .exact
+            {
                 self.fire_binding(client_id, bound.clone());
                 self.rearm_continuous(client_id, &bound, &pending.sequence);
-            } else {
-                self.flush_pending(mode, pending.fallback);
             }
             self.render_scheduler
                 .invalidate(InvalidationReason::StatusChanged);
@@ -164,34 +161,28 @@ impl Runtime {
         let _ = self.pty_backend().write(pane_id, bytes);
     }
 
-    /// Capture one key press: the chord, the pane it was typed into, and that
-    /// pane's cursor-key mode at this instant. A pane with no terminal engine
-    /// has turned nothing on, which reads the same as the mode being off.
-    fn press(&self, client_id: ClientId, chord: KeyChord) -> PressedKey {
-        let pane = self.focused_pane(client_id);
-        let app_cursor_keys = pane
-            .and_then(|pane_id| self.terminal_engines.get(&pane_id))
-            .is_some_and(|engine| engine.state().app_cursor_keys());
-        PressedKey {
-            chord,
-            pane,
-            app_cursor_keys,
-        }
-    }
-
-    /// Write one unconsumed press to the pane it was typed into, encoded for the
-    /// cursor-key mode that pane was in at the time — both carried by
-    /// [`PressedKey`], so a key held in a pending sequence still lands where and
-    /// as it would have landed unbuffered. A program in application-cursor-keys
-    /// mode reads `<Up>` as `ESC O A`, one outside it reads `ESC [ A`.
+    /// Write one unconsumed press to the pane the client is typing into,
+    /// encoded for the cursor-key mode that pane is in at this instant: a
+    /// program in application-cursor-keys mode reads `<Up>` as `ESC O A`, one
+    /// outside it reads `ESC [ A`. A pane with no terminal engine has turned
+    /// nothing on, which reads the same as the mode being off.
     ///
-    /// A press whose pane has since closed writes nothing: the process it was
-    /// typed at is gone, and its keystrokes go with it.
-    fn write_press(&mut self, pressed: PressedKey) {
-        let Some(pane_id) = pressed.pane else {
+    /// An opaque mode writes nothing: the mode owns the keyboard while it is
+    /// held, and a key it does not bind is not the pane's to see. Nothing is
+    /// written either when the client has no focused pane — there is nobody to
+    /// type at.
+    fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
+        if !transparent(mode) {
+            return;
+        }
+        let Some(pane_id) = self.focused_pane(client_id) else {
             return;
         };
-        let bytes = encode(pressed.chord, pressed.app_cursor_keys);
+        let app_cursor_keys = self
+            .terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| engine.state().app_cursor_keys());
+        let bytes = encode(chord, app_cursor_keys);
         let _ = self.pty_backend().write(pane_id, &bytes);
     }
 
@@ -203,17 +194,20 @@ impl Runtime {
         client.focused_pane(client.active_tab())
     }
 
-    /// Re-arm a continuous binding's prefix after it fires: the sequence
-    /// minus its final chord goes back to pending, so the next chord alone
-    /// fires the sibling binding (`<C-s> h h h` resizes three times). Only
-    /// actions the registry marks `continuous` re-arm, and only multi-chord
-    /// sequences have a prefix to hold. The re-armed pending carries no
-    /// fallback chords — the original press was consumed by the fired action,
-    /// so abandoning the held prefix later writes nothing to the pane.
+    /// Re-arm a continuous binding's prefix after it fires: the sequence minus
+    /// its final chord goes back to pending, so the next chord alone fires the
+    /// sibling binding (`<C-s> h h h` resizes three times). Only actions the
+    /// registry marks `continuous` re-arm, and only multi-chord sequences have
+    /// a prefix to hold.
+    ///
+    /// The re-armed prefix is an open sequence like any other, and captures the
+    /// keyboard like any other: a key that resizes nothing is discarded and the
+    /// prefix stands, so repeated presses stay in the resize context until `Esc`
+    /// leaves it.
     fn rearm_continuous(
         &mut self,
         client_id: ClientId,
-        bound: &koshi_config::types::BoundAction,
+        bound: &BoundAction,
         sequence: &KeySequence,
     ) {
         let continuous = self
@@ -225,18 +219,13 @@ impl Runtime {
             return;
         }
         let prefix = KeySequence::new(chords[0], chords[1..chords.len() - 1].to_vec());
-        let pending = PendingKeySequence {
-            sequence: prefix,
-            fallback: Vec::new(),
-            deadline: None,
-        };
-        if let Some(session) = self.session_for_client_mut(client_id) {
-            if let Some(client) = session.clients.get_mut(client_id) {
-                client.update_pending_key_sequence(Some(pending));
-            }
-        }
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
+        self.set_pending(
+            client_id,
+            PendingKeySequence {
+                sequence: prefix,
+                deadline: None,
+            },
+        );
     }
 
     fn take_pending(
@@ -248,23 +237,25 @@ impl Runtime {
         Some((client.lock_mode(), client.take_pending_key_sequence()))
     }
 
-    fn flush_pending(&mut self, mode: LockMode, fallback: Vec<PressedKey>) {
-        if transparent(mode) {
-            for pressed in fallback {
-                self.write_press(pressed);
-            }
-        }
+    /// Hold `pending` as the client's open sequence and repaint the hint bar,
+    /// which draws the sequence's continuations while it stands.
+    fn set_pending(&mut self, client_id: ClientId, pending: PendingKeySequence) {
+        self.hold_pending(client_id, pending);
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
     }
 
-    fn fall_through(&mut self, mode: LockMode, pressed: PressedKey) {
-        if transparent(mode) {
-            self.write_press(pressed);
+    /// Hold `pending` without repainting: the caller is putting back a sequence
+    /// the client already had, so the hint bar already draws it.
+    fn hold_pending(&mut self, client_id: ClientId, pending: PendingKeySequence) {
+        if let Some(session) = self.session_for_client_mut(client_id) {
+            if let Some(client) = session.clients.get_mut(client_id) {
+                client.update_pending_key_sequence(Some(pending));
+            }
         }
     }
 
-    fn fire_binding(&mut self, client_id: ClientId, bound: koshi_config::types::BoundAction) {
+    fn fire_binding(&mut self, client_id: ClientId, bound: BoundAction) {
         let Ok(plan) = resolve_action(&bound.action, &bound.args, &self.action_registry) else {
             return;
         };
@@ -302,6 +293,21 @@ fn sequence(chords: Vec<KeyChord>) -> KeySequence {
     KeySequence::new(first, chords.collect())
 }
 
+/// The binding the unlock chord fires. Built rather than read from the keymap:
+/// the escape from locked mode is the one binding that must hold whatever any
+/// layer above it says, so it does not depend on a lookup that a layer could
+/// answer differently.
+fn unlock() -> BoundAction {
+    BoundAction {
+        action: ActionRef::core("unlock")
+            .expect("the reserved unlock action name satisfies the action-name grammar"),
+        args: ActionArgs::None,
+    }
+}
+
+/// Whether a key that binds nothing reaches the pane. Normal and locked mode
+/// pass what they do not bind; the modal layers own the keyboard while they are
+/// held and discard it.
 fn transparent(mode: LockMode) -> bool {
     matches!(mode, LockMode::Normal | LockMode::Locked)
 }

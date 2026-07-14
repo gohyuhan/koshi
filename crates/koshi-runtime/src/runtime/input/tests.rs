@@ -1,14 +1,15 @@
 //! End-to-end default-keymap tests: passthrough, lock escape, prefix display,
-//! multi-chord dispatch, timeout fallback, mismatch retry, and pane resize.
+//! multi-chord dispatch, timeout fallback, open-sequence capture, and pane
+//! resize.
 
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
-use koshi_config::conflict::KeymapVerdict;
+use koshi_config::conflict::{KeyMapLayer, KeymapVerdict, LayerOrigin};
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{BoundAction, ModeBindings, ModeName};
+use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{Command, FocusPaneArgs, FocusTarget};
 use koshi_core::geometry::{Direction, Size};
@@ -19,6 +20,7 @@ use koshi_session::client::Client;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
+use crate::runtime::hints::KeymapHintCatalog;
 use crate::runtime::state::Runtime;
 
 fn runtime() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
@@ -41,16 +43,6 @@ fn runtime() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
 
 fn chord(mods: ModFlags, key: char) -> KeyChord {
     KeyChord::new(mods, Key::Char(key))
-}
-
-/// A press typed into `pane` while it was in ordinary (non-application)
-/// cursor-key mode — every pane's state until a program changes it.
-fn pressed(pane: koshi_core::ids::PaneId, chord: KeyChord) -> PressedKey {
-    PressedKey {
-        chord,
-        pane: Some(pane),
-        app_cursor_keys: false,
-    }
 }
 
 fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
@@ -86,14 +78,12 @@ fn an_unbound_arrow_follows_the_focused_panes_application_cursor_mode() {
 }
 
 #[test]
-fn a_buffered_key_goes_to_the_pane_it_was_typed_into_even_after_focus_moves() {
-    // A key held as a pending prefix is written LATER, and focus can move in
-    // between from something that is not a keypress at all — a `core:focus-pane`
-    // command over IPC, or the focused pane's child exiting. The press belongs
-    // to the pane the user was typing into: it must land THERE, encoded for THAT
-    // pane's mode. Writing it to whoever holds focus at flush time would deliver
-    // an arrow typed into vim (`ESC O A`, application mode) to a shell that
-    // expects `ESC [ A` — and to the wrong process entirely.
+fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
+    // An open sequence's chords belong to Koshi, not to any pane. Focus can move
+    // while one waits — from something that is not a keypress at all, like a
+    // `core:focus-pane` command over IPC — and the question "which pane gets the
+    // buffered key" has one answer: none of them. Nothing typed into an open
+    // sequence is ever written, so a stale recipient cannot be picked wrongly.
     let (mut runtime, fake, client) = runtime();
     let first = only_pane(&runtime);
     let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
@@ -106,7 +96,7 @@ fn a_buffered_key_goes_to_the_pane_it_was_typed_into_even_after_focus_moves() {
     assert_ne!(second, first);
     runtime.handle_pty_output(second, b"\x1b[?1h");
 
-    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it buffers.
+    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence.
     bind_normal(
         &mut runtime,
         KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
@@ -116,8 +106,8 @@ fn a_buffered_key_goes_to_the_pane_it_was_typed_into_even_after_focus_moves() {
     runtime.handle_key_input(client, up, now);
 
     // Focus moves off that pane WITHOUT a keypress: a `core:focus-pane` command
-    // from another source entirely. Only a keypress clears a pending sequence,
-    // so the buffered `<Up>` is still waiting when the recipient changes.
+    // from another source entirely. Only a keypress touches a pending sequence,
+    // so the buffered `<Up>` is still open when the focused pane changes.
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::Mouse { client_id: client },
@@ -130,37 +120,43 @@ fn a_buffered_key_goes_to_the_pane_it_was_typed_into_even_after_focus_moves() {
     let result = runtime.dispatch(envelope);
     assert_eq!(focused_pane(&runtime, client), first, "{result:?}");
 
-    // A mismatching key abandons the sequence. The buffered `<Up>` goes to the
-    // pane it was typed into, in that pane's application mode; the new `z` goes
-    // to the pane now focused.
+    // `z` continues nothing: it is discarded, and the sequence stands. Neither
+    // pane sees a byte — not the buffered `<Up>`, not the `z`.
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(fake.writes(first).expect("writes"), Vec::<Vec<u8>>::new());
     assert_eq!(
-        fake.writes(second).expect("writes"),
-        vec![b"\x1bOA".to_vec()],
-        "the buffered arrow belongs to the pane it was typed into"
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        Some(KeySequence::from(up)),
+        "the open sequence outlives a key it cannot use"
     );
-    assert_eq!(
-        fake.writes(first).expect("writes"),
-        vec![b"z".to_vec()],
-        "only the new press goes to the newly focused pane"
+
+    // Escape leaves the sequence, and still nothing is typed at either pane.
+    runtime.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        now,
     );
+    assert_eq!(fake.writes(second).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(fake.writes(first).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
-fn a_buffered_arrow_reaches_the_pane_as_the_key_that_was_pressed() {
-    // A key held as a pending prefix is written to the pane LATER, and the pane
-    // can change its cursor-key mode in between — its own output is applied on
-    // the same loop. The press must survive that: pressed in normal mode, it
-    // reaches the pane as `ESC [ A`, even though the pane is in application mode
-    // by the time the sequence is abandoned. Re-reading the mode at the write
-    // would deliver `ESC O A` — bytes for a mode that was not active when the
-    // user pressed the key.
+fn a_buffered_arrow_is_never_written_even_when_its_pane_flips_cursor_mode() {
+    // A pane can turn application-cursor-keys mode on from its own output while
+    // a sequence waits — its bytes are applied on the same loop. It changes
+    // nothing here: the buffered `<Up>` has no byte form to get wrong, because
+    // it is never written in either mode.
     let (mut runtime, fake, client) = runtime();
     let pane = only_pane(&runtime);
     let up = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Up));
 
-    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it buffers instead of
-    // passing straight through.
+    // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence
+    // instead of passing straight through.
     bind_normal(
         &mut runtime,
         KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
@@ -176,13 +172,14 @@ fn a_buffered_arrow_reaches_the_pane_as_the_key_that_was_pressed() {
     // The pane now turns application-cursor-keys mode ON, mid-sequence.
     runtime.handle_pty_output(pane, b"\x1b[?1h");
 
-    // A mismatching key abandons the sequence and flushes it. The buffered
-    // `<Up>` goes out in the mode it was PRESSED in; the `z` goes out as itself.
+    // `z` continues nothing, so it is discarded and the sequence stands. The
+    // pane sees neither the arrow nor the `z`, in either cursor mode.
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(
-        fake.writes(pane).expect("writes"),
-        vec![b"\x1b[A".to_vec(), b"z".to_vec()]
-    );
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+
+    // Completing the sequence fires the binding — still no bytes to the pane.
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'x'), now);
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
@@ -394,16 +391,29 @@ fn escape_cancels_a_pending_sequence_silently() {
 }
 
 #[test]
-fn unmatched_continuation_flushes_prefix_then_retries_current_key() {
+fn an_unmatched_continuation_is_discarded_and_the_sequence_stands() {
     let (mut runtime, fake, client) = runtime();
     let pane = only_pane(&runtime);
     let now = Instant::now();
+    // `<C-p>` opens the pane prefix. `z` binds nothing under it: it goes
+    // nowhere, and the prefix is still open — the shell must not see `Ctrl-P`
+    // (history-back) or the `z`, because both were typed at Koshi.
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
     assert_eq!(
-        fake.writes(pane).expect("writes"),
-        vec![vec![0x10], vec![b'z']]
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        Some(KeySequence::from(chord(ModFlags::CTRL, 'p')))
     );
+
+    // The sequence is live, not merely remembered: `n` still completes it.
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'n'), now);
+    assert_eq!(runtime.pty_handles.len(), 2);
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
@@ -531,7 +541,7 @@ fn abandoned_rearmed_prefix_writes_nothing_to_the_pane() {
 }
 
 #[test]
-fn rearmed_prefix_mismatch_passes_the_key_through_and_disarms() {
+fn an_unmatched_key_under_a_rearmed_prefix_is_discarded_and_it_stays_armed() {
     let (mut runtime, fake, client) = runtime();
     let now = Instant::now();
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
@@ -540,13 +550,34 @@ fn rearmed_prefix_mismatch_passes_the_key_through_and_disarms() {
 
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
-    let sizes_after_resize = runtime.pty_sizes.clone();
+    let sizes_after_one_resize = runtime.pty_sizes.clone();
 
-    // `z` matches nothing under `<C-s>`: the empty re-armed prefix flushes
-    // nothing, and `z` retries alone — unbound, so it reaches the shell.
+    // A re-armed prefix is an open sequence like any other, and captures like
+    // one: `z` resizes nothing, so it is discarded — not passed to the shell —
+    // and `<C-s>` stays armed.
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
-    assert_eq!(fake.writes(focused).expect("writes"), vec![vec![b'z']]);
-    assert_eq!(runtime.pty_sizes, sizes_after_resize);
+    assert_eq!(fake.writes(focused).expect("writes"), Vec::<Vec<u8>>::new());
+    assert_eq!(runtime.pty_sizes, sizes_after_one_resize);
+    assert_eq!(
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        Some(KeySequence::from(chord(ModFlags::CTRL, 's')))
+    );
+
+    // Still armed, so the next `h` resizes again without re-pressing `<C-s>`.
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    assert_ne!(runtime.pty_sizes, sizes_after_one_resize);
+
+    // Escape is the way out, and it types nothing at the pane.
+    runtime.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+        now,
+    );
+    assert_eq!(fake.writes(focused).expect("writes"), Vec::<Vec<u8>>::new());
     assert_eq!(
         runtime
             .build_snapshot(client)
@@ -578,6 +609,46 @@ fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
 /// Bind one `normal`-mode sequence to `action` via [`Runtime::reload_keybindings`].
 fn bind_normal(runtime: &mut Runtime, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
     bind_normal_all(runtime, vec![(sequence, action, args)]);
+}
+
+/// Bind one `locked`-mode sequence to `action`, keeping the shipped locked
+/// bindings (the unlock chord among them) beside it — a user layer that dropped
+/// the unlock entry would be refused by conflict detection.
+fn bind_locked(runtime: &mut Runtime, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
+    let mut keys = KeybindingsConfig::default()
+        .modes
+        .remove(&ModeName::new("locked"))
+        .expect("the shipped config binds locked mode")
+        .keys;
+    keys.insert(sequence, BoundAction { action, args });
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    });
+    assert_eq!(
+        outcome.report.verdict(),
+        KeymapVerdict::Apply,
+        "test setup: the candidate binding must apply cleanly"
+    );
+}
+
+/// The client's current lock mode.
+fn lock_mode(runtime: &Runtime, client: ClientId) -> LockMode {
+    runtime
+        .session_for_client(client)
+        .expect("session")
+        .clients
+        .get(client)
+        .expect("client")
+        .lock_mode()
 }
 
 /// Bind every `(sequence, action, args)` triple in `bindings` under `normal`
@@ -752,13 +823,13 @@ fn take_pending_reads_only_the_requested_clients_own_state() {
 }
 
 #[test]
-fn a_pending_sequence_beyond_max_chord_depth_flushes_the_whole_buffer_without_firing() {
+fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
     let (mut runtime, fake, client) = runtime();
     let pane = only_pane(&runtime);
-    // A real 4-chord binding at the default max depth: if it fired it would be
-    // observable as a new tab, which distinguishes the depth cap's raw-byte
-    // flush from the ordinary mismatch-retry path that resolves a held exact
-    // binding on a mismatch.
+    // A 4-chord binding, exactly the default `max_chord_depth`. The cap bounds
+    // pending state without a check on the input path: a sequence only grows
+    // while a longer live binding still starts with it, and the merge drops any
+    // binding past the cap, so no pending sequence can outgrow it.
     let long = KeySequence::new(
         chord(ModFlags::CTRL, 'y'),
         vec![
@@ -781,34 +852,13 @@ fn a_pending_sequence_beyond_max_chord_depth_flushes_the_whole_buffer_without_fi
         .tabs
         .len();
 
-    // Park a sequence one chord short of the binding — the exact state a
-    // corrupted or stale pending entry would leave behind — then press a 5th
-    // chord that pushes the accumulated count past `max_chord_depth` (4).
-    runtime
-        .session_for_client_mut(client)
-        .expect("session")
-        .clients
-        .get_mut(client)
-        .expect("client")
-        .update_pending_key_sequence(Some(PendingKeySequence {
-            sequence: long,
-            fallback: vec![
-                pressed(pane, chord(ModFlags::CTRL, 'y')),
-                pressed(pane, chord(ModFlags::NONE, 'a')),
-                pressed(pane, chord(ModFlags::NONE, 'b')),
-                pressed(pane, chord(ModFlags::NONE, 'c')),
-            ],
-            deadline: None,
-        }));
+    let now = Instant::now();
+    for chord in long.chords() {
+        runtime.handle_key_input(client, *chord, now);
+    }
 
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), Instant::now());
-
-    // The depth cap dumps every buffered chord verbatim; the held 4-chord
-    // binding never resolves, so no new tab appears.
-    assert_eq!(
-        fake.writes(pane).expect("writes"),
-        vec![vec![0x19], vec![b'a'], vec![b'b'], vec![b'c'], vec![b'z']]
-    );
+    // The full-depth binding fires, the sequence closes, and nothing along the
+    // way was typed at the pane.
     assert_eq!(
         runtime
             .sessions()
@@ -817,7 +867,7 @@ fn a_pending_sequence_beyond_max_chord_depth_flushes_the_whole_buffer_without_fi
             .expect("session")
             .tabs
             .len(),
-        tabs_before
+        tabs_before + 1
     );
     assert_eq!(
         runtime
@@ -827,6 +877,137 @@ fn a_pending_sequence_beyond_max_chord_depth_flushes_the_whole_buffer_without_fi
             .pending_sequence,
         None
     );
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn the_unlock_chord_escapes_a_locked_client_from_inside_an_open_sequence() {
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+    let now = Instant::now();
+    // A locked-mode sequence of the user's own: `<C-x> a`. Pressing `<C-x>`
+    // opens it, so the client is locked AND mid-sequence — the state the unlock
+    // guarantee has to survive.
+    bind_locked(
+        &mut runtime,
+        KeySequence::new(chord(ModFlags::CTRL, 'x'), vec![chord(ModFlags::NONE, 'a')]),
+        ActionRef::core("new-tab").expect("valid core action name"),
+        ActionArgs::None,
+    );
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'x'), now);
+    assert!(runtime
+        .build_snapshot(client)
+        .unwrap()
+        .client
+        .pending_sequence
+        .is_some());
+
+    // The unlock chord resolves ahead of the keymap and ahead of the open
+    // sequence: the client unlocks, the held `<C-x>` is dropped rather than
+    // typed at the pane, and no pending sequence survives into normal mode.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
+    assert_eq!(
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        None
+    );
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
+    let (mut runtime, fake, client) = runtime();
+    let pane = only_pane(&runtime);
+    let now = Instant::now();
+    // `<C-x> <C-l>` in locked mode: the unlock resolves at the `<C-l>` wherever
+    // it is pressed, so this binding can never fire. The config layer knows it
+    // is dead and drops it, which is what keeps the two halves honest — if the
+    // merge admitted it, `<C-x>` would become a live prefix that captures the
+    // keyboard and offers a hint-bar continuation that silently unlocks.
+    bind_locked(
+        &mut runtime,
+        KeySequence::new(
+            chord(ModFlags::CTRL, 'x'),
+            vec![KeybindingsConfig::RESERVED_UNLOCK],
+        ),
+        ActionRef::core("new-tab").expect("valid core action name"),
+        ActionArgs::None,
+    );
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
+    let tabs_before = runtime
+        .sessions()
+        .values()
+        .next()
+        .expect("session")
+        .tabs
+        .len();
+
+    // The dead binding wins no key: `<C-x>` opens no sequence and passes to the
+    // pane verbatim, exactly as locked mode passes every unbound key.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'x'), now);
+    assert_eq!(
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        None
+    );
+    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![0x18]]);
+
+    // And the unlock still unlocks — it never became a continuation of anything.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
+    assert_eq!(
+        runtime
+            .sessions()
+            .values()
+            .next()
+            .expect("session")
+            .tabs
+            .len(),
+        tabs_before,
+        "the dead binding's action must never run"
+    );
+    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![0x18]]);
+}
+
+#[test]
+fn the_unlock_chord_escapes_even_when_the_locked_keymap_lost_its_unlock_binding() {
+    let (mut runtime, _fake, client) = runtime();
+    let now = Instant::now();
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
+
+    // Strip locked mode's bindings out of the resolved keymap entirely — the
+    // shape a keymap layer that shadowed or removed the unlock entry would
+    // leave. The escape does not read the keymap, so it still fires.
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed: BTreeSet::new(),
+        },
+    );
+    runtime.keymap_hints = KeymapHintCatalog::from_parts(
+        &[KeyMapLayer {
+            origin: LayerOrigin::Defaults,
+            modes,
+        }],
+        &KeybindingsConfig::default(),
+        &runtime.action_registry,
+    );
+
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'l'), now);
+    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
 }
 
 #[test]
@@ -934,10 +1115,11 @@ fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match
 }
 
 #[test]
-fn a_held_exact_binding_fires_on_mismatch_then_retries_the_new_key() {
+fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline() {
     let (mut runtime, fake, client) = runtime();
     let pane = only_pane(&runtime);
-    // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`.
+    // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`, so
+    // pressing it opens a sequence that carries an ambiguity deadline.
     bind_normal_all(
         &mut runtime,
         vec![
@@ -963,12 +1145,33 @@ fn a_held_exact_binding_fires_on_mismatch_then_retries_the_new_key() {
         .len();
 
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 'y'), now);
-    // `z` does not extend `<C-y>` into anything: the held `<C-y>` is itself a
-    // complete binding, so it fires instead of flushing its raw bytes — firing
-    // `new-tab` switches the client's focused pane, so only `z` (unbound on
-    // the new tab) retries and reaches the newly focused pane.
+    // `z` extends `<C-y>` into nothing, so it is discarded — the sequence is not
+    // abandoned by a key it cannot use, and its deadline still stands.
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'z'), now);
+    assert_eq!(
+        runtime
+            .sessions()
+            .values()
+            .next()
+            .expect("session")
+            .tabs
+            .len(),
+        tabs_before,
+        "the held binding waits for its deadline, not for a mismatch"
+    );
+    assert_eq!(
+        runtime
+            .build_snapshot(client)
+            .unwrap()
+            .client
+            .pending_sequence,
+        Some(KeySequence::from(chord(ModFlags::CTRL, 'y')))
+    );
 
+    // The deadline decides: `<C-y>`'s own binding fires, and the client lands on
+    // the new tab. Neither the held chord nor the discarded `z` was ever typed.
+    let deadline = now + runtime.keymap_hints.chord_timeout();
+    runtime.expire_key_sequences(deadline);
     assert_eq!(
         runtime
             .sessions()
@@ -984,7 +1187,10 @@ fn a_held_exact_binding_fires_on_mismatch_then_retries_the_new_key() {
         new_pane, pane,
         "new-tab must have switched focus to a new pane"
     );
-    assert_eq!(fake.writes(new_pane).expect("writes"), vec![vec![b'z']]);
+    assert_eq!(
+        fake.writes(new_pane).expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
     assert_eq!(
         runtime
