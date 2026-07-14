@@ -153,7 +153,7 @@ fn build_snapshot_carries_the_hints_for_the_clients_mode() {
     // Normal mode: the shipped normal-mode bindings surface as hint data.
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     assert_eq!(snap.client.lock_mode, LockMode::Normal);
-    assert_eq!(snap.keymap_hints.entries.len(), 20);
+    assert_eq!(snap.keymap_hints.entries.len(), 24);
     assert!(!snap.keymap_hints.reverted);
 
     // Locked mode: the same frame path now carries only the pinned unlock.

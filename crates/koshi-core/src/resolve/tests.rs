@@ -1,12 +1,11 @@
-//! Unit tests for action resolution: the built-in name table, the presets that
-//! distinguish actions sharing one command, argument fit, the plugin and macro
-//! routes, and the orphan and coming-soon refusals.
+//! Unit tests for action resolution: the built-in name table, the named
+//! variants that distinguish actions sharing one command, argument fit, the
+//! plugin and macro routes, and the orphan and coming-soon refusals.
 
 use super::*;
 
 use crate::action::{core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, TargetKind};
 use crate::command::CommandKind;
-use crate::ids::PaneId;
 use crate::process::ShellKind;
 use crate::registry::tests::insert_unchecked;
 use std::collections::BTreeMap;
@@ -40,10 +39,19 @@ fn spawn_spec() -> SpawnSpec {
     }
 }
 
-/// Every `Available` core action, the arguments it is invoked with, and the
-/// exact command it must produce. The set of names here is pinned against the
-/// seed table by [`available_table_matches_seeds`], so an action that gains or
-/// loses `Available` status without a matching row fails the suite.
+/// The `Available` core actions that no binding can invoke: each has a
+/// required value with an open range (a resize amount, a pane id, a tab
+/// index), so it is reachable only through a CLI command, which builds its
+/// [`Command`] directly. `resolve_action` refuses every one of them whatever
+/// the arguments. Pinned against the seed table by
+/// [`available_table_matches_seeds`].
+const CLI_ONLY: [&str; 4] = ["resize-pane", "focus-pane", "focus-tab", "move-tab"];
+
+/// Every binding-invocable `Available` core action, the arguments it is
+/// invoked with, and the exact command it must produce. Together with
+/// [`CLI_ONLY`] this covers the whole `Available` seed set, pinned by
+/// [`available_table_matches_seeds`], so an action that gains or loses
+/// `Available` status without a matching row fails the suite.
 fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
     vec![
         (
@@ -52,29 +60,144 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs::default()),
         ),
         (
+            "new-pane-left",
+            ActionArgs::None,
+            Command::NewPane(NewPaneArgs {
+                source: None,
+                direction: Some(Direction::Left),
+                stacked: false,
+                cwd: None,
+                command: None,
+                client: None,
+            }),
+        ),
+        (
+            "new-pane-down",
+            ActionArgs::None,
+            Command::NewPane(NewPaneArgs {
+                source: None,
+                direction: Some(Direction::Down),
+                stacked: false,
+                cwd: None,
+                command: None,
+                client: None,
+            }),
+        ),
+        (
+            "new-pane-up",
+            ActionArgs::None,
+            Command::NewPane(NewPaneArgs {
+                source: None,
+                direction: Some(Direction::Up),
+                stacked: false,
+                cwd: None,
+                command: None,
+                client: None,
+            }),
+        ),
+        (
+            "new-pane-right",
+            ActionArgs::None,
+            Command::NewPane(NewPaneArgs {
+                source: None,
+                direction: Some(Direction::Right),
+                stacked: false,
+                cwd: None,
+                command: None,
+                client: None,
+            }),
+        ),
+        (
+            "new-pane-stacked",
+            ActionArgs::None,
+            Command::NewPane(NewPaneArgs {
+                source: None,
+                direction: None,
+                stacked: true,
+                cwd: None,
+                command: None,
+                client: None,
+            }),
+        ),
+        (
             "close-pane",
             ActionArgs::None,
             Command::ClosePane(ClosePaneArgs::default()),
         ),
         (
-            "resize-pane",
-            ActionArgs::ResizePane {
-                direction: Direction::Left,
-                size: 5,
-            },
-            Command::ResizePane(ResizePaneArgs {
+            "close-pane-tree",
+            ActionArgs::None,
+            Command::ClosePane(ClosePaneArgs {
                 pane: None,
-                direction: Direction::Left,
-                size: 5,
+                force: false,
+                tree: true,
             }),
         ),
         (
-            "focus-pane",
-            ActionArgs::FocusPane {
-                target: FocusTarget::Pane(PaneId::from_uuid(Uuid::from_bytes([7; 16]))),
-            },
+            "resize-pane-left",
+            ActionArgs::None,
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Left,
+                size: 1,
+            }),
+        ),
+        (
+            "resize-pane-down",
+            ActionArgs::None,
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Down,
+                size: 1,
+            }),
+        ),
+        (
+            "resize-pane-up",
+            ActionArgs::None,
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Up,
+                size: 1,
+            }),
+        ),
+        (
+            "resize-pane-right",
+            ActionArgs::None,
+            Command::ResizePane(ResizePaneArgs {
+                pane: None,
+                direction: Direction::Right,
+                size: 1,
+            }),
+        ),
+        (
+            "focus-pane-left",
+            ActionArgs::None,
             Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Pane(PaneId::from_uuid(Uuid::from_bytes([7; 16]))),
+                target: FocusTarget::Direction(Direction::Left),
+                client: None,
+            }),
+        ),
+        (
+            "focus-pane-down",
+            ActionArgs::None,
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Direction(Direction::Down),
+                client: None,
+            }),
+        ),
+        (
+            "focus-pane-up",
+            ActionArgs::None,
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Direction(Direction::Up),
+                client: None,
+            }),
+        ),
+        (
+            "focus-pane-right",
+            ActionArgs::None,
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Direction(Direction::Right),
                 client: None,
             }),
         ),
@@ -99,16 +222,6 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::CloseTab(CloseTabArgs::default()),
         ),
         (
-            "focus-tab",
-            ActionArgs::FocusTab {
-                target: TabTarget::Index(2),
-            },
-            Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Index(2),
-                client: None,
-            }),
-        ),
-        (
             "next-tab",
             ActionArgs::None,
             Command::FocusTab(FocusTabArgs {
@@ -128,14 +241,6 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             "rename-tab",
             ActionArgs::None,
             Command::RenameTab(RenameTabArgs { tab: None }),
-        ),
-        (
-            "move-tab",
-            ActionArgs::MoveTab { index: 3 },
-            Command::MoveTab(MoveTabArgs {
-                tab: None,
-                index: 3,
-            }),
         ),
         (
             "rename-session",
@@ -254,6 +359,7 @@ fn available_table_matches_seeds() {
     let mut tabled: Vec<String> = available_table()
         .into_iter()
         .map(|(name, _, _)| name.to_string())
+        .chain(CLI_ONLY.into_iter().map(str::to_string))
         .collect();
     tabled.sort();
 
@@ -339,24 +445,6 @@ fn coming_soon_names_are_pinned() {
 }
 
 #[test]
-fn focus_pane_resolves_a_direction_target() {
-    let registry = ActionRegistry::new();
-    assert_eq!(
-        resolve_action(
-            &core("focus-pane"),
-            &ActionArgs::FocusPane {
-                target: FocusTarget::Direction(Direction::Down),
-            },
-            &registry,
-        ),
-        Ok(DispatchPlan::Command(Command::FocusPane(FocusPaneArgs {
-            target: FocusTarget::Direction(Direction::Down),
-            client: None,
-        })))
-    );
-}
-
-#[test]
 fn unregistered_action_is_an_orphan() {
     let registry = ActionRegistry::new();
     let action = ActionRef::plugin(plugin_id(1), "open-status").expect("valid name");
@@ -378,9 +466,11 @@ fn plugin_action_routes_to_its_own_host_call() {
         .register(owner, action.clone(), plugin_metadata(owner))
         .expect("plugin registers its own action");
 
-    let args = ActionArgs::ClosePane {
-        force: true,
-        tree: false,
+    let args = ActionArgs::Run {
+        program: run_program(),
+        args: vec![],
+        direction: None,
+        stacked: false,
     };
     assert_eq!(
         resolve_action(&action, &args, &registry),
@@ -393,111 +483,39 @@ fn plugin_action_routes_to_its_own_host_call() {
 }
 
 #[test]
-fn new_pane_takes_its_arguments() {
+fn cli_only_actions_are_refused_with_and_without_arguments() {
+    // `run` joins the CLI-only set for the argless half: a bare `core:run`
+    // names no program, so it rejects `None` like the others; unlike them it
+    // does accept its own `Run` arguments (covered by the available table).
     let registry = ActionRegistry::new();
-    let args = ActionArgs::NewPane {
-        direction: Some(Direction::Down),
-        stacked: true,
+    let some_args = ActionArgs::Run {
+        program: run_program(),
+        args: vec![],
+        direction: None,
+        stacked: false,
     };
-
-    assert_eq!(
-        resolve_action(&core("new-pane"), &args, &registry),
-        Ok(DispatchPlan::Command(Command::NewPane(NewPaneArgs {
-            source: None,
-            direction: Some(Direction::Down),
-            stacked: true,
-            cwd: None,
-            command: None,
-            client: None,
-        })))
-    );
-}
-
-#[test]
-fn close_pane_takes_its_force_and_tree_flags() {
-    let registry = ActionRegistry::new();
-
-    assert_eq!(
-        resolve_action(
-            &core("close-pane"),
-            &ActionArgs::ClosePane {
-                force: true,
-                tree: false,
-            },
-            &registry
-        ),
-        Ok(DispatchPlan::Command(Command::ClosePane(ClosePaneArgs {
-            pane: None,
-            force: true,
-            tree: false,
-        })))
-    );
-    assert_eq!(
-        resolve_action(
-            &core("close-pane"),
-            &ActionArgs::ClosePane {
-                force: false,
-                tree: true,
-            },
-            &registry
-        ),
-        Ok(DispatchPlan::Command(Command::ClosePane(ClosePaneArgs {
-            pane: None,
-            force: false,
-            tree: true,
-        })))
-    );
-}
-
-#[test]
-fn close_tab_takes_its_force_and_tree_flags() {
-    let registry = ActionRegistry::new();
-
-    assert_eq!(
-        resolve_action(
-            &core("close-tab"),
-            &ActionArgs::CloseTab {
-                force: true,
-                tree: false
-            },
-            &registry
-        ),
-        Ok(DispatchPlan::Command(Command::CloseTab(CloseTabArgs {
-            tab: None,
-            force: true,
-            tree: false,
-        })))
-    );
-    assert_eq!(
-        resolve_action(
-            &core("close-tab"),
-            &ActionArgs::CloseTab {
-                force: false,
-                tree: true
-            },
-            &registry
-        ),
-        Ok(DispatchPlan::Command(Command::CloseTab(CloseTabArgs {
-            tab: None,
-            force: false,
-            tree: true,
-        })))
-    );
-}
-
-#[test]
-fn actions_with_a_required_argument_reject_none() {
-    let registry = ActionRegistry::new();
-    for name in ["resize-pane", "focus-pane", "focus-tab", "move-tab", "run"] {
+    for name in CLI_ONLY {
         let action = core(name);
         assert_eq!(
             resolve_action(&action, &ActionArgs::None, &registry),
             Err(ResolveError::ArgsMismatch {
                 action: action.clone()
             }),
-            "core:{name}"
+            "core:{name} given no arguments"
+        );
+        assert_eq!(
+            resolve_action(&action, &some_args, &registry),
+            Err(ResolveError::ArgsMismatch {
+                action: action.clone()
+            }),
+            "core:{name} given arguments"
         );
     }
+    let run = core("run");
+    assert_eq!(
+        resolve_action(&run, &ActionArgs::None, &registry),
+        Err(ResolveError::ArgsMismatch { action: run })
+    );
 }
 
 #[test]
@@ -508,9 +526,11 @@ fn arguments_belonging_to_another_action_are_refused() {
     assert_eq!(
         resolve_action(
             &action,
-            &ActionArgs::ClosePane {
-                force: true,
-                tree: false,
+            &ActionArgs::Run {
+                program: run_program(),
+                args: vec![],
+                direction: None,
+                stacked: false,
             },
             &registry
         ),
@@ -558,9 +578,11 @@ fn a_sequence_given_arguments_is_refused() {
     assert_eq!(
         resolve_action(
             &macro_ref,
-            &ActionArgs::ClosePane {
-                force: true,
-                tree: false,
+            &ActionArgs::Run {
+                program: run_program(),
+                args: vec![],
+                direction: None,
+                stacked: false,
             },
             &registry
         ),
@@ -699,9 +721,11 @@ fn coming_soon_status_is_checked_before_args_mismatch() {
     // `ComingSoon` first.
     let registry = ActionRegistry::new();
     let action = core("copy-mode-enter");
-    let wrong_args = ActionArgs::ClosePane {
-        force: true,
-        tree: false,
+    let wrong_args = ActionArgs::Run {
+        program: run_program(),
+        args: vec![],
+        direction: None,
+        stacked: false,
     };
 
     assert_eq!(

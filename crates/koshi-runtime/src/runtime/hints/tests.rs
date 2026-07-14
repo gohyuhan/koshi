@@ -22,8 +22,8 @@ fn ctrl(key: char) -> KeyChord {
 fn normal_mode_joins_defaults_to_display_names() {
     let hints = catalog().hints_for(LockMode::Normal);
 
-    // All 20 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.entries.len(), 20);
+    // All 24 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.entries.len(), 24);
 
     let new_pane = KeySequence::new(
         ctrl('p'),

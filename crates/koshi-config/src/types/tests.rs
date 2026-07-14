@@ -188,21 +188,27 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         args,
         resolved,
     };
-    let focus_args = |direction: Direction| ActionArgs::FocusPane {
-        target: FocusTarget::Direction(direction),
-    };
     let focus_cmd = |direction: Direction| {
         Command::FocusPane(FocusPaneArgs {
             target: FocusTarget::Direction(direction),
             client: None,
         })
     };
-    let resize_args = |direction: Direction| ActionArgs::ResizePane { direction, size: 1 };
     let resize_cmd = |direction: Direction| {
         Command::ResizePane(ResizePaneArgs {
             pane: None,
             direction,
             size: 1,
+        })
+    };
+    let new_pane_cmd = |direction: Direction| {
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            direction: Some(direction),
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
         })
     };
 
@@ -230,12 +236,37 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "normal",
+            "<C-p> h",
+            "new-pane-left",
+            ActionArgs::None,
+            Ok(new_pane_cmd(Direction::Left)),
+        ),
+        row(
+            "normal",
+            "<C-p> j",
+            "new-pane-down",
+            ActionArgs::None,
+            Ok(new_pane_cmd(Direction::Down)),
+        ),
+        row(
+            "normal",
+            "<C-p> k",
+            "new-pane-up",
+            ActionArgs::None,
+            Ok(new_pane_cmd(Direction::Up)),
+        ),
+        row(
+            "normal",
+            "<C-p> l",
+            "new-pane-right",
+            ActionArgs::None,
+            Ok(new_pane_cmd(Direction::Right)),
+        ),
+        row(
+            "normal",
             "<C-p> x",
-            "close-pane",
-            ActionArgs::ClosePane {
-                force: false,
-                tree: true,
-            },
+            "close-pane-tree",
+            ActionArgs::None,
             Ok(Command::ClosePane(ClosePaneArgs {
                 pane: None,
                 force: false,
@@ -252,85 +283,85 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         row(
             "normal",
             "<C-p> <Left>",
-            "focus-pane",
-            focus_args(Direction::Left),
+            "focus-pane-left",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Left)),
         ),
         row(
             "normal",
             "<C-p> <Down>",
-            "focus-pane",
-            focus_args(Direction::Down),
+            "focus-pane-down",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Down)),
         ),
         row(
             "normal",
             "<C-p> <Up>",
-            "focus-pane",
-            focus_args(Direction::Up),
+            "focus-pane-up",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Up)),
         ),
         row(
             "normal",
             "<C-p> <Right>",
-            "focus-pane",
-            focus_args(Direction::Right),
+            "focus-pane-right",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Right)),
         ),
         row(
             "normal",
             "<A-h>",
-            "focus-pane",
-            focus_args(Direction::Left),
+            "focus-pane-left",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Left)),
         ),
         row(
             "normal",
             "<A-j>",
-            "focus-pane",
-            focus_args(Direction::Down),
+            "focus-pane-down",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Down)),
         ),
         row(
             "normal",
             "<A-k>",
-            "focus-pane",
-            focus_args(Direction::Up),
+            "focus-pane-up",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Up)),
         ),
         row(
             "normal",
             "<A-l>",
-            "focus-pane",
-            focus_args(Direction::Right),
+            "focus-pane-right",
+            ActionArgs::None,
             Ok(focus_cmd(Direction::Right)),
         ),
         row(
             "normal",
             "<C-s> h",
-            "resize-pane",
-            resize_args(Direction::Left),
+            "resize-pane-left",
+            ActionArgs::None,
             Ok(resize_cmd(Direction::Left)),
         ),
         row(
             "normal",
             "<C-s> j",
-            "resize-pane",
-            resize_args(Direction::Down),
+            "resize-pane-down",
+            ActionArgs::None,
             Ok(resize_cmd(Direction::Down)),
         ),
         row(
             "normal",
             "<C-s> k",
-            "resize-pane",
-            resize_args(Direction::Up),
+            "resize-pane-up",
+            ActionArgs::None,
             Ok(resize_cmd(Direction::Up)),
         ),
         row(
             "normal",
             "<C-s> l",
-            "resize-pane",
-            resize_args(Direction::Right),
+            "resize-pane-right",
+            ActionArgs::None,
             Ok(resize_cmd(Direction::Right)),
         ),
         row(
