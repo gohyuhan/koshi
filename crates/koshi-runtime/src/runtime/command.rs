@@ -2088,15 +2088,23 @@ impl Runtime {
     /// its rect** — zoom is per-client, so client A can have pane X filling the
     /// tab while client B has it tiled in a corner. The size handed to X's child
     /// is therefore the **smallest** rect among the clients who actually draw X,
-    /// which is the largest grid every one of them can show in full. This is the
-    /// same rule [`Session::tab_viewport`] already applies to terminal sizes, one
-    /// level down: nobody is ever shown a grid too big to fit, so no client has
-    /// to crop.
+    /// which is the largest grid every one of them can show in full: nobody is
+    /// ever shown a grid too big to fit, so no client has to crop.
     ///
-    /// A client zoomed on some *other* pane draws X not at all and so asks
-    /// nothing of X's size — it is not counted. When exactly one client views the
-    /// tab (the common case), the minimum is that client's own rect and a zoom
-    /// gives its pane the whole tab, exactly as before zoom became per-client.
+    /// A client zoomed on some *other* pane draws X not at all, so it does not
+    /// narrow X's rect here — it is not one of the viewers this minimum is taken
+    /// over. It still bounds X indirectly, and must: `viewport` is the tab's
+    /// shared [`Session::tab_viewport`] (the per-axis minimum terminal across
+    /// every client viewing the tab, zoomed or not), every pane is solved inside
+    /// it, and the renderer draws the whole tab at that size and letterboxes the
+    /// margin. A rect bigger than the tab has nowhere to be drawn, so no pane —
+    /// zoomed or tiled — may exceed it. Sizing a zoomed pane to its own client's
+    /// larger terminal instead would need the shared tab size to become
+    /// per-client, which is a rendering-model change, not a sizing one.
+    ///
+    /// When exactly one client views the tab (the common case), the minimum is
+    /// that client's own rect and a zoom gives its pane the whole tab, exactly as
+    /// before zoom became per-client.
     ///
     /// Only the returned rect's SIZE is meaningful: its origin is whatever the
     /// first drawing viewer placed it at, and every consumer here reads the size

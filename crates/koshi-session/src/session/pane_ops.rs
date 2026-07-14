@@ -34,9 +34,14 @@ pub struct NewPaneSpec {
 
 /// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
 /// focused client onto the tab (if it is not already there), register the new
-/// pane as `Running`, swap in `candidate` as the tab's layout — dropping the
-/// tab's fullscreen when one was on, so the new pane lands visible — and focus
-/// the new pane for `focus_client` when one is given and still attached.
+/// pane as `Running`, swap in `candidate` as the tab's layout — dropping the zoom
+/// that would have hidden the new pane, so it lands visible — and focus the new
+/// pane for `focus_client` when one is given and still attached.
+///
+/// Whose zoom drops depends on who made the split: with a `focus_client`, that
+/// one client's (another client's zoom is not disturbed by someone else's split);
+/// with none, every zoom of the tab, since nobody owns the edit and a pane added
+/// beneath a zoom would be seen by no one and focused by no one.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_to_stack`],
@@ -106,14 +111,29 @@ pub fn commit_new_pane(
         }
     }
 
-    // Splitting drops the zoom of the client that split, and of that client
-    // only: the new pane lands in the tiled layout it was sized against, and the
-    // splitter sees it. Any other client zoomed on a pane of this tab keeps its
-    // zoom — its pane still exists, and one client splitting does not disturb
-    // another client's view.
-    if let Some(client_id) = focus {
-        if let Some(client) = session.clients.get_mut(client_id) {
-            client.clear_zoom(tab_id);
+    // A new pane must be seen by somebody, so a zoom that would hide it is
+    // dropped — but only the zoom of whoever is responsible for the split.
+    //
+    // - **A client made the split** (a keybinding, the in-session CLI, or an
+    //   explicit `--client`): that client's zoom drops, so the new pane lands
+    //   visible in the tiled layout it was sized against. Every other client
+    //   keeps its zoom; one client splitting is not a reason to disturb another
+    //   client's view.
+    // - **No client made it** (an external caller naming only a tab): nobody owns
+    //   the edit, so there is no one client to un-zoom — and leaving every zoom
+    //   in place would add the pane underneath them, where no zoomed viewer would
+    //   ever see it and none of them focuses it. Every zoom of this tab drops
+    //   instead, so the pane the caller asked for actually appears.
+    match focus {
+        Some(client_id) => {
+            if let Some(client) = session.clients.get_mut(client_id) {
+                client.clear_zoom(tab_id);
+            }
+        }
+        None => {
+            for client in session.clients.list_attached_mut() {
+                client.clear_zoom(tab_id);
+            }
         }
     }
 

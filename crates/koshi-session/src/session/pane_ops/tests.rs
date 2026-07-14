@@ -330,6 +330,44 @@ fn commit_with_a_stale_focus_client_claims_no_focus() {
     assert!(session.tabs.get(&tab).expect("tab").focus_mru().is_empty());
 }
 
+/// A split nobody owns — an external caller naming a tab, with no client to act
+/// for — drops every zoom of that tab, so the new pane is actually seen. Leaving
+/// the zooms up would add the pane underneath them: a zoomed viewer would never
+/// see it, and with no acting client nothing focuses it either.
+#[test]
+fn commit_with_no_acting_client_drops_every_zoom_of_the_tab() {
+    let (mut session, tab, source, client) = session_one_pane();
+    session
+        .clients
+        .get_mut(client)
+        .expect("client")
+        .zoom_pane(tab, source);
+
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    // `focus: None` — the caller designated no client (an already-viewed tab
+    // needs no adoption, so the runtime passes none through).
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client")
+            .layout_mode(tab),
+        LayoutMode::Tiled,
+        "the zoom would have hidden the pane the caller just asked for"
+    );
+}
+
 /// Splitting drops the zoom of the client that split — and only that client's.
 /// The new pane lands in the tiled view it was sized against, and the splitter
 /// sees it; a second client zoomed on a pane of the same tab is untouched,
