@@ -603,6 +603,47 @@ fn reserved_led_claims_do_not_collide() {
 }
 
 #[test]
+fn a_locked_sequence_holding_the_reserved_chord_anywhere_is_dead() {
+    // `<C-x> <C-l>` does not OPEN with the reserved chord, so it looks live —
+    // but the input path resolves the unlock the instant it is pressed, open
+    // sequence or not, so the `<C-l>` unlocks and `core:new-tab` never runs.
+    // Position is irrelevant: a locked sequence holding the chord at all is
+    // dead, and must be warned rather than admitted as a firing binding that
+    // steals its key and offers a hint-bar continuation that silently unlocks.
+    let key = seq2(
+        chord(ModFlags::CTRL, 'x'),
+        KeybindingsConfig::RESERVED_UNLOCK,
+    );
+    let report = detect(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::DeadUnderReservedUnlock {
+            origin: LayerOrigin::User,
+            key,
+            action: core("new-tab"),
+        }]
+    );
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn the_one_chord_unlock_binding_itself_stays_live() {
+    // The rule kills sequences that HOLD the reserved chord — never the
+    // one-chord binding that IS the unlock. Locked mode's own `<C-l>` →
+    // `core:unlock` must keep firing, or the escape guarantee dies with it.
+    let report = detect(&[defaults()]);
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
 fn reserved_led_sequences_do_not_pair_as_prefixes() {
     // `<C-g> x` is a strict prefix of `<C-g> x y`, but both are swallowed
     // by the reserved chord: two dead warnings, no ambiguous-prefix pair.
@@ -1341,8 +1382,8 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         dead.to_string(),
-        "`<C-l> x` (user, `core:lock`) in locked mode can never fire: its first chord \
-         is the reserved unlock, which resolves instantly"
+        "`<C-l> x` (user, `core:lock`) in locked mode can never fire: it holds the \
+         reserved unlock chord, which resolves instantly wherever it is pressed"
     );
 
     let same_action_collision = ConflictDiagnostic::KeyCollision {

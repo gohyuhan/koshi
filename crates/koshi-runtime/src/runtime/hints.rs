@@ -35,8 +35,8 @@ pub(crate) struct KeymapHintCatalog {
     merged: Arc<MergedKeyMap>,
     /// Multi-chord wait before an incomplete prefix falls through.
     chord_timeout: Duration,
-    /// Hard cap on one pending key sequence.
-    max_chord_depth: usize,
+    /// The chord that unlocks a locked client, ahead of every other lookup.
+    unlock_chord: KeyChord,
     /// One sorted binding list per built-in mode; a mode nothing binds in
     /// holds an empty list.
     entries: BTreeMap<ModeName, Arc<Vec<HintBinding>>>,
@@ -75,7 +75,9 @@ impl KeymapHintCatalog {
         registry: &ActionRegistry,
     ) -> Self {
         let chord_timeout = Duration::from_millis(u64::from(config.chord_timeout_ms));
-        let max_chord_depth = usize::from(config.max_chord_depth);
+        let unlock_chord = config
+            .unlock_alternative
+            .unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
         let merged = merge_keymaps(
             layers,
             config.unlock_alternative,
@@ -103,7 +105,7 @@ impl KeymapHintCatalog {
         KeymapHintCatalog {
             merged: Arc::new(merged),
             chord_timeout,
-            max_chord_depth,
+            unlock_chord,
             entries,
             removed,
             prefix_labels: Arc::new(default_prefix_labels()),
@@ -137,8 +139,12 @@ impl KeymapHintCatalog {
         self.chord_timeout
     }
 
-    pub(crate) fn max_chord_depth(&self) -> usize {
-        self.max_chord_depth
+    /// The chord that unlocks a locked client: the configured
+    /// `unlock_alternative` when the user named one, else the reserved
+    /// `<C-l>`. Conflict detection refuses a config whose locked mode does
+    /// not fire `core:unlock` from it, so this chord always escapes.
+    pub(crate) fn unlock_chord(&self) -> KeyChord {
+        self.unlock_chord
     }
 
     /// The hint-bar data for one client's current mode: the mode's bindings

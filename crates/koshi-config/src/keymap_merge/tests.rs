@@ -372,6 +372,35 @@ fn reserved_led_locked_sequence_is_transparent() {
 }
 
 #[test]
+fn a_locked_sequence_holding_the_reserved_chord_later_is_transparent_too() {
+    // `<C-x> <C-l>` does not open with the reserved chord, but the unlock
+    // resolves wherever it is pressed — so the sequence can never fire and
+    // must win no key. Admitting it would make `<C-x>` a live prefix in the
+    // merged map, and the hint bar would offer a `<C-l>` continuation that
+    // silently unlocks instead of firing `new-tab`.
+    let key = seq2(
+        KeyChord::new(ModFlags::CTRL, Key::Char('x')),
+        KeybindingsConfig::RESERVED_UNLOCK,
+    );
+    let merged = merge(&[
+        defaults(),
+        layer(
+            LayerOrigin::User,
+            "locked",
+            vec![(key.clone(), bound("new-tab"))],
+        ),
+    ]);
+    let locked = &merged.modes[&mode("locked")];
+
+    assert_eq!(locked.user_set.get(&key), None);
+    assert_eq!(locked.defaults.get(&key), None);
+    assert_eq!(
+        locked.defaults[&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
+        bound("unlock")
+    );
+}
+
+#[test]
 fn unlock_alternative_moves_the_reserved_chord() {
     // With an alternative declared, IT is the reserved chord: sequences it
     // opens are dead in locked mode, and the default `<C-g>` chord is an

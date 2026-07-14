@@ -237,7 +237,14 @@ fn keybinding_reload_with_zero_chord_depth_is_kept() {
         })]
     );
     assert_eq!(runtime.config, before);
-    assert_eq!(runtime.keymap_hints.max_chord_depth(), 4);
+    // The catalog was not rebuilt from the rejected depth: the shipped
+    // two-chord defaults still open under `<C-p>`.
+    assert!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &sequence(ModFlags::CTRL, 'p'))
+            .prefix
+    );
 }
 
 #[test]
@@ -346,7 +353,12 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
     // resolved theme are exactly what they were.
     assert_eq!(runtime.config, KoshiConfig::default());
     assert_eq!(runtime.theme, theme_before);
-    assert_eq!(runtime.keymap_hints.max_chord_depth(), 4);
+    assert!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &sequence(ModFlags::CTRL, 'p'))
+            .prefix
+    );
 }
 
 #[test]

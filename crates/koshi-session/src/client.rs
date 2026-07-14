@@ -12,7 +12,7 @@ use std::{
 use koshi_core::{
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
-    key::{KeyChord, KeySequence},
+    key::KeySequence,
     lock::LockMode,
 };
 
@@ -286,41 +286,18 @@ impl ClientRegistry {
     }
 }
 
-/// One key press held in a pending sequence, kept as everything needed to send
-/// it later exactly as it would have been sent when it was pressed.
+/// One incomplete multi-chord keybinding: the chords typed into it so far, and
+/// the instant an ambiguous one resolves.
 ///
-/// A chord alone is not enough, because the world moves while a sequence waits
-/// for its next chord. **Who** receives the key can change — the focused pane's
-/// child can exit, or a command can move focus — and **how** it is encoded can
-/// change, since the pane can turn application-cursor-keys mode on or off from
-/// its own output. Both are therefore captured at the press and travel with the
-/// chord, so abandoning the sequence delivers the press the user actually made:
-/// the same bytes, to the same pane, that an un-buffered key would have reached
-/// at that instant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PressedKey {
-    /// The canonical chord that was pressed.
-    pub chord: KeyChord,
-    /// The pane focused when the key was pressed — the one the user was typing
-    /// into, and so the one that receives the key if no binding consumes it.
-    /// `None` when the client had no focused pane, which means there was nobody
-    /// to type at and the press has nowhere to go.
-    pub pane: Option<PaneId>,
-    /// That pane's application-cursor-keys (DECCKM) state at the moment of the
-    /// press, which decides an arrow key's byte form.
-    pub app_cursor_keys: bool,
-}
-
-/// One incomplete multi-chord keybinding plus its passthrough presses and expiry.
+/// The chords are Koshi's, not the pane's. A sequence that is open captures the
+/// keyboard until it resolves, so no chord held here is ever written to a pane —
+/// it fires a binding, or it is dropped when the sequence is left. That is why
+/// the pane a chord was typed into, and the byte form it would have taken there,
+/// are not kept: nothing will ever send them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.
     pub sequence: KeySequence,
-    /// The presses whose bytes go to the pane if this sequence is abandoned,
-    /// in press order. Usually every chord in `sequence`; empty when the press
-    /// already fired an action and left its prefix armed, so that abandoning
-    /// the prefix writes nothing.
-    pub fallback: Vec<PressedKey>,
     /// Disambiguation instant, set only when the chords so far are BOTH a
     /// complete binding and the prefix of a longer one — reaching it fires the
     /// complete binding. A prefix-only sequence carries `None` and waits for
