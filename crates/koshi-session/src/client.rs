@@ -10,7 +10,7 @@ use std::{
 };
 
 use koshi_core::{
-    geometry::Size,
+    geometry::{Direction, Point, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeySequence,
     lock::LockMode,
@@ -41,6 +41,8 @@ pub struct Client {
     focus_by_tab: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
     mouse_state: MouseState,
+    /// This client's in-flight pane-border resize drag, held only between the
+    /// mouse press on a border that begins it and the release that ends it.
     pending_resize_drag: Option<ResizeDragState>,
     /// This client's tabline scroll position: `None` follows the active tab —
     /// the window always reveals it — while `Some(i)` peeks from tab index `i`
@@ -437,10 +439,24 @@ pub struct MouseState;
 /// lives on the client because the gesture belongs to the one terminal
 /// performing it.
 ///
-/// Placeholder: the mouse-routing layer fills in the concrete fields. This is
-/// transient runtime state — never persisted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResizeDragState;
+/// Per-client state of an in-flight pane-border resize drag: the pane whose
+/// border was grabbed, which side it is, and the cell the last *applied* resize
+/// tracked to. Dragging moves that border a cell at a time to follow the
+/// pointer; `last` advances only when a resize is accepted, so pushing the
+/// pointer past a pane's minimum size leaves `last` at the wall and a reverse
+/// drag reacts at once. Held only between the border mouse-press that begins the
+/// drag and the release that ends it. It lives on the client because the gesture
+/// belongs to the one terminal performing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeDragState {
+    /// The pane whose border is being dragged.
+    pub pane: PaneId,
+    /// Which of the pane's borders was grabbed.
+    pub side: Direction,
+    /// The cell the last accepted resize tracked to; the next drag delta is
+    /// measured from here.
+    pub last: Point,
+}
 
 /// Per-client state of an in-flight tabline peek-drag: the cell the drag
 /// anchored on and the first visible tab index at that instant. Dragging

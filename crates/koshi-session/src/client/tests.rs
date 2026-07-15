@@ -5,7 +5,7 @@
 
 use std::time::SystemTime;
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 
@@ -162,8 +162,13 @@ fn updating_a_tabs_focus_returns_the_previous_pane() {
 fn a_pending_resize_drag_can_be_set_and_cleared() {
     let mut client = a_client(TabId::new());
 
-    client.update_pending_resize_drag(Some(ResizeDragState));
-    assert_eq!(client.pending_resize_drag(), Some(&ResizeDragState));
+    let drag = ResizeDragState {
+        pane: PaneId::new(),
+        side: Direction::Right,
+        last: Point { x: 4, y: 2 },
+    };
+    client.update_pending_resize_drag(Some(drag));
+    assert_eq!(client.pending_resize_drag(), Some(&drag));
 
     client.update_pending_resize_drag(None);
     assert!(client.pending_resize_drag().is_none());

@@ -9,7 +9,7 @@ use super::*;
 
 use std::sync::{mpsc, Arc};
 
-use koshi_core::command::NewTabArgs;
+use koshi_core::command::{NewPaneArgs, NewTabArgs};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::key::ModFlags;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -302,5 +302,349 @@ fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
         offset(&runtime, client),
         Some(4),
         "offset stays after release"
+    );
+}
+
+fn drag(x: u16, y: u16) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Drag(MouseButton::Left),
+        at: Point { x, y },
+        mods: ModFlags::NONE,
+    }
+}
+
+fn release() -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Release(MouseButton::Left),
+        at: Point { x: 0, y: 0 },
+        mods: ModFlags::NONE,
+    }
+}
+
+/// Split the focused pane in the runtime's default direction (Right), leaving
+/// the tab with two side-by-side panes and a vertical border between them.
+fn split_focused(runtime: &mut Runtime, client: ClientId) {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    let _ = runtime.dispatch(envelope);
+}
+
+/// The solved width, in columns, of `pane`'s box in `client`'s current frame.
+fn pane_cols(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .find(|slot| slot.pane_id == pane)
+        .expect("pane in layout")
+        .rect
+        .size
+        .cols
+}
+
+/// A cell on the vertical divider between two side-by-side panes: the left/right
+/// border nearest the horizontal center, so it is the shared divider rather than
+/// the pane area's outer frame at either edge. Panics if the frame has no
+/// vertical border.
+fn find_vertical_border(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let viewport = snapshot.client.viewport;
+    let y = viewport.rows / 2;
+    let center = viewport.cols / 2;
+    let mut best: Option<(u16, PaneId, Direction)> = None;
+    for x in 0..viewport.cols {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+            if matches!(side, Direction::Left | Direction::Right)
+                && best.is_none_or(|(bx, ..)| center.abs_diff(x) < center.abs_diff(bx))
+            {
+                best = Some((x, pane_id, side));
+            }
+        }
+    }
+    let (x, pane, side) = best.expect("a vertical pane border in the frame");
+    (Point { x, y }, pane, side)
+}
+
+/// The column `n` cells outward (the grow direction) from `x` for a border on
+/// `side`: rightward for a right border, leftward for a left border.
+fn outward_x(side: Direction, x: u16, n: u16) -> u16 {
+    match side {
+        Direction::Right => x + n,
+        Direction::Left => x - n,
+        other => panic!("expected a vertical border, got {other:?}"),
+    }
+}
+
+/// The far viewport edge on a border's outward side: a drag there grows the
+/// grabbed pane by more than its neighbor can ever donate.
+fn outward_edge_x(side: Direction, viewport_cols: u16) -> u16 {
+    match side {
+        Direction::Right => viewport_cols - 1,
+        Direction::Left => 0,
+        other => panic!("expected a vertical border, got {other:?}"),
+    }
+}
+
+#[test]
+fn resize_delta_grows_toward_each_border_and_ignores_the_other_axis() {
+    let from = Point { x: 10, y: 10 };
+    // Right border: pointer rightward grows, leftward shrinks.
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 13, y: 10 }),
+        3
+    );
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 8, y: 10 }),
+        -2
+    );
+    // Left border: pointer leftward grows.
+    assert_eq!(
+        resize_delta(Direction::Left, from, Point { x: 7, y: 10 }),
+        3
+    );
+    assert_eq!(
+        resize_delta(Direction::Left, from, Point { x: 12, y: 10 }),
+        -2
+    );
+    // Down border: pointer downward grows.
+    assert_eq!(
+        resize_delta(Direction::Down, from, Point { x: 10, y: 14 }),
+        4
+    );
+    // Up border: pointer upward grows.
+    assert_eq!(resize_delta(Direction::Up, from, Point { x: 10, y: 6 }), 4);
+    // A left/right border ignores vertical motion.
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 10, y: 20 }),
+        0
+    );
+}
+
+#[test]
+fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+
+    let (cell, pane, side) = find_vertical_border(&runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 3), cell.y));
+
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before + 3,
+        "the grabbed pane grew by the three cells dragged toward its border"
+    );
+}
+
+#[test]
+fn a_release_ends_the_resize_drag_so_a_later_drag_does_nothing() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+
+    let (cell, pane, side) = find_vertical_border(&runtime, client);
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 2), cell.y));
+    let after_drag = pane_cols(&runtime, client, pane);
+
+    runtime.handle_mouse_input(client, release());
+    assert!(
+        runtime
+            .client_mut(client)
+            .unwrap()
+            .pending_resize_drag()
+            .is_none(),
+        "release cleared the resize drag"
+    );
+
+    // With no resize drag in progress, a stray drag resizes nothing.
+    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 6), cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        after_drag,
+        "no resize drag is in progress, so the pointer move is ignored"
+    );
+}
+
+#[test]
+fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+
+    let (cell, pane, side) = find_vertical_border(&runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+    let viewport_cols = runtime.build_snapshot(client).unwrap().client.viewport.cols;
+
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+
+    // One big jump past the wall: the drag is applied a cell at a time, so it
+    // grows the pane as far as the neighbor can donate instead of refusing the
+    // whole move.
+    runtime.handle_mouse_input(client, drag(outward_edge_x(side, viewport_cols), cell.y));
+    let grown = pane_cols(&runtime, client, pane);
+    assert!(
+        grown > before,
+        "the jump grew the pane toward the neighbor's minimum ({before} -> {grown})"
+    );
+
+    // Pointer still further out: the neighbor is already at its minimum, so the
+    // anchor sits at the wall and nothing more moves.
+    runtime.handle_mouse_input(client, drag(outward_edge_x(side, viewport_cols), cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        grown,
+        "held at the wall while the pointer overshoots"
+    );
+
+    // Reverse straight back to the original border cell: the anchor held at the
+    // wall, so the pane shrinks back with no dead zone.
+    runtime.handle_mouse_input(client, drag(cell.x, cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before,
+        "a reverse drag returns the border to where it started, no lag"
+    );
+}
+
+#[test]
+fn advance_toward_steps_along_the_axis_and_saturates() {
+    let p = Point { x: 3, y: 3 };
+    assert_eq!(advance_toward(Direction::Right, p, 2), Point { x: 5, y: 3 });
+    assert_eq!(advance_toward(Direction::Left, p, 2), Point { x: 1, y: 3 });
+    assert_eq!(advance_toward(Direction::Down, p, 2), Point { x: 3, y: 5 });
+    assert_eq!(advance_toward(Direction::Up, p, 2), Point { x: 3, y: 1 });
+    // Saturating: an anchor near an edge cannot wrap below zero.
+    assert_eq!(advance_toward(Direction::Left, p, 10), Point { x: 0, y: 3 });
+    assert_eq!(advance_toward(Direction::Up, p, 10), Point { x: 3, y: 0 });
+}
+
+/// Split the focused pane downward, leaving the tab with a top and bottom pane
+/// and a horizontal border between them.
+fn split_focused_vertical(runtime: &mut Runtime, client: ClientId) {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::NewPane(NewPaneArgs {
+            direction: Some(Direction::Down),
+            ..NewPaneArgs::default()
+        }),
+    );
+    let _ = runtime.dispatch(envelope);
+}
+
+/// The solved height, in rows, of `pane`'s box in `client`'s current frame.
+fn pane_rows(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .find(|slot| slot.pane_id == pane)
+        .expect("pane in layout")
+        .rect
+        .size
+        .rows
+}
+
+/// A cell on the horizontal divider between a top and bottom pane: the up/down
+/// border nearest the vertical center, so it is the shared divider rather than
+/// the outer frame. Panics if the frame has no horizontal border.
+fn find_horizontal_border(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let viewport = snapshot.client.viewport;
+    let x = viewport.cols / 2;
+    let center = viewport.rows / 2;
+    let mut best: Option<(u16, PaneId, Direction)> = None;
+    for y in 1..viewport.rows - 1 {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+            if matches!(side, Direction::Up | Direction::Down)
+                && best.is_none_or(|(by, ..)| center.abs_diff(y) < center.abs_diff(by))
+            {
+                best = Some((y, pane_id, side));
+            }
+        }
+    }
+    let (y, pane, side) = best.expect("a horizontal pane border in the frame");
+    (Point { x, y }, pane, side)
+}
+
+/// The row `n` cells outward (the grow direction) from `y` for a border on
+/// `side`: downward for a down border, upward for an up border.
+fn outward_y(side: Direction, y: u16, n: u16) -> u16 {
+    match side {
+        Direction::Down => y + n,
+        Direction::Up => y - n,
+        other => panic!("expected a horizontal border, got {other:?}"),
+    }
+}
+
+/// The rightmost vertical border in the frame: the pane area's outer right
+/// frame, which has no neighbor on its outward side.
+fn find_outer_vertical_frame(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let viewport = snapshot.client.viewport;
+    let y = viewport.rows / 2;
+    let mut best: Option<(u16, PaneId, Direction)> = None;
+    for x in 0..viewport.cols {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+            if matches!(side, Direction::Left | Direction::Right)
+                && best.is_none_or(|(bx, ..)| x > bx)
+            {
+                best = Some((x, pane_id, side));
+            }
+        }
+    }
+    let (x, pane, side) = best.expect("a vertical pane border in the frame");
+    (Point { x, y }, pane, side)
+}
+
+#[test]
+fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
+    let (mut runtime, client) = runtime();
+    split_focused_vertical(&mut runtime, client);
+
+    let (cell, pane, side) = find_horizontal_border(&runtime, client);
+    let before = pane_rows(&runtime, client, pane);
+
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    runtime.handle_mouse_input(client, drag(cell.x, outward_y(side, cell.y, 3)));
+
+    assert_eq!(
+        pane_rows(&runtime, client, pane),
+        before + 3,
+        "the grabbed pane grew by the three rows dragged toward its border"
+    );
+}
+
+#[test]
+fn dragging_the_outer_frame_resizes_via_fallback_without_panicking() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+
+    let (cell, pane, side) = find_outer_vertical_frame(&runtime, client);
+    assert_eq!(
+        side,
+        Direction::Right,
+        "the rightmost frame is a right border"
+    );
+    let before = pane_cols(&runtime, client, pane);
+
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    // The outer frame has no neighbor on its outward side, so each step falls
+    // back to the opposite border. Dragging it off-screen must not panic.
+    runtime.handle_mouse_input(client, drag(cell.x + 20, cell.y));
+
+    assert!(
+        pane_cols(&runtime, client, pane) <= before,
+        "the fallback can only shrink the grabbed pane here, never grow it"
     );
 }
