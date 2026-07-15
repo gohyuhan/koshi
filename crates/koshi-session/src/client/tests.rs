@@ -9,7 +9,7 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 
-use super::{pane_viewport, Client, ClientRegistry, MouseState, ResizeDragState};
+use super::{pane_viewport, Client, ClientRegistry, MouseState, ResizeDragState, TablineDragState};
 
 /// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
@@ -38,6 +38,36 @@ fn a_new_client_starts_unlocked_with_no_focus_and_no_drag() {
     assert_eq!(client.mouse_state(), &MouseState);
     // A freshly attached client is never mid-drag.
     assert!(client.pending_resize_drag().is_none());
+    // And it follows its active tab (no peek offset, no tabline drag).
+    assert_eq!(client.tabline_offset(), None);
+    assert_eq!(client.tabline_drag(), None);
+}
+
+#[test]
+fn tabline_offset_and_drag_round_trip_and_reset_on_tab_switch() {
+    let tab = TabId::new();
+    let other = TabId::new();
+    let mut client = a_client(tab);
+
+    client.set_tabline_offset(Some(3));
+    assert_eq!(client.tabline_offset(), Some(3));
+    client.set_tabline_drag(Some(TablineDragState {
+        anchor_x: 12,
+        anchor_first_visible: 3,
+    }));
+    assert_eq!(
+        client.tabline_drag(),
+        Some(TablineDragState {
+            anchor_x: 12,
+            anchor_first_visible: 3,
+        })
+    );
+
+    // Switching tabs reveals the new tab: the peek offset and the drag both clear.
+    client.update_active_tab(other);
+    assert_eq!(client.active_tab(), other);
+    assert_eq!(client.tabline_offset(), None);
+    assert_eq!(client.tabline_drag(), None);
 }
 
 #[test]

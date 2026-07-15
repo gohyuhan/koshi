@@ -166,6 +166,7 @@ impl Runtime {
                 pending_sequence: client
                     .pending_key_sequence()
                     .map(|pending| pending.sequence.clone()),
+                tabline_offset: client.tabline_offset(),
             },
             plugin_ui: PluginUiSnapshot::default(),
             keymap_hints: self.keymap_hints.hints_for(client.lock_mode()),

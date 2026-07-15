@@ -257,6 +257,11 @@ pub struct ClientSnapshot {
     /// sequence is pending. The hint bar switches from the mode's top-level
     /// hints to the continuations of this prefix while it is `Some`.
     pub pending_sequence: Option<KeySequence>,
+    /// This client's tabline scroll position: `None` follows the active tab —
+    /// the tab strip always scrolls to reveal it — while `Some(i)` peeks from
+    /// tab index `i` without changing focus. The renderer windows the tab list
+    /// from this; mouse scroll, arrow clicks, and drag set it.
+    pub tabline_offset: Option<usize>,
 }
 
 /// The keybinding data behind the hint bar, projected for one client's
