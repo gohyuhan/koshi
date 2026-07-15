@@ -210,7 +210,7 @@ impl Runtime {
     /// drawn, exactly as they agree on the frame.
     ///
     /// [`Session::tab_viewport`]: koshi_session::session::state::Session::tab_viewport
-    fn typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
+    pub(crate) fn typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
         let tab_id = client.active_tab();

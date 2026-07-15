@@ -10,7 +10,7 @@ use std::{
 };
 
 use koshi_core::{
-    geometry::Size,
+    geometry::{Direction, Point, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeySequence,
     lock::LockMode,
@@ -41,7 +41,14 @@ pub struct Client {
     focus_by_tab: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
     mouse_state: MouseState,
+    /// This client's in-flight pane-border resize drag, held only between the
+    /// mouse press on a border that begins it and the release that ends it.
     pending_resize_drag: Option<ResizeDragState>,
+    /// The pane a forwarded mouse press captured. While a button is held, its
+    /// drags and its release go to this pane even as the pointer leaves it, and a
+    /// release with no capture is not forwarded. Set on a forwarded press,
+    /// cleared on the release.
+    mouse_capture: Option<PaneId>,
     /// This client's tabline scroll position: `None` follows the active tab —
     /// the window always reveals it — while `Some(i)` peeks from tab index `i`
     /// without changing focus. Mouse scroll, arrow clicks, and drag set it;
@@ -93,6 +100,7 @@ impl Client {
             lock_mode: LockMode::Normal,
             mouse_state: MouseState,
             pending_resize_drag: None,
+            mouse_capture: None,
             tabline_offset: None,
             tabline_drag: None,
             pending_key_sequence: None,
@@ -301,11 +309,14 @@ impl Client {
     ///
     /// A tab switch always reveals the new tab: it drops any tabline peek so
     /// the strip follows the active tab again, and ends any in-flight tabline
-    /// drag.
+    /// drag. It also ends any in-flight border-resize drag or captured mouse
+    /// gesture, whose pane is no longer on the client's frame.
     pub fn update_active_tab(&mut self, tab_id: TabId) {
         self.active_tab = tab_id;
         self.tabline_offset = None;
         self.tabline_drag = None;
+        self.pending_resize_drag = None;
+        self.mouse_capture = None;
     }
 
     /// Update this client's viewport size.
@@ -321,6 +332,18 @@ impl Client {
     /// Update this client's in-flight resize drag.
     pub fn update_pending_resize_drag(&mut self, pending_resize_drag: Option<ResizeDragState>) {
         self.pending_resize_drag = pending_resize_drag
+    }
+
+    /// The pane a forwarded mouse gesture is captured to, if a button is held.
+    #[must_use]
+    pub fn mouse_capture(&self) -> Option<PaneId> {
+        self.mouse_capture
+    }
+
+    /// Set (`Some`) or clear (`None`) the pane a forwarded mouse gesture is
+    /// captured to.
+    pub fn set_mouse_capture(&mut self, pane: Option<PaneId>) {
+        self.mouse_capture = pane;
     }
 }
 
@@ -427,20 +450,24 @@ pub struct PendingKeySequence {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MouseState;
 
-/// Per-client state of an in-flight border resize drag: which pane border is
-/// being dragged, the cell the drag anchored on, and the current delta. It is
-/// held only between the border mouse-press that begins the drag and the
-/// release that commits it as a pane resize; while present, drag motion feeds
-/// the resize and is not forwarded to the pane's process. A locked client has
-/// no resize drag — the mouse-routing layer clears any pending drag when a
-/// client enters a lock mode, so locked input is never treated as a resize. It
-/// lives on the client because the gesture belongs to the one terminal
-/// performing it.
-///
-/// Placeholder: the mouse-routing layer fills in the concrete fields. This is
-/// transient runtime state — never persisted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResizeDragState;
+/// Per-client state of an in-flight pane-border resize drag: the pane whose
+/// border was grabbed, which side it is, and the cell the last *applied* resize
+/// tracked to. Dragging moves that border a cell at a time to follow the
+/// pointer; `last` advances only when a resize is accepted, so pushing the
+/// pointer past a pane's minimum size leaves `last` at the wall and a reverse
+/// drag reacts at once. Held only between the border mouse-press that begins the
+/// drag and the release that ends it. It lives on the client because the gesture
+/// belongs to the one terminal performing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeDragState {
+    /// The pane whose border is being dragged.
+    pub pane: PaneId,
+    /// Which of the pane's borders was grabbed.
+    pub side: Direction,
+    /// The cell the last accepted resize tracked to; the next drag delta is
+    /// measured from here.
+    pub last: Point,
+}
 
 /// Per-client state of an in-flight tabline peek-drag: the cell the drag
 /// anchored on and the first visible tab index at that instant. Dragging

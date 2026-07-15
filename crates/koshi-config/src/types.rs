@@ -444,8 +444,6 @@ pub enum KeymapOptIn {
 pub struct MouseConfig {
     /// Whether dragging a pane border resizes it.
     pub border_resize: bool,
-    /// Whether border-drag resize also works in locked mode.
-    pub border_resize_in_lock: bool,
     /// Whether clicking a pane focuses it.
     pub click_to_focus: bool,
     /// Lines scrolled per mouse wheel notch.
@@ -456,7 +454,6 @@ impl Default for MouseConfig {
     fn default() -> Self {
         Self {
             border_resize: true,
-            border_resize_in_lock: false,
             click_to_focus: true,
             scroll_lines: 3,
         }

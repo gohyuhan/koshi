@@ -186,6 +186,63 @@ fn tabline_region(snapshot: &RenderSnapshot, area: RatatuiRect, x: u16) -> HitRe
     HitRegion::Tabline
 }
 
+/// The content area of `pane_id` in client-local screen coordinates, or [`None`]
+/// when the pane is not drawn this frame.
+///
+/// This is the region a program's own grid maps onto — its cells inside the
+/// border. Read the frame the same way [`hit_test`] does (the layout centered in
+/// the viewport with a letterbox margin), so a cell forwarded to a program is
+/// the cell the user clicked.
+#[must_use]
+pub fn pane_content_rect(snapshot: &RenderSnapshot, pane_id: PaneId) -> Option<Rect> {
+    let viewport = snapshot.client.viewport;
+    if viewport.cols == 0 || viewport.rows == 0 {
+        return None;
+    }
+    let tab = &snapshot.session.active_tab;
+    if tab.all_suppressed {
+        return None;
+    }
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: viewport.cols,
+        height: viewport.rows,
+    };
+    let content = content_rect(area, tab.effective_size);
+    let slot = tab
+        .layout_solved
+        .iter()
+        .find(|slot| slot.visible && slot.pane_id == pane_id)?;
+    let inner = slot.inner_rect?;
+    Some(Rect::new(
+        Point {
+            x: content.x + inner.origin.x,
+            y: content.y + inner.origin.y,
+        },
+        inner.size,
+    ))
+}
+
+/// The 1-based cell inside `pane_id`'s content that client-local screen cell
+/// `at` falls on, or [`None`] when `at` is outside that pane's content or the
+/// pane is not drawn this frame.
+///
+/// A mouse report addresses the program's own grid, whose top-left content cell
+/// is `(1, 1)`, so the caller forwards these coordinates straight into the pane.
+#[must_use]
+pub fn pane_local_cell(
+    snapshot: &RenderSnapshot,
+    pane_id: PaneId,
+    at: Point,
+) -> Option<(u16, u16)> {
+    let rect = pane_content_rect(snapshot, pane_id)?;
+    if !rect.contains(at) {
+        return None;
+    }
+    Some((at.x - rect.origin.x + 1, at.y - rect.origin.y + 1))
+}
+
 /// The metadata index of the first tab currently visible in `snapshot`'s
 /// tabline window.
 ///
