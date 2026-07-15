@@ -84,6 +84,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         focused_pane: Some(pane_id),
         lock_mode: LockMode::Normal,
         pending_sequence: None,
+        tabline_offset: None,
     };
 
     RenderSnapshot {

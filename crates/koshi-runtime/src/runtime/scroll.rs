@@ -90,7 +90,7 @@ impl Runtime {
     /// `None` if no attached client has that id. Resolves the owning session via
     /// [`session_for_client_mut`](Self::session_for_client_mut), the shared
     /// client→session lookup.
-    fn client_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
+    pub(crate) fn client_mut(&mut self, client_id: ClientId) -> Option<&mut Client> {
         self.session_for_client_mut(client_id)?
             .clients
             .get_mut(client_id)

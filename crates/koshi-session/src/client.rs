@@ -42,6 +42,15 @@ pub struct Client {
     lock_mode: LockMode,
     mouse_state: MouseState,
     pending_resize_drag: Option<ResizeDragState>,
+    /// This client's tabline scroll position: `None` follows the active tab —
+    /// the window always reveals it — while `Some(i)` peeks from tab index `i`
+    /// without changing focus. Mouse scroll, arrow clicks, and drag set it;
+    /// [`update_active_tab`](Self::update_active_tab) resets it to `None`, so a
+    /// tab switch always cancels a peek and reveals the new tab.
+    tabline_offset: Option<usize>,
+    /// This client's in-flight tabline peek-drag, held only between the mouse
+    /// press that begins it and the release that ends it.
+    tabline_drag: Option<TablineDragState>,
     pending_key_sequence: Option<PendingKeySequence>,
     /// This client's scrollback view offset per pane: lines scrolled up from the
     /// live bottom. A pane absent from the map (the default) follows live output;
@@ -84,6 +93,8 @@ impl Client {
             lock_mode: LockMode::Normal,
             mouse_state: MouseState,
             pending_resize_drag: None,
+            tabline_offset: None,
+            tabline_drag: None,
             pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
@@ -235,6 +246,31 @@ impl Client {
         }
     }
 
+    /// This client's tabline scroll position: `None` follows the active tab,
+    /// `Some(i)` peeks from tab index `i`. See the field docs.
+    #[must_use]
+    pub fn tabline_offset(&self) -> Option<usize> {
+        self.tabline_offset
+    }
+
+    /// Set this client's tabline scroll position. `Some(i)` peeks from index
+    /// `i` without changing focus; `None` restores following the active tab.
+    pub fn set_tabline_offset(&mut self, offset: Option<usize>) {
+        self.tabline_offset = offset;
+    }
+
+    /// This client's in-flight tabline peek-drag, if one is under way.
+    #[must_use]
+    pub fn tabline_drag(&self) -> Option<TablineDragState> {
+        self.tabline_drag
+    }
+
+    /// Begin or update (with `Some`) or end (with `None`) this client's tabline
+    /// peek-drag.
+    pub fn set_tabline_drag(&mut self, drag: Option<TablineDragState>) {
+        self.tabline_drag = drag;
+    }
+
     /// Update this client's lock mode.
     pub fn update_lock_mode(&mut self, lock_mode: LockMode) {
         self.lock_mode = lock_mode
@@ -262,8 +298,14 @@ impl Client {
     }
 
     /// Switch this client to viewing `tab_id`.
+    ///
+    /// A tab switch always reveals the new tab: it drops any tabline peek so
+    /// the strip follows the active tab again, and ends any in-flight tabline
+    /// drag.
     pub fn update_active_tab(&mut self, tab_id: TabId) {
-        self.active_tab = tab_id
+        self.active_tab = tab_id;
+        self.tabline_offset = None;
+        self.tabline_drag = None;
     }
 
     /// Update this client's viewport size.
@@ -399,6 +441,20 @@ pub struct MouseState;
 /// transient runtime state — never persisted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResizeDragState;
+
+/// Per-client state of an in-flight tabline peek-drag: the cell the drag
+/// anchored on and the first visible tab index at that instant. Dragging
+/// horizontally from the anchor scrolls the tab strip without changing which
+/// tab is active. Held only between the tabline mouse-press that begins the
+/// drag and the release that ends it. It lives on the client because the
+/// gesture belongs to the one terminal performing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TablineDragState {
+    /// The screen column the drag anchored on.
+    pub anchor_x: u16,
+    /// The first visible tab index when the drag began.
+    pub anchor_first_visible: usize,
+}
 
 #[cfg(test)]
 mod tests;

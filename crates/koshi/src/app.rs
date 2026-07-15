@@ -1,11 +1,11 @@
 //! The runnable `koshi` binary: terminal setup, genesis, and the event loop.
 //!
-//! Startup enters raw mode + the alternate screen (restored on drop or panic by
-//! a cleanup guard), builds the runtime, and seeds one session/tab/shell pane.
-//! A background thread turns crossterm key events into inbox events; the main
-//! loop drains the inbox, applies each event to the runtime, and repaints when
-//! the render scheduler says a frame is due. Ctrl-Q, or the shell exiting, ends
-//! the loop.
+//! Startup enters raw mode + the alternate screen + mouse capture (all restored
+//! on drop or panic by a cleanup guard), builds the runtime, and seeds one
+//! session/tab/shell pane. A background thread turns crossterm key and mouse
+//! events into inbox events; the main loop drains the inbox, applies each event
+//! to the runtime, and repaints when the render scheduler says a frame is due.
+//! Ctrl-Q, or the shell exiting, ends the loop.
 
 use std::io;
 use std::ops::ControlFlow;
@@ -17,7 +17,7 @@ use std::time::{Instant, SystemTime};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -28,6 +28,7 @@ use ratatui::Terminal;
 
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::ClientId;
+use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, TracingOptions};
 use koshi_pty::backend::state::PtyBackend;
@@ -66,11 +67,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // not to the shell koshi exits back to: quitting while vim was inserting
         // would otherwise leave the user's own prompt wearing vim's blinking bar.
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
+        // Undo the mouse capture enabled at startup, so the terminal koshi exits
+        // back to has its native selection and scroll again.
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }));
     let _panic_guard = install_panic_hook(&cleanup);
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    // Capture mouse events so koshi can hit-test clicks (tabs, panes, scroll).
+    // This is terminal-global: while on, programs inside panes and native text
+    // selection do not see the mouse until koshi forwards it.
+    execute!(io::stdout(), EnableMouseCapture)?;
 
     // Build the runtime, handing it the cleanup guard so it restores the
     // terminal when the runtime drops at the end of this function.
@@ -178,6 +186,10 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
                 client_id,
                 size: Size { cols, rows },
             }),
+            Ok(Event::Mouse(mouse)) => Some(RuntimeEvent::MouseInput {
+                client_id,
+                mouse: decode_mouse(mouse),
+            }),
             Ok(_) => None,
             Err(_) => Some(RuntimeEvent::Quit),
         };
@@ -265,6 +277,9 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         }
         RuntimeEvent::KeyInput { client_id, chord } => {
             runtime.handle_key_input(client_id, chord, Instant::now());
+        }
+        RuntimeEvent::MouseInput { client_id, mouse } => {
+            runtime.handle_mouse_input(client_id, mouse);
         }
         RuntimeEvent::ClientAttached {
             session_id,

@@ -22,6 +22,7 @@ use koshi_core::{
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeyChord,
+    mouse::MouseInput,
     process::ExitStatus,
 };
 
@@ -89,6 +90,13 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// Canonical chord used for keymap lookup.
         chord: KeyChord,
+    },
+    /// One decoded outer-terminal mouse event awaiting hit-testing and routing.
+    MouseInput {
+        /// Client whose terminal produced the mouse event.
+        client_id: ClientId,
+        /// The decoded event: kind, cell position, and modifiers.
+        mouse: MouseInput,
     },
     /// A command delivered over the IPC socket, from external or in-session CLI.
     Ipc(CommandEnvelope),

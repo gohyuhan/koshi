@@ -118,6 +118,7 @@ fn build(
             focused_pane: focused,
             lock_mode,
             pending_sequence: None,
+            tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
@@ -248,7 +249,7 @@ fn tabline_lists_tabs_with_active_marker() {
 }
 
 #[test]
-fn tabline_truncates_overflowing_tabs_behind_an_ellipsis() {
+fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     let pane = PaneId::new();
     let snap = build(
         "sess",
@@ -267,16 +268,101 @@ fn tabline_truncates_overflowing_tabs_behind_an_ellipsis() {
     let buf = render(&snap, 40, 8);
     let tabline = row_text(&buf, 0);
 
-    // The session block and the mode tag always render whole; overflowing
-    // tabs are dropped whole behind a `…` in the middle.
+    // The session block and the mode tag always render whole. The active tab
+    // (alpha, index 0) fits from the left, so the window starts there and the
+    // tabs hidden off the right sit behind a `>` scroll arrow.
     assert!(tabline.starts_with(" sess "), "tabline: {tabline:?}");
     assert!(
         tabline.trim_end().ends_with(" BASE"),
         "tabline: {tabline:?}"
     );
     assert!(tabline.contains(" #1  alpha "), "tabline: {tabline:?}");
-    assert!(tabline.contains('…'), "tabline: {tabline:?}");
+    assert!(tabline.contains('>'), "tabline: {tabline:?}");
+    assert!(!tabline.contains('<'), "no tabs hidden left: {tabline:?}");
     assert!(!tabline.contains("#5  echo"), "tabline: {tabline:?}");
+}
+
+/// Overflowing tabs, offset unset: the window scrolls to reveal the active tab
+/// even when it lands deep in the tail, and both sides show a scroll arrow.
+#[test]
+fn tabline_follows_focus_into_the_overflow() {
+    let pane = PaneId::new();
+    let snap = build(
+        "s",
+        &[
+            ("t0", false),
+            ("t1", false),
+            ("t2", false),
+            ("t3", false),
+            ("t4", false),
+            ("t5", true),
+            ("t6", false),
+            ("t7", false),
+        ],
+        &[(pane, rect(0, 1, 30, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 30, rows: 8 },
+    );
+    let tabline = row_text(&render(&snap, 30, 8), 0);
+
+    assert!(tabline.contains("t5"), "active tab revealed: {tabline:?}");
+    assert!(
+        tabline.contains('<'),
+        "tabs hidden off the left: {tabline:?}"
+    );
+    assert!(
+        tabline.contains('>'),
+        "tabs hidden off the right: {tabline:?}"
+    );
+    assert!(
+        !tabline.contains("t0"),
+        "the far-left tab is scrolled off: {tabline:?}"
+    );
+}
+
+/// A peek offset windows the strip from that index, not the active tab: the
+/// active tab may stay hidden while peeking, and a left offset of 0 shows no
+/// left arrow.
+#[test]
+fn tabline_peek_offset_ignores_the_active_tab() {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[
+            ("t0", false),
+            ("t1", false),
+            ("t2", false),
+            ("t3", false),
+            ("t4", false),
+            ("t5", true),
+            ("t6", false),
+            ("t7", false),
+        ],
+        &[(pane, rect(0, 1, 30, 6), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 30, rows: 8 },
+    );
+    snap.client.tabline_offset = Some(0);
+    let tabline = row_text(&render(&snap, 30, 8), 0);
+
+    assert!(
+        tabline.contains("t0"),
+        "peek shows from index 0: {tabline:?}"
+    );
+    assert!(
+        !tabline.contains("t5"),
+        "active tab not forced visible: {tabline:?}"
+    );
+    assert!(
+        tabline.contains('>'),
+        "tabs hidden off the right: {tabline:?}"
+    );
+    assert!(
+        !tabline.contains('<'),
+        "nothing hidden left at offset 0: {tabline:?}"
+    );
 }
 
 #[test]
@@ -1480,10 +1566,9 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
 #[test]
 fn one_by_one_viewport_draws_without_panicking() {
     // The smallest possible non-zero area: content_rect and the tabline draw
-    // must degrade gracefully rather than underflow or panic. The single
-    // cell ends up owned by the tabline's overflow marker: the tab list has
-    // no room at all once the mode tag saturates the row's whole 1-cell
-    // width, so it drops behind `…` (drawn last, so it wins the cell).
+    // must degrade gracefully rather than underflow or panic. The mode tag
+    // saturates the whole 1-cell row, leaving no room for the tab strip, so the
+    // single cell falls to the mode block's clipped leading cell — a space.
     let pane = PaneId::new();
     let snap = build(
         "sess",
@@ -1495,5 +1580,5 @@ fn one_by_one_viewport_draws_without_panicking() {
     );
     let buf = render(&snap, 1, 1);
 
-    assert_eq!(buf[(0, 0)].symbol(), "…");
+    assert_eq!(buf[(0, 0)].symbol(), " ");
 }

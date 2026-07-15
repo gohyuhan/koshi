@@ -12,6 +12,7 @@ pub mod driver;
 pub mod event;
 pub(crate) mod hints;
 pub mod input;
+pub mod mouse;
 pub mod pty_forward;
 pub mod pty_output;
 pub mod reload;

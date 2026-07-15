@@ -91,6 +91,7 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
             focused_pane: None,
             lock_mode: LockMode::Normal,
             pending_sequence: pending,
+            tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints,
