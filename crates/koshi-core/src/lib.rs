@@ -17,6 +17,7 @@ pub mod geometry;
 pub mod ids;
 pub mod key;
 pub mod lock;
+pub mod mouse;
 pub mod naming;
 pub mod process;
 pub mod redact;
