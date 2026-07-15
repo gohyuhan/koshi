@@ -139,6 +139,12 @@ fn mouse_events_roundtrip() {
         position: Point { x: 0, y: 0 },
         direction: ScrollDirection::Up,
     }));
+    roundtrip(&Event::MouseScrolled(MouseScrolled {
+        client_id: ClientId::new(),
+        pane: None,
+        position: Point { x: 0, y: 0 },
+        direction: ScrollDirection::Left,
+    }));
     roundtrip(&Event::PluginMouseInput(PluginMouseInput {
         plugin_id: PluginId::new(),
     }));

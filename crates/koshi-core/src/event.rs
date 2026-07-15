@@ -20,6 +20,7 @@
 use crate::command::{CopyTarget, GridPos, SelectionKind};
 use crate::geometry::{Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
+use crate::mouse::{MouseButton, ScrollDirection};
 use crate::process::PtySize;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -509,26 +510,6 @@ pub struct PaneEnterPressed {
 // ============================================================================
 // Mouse input
 // ============================================================================
-
-/// A mouse button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MouseButton {
-    /// Left button.
-    Left,
-    /// Middle button.
-    Middle,
-    /// Right button.
-    Right,
-}
-
-/// A scroll-wheel direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ScrollDirection {
-    /// Wheel up.
-    Up,
-    /// Wheel down.
-    Down,
-}
 
 /// Payload for [`Event::MousePressed`].
 ///
