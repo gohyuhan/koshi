@@ -381,6 +381,16 @@ fn outward_x(side: Direction, x: u16, n: u16) -> u16 {
     }
 }
 
+/// The column `n` cells inward (the shrink direction) from `x` for a border on
+/// `side`: leftward for a right border, rightward for a left border.
+fn inward_x(side: Direction, x: u16, n: u16) -> u16 {
+    match side {
+        Direction::Right => x - n,
+        Direction::Left => x + n,
+        other => panic!("expected a vertical border, got {other:?}"),
+    }
+}
+
 /// The far viewport edge on a border's outward side: a drag there grows the
 /// grabbed pane by more than its neighbor can ever donate.
 fn outward_edge_x(side: Direction, viewport_cols: u16) -> u16 {
@@ -441,6 +451,34 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
         pane_cols(&runtime, client, pane),
         before + 3,
         "the grabbed pane grew by the three cells dragged toward its border"
+    );
+}
+
+#[test]
+fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+
+    let (cell, pane, side) = find_vertical_border(&runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+
+    // Drag three cells inward to shrink the pane.
+    runtime.handle_mouse_input(client, drag(inward_x(side, cell.x, 3), cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before - 3,
+        "the grabbed pane shrank by the three cells dragged inward"
+    );
+
+    // One more cell inward from the new pointer position shrinks by exactly one
+    // more: the anchor followed the pointer, so it is not a sudden jump.
+    runtime.handle_mouse_input(client, drag(inward_x(side, cell.x, 4), cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before - 4,
+        "the second drag shrinks one cell, tracking the pointer"
     );
 }
 
@@ -514,15 +552,39 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
 }
 
 #[test]
-fn advance_toward_steps_along_the_axis_and_saturates() {
-    let p = Point { x: 3, y: 3 };
-    assert_eq!(advance_toward(Direction::Right, p, 2), Point { x: 5, y: 3 });
-    assert_eq!(advance_toward(Direction::Left, p, 2), Point { x: 1, y: 3 });
-    assert_eq!(advance_toward(Direction::Down, p, 2), Point { x: 3, y: 5 });
-    assert_eq!(advance_toward(Direction::Up, p, 2), Point { x: 3, y: 1 });
+fn advance_toward_moves_the_anchor_toward_the_pointer_and_saturates() {
+    let from = Point { x: 3, y: 3 };
+    // Steps toward the pointer's coordinate on the border's own axis.
+    assert_eq!(
+        advance_toward(Direction::Right, from, Point { x: 9, y: 3 }, 2),
+        Point { x: 5, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 2),
+        Point { x: 1, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Down, from, Point { x: 3, y: 9 }, 2),
+        Point { x: 3, y: 5 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 2),
+        Point { x: 3, y: 1 }
+    );
+    // A left/right border reads only x; the pointer's y is ignored.
+    assert_eq!(
+        advance_toward(Direction::Right, from, Point { x: 9, y: 99 }, 2),
+        Point { x: 5, y: 3 }
+    );
     // Saturating: an anchor near an edge cannot wrap below zero.
-    assert_eq!(advance_toward(Direction::Left, p, 10), Point { x: 0, y: 3 });
-    assert_eq!(advance_toward(Direction::Up, p, 10), Point { x: 3, y: 0 });
+    assert_eq!(
+        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 10),
+        Point { x: 0, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 10),
+        Point { x: 3, y: 0 }
+    );
 }
 
 /// Split the focused pane downward, leaving the tab with a top and bottom pane

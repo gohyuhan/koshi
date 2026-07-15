@@ -256,7 +256,7 @@ impl Runtime {
         }
         if applied > 0 {
             if let Some(client) = self.client_mut(client_id) {
-                let last = advance_toward(drag.side, drag.last, applied);
+                let last = advance_toward(drag.side, drag.last, at, applied);
                 client.update_pending_resize_drag(Some(ResizeDragState { last, ..drag }));
             }
         }
@@ -324,27 +324,29 @@ fn resize_delta(side: Direction, from: Point, to: Point) -> i16 {
     outward.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
-/// The cell `n` steps outward from `from` along `side`'s axis — where the drag
-/// anchor lands after `n` accepted single-cell resizes. Saturating, so a border
-/// already at a viewport edge cannot wrap.
-fn advance_toward(side: Direction, from: Point, n: u16) -> Point {
+/// The cell `n` cells from `from` toward `to` along `side`'s axis — where the
+/// drag anchor lands after `n` accepted single-cell resizes. Moving toward the
+/// pointer keeps the anchor correct for both a grow and a shrink. Saturating, so
+/// a border at a viewport edge cannot wrap below zero.
+fn advance_toward(side: Direction, from: Point, to: Point, n: u16) -> Point {
     match side {
-        Direction::Right => Point {
-            x: from.x.saturating_add(n),
+        Direction::Left | Direction::Right => Point {
+            x: step_toward(from.x, to.x, n),
             ..from
         },
-        Direction::Left => Point {
-            x: from.x.saturating_sub(n),
+        Direction::Up | Direction::Down => Point {
+            y: step_toward(from.y, to.y, n),
             ..from
         },
-        Direction::Down => Point {
-            y: from.y.saturating_add(n),
-            ..from
-        },
-        Direction::Up => Point {
-            y: from.y.saturating_sub(n),
-            ..from
-        },
+    }
+}
+
+/// `from` moved `n` cells toward `to`, saturating at zero.
+fn step_toward(from: u16, to: u16, n: u16) -> u16 {
+    if to >= from {
+        from.saturating_add(n)
+    } else {
+        from.saturating_sub(n)
     }
 }
 

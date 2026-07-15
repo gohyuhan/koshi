@@ -303,11 +303,13 @@ impl Client {
     ///
     /// A tab switch always reveals the new tab: it drops any tabline peek so
     /// the strip follows the active tab again, and ends any in-flight tabline
-    /// drag.
+    /// drag. It also ends any in-flight border-resize drag, whose grabbed pane
+    /// is no longer on the client's frame.
     pub fn update_active_tab(&mut self, tab_id: TabId) {
         self.active_tab = tab_id;
         self.tabline_offset = None;
         self.tabline_drag = None;
+        self.pending_resize_drag = None;
     }
 
     /// Update this client's viewport size.

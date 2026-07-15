@@ -71,6 +71,24 @@ fn tabline_offset_and_drag_round_trip_and_reset_on_tab_switch() {
 }
 
 #[test]
+fn switching_tabs_ends_a_pending_resize_drag() {
+    let tab = TabId::new();
+    let other = TabId::new();
+    let mut client = a_client(tab);
+
+    client.update_pending_resize_drag(Some(ResizeDragState {
+        pane: PaneId::new(),
+        side: Direction::Right,
+        last: Point { x: 5, y: 5 },
+    }));
+    assert!(client.pending_resize_drag().is_some());
+
+    // The grabbed border is no longer on the client's frame, so the drag ends.
+    client.update_active_tab(other);
+    assert!(client.pending_resize_drag().is_none());
+}
+
+#[test]
 fn two_clients_focus_different_panes_in_the_same_tab() {
     let tab = TabId::new();
     let (pane_a, pane_b) = (PaneId::new(), PaneId::new());
