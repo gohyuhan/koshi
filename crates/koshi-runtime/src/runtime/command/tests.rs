@@ -13,11 +13,10 @@ use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, CopyModeCommand, CopyTarget,
-    EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveCursorArgs,
-    MoveTabArgs, MoveUnit, NewPaneArgs, NewTabArgs, PluginCommand, RenamePaneArgs,
-    RenameSessionArgs, RenameTabArgs, ResizePaneArgs, RunCommandPaneArgs, SearchArgs,
-    SelectionKind, SetSelectionArgs, TabTarget, WriteToPaneArgs,
+    ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, CopyTarget, EnablePluginArgs,
+    FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
+    PluginCommand, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
+    RunCommandPaneArgs, Selection, SelectionKind, TabTarget, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, Size, SplitDirection};
@@ -221,7 +220,7 @@ fn client_scoped_command_without_a_client_is_unauthorized() {
         Command::ToggleLockMode,
         Command::SetLockMode(LockModeArgs { locked: true }),
         Command::TogglePaneFullscreen,
-        Command::CopyMode(CopyModeCommand::Enter),
+        Command::Visual(VisualCommand::ClearSelection),
     ];
 
     for command in commands {
@@ -1583,10 +1582,10 @@ fn client_without_focused_pane_is_not_found() {
     add_client(&mut session, client_id, TabId::new(), None);
     rt.sessions.insert(session.id, session);
 
-    // CopyMode resolves the focused pane; this client has none.
+    // A Visual command resolves the focused pane; this client has none.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::CopyMode(CopyModeCommand::Enter),
+        Command::Visual(VisualCommand::ClearSelection),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1611,7 +1610,7 @@ fn focused_pane_that_no_longer_exists_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::CopyMode(CopyModeCommand::Enter),
+        Command::Visual(VisualCommand::ClearSelection),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1625,7 +1624,7 @@ fn focused_pane_that_no_longer_exists_is_not_found() {
 }
 
 #[test]
-fn copy_mode_resolves_the_focused_pane() {
+fn a_visual_command_resolves_the_focused_pane() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -1638,7 +1637,7 @@ fn copy_mode_resolves_the_focused_pane() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::CopyMode(CopyModeCommand::Enter),
+        Command::Visual(VisualCommand::ClearSelection),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1646,13 +1645,13 @@ fn copy_mode_resolves_the_focused_pane() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("copy mode not yet implemented".to_string()),
+            help: Some("selection not yet implemented".to_string()),
         }
     );
 }
 
 #[test]
-fn every_copy_mode_variant_routes_to_the_stub_reject() {
+fn every_visual_variant_routes_to_the_stub_reject() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -1663,38 +1662,27 @@ fn every_copy_mode_variant_routes_to_the_stub_reject() {
     add_client(&mut session, client_id, tab, Some(pane));
     rt.sessions.insert(session.id, session);
 
-    // Every CopyModeCommand sub-variant resolves the same focused pane and
-    // routes through its own arm of the exhaustive match to the shared
-    // not-yet-implemented rejection.
+    // Every VisualCommand sub-variant resolves the same focused pane and routes
+    // through its own arm of the exhaustive match to the shared
+    // not-yet-implemented rejection. Three variants, not nine: there is no
+    // Enter/Exit (a selection appearing IS entering visual mode) and no
+    // MoveCursor (selecting is the mouse's alone).
     let variants = vec![
-        CopyModeCommand::Enter,
-        CopyModeCommand::Exit,
-        CopyModeCommand::MoveCursor(MoveCursorArgs {
-            unit: MoveUnit::Cell,
-            direction: Direction::Up,
-        }),
-        CopyModeCommand::SetSelection(SetSelectionArgs {
+        VisualCommand::SetSelection(Selection {
             kind: SelectionKind::Character,
             anchor: GridPos { row: 0, col: 0 },
             cursor: GridPos { row: 0, col: 1 },
         }),
-        CopyModeCommand::ClearSelection,
-        CopyModeCommand::Copy(CopyArgs {
+        VisualCommand::ClearSelection,
+        VisualCommand::Copy(CopyArgs {
             target: CopyTarget::Osc52,
         }),
-        CopyModeCommand::Search(SearchArgs {
-            query: "needle".to_string(),
-            regex: false,
-            case_sensitive: false,
-        }),
-        CopyModeCommand::SearchNext,
-        CopyModeCommand::SearchPrev,
     ];
 
     for variant in variants {
         let env = envelope_from(
             CommandSource::key_binding(client_id),
-            Command::CopyMode(variant),
+            Command::Visual(variant),
         );
         let command_id = env.id;
         assert_eq!(
@@ -1702,7 +1690,7 @@ fn every_copy_mode_variant_routes_to_the_stub_reject() {
             CommandResult::Rejected {
                 command_id,
                 reason: RejectReason::InvalidState,
-                help: Some("copy mode not yet implemented".to_string()),
+                help: Some("selection not yet implemented".to_string()),
             }
         );
     }
@@ -2568,10 +2556,10 @@ fn focused_default_outside_active_tab_is_not_found() {
     add_client(&mut session, client_id, tab, Some(focused_elsewhere));
     rt.sessions.insert(session.id, session);
 
-    // CopyMode defaults through the focused pane; it is outside the tab.
+    // A Visual command defaults through the focused pane; it is outside the tab.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::CopyMode(CopyModeCommand::Enter),
+        Command::Visual(VisualCommand::ClearSelection),
     );
     let command_id = env.id;
     assert_eq!(

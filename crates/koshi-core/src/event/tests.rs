@@ -6,6 +6,7 @@
 //! - maintain privacy tier invariants (sensitive data is structurally unavoidable).
 
 use super::*;
+use crate::command::{GridPos, SelectionKind};
 use crate::geometry::{Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
@@ -56,7 +57,7 @@ fn lifecycle_events_roundtrip() {
     }));
     roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
-        mode: InputMode::CopyMode,
+        mode: InputMode::Locked,
     }));
 }
 
@@ -169,8 +170,9 @@ fn delivery_and_rejection_events_roundtrip() {
 }
 
 #[test]
-fn copy_and_search_events_roundtrip() {
+fn selection_and_copy_events_roundtrip() {
     roundtrip(&Event::SelectionChanged(SelectionChanged {
+        client_id: ClientId::new(),
         pane_id: PaneId::new(),
         selection: Some(Selection {
             kind: SelectionKind::Block,
@@ -179,18 +181,15 @@ fn copy_and_search_events_roundtrip() {
         }),
     }));
     roundtrip(&Event::SelectionChanged(SelectionChanged {
+        client_id: ClientId::new(),
         pane_id: PaneId::new(),
         selection: None,
     }));
     roundtrip(&Event::Copied(Copied {
+        client_id: ClientId::new(),
         pane_id: PaneId::new(),
         target: CopyTarget::Osc52,
         byte_len: 42,
-    }));
-    roundtrip(&Event::SearchUpdated(SearchUpdated {
-        pane_id: PaneId::new(),
-        match_count: 3,
-        current_match: Some(1),
     }));
 }
 
@@ -259,12 +258,6 @@ fn remaining_event_variants_survive_a_json_round_trip() {
         button: MouseButton::Middle,
     }));
     roundtrip(&Event::PaneMouseForwarded(PaneMouseForwarded {
-        pane_id: PaneId::new(),
-    }));
-    roundtrip(&Event::CopyModeEntered(CopyModeEntered {
-        pane_id: PaneId::new(),
-    }));
-    roundtrip(&Event::CopyModeExited(CopyModeExited {
         pane_id: PaneId::new(),
     }));
     roundtrip(&Event::Quit);
@@ -617,19 +610,8 @@ fn event_variant_names_are_canonical() {
             "CommandRejected",
         ),
         (
-            Event::CopyModeEntered(CopyModeEntered {
-                pane_id: PaneId::new(),
-            }),
-            "CopyModeEntered",
-        ),
-        (
-            Event::CopyModeExited(CopyModeExited {
-                pane_id: PaneId::new(),
-            }),
-            "CopyModeExited",
-        ),
-        (
             Event::SelectionChanged(SelectionChanged {
+                client_id: ClientId::new(),
                 pane_id: PaneId::new(),
                 selection: None,
             }),
@@ -637,19 +619,12 @@ fn event_variant_names_are_canonical() {
         ),
         (
             Event::Copied(Copied {
+                client_id: ClientId::new(),
                 pane_id: PaneId::new(),
                 target: CopyTarget::Native,
                 byte_len: 0,
             }),
             "Copied",
-        ),
-        (
-            Event::SearchUpdated(SearchUpdated {
-                pane_id: PaneId::new(),
-                match_count: 0,
-                current_match: None,
-            }),
-            "SearchUpdated",
         ),
         (
             Event::Plugin(PluginEvent::Installed(PluginInstalled {
@@ -659,7 +634,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 43);
+    assert_eq!(cases.len(), 40);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }

@@ -115,7 +115,7 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
 
 #[test]
 fn dead_default_is_absent_not_unbound() {
-    // `core:copy-mode-enter` is ComingSoon: the resolver refuses it, so a
+    // `core:copy-selection` is ComingSoon: the resolver refuses it, so a
     // defaults-layer binding to it enters no map — the key falls through to
     // the pane, and it is not "unbound" since the user displaced nothing.
     let dead_key = seq(ModFlags::ALT, 'c');
@@ -124,7 +124,7 @@ fn dead_default_is_absent_not_unbound() {
         layer(
             LayerOrigin::Defaults,
             "normal",
-            vec![(dead_key.clone(), bound("copy-mode-enter"))],
+            vec![(dead_key.clone(), bound("copy-selection"))],
         ),
     ]);
     let normal = &merged.modes[&mode("normal")];
@@ -497,7 +497,7 @@ fn named_key_defaults_survive_untouched() {
 
 #[test]
 fn stealing_a_dead_defaults_key_unbinds_nothing() {
-    // A defaults-layer key bound to the dead `core:copy-mode-enter`; a user
+    // A defaults-layer key bound to the dead `core:copy-selection`; a user
     // binding takes the key. The dead default was never firing, so nothing
     // was displaced: `unbound_defaults` stays empty.
     let key = seq(ModFlags::ALT, 'c');
@@ -506,7 +506,7 @@ fn stealing_a_dead_defaults_key_unbinds_nothing() {
         layer(
             LayerOrigin::Defaults,
             "normal",
-            vec![(key.clone(), bound("copy-mode-enter"))],
+            vec![(key.clone(), bound("copy-selection"))],
         ),
         layer(
             LayerOrigin::User,

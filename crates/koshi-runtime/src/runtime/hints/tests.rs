@@ -77,7 +77,6 @@ fn modes_without_defaults_are_empty() {
         LockMode::PaneMode,
         LockMode::TabMode,
         LockMode::ScrollMode,
-        LockMode::SearchMode,
     ] {
         let hints = catalog.hints_for(mode);
         assert!(hints.entries.is_empty(), "{mode:?} ships no bindings");

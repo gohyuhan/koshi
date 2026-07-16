@@ -256,7 +256,7 @@ fn resolve_at_depth(
 /// resolve against the command's source.
 ///
 /// The action's [`CommandKind`](crate::command::CommandKind) is deliberately not
-/// consulted: nine actions share `CopyMode` and two share `SetLockMode`, so the
+/// consulted: three actions share `FocusTab` and two share `SetLockMode`, so the
 /// discriminant cannot say which command to build. It stays on the metadata as
 /// the introspection surface, and a test pins it against what this table
 /// produces.

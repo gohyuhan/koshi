@@ -18,9 +18,9 @@ use std::time::SystemTime;
 use koshi_core::{
     command::{
         ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        CopyModeCommand, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
-        NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, TabTarget, WriteToPaneArgs,
+        FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs, NewPaneArgs,
+        NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
+        RunCommandPaneArgs, TabTarget, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -221,7 +221,7 @@ impl Runtime {
                     envelope.issued_at,
                 )
             }
-            Command::CopyMode(command) => Ok(self.handle_copy_mode(command_id, &command)),
+            Command::Visual(command) => Ok(self.handle_visual(command_id, &command)),
             Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
             Command::Quit => Ok(self.handle_quit(command_id)),
             Command::TogglePaneFullscreen => {
@@ -251,21 +251,15 @@ impl Runtime {
         }
     }
 
-    /// Route a [`Command::CopyMode`] sub-command to its handler. The
-    /// exhaustive match gives each [`CopyModeCommand`] variant its own routing
-    /// seam; every arm rejects with [`RejectReason::InvalidState`] until
-    /// copy-mode handling lands.
-    fn handle_copy_mode(&self, command_id: CommandId, command: &CopyModeCommand) -> CommandResult {
+    /// Route a [`Command::Visual`] sub-command to its handler. The exhaustive
+    /// match gives each [`VisualCommand`] variant its own routing seam; every
+    /// arm rejects with [`RejectReason::InvalidState`] until selection handling
+    /// lands.
+    fn handle_visual(&self, command_id: CommandId, command: &VisualCommand) -> CommandResult {
         match command {
-            CopyModeCommand::Enter => self.reject(command_id, "copy mode"),
-            CopyModeCommand::Exit => self.reject(command_id, "copy mode"),
-            CopyModeCommand::MoveCursor(_) => self.reject(command_id, "copy mode"),
-            CopyModeCommand::SetSelection(_) => self.reject(command_id, "copy mode"),
-            CopyModeCommand::ClearSelection => self.reject(command_id, "copy mode"),
-            CopyModeCommand::Copy(_) => self.reject(command_id, "copy mode"),
-            CopyModeCommand::Search(_) => self.reject(command_id, "copy mode"),
-            CopyModeCommand::SearchNext => self.reject(command_id, "copy mode"),
-            CopyModeCommand::SearchPrev => self.reject(command_id, "copy mode"),
+            VisualCommand::SetSelection(_) => self.reject(command_id, "selection"),
+            VisualCommand::ClearSelection => self.reject(command_id, "selection"),
+            VisualCommand::Copy(_) => self.reject(command_id, "selection"),
         }
     }
 
@@ -2310,7 +2304,7 @@ impl Runtime {
     }
 
     /// Whether `command` acts on a specific client's view (its focused pane,
-    /// lock mode, or copy-mode state) and so cannot be issued by a source
+    /// lock mode, or selection) and so cannot be issued by a source
     /// that names no client. [`Command::FocusPane`], [`Command::FocusTab`],
     /// and [`Command::NewTab`] are absent: each resolves its own target
     /// client (explicit `client` argument, issuing client, or the session's
@@ -2321,7 +2315,7 @@ impl Runtime {
             Command::ToggleLockMode
                 | Command::SetLockMode(_)
                 | Command::TogglePaneFullscreen
-                | Command::CopyMode(_)
+                | Command::Visual(_)
         )
     }
 
@@ -2395,7 +2389,7 @@ impl Runtime {
             // Lock mode is client-scoped: the acting client (confirmed attached
             // by `acting_session`) is the whole target — no pane or tab to resolve.
             Command::ToggleLockMode | Command::SetLockMode(_) => Ok(()),
-            Command::TogglePaneFullscreen | Command::CopyMode(_) => {
+            Command::TogglePaneFullscreen | Command::Visual(_) => {
                 self.resolve_default_pane(source, session).map(drop)
             }
             Command::CloseTab(args) => self

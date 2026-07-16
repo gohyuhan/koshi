@@ -2,8 +2,8 @@
 //!
 //! [`LockMode`] is the interaction mode a single client is in — whether
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
-//! interpreted by one of Koshi's modal layers (resize, pane, tab, scroll,
-//! search). It is client-scoped: two clients attached to the same session hold
+//! interpreted by one of Koshi's modal layers (resize, pane, tab, scroll).
+//! It is client-scoped: two clients attached to the same session hold
 //! independent modes. This is the richer modal state the client tracks, as
 //! distinct from the command layer's binary lock toggle (`SetLockMode`), which
 //! flips into and out of [`LockMode::Locked`].
@@ -30,22 +30,19 @@ pub enum LockMode {
     TabMode,
     /// Scroll mode: keys navigate the focused pane's scrollback.
     ScrollMode,
-    /// Search mode: keys drive a search over the focused pane's scrollback.
-    SearchMode,
 }
 
 impl LockMode {
     /// Every built-in mode, in declaration order. The startup mode
     /// registration and the keymap layers iterate this so the built-in set
     /// is defined once.
-    pub const ALL: [LockMode; 7] = [
+    pub const ALL: [LockMode; 6] = [
         LockMode::Normal,
         LockMode::Locked,
         LockMode::Resize,
         LockMode::PaneMode,
         LockMode::TabMode,
         LockMode::ScrollMode,
-        LockMode::SearchMode,
     ];
 
     /// The mode's canonical keymap name — the string the keybinding config
@@ -59,7 +56,6 @@ impl LockMode {
             LockMode::PaneMode => "pane",
             LockMode::TabMode => "tab",
             LockMode::ScrollMode => "scroll",
-            LockMode::SearchMode => "search",
         }
     }
 }

@@ -352,9 +352,9 @@ fn actions_list_table_shows_only_supported_actions() {
         lines[1].split_whitespace().collect::<Vec<_>>(),
         vec!["core:new-pane", "NewPane", "pane-session"]
     );
-    // Coming-soon families never appear.
+    // Coming-soon actions never appear.
     assert!(
-        !rendered.contains("copy-mode") && !rendered.contains("plugin-"),
+        !rendered.contains("copy-selection") && !rendered.contains("plugin-"),
         "coming-soon actions leaked into the list:\n{rendered}"
     );
 }
@@ -370,7 +370,7 @@ fn actions_list_json_is_an_array_of_supported_summaries() {
     assert_eq!(array[0]["command"], "NewPane");
     assert_eq!(array[0]["scope"], "pane-session");
     assert!(
-        !rendered.contains("copy-mode") && !rendered.contains("plugin-"),
+        !rendered.contains("copy-selection") && !rendered.contains("plugin-"),
         "coming-soon actions leaked into JSON:\n{rendered}"
     );
 }
@@ -449,14 +449,17 @@ fn explain_run_omits_the_koshi_example() {
 
 #[test]
 fn explain_of_a_coming_soon_action_is_hidden() {
-    // copy-mode and plugin actions have no runtime handler yet, so explain
-    // treats them as unknown — by bare name and by full ref.
+    // The selection and plugin actions are registered but have no
+    // runtime handler yet, so explain treats them as unknown — by bare name and
+    // by full ref. These are seeded actions on purpose: an unregistered name is
+    // hidden too, but for a different reason, which
+    // `explain_of_an_unknown_action_is_none` covers.
     assert_eq!(
-        render_action_explain("copy-mode-enter", FormatArg::Json),
+        render_action_explain("copy-selection", FormatArg::Json),
         None
     );
     assert_eq!(
-        render_action_explain("core:copy-mode-enter", FormatArg::Json),
+        render_action_explain("core:copy-selection", FormatArg::Json),
         None
     );
     assert_eq!(

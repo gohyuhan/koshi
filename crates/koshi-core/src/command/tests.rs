@@ -103,28 +103,15 @@ fn write_to_pane_roundtrips() {
 }
 
 #[test]
-fn copy_mode_commands_roundtrip() {
-    roundtrip(&Command::CopyMode(CopyModeCommand::Enter));
-    roundtrip(&Command::CopyMode(CopyModeCommand::MoveCursor(
-        MoveCursorArgs {
-            unit: MoveUnit::Word,
-            direction: Direction::Left,
-        },
-    )));
-    roundtrip(&Command::CopyMode(CopyModeCommand::SetSelection(
-        SetSelectionArgs {
-            kind: SelectionKind::Block,
-            anchor: GridPos { row: 10, col: 0 },
-            cursor: GridPos { row: 12, col: 40 },
-        },
-    )));
-    roundtrip(&Command::CopyMode(CopyModeCommand::Copy(CopyArgs {
-        target: CopyTarget::Osc52,
+fn visual_commands_roundtrip() {
+    roundtrip(&Command::Visual(VisualCommand::SetSelection(Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 10, col: 0 },
+        cursor: GridPos { row: 12, col: 40 },
     })));
-    roundtrip(&Command::CopyMode(CopyModeCommand::Search(SearchArgs {
-        query: "error".to_string(),
-        regex: true,
-        case_sensitive: false,
+    roundtrip(&Command::Visual(VisualCommand::ClearSelection));
+    roundtrip(&Command::Visual(VisualCommand::Copy(CopyArgs {
+        target: CopyTarget::Osc52,
     })));
 }
 
@@ -207,7 +194,7 @@ fn command_variant_names_are_canonical() {
             }),
             "RunCommandPane",
         ),
-        (Command::CopyMode(CopyModeCommand::Enter), "CopyMode"),
+        (Command::Visual(VisualCommand::ClearSelection), "Visual"),
         (
             Command::Plugin(PluginCommand::Reload(ReloadPluginArgs {
                 plugin: PluginId::new(),
@@ -239,44 +226,28 @@ fn command_variant_names_are_canonical() {
 }
 
 #[test]
-fn copy_mode_variant_names_are_canonical() {
-    let cases: Vec<(CopyModeCommand, &str)> = vec![
-        (CopyModeCommand::Enter, "Enter"),
-        (CopyModeCommand::Exit, "Exit"),
+fn visual_variant_names_are_canonical() {
+    // Three variants, not nine: `Enter`/`Exit` are gone because a selection
+    // appearing IS entering visual mode, and `MoveCursor` is gone because
+    // selecting is the mouse's alone.
+    let cases: Vec<(VisualCommand, &str)> = vec![
         (
-            CopyModeCommand::MoveCursor(MoveCursorArgs {
-                unit: MoveUnit::Cell,
-                direction: Direction::Down,
-            }),
-            "MoveCursor",
-        ),
-        (
-            CopyModeCommand::SetSelection(SetSelectionArgs {
+            VisualCommand::SetSelection(Selection {
                 kind: SelectionKind::Character,
                 anchor: GridPos { row: 0, col: 0 },
                 cursor: GridPos { row: 0, col: 1 },
             }),
             "SetSelection",
         ),
-        (CopyModeCommand::ClearSelection, "ClearSelection"),
+        (VisualCommand::ClearSelection, "ClearSelection"),
         (
-            CopyModeCommand::Copy(CopyArgs {
+            VisualCommand::Copy(CopyArgs {
                 target: CopyTarget::Osc52,
             }),
             "Copy",
         ),
-        (
-            CopyModeCommand::Search(SearchArgs {
-                query: "q".to_string(),
-                regex: false,
-                case_sensitive: false,
-            }),
-            "Search",
-        ),
-        (CopyModeCommand::SearchNext, "SearchNext"),
-        (CopyModeCommand::SearchPrev, "SearchPrev"),
     ];
-    assert_eq!(cases.len(), 9);
+    assert_eq!(cases.len(), 3);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
@@ -354,8 +325,8 @@ fn command_kind_mirrors_command() {
             CommandKind::RunCommandPane,
         ),
         (
-            Command::CopyMode(CopyModeCommand::Enter),
-            CommandKind::CopyMode,
+            Command::Visual(VisualCommand::ClearSelection),
+            CommandKind::Visual,
         ),
         (
             Command::Plugin(PluginCommand::Reload(ReloadPluginArgs {

@@ -659,7 +659,6 @@ fn mode_tag(mode: LockMode) -> &'static str {
         LockMode::PaneMode => "PANE",
         LockMode::TabMode => "TAB",
         LockMode::ScrollMode => "SCROLL",
-        LockMode::SearchMode => "SEARCH",
     }
 }
 

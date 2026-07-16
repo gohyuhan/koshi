@@ -52,8 +52,8 @@ pub enum Command {
     SetLockMode(LockModeArgs),
     /// Spawn a command in a new pane.
     RunCommandPane(RunCommandPaneArgs),
-    /// Copy mode, selection, and search.
-    CopyMode(CopyModeCommand),
+    /// Selection and copy — the commands of visual mode.
+    Visual(VisualCommand),
     /// Plugin lifecycle management.
     Plugin(PluginCommand),
     /// Toggle fullscreen for the focused pane.
@@ -104,8 +104,8 @@ pub enum CommandKind {
     SetLockMode,
     /// Discriminant of [`Command::RunCommandPane`].
     RunCommandPane,
-    /// Discriminant of [`Command::CopyMode`].
-    CopyMode,
+    /// Discriminant of [`Command::Visual`].
+    Visual,
     /// Discriminant of [`Command::Plugin`].
     Plugin,
     /// Discriminant of [`Command::TogglePaneFullscreen`].
@@ -137,7 +137,7 @@ impl Command {
             Command::ToggleLockMode => CommandKind::ToggleLockMode,
             Command::SetLockMode(_) => CommandKind::SetLockMode,
             Command::RunCommandPane(_) => CommandKind::RunCommandPane,
-            Command::CopyMode(_) => CommandKind::CopyMode,
+            Command::Visual(_) => CommandKind::Visual,
             Command::Plugin(_) => CommandKind::Plugin,
             Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
             Command::RenamePane(_) => CommandKind::RenamePane,
@@ -338,53 +338,26 @@ pub struct RenameSessionArgs {
     pub session: Option<SessionId>,
 }
 
-/// Copy mode, selection, and search commands.
+/// Selection and copy commands — the commands of visual mode.
+///
+/// **Visual mode is what a client is in while text is highlighted**, and it is
+/// never entered by hand: a mouse drag over a pane's content starts a
+/// selection, and a click or any key press drops it. So these two variants
+/// *are* its lifecycle — a selection appearing is entering visual mode and it
+/// clearing is leaving — and there is deliberately no `Enter`/`Exit` variant to
+/// be a second source of truth for the same fact.
+///
+/// There is no copy cursor either: selecting is the mouse's alone. Growing a
+/// highlight with `Shift`+`Arrow` would have to take keys that belong to the
+/// program in the pane — `vim`, readline, and `less` all bind them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CopyModeCommand {
-    /// Enter copy mode.
-    Enter,
-    /// Leave copy mode.
-    Exit,
-    /// Move the copy cursor.
-    MoveCursor(MoveCursorArgs),
-    /// Begin or extend a selection.
-    SetSelection(SetSelectionArgs),
-    /// Clear the active selection.
+pub enum VisualCommand {
+    /// Begin or extend a selection. Issued by the mouse layer as a drag moves.
+    SetSelection(Selection),
+    /// Clear the active selection, leaving visual mode.
     ClearSelection,
     /// Copy the current selection to a clipboard target.
     Copy(CopyArgs),
-    /// Start a search.
-    Search(SearchArgs),
-    /// Jump to the next match.
-    SearchNext,
-    /// Jump to the previous match.
-    SearchPrev,
-}
-
-/// The unit a copy-cursor move advances by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MoveUnit {
-    /// A single cell.
-    Cell,
-    /// A word boundary.
-    Word,
-    /// A logical line.
-    Line,
-    /// A page (viewport height).
-    Page,
-    /// Jump to the top of scrollback (absolute; `direction` is ignored).
-    Top,
-    /// Jump to the bottom of scrollback (absolute; `direction` is ignored).
-    Bottom,
-}
-
-/// Arguments for [`CopyModeCommand::MoveCursor`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MoveCursorArgs {
-    /// How far each step moves.
-    pub unit: MoveUnit,
-    /// Which way to move.
-    pub direction: Direction,
 }
 
 /// The shape of a selection.
@@ -411,9 +384,20 @@ pub struct GridPos {
     pub col: u16,
 }
 
-/// Arguments for [`CopyModeCommand::SetSelection`].
+/// A selection: a highlighted range of text, always made with the mouse — a
+/// drag over a pane's content starts one, and a click or any key press drops it.
+///
+/// **One type, not two.** This is both what [`VisualCommand::SetSelection`]
+/// carries and what [`SelectionChanged`](crate::event::SelectionChanged)
+/// reports, because they are the same fact: the command asks for a selection and
+/// the event announces the selection that resulted. A separate args struct of
+/// identical shape would only be a place for the two to drift — a field added to
+/// one and not the other would compile and be silently dropped at the
+/// conversion between them.
+///
+/// Both ends are grid positions the mouse layer resolved from a drag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetSelectionArgs {
+pub struct Selection {
     /// Selection shape.
     pub kind: SelectionKind,
     /// The fixed end of the selection.
@@ -432,22 +416,11 @@ pub enum CopyTarget {
     Native,
 }
 
-/// Arguments for [`CopyModeCommand::Copy`].
+/// Arguments for [`VisualCommand::Copy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
     /// Where the copied text should go.
     pub target: CopyTarget,
-}
-
-/// Arguments for [`CopyModeCommand::Search`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchArgs {
-    /// The query text.
-    pub query: String,
-    /// Treat `query` as a regular expression rather than a literal.
-    pub regex: bool,
-    /// Match case-sensitively.
-    pub case_sensitive: bool,
 }
 
 /// Plugin lifecycle commands.
