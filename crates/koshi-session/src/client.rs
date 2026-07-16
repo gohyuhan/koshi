@@ -14,6 +14,7 @@ use koshi_core::{
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeySequence,
     lock::LockMode,
+    mouse::MouseButton,
 };
 use koshi_layout::mode::LayoutMode;
 
@@ -44,11 +45,17 @@ pub struct Client {
     /// This client's in-flight pane-border resize drag, held only between the
     /// mouse press on a border that begins it and the release that ends it.
     pending_resize_drag: Option<ResizeDragState>,
-    /// The pane a forwarded mouse press captured. While a button is held, its
-    /// drags and its release go to this pane even as the pointer leaves it, and a
-    /// release with no capture is not forwarded. Set on a forwarded press,
-    /// cleared on the release.
-    mouse_capture: Option<PaneId>,
+    /// The pane a forwarded mouse press captured, and the button that pressed it.
+    /// While a button is held, its drags and its release go to this pane even as
+    /// the pointer leaves it, and a drag or release with no capture is not
+    /// forwarded. Set on a forwarded press; cleared on the next release.
+    ///
+    /// The stored button is the reliable one — a press always names its button,
+    /// while some terminals report every drag and release as the left button. So
+    /// the drag and release forwarded to the program are re-stamped with this
+    /// button, and a release clears the capture without trying to match a button
+    /// it cannot trust.
+    mouse_capture: Option<(PaneId, MouseButton)>,
     /// This client's tabline scroll position: `None` follows the active tab —
     /// the window always reveals it — while `Some(i)` peeks from tab index `i`
     /// without changing focus. Mouse scroll, arrow clicks, and drag set it;
@@ -334,16 +341,17 @@ impl Client {
         self.pending_resize_drag = pending_resize_drag
     }
 
-    /// The pane a forwarded mouse gesture is captured to, if a button is held.
+    /// The pane a forwarded mouse gesture is captured to and the button that
+    /// pressed it, if a button is held.
     #[must_use]
-    pub fn mouse_capture(&self) -> Option<PaneId> {
+    pub fn mouse_capture(&self) -> Option<(PaneId, MouseButton)> {
         self.mouse_capture
     }
 
-    /// Set (`Some`) or clear (`None`) the pane a forwarded mouse gesture is
-    /// captured to.
-    pub fn set_mouse_capture(&mut self, pane: Option<PaneId>) {
-        self.mouse_capture = pane;
+    /// Set (`Some`) or clear (`None`) the pane and button a forwarded mouse
+    /// gesture is captured to.
+    pub fn set_mouse_capture(&mut self, capture: Option<(PaneId, MouseButton)>) {
+        self.mouse_capture = capture;
     }
 }
 

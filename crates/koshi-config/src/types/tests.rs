@@ -42,7 +42,6 @@ fn default_loads_with_expected_values() {
     assert!(config.plugins.entries.is_empty());
 
     assert!(config.mouse.border_resize);
-    assert!(config.mouse.click_to_focus);
     assert_eq!(config.mouse.scroll_lines, 3);
 
     assert!(!config.copy.copy_on_select);

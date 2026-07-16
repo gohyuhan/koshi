@@ -11,7 +11,8 @@
 //!
 //! - **Tracking level** ([`MouseTracking`]) — which events are reported at all.
 //!   The levels form a ladder: `X10` reports only presses, `Normal` adds
-//!   releases, `ButtonMotion` adds drags, `AnyMotion` adds buttonless motion.
+//!   releases and wheel ticks, `ButtonMotion` adds drags, `AnyMotion` adds
+//!   buttonless motion.
 //! - **Encoding** ([`MouseEncoding`]) — how the button and the 1-based cell are
 //!   written: the modern `Sgr` form (`CSI < b ; x ; y M`), the legacy byte form
 //!   (`CSI M` + three `value+32` bytes), its `Utf8` and `Urxvt` variants.
@@ -47,7 +48,13 @@ pub fn encode_mouse(
     if !reports(tracking, kind) {
         return None;
     }
-    let modifiers = mod_bits(mods);
+    // X10 compatibility mode (`?9`) carries only the button in its report; the
+    // modifier bits enter at normal tracking (`?1000`) and beyond.
+    let modifiers = if tracking == MouseTracking::X10 {
+        0
+    } else {
+        mod_bits(mods)
+    };
     let released = matches!(kind, MouseKind::Release(_));
     Some(match encoding {
         MouseEncoding::Sgr => encode_sgr(button_code(kind, false) + modifiers, col, row, released),
@@ -58,9 +65,10 @@ pub fn encode_mouse(
 }
 
 /// Whether a program at `tracking` is told about a `kind` of event. The ladder:
-/// any level reports a press, `Normal` and up add releases, `ButtonMotion` and
-/// up add drags, only `AnyMotion` adds buttonless motion. A wheel tick reports
-/// whenever any tracking is on.
+/// every level but `Off` reports a press, `Normal` and up add releases,
+/// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
+/// wheel tick reports from `Normal` up — `X10` predates the wheel and reports
+/// only presses.
 ///
 /// The forward path calls this to skip the frame rebuild for an event the pane's
 /// program does not want — a bare move over a pane not in `AnyMotion` costs
@@ -68,8 +76,8 @@ pub fn encode_mouse(
 #[must_use]
 pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
     match kind {
-        MouseKind::Press(_) | MouseKind::Scroll(_) => tracking != MouseTracking::Off,
-        MouseKind::Release(_) => matches!(
+        MouseKind::Press(_) => tracking != MouseTracking::Off,
+        MouseKind::Release(_) | MouseKind::Scroll(_) => matches!(
             tracking,
             MouseTracking::Normal | MouseTracking::ButtonMotion | MouseTracking::AnyMotion
         ),
@@ -83,7 +91,7 @@ pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
 
 /// The button code before modifiers: the button number, plus `32` for a drag or
 /// a bare move, plus the wheel base for a scroll. A release loses the button
-/// (reports `3`) unless `keep_button` — only `Sgr` keeps it.
+/// (reports `3`) when `release_loses_button` — every encoding but `Sgr` loses it.
 fn button_code(kind: MouseKind, release_loses_button: bool) -> u16 {
     const MOTION: u16 = 32;
     match kind {
@@ -159,7 +167,7 @@ fn encode_legacy(cb: u16, col: u16, row: u16) -> Vec<u8> {
 fn encode_utf8(cb: u16, col: u16, row: u16) -> Vec<u8> {
     let mut bytes = vec![0x1b, b'[', b'M'];
     for value in [cb, col, row] {
-        push_utf8(&mut bytes, value + 32);
+        push_utf8(&mut bytes, u32::from(value) + 32);
     }
     bytes
 }
@@ -170,15 +178,16 @@ fn encode_urxvt(cb: u16, col: u16, row: u16) -> Vec<u8> {
     format!("\x1b[{};{col};{row}M", cb + 32).into_bytes()
 }
 
-/// `value + 32` as a byte, saturating at `255`.
+/// `value + 32` as a byte, saturating at `255`. Widened to `u32` first so a
+/// coordinate near `u16::MAX` cannot overflow the addition.
 fn offset_byte(value: u16) -> u8 {
-    (value + 32).min(255) as u8
+    (u32::from(value) + 32).min(255) as u8
 }
 
 /// Append `code_point` as UTF-8, falling back to `?` for a value that is not a
 /// valid `char` (unreachable for real cells).
-fn push_utf8(bytes: &mut Vec<u8>, code_point: u16) {
-    let character = char::from_u32(u32::from(code_point)).unwrap_or('?');
+fn push_utf8(bytes: &mut Vec<u8>, code_point: u32) {
+    let character = char::from_u32(code_point).unwrap_or('?');
     let mut buffer = [0; 4];
     bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
 }

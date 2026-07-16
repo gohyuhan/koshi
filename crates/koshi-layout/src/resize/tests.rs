@@ -210,6 +210,41 @@ fn pane_inside_a_stack_resizes_the_stack_as_a_unit() {
 }
 
 #[test]
+fn has_adjacent_border_holds_for_inner_dividers_only() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+
+    // The shared column divider is real from either side.
+    assert!(has_adjacent_border(&tree, a, Direction::Right));
+    assert!(has_adjacent_border(&tree, b, Direction::Left));
+    // The tab's outer frame has no neighbor on any outer side.
+    assert!(!has_adjacent_border(&tree, a, Direction::Left));
+    assert!(!has_adjacent_border(&tree, b, Direction::Right));
+    assert!(!has_adjacent_border(&tree, a, Direction::Up));
+    assert!(!has_adjacent_border(&tree, a, Direction::Down));
+}
+
+#[test]
+fn has_adjacent_border_is_false_above_a_collapsed_stack_header() {
+    // a | [b active / c collapsed header]. b's rect stops short of the tab edge
+    // to leave c's header row, but the boundary above that header is not a
+    // resizable divider — the geometry says "inside bounds", the tree says no.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(stack)],
+    ));
+
+    assert!(
+        !has_adjacent_border(&tree, b, Direction::Down),
+        "the boundary above a stack header has no resizable neighbor"
+    );
+    // The stack's outer-left border is real: pane a lies beyond it.
+    assert!(has_adjacent_border(&tree, b, Direction::Left));
+}
+
+#[test]
 fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
     // Hand-built: a stack whose active member is a vertical pair. The
     // resize preflight measures the donor inside the header-carved active

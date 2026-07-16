@@ -171,6 +171,35 @@ fn legacy_caps_a_cell_past_the_byte_limit() {
 }
 
 #[test]
+fn a_coordinate_near_u16_max_saturates_without_overflowing() {
+    // `value + 32` must not overflow u16 before the byte cap: the legacy byte
+    // saturates and the UTF-8 form does not panic.
+    let legacy = encode_mouse(
+        press(MouseButton::Left),
+        ModFlags::NONE,
+        u16::MAX,
+        1,
+        MouseTracking::Normal,
+        MouseEncoding::Default,
+    )
+    .unwrap();
+    assert_eq!(legacy[4], 255, "the column byte saturates at 255");
+
+    assert!(
+        encode_mouse(
+            press(MouseButton::Left),
+            ModFlags::NONE,
+            u16::MAX,
+            1,
+            MouseTracking::Normal,
+            MouseEncoding::Utf8,
+        )
+        .is_some(),
+        "the UTF-8 form encodes a huge coordinate without panicking"
+    );
+}
+
+#[test]
 fn utf8_encodes_a_high_cell_as_two_bytes() {
     // Column 300 -> code point 332 -> U+014C, two UTF-8 bytes 0xC5 0x8C.
     let bytes = encode_mouse(
@@ -240,7 +269,7 @@ fn off_reports_nothing() {
 }
 
 #[test]
-fn x10_reports_only_presses_and_wheel() {
+fn x10_reports_only_presses() {
     let at = |kind| {
         encode_mouse(
             kind,
@@ -252,10 +281,43 @@ fn x10_reports_only_presses_and_wheel() {
         )
     };
     assert!(at(press(MouseButton::Left)).is_some());
-    assert!(at(MouseKind::Scroll(ScrollDirection::Up)).is_some());
+    assert!(
+        at(MouseKind::Scroll(ScrollDirection::Up)).is_none(),
+        "X10 predates the wheel"
+    );
     assert!(at(MouseKind::Release(MouseButton::Left)).is_none());
     assert!(at(MouseKind::Drag(MouseButton::Left)).is_none());
     assert!(at(MouseKind::Motion).is_none());
+}
+
+#[test]
+fn x10_omits_modifier_bits_that_later_modes_carry() {
+    // X10 (?9) reports only the button: a Ctrl+left press stays button 0.
+    assert_eq!(
+        encode_mouse(
+            press(MouseButton::Left),
+            ModFlags::CTRL,
+            1,
+            1,
+            MouseTracking::X10,
+            MouseEncoding::Default,
+        ),
+        Some(vec![0x1b, b'[', b'M', 32, 33, 33]),
+        "X10 drops the ctrl bit; Cb stays 0"
+    );
+    // Normal tracking keeps the modifier bit for the same click.
+    assert_eq!(
+        encode_mouse(
+            press(MouseButton::Left),
+            ModFlags::CTRL,
+            1,
+            1,
+            MouseTracking::Normal,
+            MouseEncoding::Default,
+        ),
+        Some(vec![0x1b, b'[', b'M', 32 + 16, 33, 33]),
+        "normal tracking adds ctrl = 16"
+    );
 }
 
 #[test]

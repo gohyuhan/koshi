@@ -715,7 +715,7 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
 }
 
 #[test]
-fn dragging_the_outer_frame_resizes_via_fallback_without_panicking() {
+fn grabbing_the_outer_frame_starts_no_resize() {
     let (mut runtime, client) = runtime();
     split_focused(&mut runtime, client);
 
@@ -727,14 +727,80 @@ fn dragging_the_outer_frame_resizes_via_fallback_without_panicking() {
     );
     let before = pane_cols(&runtime, client, pane);
 
+    // The outer frame sits at the tab edge and cannot move, so grabbing it starts
+    // no resize drag.
     runtime.handle_mouse_input(client, press(cell.x, cell.y));
-    // The outer frame has no neighbor on its outward side, so each step falls
-    // back to the opposite border. Dragging it off-screen must not panic.
-    runtime.handle_mouse_input(client, drag(cell.x + 20, cell.y));
-
     assert!(
-        pane_cols(&runtime, client, pane) <= before,
-        "the fallback can only shrink the grabbed pane here, never grow it"
+        runtime
+            .client_mut(client)
+            .unwrap()
+            .pending_resize_drag()
+            .is_none(),
+        "the outer frame is not draggable, so no resize drag begins"
+    );
+
+    // A drag inward after that changes nothing either.
+    runtime.handle_mouse_input(client, drag(cell.x - 3, cell.y));
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before,
+        "grabbing the terminal's outer edge resizes nothing"
+    );
+}
+
+#[test]
+fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+    let (_, pane, _) = find_vertical_border(&runtime, client);
+    let tiled_cols = pane_cols(&runtime, client, pane);
+
+    // Zoom the focused pane: its border ring is now the outer frame, while the
+    // tiled tree underneath still has a hidden neighbor to its side.
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::TogglePaneFullscreen,
+    );
+    let _ = runtime.dispatch(envelope);
+    let active_tab = runtime.client_mut(client).unwrap().active_tab();
+
+    // Grab the zoomed pane's right frame edge and drag inward: no divider is
+    // visible under a zoom, so no resize begins, the zoom stands, and the
+    // hidden tiled layout is untouched.
+    let (cell, _, _) = find_vertical_border(&runtime, client);
+    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    assert!(
+        runtime
+            .client_mut(client)
+            .unwrap()
+            .pending_resize_drag()
+            .is_none(),
+        "a zoomed view has no draggable border, so no resize drag begins"
+    );
+
+    runtime.handle_mouse_input(client, drag(cell.x - 3, cell.y));
+    assert!(
+        matches!(
+            runtime.client_mut(client).unwrap().layout_mode(active_tab),
+            LayoutMode::Fullscreen { .. }
+        ),
+        "no resize was dispatched, so the client's zoom stands"
+    );
+
+    // Toggle back out: the tiled layout is exactly as it was.
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::TogglePaneFullscreen,
+    );
+    let _ = runtime.dispatch(envelope);
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        tiled_cols,
+        "the hidden tiled layout was not mutated by the drag"
     );
 }
 
@@ -828,6 +894,43 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
         fake.writes(pane).expect("writes"),
         vec![format!("\x1b[<35;{col};{row}M").into_bytes()],
         "any-motion tracking reports the move"
+    );
+}
+
+#[test]
+fn a_captured_release_is_re_stamped_to_the_pressed_button() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+
+    // A right press captures the gesture (button 2).
+    runtime.handle_mouse_input(
+        client,
+        MouseInput {
+            kind: MouseKind::Press(MouseButton::Right),
+            at,
+            mods: ModFlags::NONE,
+        },
+    );
+    // The terminal reports the release as the left button (a stand-in); it must
+    // still reach the program as a right release, matching the press.
+    runtime.handle_mouse_input(
+        client,
+        MouseInput {
+            kind: MouseKind::Release(MouseButton::Left),
+            at,
+            mods: ModFlags::NONE,
+        },
+    );
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![
+            format!("\x1b[<2;{col};{row}M").into_bytes(),
+            format!("\x1b[<2;{col};{row}m").into_bytes(),
+        ],
+        "the release re-stamps to button 2, not the reported left button 0"
     );
 }
 

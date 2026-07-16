@@ -43,6 +43,7 @@ use koshi_core::command::{
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
+use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::RenderSnapshot;
 use koshi_renderer::{
@@ -141,7 +142,12 @@ impl Runtime {
             }
             HitRegion::StackHeader { pane_id } => self.mouse_focus_pane(client_id, pane_id),
             HitRegion::PaneBorder { pane_id, side } => {
-                if self.config.mouse.border_resize {
+                // Only a real divider — one with an adjacent pane to resize
+                // against — begins a resize. The tab-edge outer frame and the
+                // boundary above a collapsed stack header have no neighbor.
+                if self.config.mouse.border_resize
+                    && self.border_has_neighbor(client_id, pane_id, side)
+                {
                     self.begin_resize_drag(client_id, pane_id, side, mouse.at);
                 }
             }
@@ -150,12 +156,37 @@ impl Runtime {
         }
     }
 
+    /// Whether the border on `side` of `pane_id` is a real divider the client
+    /// can drag — one with an adjacent pane to resize against, per the layout
+    /// tree. The tab-edge outer frame and the boundary above a collapsed stack
+    /// header have no neighbor, so they cannot be dragged; a zoomed view draws
+    /// no dividers at all — its visible frame is the outer edge — so nothing is
+    /// draggable until the client is back in the tiled view.
+    fn border_has_neighbor(&self, client_id: ClientId, pane_id: PaneId, side: Direction) -> bool {
+        let Some(session) = self.session_for_client(client_id) else {
+            return false;
+        };
+        let Some(client) = session.clients.get(client_id) else {
+            return false;
+        };
+        if matches!(
+            client.layout_mode(client.active_tab()),
+            LayoutMode::Fullscreen { .. }
+        ) {
+            return false;
+        }
+        let Some(tab) = session.tabs.get(&client.active_tab()) else {
+            return false;
+        };
+        koshi_layout::resize::has_adjacent_border(tab.layout(), pane_id, side)
+    }
+
     /// Route a click on a pane's content: a click on a pane the client has not
-    /// focused focuses it (when `click_to_focus` is on); a click on the pane it
-    /// is already in goes through to the program, so a mouse-aware TUI receives
-    /// it. A first click focuses, a second acts.
+    /// focused focuses it; a click on the pane it is already in goes through to
+    /// the program, so a mouse-aware TUI receives it. A first click focuses, a
+    /// second acts.
     fn click_pane_content(&mut self, client_id: ClientId, pane_id: PaneId, mouse: MouseInput) {
-        if Some(pane_id) != self.typed_pane(client_id) && self.config.mouse.click_to_focus {
+        if Some(pane_id) != self.typed_pane(client_id) {
             self.mouse_focus_pane(client_id, pane_id);
         } else {
             self.forward_mouse_to_pane(client_id, mouse);
@@ -176,19 +207,24 @@ impl Runtime {
     /// bare move over a pane in no mouse mode costs nothing.
     fn forward_mouse_to_pane(&mut self, client_id: ClientId, mouse: MouseInput) {
         let captured = self.mouse_capture(client_id);
-        // A release always ends the capture, whether or not it forwards.
+        // A release ends the capture, whether or not it forwards. Which button
+        // released cannot be trusted (some terminals report every release as the
+        // left button), so any release clears.
         if matches!(mouse.kind, MouseKind::Release(_)) {
             self.set_mouse_capture(client_id, None);
         }
-        let (pane_id, clamp) = match mouse.kind {
+        let (pane_id, clamp, kind) = match mouse.kind {
             MouseKind::Press(_) | MouseKind::Motion => {
                 match self.focused_terminal_pane(client_id) {
-                    Some(pane) => (pane, false),
+                    Some(pane) => (pane, false, mouse.kind),
                     None => return,
                 }
             }
+            // A captured drag or release is re-stamped with the button its press
+            // named — the event's own button is unreliable, so the program sees
+            // the same button it saw go down.
             MouseKind::Drag(_) | MouseKind::Release(_) => match captured {
-                Some(pane) => (pane, true),
+                Some((pane, button)) => (pane, true, with_button(mouse.kind, button)),
                 None => return,
             },
             MouseKind::Scroll(_) => return,
@@ -202,7 +238,7 @@ impl Runtime {
         }) else {
             return;
         };
-        if !reports(tracking, mouse.kind) {
+        if !reports(tracking, kind) {
             return;
         }
         let Some(snapshot) = self.build_snapshot(client_id) else {
@@ -211,10 +247,12 @@ impl Runtime {
         let Some((col, row)) = pane_cell(&snapshot, pane_id, mouse.at, clamp) else {
             return;
         };
-        if let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) {
+        if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
             let _ = self.pty_backend().write(pane_id, &bytes);
-            if matches!(mouse.kind, MouseKind::Press(_)) {
-                self.set_mouse_capture(client_id, Some(pane_id));
+            // Capture with the press's own button — reliable, unlike a later
+            // drag's or release's.
+            if let MouseKind::Press(button) = mouse.kind {
+                self.set_mouse_capture(client_id, Some((pane_id, button)));
             }
         }
     }
@@ -228,8 +266,9 @@ impl Runtime {
         matches!(session.panes.get(pane_id)?.kind(), PaneKind::Terminal).then_some(pane_id)
     }
 
-    /// The pane this client's held mouse button is captured to, if any.
-    fn mouse_capture(&self, client_id: ClientId) -> Option<PaneId> {
+    /// The pane and pressed button this client's held mouse gesture is captured
+    /// to, if any.
+    fn mouse_capture(&self, client_id: ClientId) -> Option<(PaneId, MouseButton)> {
         self.session_for_client(client_id)?
             .clients
             .get(client_id)?
@@ -237,9 +276,9 @@ impl Runtime {
     }
 
     /// Set or clear this client's mouse capture.
-    fn set_mouse_capture(&mut self, client_id: ClientId, pane: Option<PaneId>) {
+    fn set_mouse_capture(&mut self, client_id: ClientId, capture: Option<(PaneId, MouseButton)>) {
         if let Some(client) = self.client_mut(client_id) {
-            client.set_mouse_capture(pane);
+            client.set_mouse_capture(capture);
         }
     }
 
@@ -488,6 +527,16 @@ fn pane_cell(
     let x = at.x.clamp(rect.origin.x, right);
     let y = at.y.clamp(rect.origin.y, bottom);
     Some((x - rect.origin.x + 1, y - rect.origin.y + 1))
+}
+
+/// `kind` with its button replaced by `button`. Only a drag or release carries a
+/// button koshi re-stamps from the capture; other kinds are returned unchanged.
+fn with_button(kind: MouseKind, button: MouseButton) -> MouseKind {
+    match kind {
+        MouseKind::Drag(_) => MouseKind::Drag(button),
+        MouseKind::Release(_) => MouseKind::Release(button),
+        other => other,
+    }
 }
 
 /// `from` moved `n` cells toward `to`, saturating at zero.
