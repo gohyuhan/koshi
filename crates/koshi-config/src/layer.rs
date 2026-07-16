@@ -217,10 +217,6 @@ impl PartialPluginActivationConfig {
 pub struct PartialMouseConfig {
     /// Whether dragging a pane border resizes it.
     pub border_resize: Option<bool>,
-    /// Whether border-drag resize also works in locked mode.
-    pub border_resize_in_lock: Option<bool>,
-    /// Whether clicking a pane focuses it.
-    pub click_to_focus: Option<bool>,
     /// Lines scrolled per mouse wheel notch.
     pub scroll_lines: Option<u16>,
 }
@@ -228,11 +224,6 @@ pub struct PartialMouseConfig {
 impl PartialMouseConfig {
     fn apply(self, target: &mut MouseConfig) {
         merge_field(&mut target.border_resize, self.border_resize);
-        merge_field(
-            &mut target.border_resize_in_lock,
-            self.border_resize_in_lock,
-        );
-        merge_field(&mut target.click_to_focus, self.click_to_focus);
         merge_field(&mut target.scroll_lines, self.scroll_lines);
     }
 }

@@ -141,6 +141,28 @@ pub fn resize(
     Ok(result)
 }
 
+/// Whether `pane` has a real adjacent border to resize against on `direction` —
+/// the border a [`resize`] would move — rather than sitting against the tab edge
+/// (or a collapsed stack header, which is not a resizable neighbor) on that side.
+///
+/// For a pane in the tree this is the exact condition under which [`resize`]
+/// does *not* return [`ResizeError::NoAdjacentBorder`] (a pane not in the tree
+/// is also `false` here; [`resize`] reports that as
+/// [`ResizeError::PaneNotFound`]), so a caller can decide whether a border is
+/// draggable without attempting the resize.
+#[must_use]
+pub fn has_adjacent_border(tree: &LayoutNode, pane: PaneId, direction: Direction) -> bool {
+    let Some(path) = tree.path_to(pane) else {
+        return false;
+    };
+    let wanted = if matches!(direction, Direction::Left | Direction::Right) {
+        SplitDirection::Horizontal
+    } else {
+        SplitDirection::Vertical
+    };
+    find_border(tree, &path, wanted, direction).is_some()
+}
+
 /// Find the deepest ancestor split with `wanted` direction where the path's
 /// child has a sibling on the `direction` side. Returns the split's depth in
 /// the path plus the receiver (the path child) and donor (the sibling).

@@ -5,7 +5,7 @@
 
 use std::time::SystemTime;
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 
@@ -68,6 +68,24 @@ fn tabline_offset_and_drag_round_trip_and_reset_on_tab_switch() {
     assert_eq!(client.active_tab(), other);
     assert_eq!(client.tabline_offset(), None);
     assert_eq!(client.tabline_drag(), None);
+}
+
+#[test]
+fn switching_tabs_ends_a_pending_resize_drag() {
+    let tab = TabId::new();
+    let other = TabId::new();
+    let mut client = a_client(tab);
+
+    client.update_pending_resize_drag(Some(ResizeDragState {
+        pane: PaneId::new(),
+        side: Direction::Right,
+        last: Point { x: 5, y: 5 },
+    }));
+    assert!(client.pending_resize_drag().is_some());
+
+    // The grabbed border is no longer on the client's frame, so the drag ends.
+    client.update_active_tab(other);
+    assert!(client.pending_resize_drag().is_none());
 }
 
 #[test]
@@ -162,8 +180,13 @@ fn updating_a_tabs_focus_returns_the_previous_pane() {
 fn a_pending_resize_drag_can_be_set_and_cleared() {
     let mut client = a_client(TabId::new());
 
-    client.update_pending_resize_drag(Some(ResizeDragState));
-    assert_eq!(client.pending_resize_drag(), Some(&ResizeDragState));
+    let drag = ResizeDragState {
+        pane: PaneId::new(),
+        side: Direction::Right,
+        last: Point { x: 4, y: 2 },
+    };
+    client.update_pending_resize_drag(Some(drag));
+    assert_eq!(client.pending_resize_drag(), Some(&drag));
 
     client.update_pending_resize_drag(None);
     assert!(client.pending_resize_drag().is_none());
