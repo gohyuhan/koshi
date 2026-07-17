@@ -616,11 +616,12 @@ impl Runtime {
     }
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
-    /// size cache, terminal engine, and each client's parked scrollback offset
-    /// for it (so the per-view map holds no dead entries over the session's
-    /// life). The one release point for pane bookkeeping — every path that
-    /// removes a pane funnels through here. Explicit field refs so a caller can
-    /// hold the owning session borrowed alongside.
+    /// size cache, terminal engine, each client's scroll offset for it (so the
+    /// per-view map holds no dead entries over the session's life), and any
+    /// client highlight that was in it. The one release point for pane
+    /// bookkeeping — every path that removes a pane funnels through here.
+    /// Explicit field refs so a caller can hold the owning session borrowed
+    /// alongside.
     fn release_pane_bookkeeping(
         pty_handles: &mut HashMap<PaneId, PtyHandle>,
         pty_sizes: &mut HashMap<PaneId, PtySize>,
@@ -633,6 +634,7 @@ impl Runtime {
         terminal_engines.remove(&pane_id);
         for client in clients.list_attached_mut() {
             client.set_scroll_offset(pane_id, 0);
+            client.clear_selection(pane_id);
         }
     }
 
@@ -641,7 +643,7 @@ impl Runtime {
     ///
     /// Removes the pane's PTY handle, size cache, and terminal engine — output
     /// bytes still in flight for it now find no engine and are dropped — and
-    /// clears any parked scrollback offset each client held for it, then
+    /// clears each client's scroll offset and any highlight in it, then
     /// re-solves and resizes the tab that reclaims the space: the pane's own tab
     /// when it survives, else the tab its viewers moved to (the cascade's
     /// `TabFocused`). A tab left with no viewer has no viewport and keeps its
@@ -1423,7 +1425,7 @@ impl Runtime {
         let mut events = tab_ops::close_tab(session, tab_id);
 
         // The panes are gone from state; drop their runtime bookkeeping — PTY
-        // handle, size cache, terminal engine, and parked scroll offsets. Keyed
+        // handle, size cache, terminal engine, scroll offsets, and highlights. Keyed
         // off the layout's own leaf list — the exact set the op removed.
         for pane_id in &pane_ids {
             Self::release_pane_bookkeeping(

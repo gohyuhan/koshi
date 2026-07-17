@@ -10,6 +10,7 @@ use std::{
 };
 
 use koshi_core::{
+    command::Selection,
     geometry::{Direction, Point, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeySequence,
@@ -66,12 +67,31 @@ pub struct Client {
     /// press that begins it and the release that ends it.
     tabline_drag: Option<TablineDragState>,
     pending_key_sequence: Option<PendingKeySequence>,
-    /// This client's scrollback view offset per pane: lines scrolled up from the
-    /// live bottom. A pane absent from the map (the default) follows live output;
-    /// only scrolled-back panes have an entry, always with a non-zero offset. It
-    /// lives on the client because scrolling is per-view — two clients scroll a
-    /// shared pane independently.
+    /// This client's scrollback view position per pane: lines scrolled up from
+    /// the live bottom. A pane absent from the map (the default) sits at the live
+    /// bottom, offset `0`; only scrolled-up panes have an entry, always with a
+    /// non-zero offset. It lives on the client because scrolling is per-view —
+    /// two clients scroll a shared pane independently.
+    ///
+    /// This is the position alone. Whether the view is *held* there — showing the
+    /// same text as output arrives, rather than following the newest line — is
+    /// not stored: [`is_view_held`](Self::is_view_held) derives it.
     scroll_by_pane: HashMap<PaneId, usize>,
+    /// This client's highlighted text, keyed by the pane it is in — the whole of
+    /// visual mode, since a highlight existing *is* being in visual mode for that
+    /// pane and it clearing *is* leaving. A pane absent from the map has no
+    /// highlight.
+    ///
+    /// **A highlight belongs to one pane, and panes keep their own.** Highlighting
+    /// in a second pane leaves the first pane's highlight exactly where it is, so
+    /// several can be up at once. Only input that reaches a pane's own child
+    /// clears that pane's highlight — moving focus to another pane is Koshi's
+    /// doing, never reaches the child, and so clears nothing.
+    ///
+    /// It lives on the client because a highlight belongs to one attached
+    /// terminal: two clients viewing one pane select in it independently, and
+    /// neither sees the other's highlight.
+    selection_by_pane: HashMap<PaneId, Selection>,
     /// The pane this client has zoomed in each tab: the one pane filling the tab
     /// while the others are hidden. A tab absent from the map (the default) is
     /// tiled for this client.
@@ -112,6 +132,7 @@ impl Client {
             tabline_drag: None,
             pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
+            selection_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
         }
     }
@@ -242,23 +263,75 @@ impl Client {
         self.pending_key_sequence.take()
     }
 
-    /// This client's scrollback view offset for `pane_id`: lines scrolled up from
-    /// the live bottom. `0` — the default for any pane not scrolled back — means
-    /// the view follows live output.
+    /// Where this client's view of `pane_id` sits: lines scrolled up from the
+    /// live bottom. `0` — the default for any pane not scrolled up — is the
+    /// newest line.
     #[must_use]
     pub fn scroll_offset(&self, pane_id: PaneId) -> usize {
         self.scroll_by_pane.get(&pane_id).copied().unwrap_or(0)
     }
 
-    /// Set this client's scrollback view offset for `pane_id`. An offset of `0`
-    /// removes the entry, restoring live-following, so the map holds only
-    /// scrolled-back panes.
+    /// Set where this client's view of `pane_id` sits. An offset of `0` removes
+    /// the entry, so the map holds only scrolled-up panes.
     pub fn set_scroll_offset(&mut self, pane_id: PaneId, offset: usize) {
         if offset == 0 {
             self.scroll_by_pane.remove(&pane_id);
         } else {
             self.scroll_by_pane.insert(pane_id, offset);
         }
+    }
+
+    /// This client's highlight in `pane_id`, or `None` if it has none there.
+    #[must_use]
+    pub fn selection(&self, pane_id: PaneId) -> Option<Selection> {
+        self.selection_by_pane.get(&pane_id).copied()
+    }
+
+    /// Highlight `selection` in `pane_id` for this client, replacing any highlight
+    /// it already had there. Other panes' highlights are untouched — each pane
+    /// keeps its own.
+    pub fn set_selection(&mut self, pane_id: PaneId, selection: Selection) {
+        self.selection_by_pane.insert(pane_id, selection);
+    }
+
+    /// Drop this client's highlight in `pane_id`, leaving visual mode for that
+    /// pane. Clearing a pane with no highlight changes nothing.
+    ///
+    /// Called when input reaches the pane's child — the key or click belongs to
+    /// what is running there, so the highlight gets out of the way — and when the
+    /// pane is removed, since a highlight over a pane that no longer exists has
+    /// nothing to show and nothing left to hold a view on.
+    pub fn clear_selection(&mut self, pane_id: PaneId) {
+        self.selection_by_pane.remove(&pane_id);
+    }
+
+    /// Whether this client's view of `pane_id` is **held**: showing the same text
+    /// as new output arrives, rather than following the newest line.
+    ///
+    /// Two independent things hold a view, and this is the only place they are
+    /// combined:
+    ///
+    /// - **Scrolled up** (`scroll_offset > 0`) — the ordinary terminal rule: at
+    ///   the bottom you are carried along, one line up you stay put. It ends when
+    ///   the view is scrolled back to the bottom.
+    /// - **Visual mode** (a highlight is up in this pane) — new output must not
+    ///   drag the view out from under text the user is selecting. It ends when
+    ///   the highlight clears.
+    ///
+    /// They overlap freely, so this is derived rather than stored: a held flag
+    /// would be a second place the same fact lives, and a view could be left held
+    /// by a highlight that had already cleared. Being scrolled up *at all* means
+    /// held, so the only state an offset cannot express is a highlight at the
+    /// live bottom — and the highlight answers that directly.
+    ///
+    /// Example: highlight up in this pane at offset `0` → held, so three lines of
+    /// output move the offset to `3` and the same text stays on screen. Clicking
+    /// into the pane clears the highlight; the view is now at offset `3`, so it is
+    /// still held — by being scrolled up. Scrolling back to the bottom follows
+    /// live again.
+    #[must_use]
+    pub fn is_view_held(&self, pane_id: PaneId) -> bool {
+        self.scroll_offset(pane_id) > 0 || self.selection_by_pane.contains_key(&pane_id)
     }
 
     /// This client's tabline scroll position: `None` follows the active tab,
@@ -410,7 +483,7 @@ impl ClientRegistry {
     }
 
     /// Mutable access to every attached client, to fan out per-client view-state
-    /// updates — e.g. re-anchoring scrolled-back panes as new output arrives.
+    /// updates — e.g. re-anchoring pinned views as new output arrives.
     pub fn list_attached_mut(&mut self) -> impl Iterator<Item = &mut Client> {
         self.records.values_mut()
     }
@@ -449,9 +522,12 @@ pub struct PendingKeySequence {
 
 /// Per-client mouse interaction state: what this client's pointer is currently
 /// doing within its own view — last position, pressed buttons, and any
-/// in-progress hover or selection. It lives on the client because each
-/// attached terminal drives its own pointer independently; two clients viewing
-/// the same tab keep separate mouse state.
+/// in-progress hover. It lives on the client because each attached terminal
+/// drives its own pointer independently; two clients viewing the same tab keep
+/// separate mouse state.
+///
+/// The highlight a drag produces is not here: it is keyed by pane in
+/// [`Client::selection`], since it outlives the gesture that made it.
 ///
 /// Placeholder: the mouse-routing layer fills in the concrete fields. This is
 /// transient runtime state — re-initialized on each attach, never persisted.

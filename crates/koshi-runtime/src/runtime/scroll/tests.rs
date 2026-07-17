@@ -1,11 +1,13 @@
 //! Tests for per-client scrollback scrolling: moving a view up into history and
-//! back to live, clamping at the ends, and re-anchoring a parked view as new
-//! output pushes lines (and reclamping when history shrinks).
+//! back to live, clamping at the ends, and re-anchoring a held view as new output
+//! pushes lines (and reclamping when history shrinks). A view is held by being
+//! scrolled up or by a highlight in that pane, so both reasons are exercised.
 
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
+use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
@@ -87,6 +89,36 @@ fn offset(rt: &Runtime, client: ClientId, pane: PaneId) -> usize {
         .scroll_offset(pane)
 }
 
+/// Whether the client's view of the pane is held against live output.
+fn held(rt: &Runtime, client: ClientId, pane: PaneId) -> bool {
+    rt.sessions()
+        .values()
+        .next()
+        .unwrap()
+        .clients
+        .get(client)
+        .unwrap()
+        .is_view_held(pane)
+}
+
+/// Put the client in visual mode with a highlight in the pane, as the mouse layer
+/// does on a drag. The highlight's shape does not matter to the view rules.
+fn highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 4 },
+    };
+    rt.client_mut(client)
+        .unwrap()
+        .set_selection(pane, selection);
+}
+
+/// Leave visual mode in `pane`, as a click or any non-copy key landing in it does.
+fn clear_highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+    rt.client_mut(client).unwrap().clear_selection(pane);
+}
+
 /// The pane engine's current retained scrollback length.
 fn retained(rt: &Runtime, pane: PaneId) -> usize {
     rt.terminal_engines
@@ -105,22 +137,45 @@ fn scroll_up_moves_into_history_and_clamps_at_the_oldest_line() {
 
     rt.scroll_up(client, pane, 3);
     assert_eq!(offset(&rt, client, pane), 3);
+    assert!(held(&rt, client, pane)); // scrolled up at all: held
 
     rt.scroll_up(client, pane, 10); // clamps to the retained count
     assert_eq!(offset(&rt, client, pane), 5);
+    assert!(held(&rt, client, pane));
 }
 
 #[test]
-fn scroll_down_returns_toward_live_and_stops_following() {
+fn scroll_down_returns_toward_live_and_follows_again_at_the_bottom() {
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n\n\n");
     rt.scroll_up(client, pane, 5);
 
     rt.scroll_down(client, pane, 2);
     assert_eq!(offset(&rt, client, pane), 3);
+    assert!(held(&rt, client, pane)); // stopped short: still held
 
-    rt.scroll_down(client, pane, 10); // saturates at live
+    rt.scroll_down(client, pane, 10); // saturates at the newest line
     assert_eq!(offset(&rt, client, pane), 0);
+    assert!(!held(&rt, client, pane)); // no highlight: follows live again
+}
+
+#[test]
+fn scrolling_to_the_bottom_in_visual_mode_keeps_the_view_held() {
+    // Scrolling never ends visual mode, so wheeling back to the newest line with
+    // a highlight up must not hand the view back to live output — the highlight
+    // would slide as soon as the next line printed.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane);
+    rt.scroll_up(client, pane, 2);
+
+    rt.scroll_to_bottom(client, pane);
+    assert_eq!(offset(&rt, client, pane), 0);
+    assert!(held(&rt, client, pane)); // the highlight still holds it
+
+    rt.handle_pty_output(pane, b"\n\n"); // output arrives under the highlight
+    assert_eq!(offset(&rt, client, pane), 2); // the view rose with its text
+    assert!(held(&rt, client, pane));
 }
 
 #[test]
@@ -130,9 +185,11 @@ fn scroll_to_top_and_bottom_jump_to_the_ends() {
 
     rt.scroll_to_top(client, pane);
     assert_eq!(offset(&rt, client, pane), 4);
+    assert!(held(&rt, client, pane));
 
     rt.scroll_to_bottom(client, pane);
     assert_eq!(offset(&rt, client, pane), 0);
+    assert!(!held(&rt, client, pane));
 }
 
 #[test]
@@ -153,21 +210,108 @@ fn new_output_leaves_a_live_following_view_following() {
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n");
     assert_eq!(offset(&rt, client, pane), 0); // never scrolled
+    assert!(!held(&rt, client, pane));
 
     rt.handle_pty_output(pane, b"\n\n"); // more output
     assert_eq!(offset(&rt, client, pane), 0); // still following live
+    assert!(!held(&rt, client, pane));
 }
 
 #[test]
-fn clearing_scrollback_reclamps_a_parked_view_to_live() {
+fn new_output_holds_a_highlighted_view_at_the_bottom_on_the_same_lines() {
+    // The state an offset alone cannot express, and the reason visual mode holds
+    // the view: a highlight at the newest line rises with its text as output
+    // pushes, instead of being dragged along by the bottom. Compare the test
+    // above — identical offset 0, no highlight, follows.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane);
+
+    rt.handle_pty_output(pane, b"\n\n"); // two lines pushed under it
+    assert_eq!(retained(&rt, pane), 5);
+    assert_eq!(offset(&rt, client, pane), 2); // rose by the two pushed lines
+    assert!(held(&rt, client, pane));
+}
+
+#[test]
+fn leaving_visual_mode_at_the_bottom_returns_the_view_to_live_output() {
+    // The whole point of deriving held: a highlight made at the newest line, then
+    // dropped before any output moved the view, leaves nothing holding it — so it
+    // follows live again with nothing having to remember to release it.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane);
+    assert!(held(&rt, client, pane));
+
+    clear_highlight(&mut rt, client, pane); // a click elsewhere, or any non-copy key
+    assert!(!held(&rt, client, pane));
+
+    rt.handle_pty_output(pane, b"\n\n"); // output arrives
+    assert_eq!(offset(&rt, client, pane), 0); // followed it down
+    assert!(!held(&rt, client, pane));
+}
+
+#[test]
+fn leaving_visual_mode_leaves_a_view_that_output_pushed_up_held() {
+    // Held for the other reason now: while the highlight was up, output pushed the
+    // view 2 lines up. Dropping the highlight does not yank the user back to the
+    // bottom — being scrolled up holds it, exactly as if they had scrolled there.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane);
+    rt.handle_pty_output(pane, b"\n\n");
+    assert_eq!(offset(&rt, client, pane), 2);
+
+    clear_highlight(&mut rt, client, pane);
+    assert!(held(&rt, client, pane)); // still 2 lines up
+
+    rt.scroll_to_bottom(client, pane); // the user scrolls back down
+    assert_eq!(offset(&rt, client, pane), 0);
+    assert!(!held(&rt, client, pane)); // and follows live again
+}
+
+#[test]
+fn output_keeps_arriving_while_a_view_is_held() {
+    // Holding holds the view, not the pane: the child's output still reaches the
+    // engine and still fills the scrollback underneath.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    rt.scroll_up(client, pane, 3);
+
+    rt.handle_pty_output(pane, b"\n\n\n\n");
+    assert_eq!(retained(&rt, pane), 7); // history kept growing under the held view
+    assert_eq!(offset(&rt, client, pane), 7);
+    assert!(held(&rt, client, pane));
+}
+
+#[test]
+fn erasing_the_scrollback_returns_a_scrolled_view_to_live_output() {
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n");
     rt.scroll_up(client, pane, 3);
     assert_eq!(offset(&rt, client, pane), 3);
 
-    rt.handle_pty_output(pane, b"\x1b[3J"); // ED 3: erase scrollback
+    // ED 3 erases the scrollback: the offset reclamps to 0, and with no highlight
+    // there is nothing else holding the view, so it follows live again.
+    rt.handle_pty_output(pane, b"\x1b[3J");
     assert_eq!(retained(&rt, pane), 0);
     assert_eq!(offset(&rt, client, pane), 0);
+    assert!(!held(&rt, client, pane));
+}
+
+#[test]
+fn erasing_the_scrollback_leaves_a_highlighted_view_held() {
+    // ED 3 erases the scrollback and leaves the live screen alone, so a highlight
+    // at the newest line still covers exactly the text it did. The offset
+    // reclamps to 0 but the highlight keeps holding the view.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane);
+
+    rt.handle_pty_output(pane, b"\x1b[3J");
+    assert_eq!(retained(&rt, pane), 0);
+    assert_eq!(offset(&rt, client, pane), 0);
+    assert!(held(&rt, client, pane));
 }
 
 #[test]
@@ -188,15 +332,16 @@ fn a_no_op_scroll_schedules_no_repaint() {
 }
 
 #[test]
-fn anchor_clamps_a_parked_view_to_the_surviving_lines() {
+fn anchor_clamps_a_held_view_to_the_surviving_lines() {
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n");
     rt.scroll_up(client, pane, 2);
 
     // Simulate a heavy-truncation frame: five lines pushed but only two survive.
-    // The anchor pins the view to the oldest surviving line rather than past it.
-    rt.anchor_scrolled_views(pane, 5, 2);
+    // The anchor holds the view on the oldest surviving line rather than past it.
+    rt.anchor_held_views(pane, 5, 2);
     assert_eq!(offset(&rt, client, pane), 2);
+    assert!(held(&rt, client, pane));
 }
 
 #[test]
@@ -207,14 +352,15 @@ fn an_erase_and_new_output_in_one_chunk_reanchors_exactly() {
 
     // One chunk: ED 3 erases the history, then four lines push fresh history.
     // The monotonic push counter keeps the count exact across the erase, so the
-    // parked view rises by all four and clamps to the surviving lines.
+    // held view rises by all four and clamps to the surviving lines.
     rt.handle_pty_output(pane, b"\x1b[3J\n\n\n\n");
     assert_eq!(retained(&rt, pane), 4);
     assert_eq!(offset(&rt, client, pane), 4);
+    assert!(held(&rt, client, pane));
 }
 
 #[test]
-fn output_that_touches_no_history_leaves_a_parked_view_alone() {
+fn output_that_touches_no_history_leaves_a_held_view_alone() {
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n");
     rt.scroll_up(client, pane, 2);
@@ -222,4 +368,44 @@ fn output_that_touches_no_history_leaves_a_parked_view_alone() {
     rt.handle_pty_output(pane, b"hi"); // prints on the live row, pushes nothing
     assert_eq!(retained(&rt, pane), 3);
     assert_eq!(offset(&rt, client, pane), 2);
+    assert!(held(&rt, client, pane));
+}
+
+#[test]
+fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
+    // Three clients on one pane — one scrolled up, one holding a highlight at the
+    // bottom, one following. The view is per-client, so each is re-anchored alone
+    // and none disturbs another.
+    let (mut rt, pane, first) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+
+    let session_id = *rt.sessions().keys().next().unwrap();
+    let tab_id = rt.client_mut(first).unwrap().active_tab();
+    let (second, third) = (ClientId::new(), ClientId::new());
+    for id in [second, third] {
+        let client = Client::new(
+            id,
+            session_id,
+            SystemTime::now(),
+            Size { cols: 8, rows: 1 },
+            tab_id,
+        );
+        rt.sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .attach_client(client);
+    }
+
+    rt.scroll_up(first, pane, 2);
+    highlight(&mut rt, second, pane);
+    // `third` is left following live.
+
+    rt.handle_pty_output(pane, b"\n\n"); // two lines pushed
+
+    assert_eq!(offset(&rt, first, pane), 4); // rose by two, still held
+    assert!(held(&rt, first, pane));
+    assert_eq!(offset(&rt, second, pane), 2); // rose by two from the bottom
+    assert!(held(&rt, second, pane));
+    assert_eq!(offset(&rt, third, pane), 0); // followed live, untouched
+    assert!(!held(&rt, third, pane));
 }

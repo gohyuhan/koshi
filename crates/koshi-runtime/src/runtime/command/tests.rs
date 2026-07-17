@@ -5158,7 +5158,7 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
 }
 
 #[test]
-fn close_pane_clears_only_the_gone_panes_parked_scroll_offset() {
+fn close_pane_clears_only_the_gone_panes_view_state() {
     let (mut rt, _tx) = new_runtime();
     let client = ClientId::new();
     let tab = TabId::new();
@@ -5178,17 +5178,25 @@ fn close_pane_clears_only_the_gone_panes_parked_scroll_offset() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let split = other_pane(&rt, sid, root);
 
-    // Park a scroll offset in both panes.
+    // Scroll both panes up, and highlight text in the one about to close.
     {
-        let parked = rt
+        let scrolled = rt
             .sessions
             .get_mut(&sid)
             .unwrap()
             .clients
             .get_mut(client)
             .unwrap();
-        parked.set_scroll_offset(split, 5);
-        parked.set_scroll_offset(root, 3);
+        scrolled.set_scroll_offset(split, 5);
+        scrolled.set_scroll_offset(root, 3);
+        scrolled.set_selection(
+            split,
+            Selection {
+                kind: SelectionKind::Character,
+                anchor: GridPos { row: 0, col: 0 },
+                cursor: GridPos { row: 0, col: 4 },
+            },
+        );
     }
 
     // Close the focused (split) pane.
@@ -5199,13 +5207,18 @@ fn close_pane_clears_only_the_gone_panes_parked_scroll_offset() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
     let after = rt.sessions[&sid].clients.get(client).unwrap();
-    // The closed pane's parked offset is dropped; the survivor's is untouched.
+    // The closed pane's offset and highlight are dropped — a highlight over a
+    // pane that no longer exists would keep holding a view of nothing. The
+    // survivor's offset is untouched.
     assert_eq!(after.scroll_offset(split), 0);
+    assert_eq!(after.selection(split), None);
+    assert!(!after.is_view_held(split));
     assert_eq!(after.scroll_offset(root), 3);
+    assert!(after.is_view_held(root));
 }
 
 #[test]
-fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
+fn close_tab_clears_the_view_state_of_its_panes() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab_a = TabId::new();
@@ -5221,7 +5234,8 @@ fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
 
-    // Park an offset in the doomed tab's pane and one in the survivor's.
+    // Scroll the doomed tab's pane up and the survivor's too, and highlight text
+    // in the doomed one.
     {
         let client = rt
             .sessions
@@ -5232,6 +5246,14 @@ fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
             .unwrap();
         client.set_scroll_offset(pane_b, 5);
         client.set_scroll_offset(pane_a, 3);
+        client.set_selection(
+            pane_b,
+            Selection {
+                kind: SelectionKind::Character,
+                anchor: GridPos { row: 0, col: 0 },
+                cursor: GridPos { row: 0, col: 4 },
+            },
+        );
     }
 
     let env = envelope_from(
@@ -5245,10 +5267,13 @@ fn close_tab_clears_parked_scroll_offsets_for_its_panes() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
     let client = rt.sessions[&sid].clients.get(client_id).unwrap();
-    // Every pane of the closed tab loses its parked offset; the surviving
-    // tab's pane keeps its own.
+    // Every pane of the closed tab loses its offset and its highlight; the
+    // surviving tab's pane keeps its own offset.
     assert_eq!(client.scroll_offset(pane_b), 0);
+    assert_eq!(client.selection(pane_b), None);
+    assert!(!client.is_view_held(pane_b));
     assert_eq!(client.scroll_offset(pane_a), 3);
+    assert!(client.is_view_held(pane_a));
 }
 
 #[test]

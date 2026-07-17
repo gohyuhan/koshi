@@ -26,9 +26,8 @@ impl Runtime {
     /// already gone, and its exit is on the way through the inbox.
     ///
     /// Lines this chunk scrolls off the top feed the scrollback; every client
-    /// scrolled back in this pane is then re-anchored by that many lines so its
-    /// parked view keeps showing the same history while live output accumulates
-    /// below.
+    /// whose view of this pane is held is then re-anchored by that many lines so
+    /// it keeps showing the same text while live output accumulates below.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
         let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
             return;
@@ -47,11 +46,11 @@ impl Runtime {
         if !replies.is_empty() {
             let _ = self.pty_backend().write(pane_id, &replies);
         }
-        // Parked offsets need adjusting only when history gained lines (offsets
-        // rise) or shrank under an erase (offsets reclamp); the common chunk that
+        // Held views need adjusting only when history gained lines (offsets rise)
+        // or shrank under an erase (offsets reclamp); the common chunk that
         // touches no history skips the client walk entirely.
         if pushed > 0 || len_after < len_before {
-            self.anchor_scrolled_views(pane_id, pushed, len_after);
+            self.anchor_held_views(pane_id, pushed, len_after);
         }
         self.render_scheduler
             .invalidate(InvalidationReason::PtyOutput);
