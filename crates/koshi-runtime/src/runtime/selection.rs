@@ -145,12 +145,39 @@ impl Runtime {
         self.extend_selection(client_id, drag, at);
     }
 
-    /// End the in-flight selection drag, leaving the highlight it made in place:
-    /// the gesture is over, the highlight is not.
+    /// End the in-flight selection drag: copy what it highlighted, leaving the
+    /// highlight standing.
+    ///
+    /// The clipboard follows the OS, with no copy key — releasing the
+    /// selection IS the copy, as zellij ships it. The highlighted text is
+    /// read at this instant, while it is exactly what the user saw, and goes
+    /// to the client's outer terminal as OSC 52, which sets the OS clipboard.
+    /// Pressing the OS copy key afterward is a harmless no-op (the clipboard
+    /// is already filled) — and being a key, it reaches the pane and so
+    /// clears the highlight, like any input reaching the pane's child. A
+    /// plain click, whose press highlighted nothing, copies nothing.
     pub(crate) fn end_selection_drag(&mut self, client_id: ClientId) {
+        let Some(drag) = self
+            .client_mut(client_id)
+            .and_then(|client| client.selection_drag())
+        else {
+            return;
+        };
         if let Some(client) = self.client_mut(client_id) {
-            if client.selection_drag().is_some() {
-                client.set_selection_drag(None);
+            client.set_selection_drag(None);
+        }
+        let Some(selection) = self
+            .client_mut(client_id)
+            .and_then(|client| client.selection(drag.pane))
+        else {
+            return;
+        };
+        if let Some(engine) = self.terminal_engines.get(&drag.pane) {
+            let text =
+                koshi_terminal::selection::selection_text(&engine.state().text_view(), &selection);
+            if !text.is_empty() {
+                let sequence = crate::runtime::clipboard::osc52_copy(&text);
+                self.queue_host_write(client_id, &sequence);
             }
         }
     }
@@ -414,6 +441,10 @@ impl Runtime {
     /// nothing on screen to explain why; dropping it lets the view follow live
     /// output again. A highlight with any line still retained keeps what
     /// remains.
+    ///
+    /// The scroll offset stays. After the drop, `offset > 0` with no highlight
+    /// is exactly the state of a client who scrolled up by hand, and it behaves
+    /// the same way: the view stays where it is until the client scrolls down.
     ///
     /// [`Client::is_view_held`]: koshi_session::client::Client::is_view_held
     pub(crate) fn drop_evicted_selections(&mut self, pane_id: PaneId) {

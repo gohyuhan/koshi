@@ -687,7 +687,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let r = self.active_cursor().row;
-                    self.insert_lines_on_screen(r, bottom, n, fill);
+                    self.active_grid_mut().insert_lines(r, bottom, n, fill);
                 }
             }
             // DL — delete n lines at the cursor row, scrolling the rest of the
@@ -717,7 +717,7 @@ impl vte::Perform for TerminalState {
                     let n = move_count(params);
                     let fill = self.active_render().style.bg_fill();
                     let (top, bottom) = self.region_bounds();
-                    self.insert_lines_on_screen(top, bottom, n, fill);
+                    self.active_grid_mut().insert_lines(top, bottom, n, fill);
                 }
             }
             // DECSTBM — set the top/bottom scroll margins (1-based; defaults are

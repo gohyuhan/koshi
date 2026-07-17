@@ -17,7 +17,10 @@ use std::time::{Instant, SystemTime};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -70,6 +73,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Undo the mouse capture enabled at startup, so the terminal koshi exits
         // back to has its native selection and scroll again.
         let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }));
     let _panic_guard = install_panic_hook(&cleanup);
@@ -79,6 +83,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // This is terminal-global: while on, programs inside panes and native text
     // selection do not see the mouse until koshi forwards it.
     execute!(io::stdout(), EnableMouseCapture)?;
+    // Ask the outer terminal to bracket its pastes, so the OS paste key
+    // arrives as one block of text instead of a burst of keystrokes.
+    execute!(io::stdout(), EnableBracketedPaste)?;
 
     // Build the runtime, handing it the cleanup guard so it restores the
     // terminal when the runtime drops at the end of this function.
@@ -190,6 +197,9 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
                 client_id,
                 mouse: decode_mouse(mouse),
             }),
+            // The outer terminal pasted (the OS paste key): the text arrives
+            // whole, so no character of it can fire a keybinding.
+            Ok(Event::Paste(text)) => Some(RuntimeEvent::HostPaste { client_id, text }),
             Ok(_) => None,
             Err(_) => Some(RuntimeEvent::Quit),
         };
@@ -247,6 +257,15 @@ fn run_loop<B: Backend>(
         }
         runtime.expire_key_sequences(Instant::now());
         runtime.expire_selection_scrolls(Instant::now());
+        // Escapes aimed at this client's own outer terminal — a copy's OSC 52
+        // clipboard write — go straight to stdout; they draw nothing, so the
+        // frame diffing above them is undisturbed.
+        if let Some(bytes) = runtime.take_host_writes(client_id) {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(&bytes);
+            let _ = stdout.flush();
+        }
         if runtime.poll_render(Instant::now()) {
             render(
                 terminal,
@@ -284,6 +303,9 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         }
         RuntimeEvent::MouseInput { client_id, mouse } => {
             runtime.handle_mouse_input(client_id, mouse, Instant::now());
+        }
+        RuntimeEvent::HostPaste { client_id, text } => {
+            runtime.handle_host_paste(client_id, &text);
         }
         RuntimeEvent::ClientAttached {
             session_id,

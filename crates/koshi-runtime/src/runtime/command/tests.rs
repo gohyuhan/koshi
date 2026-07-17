@@ -1721,19 +1721,51 @@ fn clearing_a_pane_with_no_highlight_is_accepted_and_changes_nothing() {
 }
 
 #[test]
-fn copy_still_rejects_until_its_own_task_lands() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane);
-    add_tab(&mut session, tab, pane);
-    add_client(&mut session, client_id, tab, Some(pane));
-    rt.sessions.insert(session.id, session);
+fn a_host_paste_lands_whole_in_the_focused_pane() {
+    // The OS paste key pressed in the outer terminal: the text arrives as one
+    // block and is written whole — a pasted Tab lands in the shell instead of
+    // firing the tab-switch binding.
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
 
-    // Copy carries no pane, so it still resolves the focused one and routes to
-    // the not-yet-implemented rejection.
+    rt.handle_host_paste(client_id, "ls\ttmp\ncat");
+    let writes = fake.writes(pane_a).expect("pane writes");
+    assert_eq!(
+        writes.last().expect("one write"),
+        b"ls\ttmp\rcat",
+        "raw bytes, line break as the Enter byte"
+    );
+}
+
+#[test]
+fn a_host_paste_wraps_in_bracketed_markers_when_the_pane_turned_them_on() {
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
+    rt.handle_pty_output(pane_a, b"\x1b[?2004h");
+
+    rt.handle_host_paste(client_id, "ok");
+    let writes = fake.writes(pane_a).expect("pane writes");
+    assert_eq!(writes.last().expect("one write"), b"\x1b[200~ok\x1b[201~");
+}
+
+#[test]
+fn a_host_paste_clears_the_highlight_in_the_pasted_pane() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
+    let client = rt.client_mut(client_id).expect("client");
+    client.set_selection(pane_a, a_selection());
+
+    rt.handle_host_paste(client_id, "x");
+    assert_eq!(
+        rt.client_mut(client_id).expect("client").selection(pane_a),
+        None,
+        "pasted text reached the child, so the highlight is gone"
+    );
+}
+
+#[test]
+fn the_copy_command_surface_rejects_the_interactive_copy_is_the_release() {
+    // `VisualCommand::Copy` is the future IPC/plugin surface and is unbuilt;
+    // a person copies by releasing the selection, which needs no command.
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size) = resize_fixture();
+
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::Visual(VisualCommand::Copy(CopyArgs {

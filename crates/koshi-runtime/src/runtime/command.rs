@@ -272,6 +272,8 @@ impl Runtime {
             VisualCommand::ClearSelection(args) => {
                 self.handle_clear_selection(command_id, source, args)
             }
+            // The copy surface for commands (IPC, plugins) is unbuilt; the
+            // interactive copy happens at the selection gesture's release.
             VisualCommand::Copy(_) => Ok(self.reject(command_id, "copy")),
         }
     }

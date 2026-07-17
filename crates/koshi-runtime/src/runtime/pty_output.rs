@@ -47,21 +47,16 @@ impl Runtime {
         let pushed_before = before.total_pushed();
         let len_before = before.len();
         let screen_before = engine.state().active_screen();
-        let alt_shifts_before = engine.state().alt_rows_shifted();
         let replies = engine.advance(bytes);
         let after = engine.state().scrollback();
         let len_after = after.len();
         let pushed = (after.total_pushed() - pushed_before) as usize;
         let screen_after = engine.state().active_screen();
-        let alt_rows_moved = engine.state().alt_rows_shifted() != alt_shifts_before;
 
         if !replies.is_empty() {
             let _ = self.pty_backend().write(pane_id, &replies);
         }
-        // A switch between the screens, or rows moving on the alternate screen
-        // (which records no scrollback), both leave a highlight's row numbers
-        // naming text that is no longer there.
-        if screen_before != screen_after || alt_rows_moved {
+        if screen_before != screen_after {
             self.clear_pane_selections(pane_id);
         }
         // Held views need adjusting only when history gained lines (offsets rise)

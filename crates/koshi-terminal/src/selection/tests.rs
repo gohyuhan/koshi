@@ -431,6 +431,82 @@ fn a_word_lookup_on_a_separator_covers_the_run_of_that_same_separator() {
 }
 
 #[test]
+fn selection_text_reads_the_range_inclusive() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["hello world"], 11);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 6 },
+        cursor: GridPos { row: 0, col: 10 },
+    };
+    assert_eq!(selection_text(&view, &selection), "world");
+}
+
+#[test]
+fn selection_text_joins_hard_rows_with_newlines_and_soft_wraps_with_nothing() {
+    // `abc` wraps into `def` (one logical line), then `ghi` starts fresh.
+    let scrollback = scrollback_of(&[], 100);
+    let mut grid = grid_of(&["abc", "def", "ghi"], 3);
+    grid.set_row_end(0, RowEnd::Soft);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 2, col: 2 },
+    };
+    assert_eq!(selection_text(&view, &selection), "abcdef\nghi");
+}
+
+#[test]
+fn selection_text_takes_the_same_columns_from_every_block_row() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["abcde", "fghij", "klmno"], 5);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 0, col: 1 },
+        cursor: GridPos { row: 2, col: 3 },
+    };
+    assert_eq!(selection_text(&view, &selection), "bcd\nghi\nlmn");
+}
+
+#[test]
+fn selection_text_reads_a_wide_glyph_once_and_drops_trailing_blanks() {
+    let cells = vec![vec![
+        Cell::new('世', 2, Style::default()),
+        Cell::new(' ', 0, Style::default()),
+        Cell::new('x', 1, Style::default()),
+        Cell::new(' ', 1, Style::default()),
+        Cell::new(' ', 1, Style::default()),
+    ]];
+    let grid = Grid::from_rows(cells, 5, Style::default());
+    let scrollback = scrollback_of(&[], 100);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 4 },
+    };
+    // The width-0 half is skipped, and the blanks right of `x` are the
+    // screen's padding, not the text's.
+    assert_eq!(selection_text(&view, &selection), "世x");
+}
+
+#[test]
+fn selection_text_spans_history_and_screen() {
+    let scrollback = scrollback_of(&["old line"], 100);
+    let grid = grid_of(&["new line"], 8);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 4 },
+        cursor: GridPos { row: 1, col: 2 },
+    };
+    assert_eq!(selection_text(&view, &selection), "line\nnew");
+}
+
+#[test]
 fn different_separators_do_not_join_into_one_run() {
     // `(` and `)` are both separators, but a run is one repeated character:
     // double-clicking `(` in `a() b` selects `(` alone.

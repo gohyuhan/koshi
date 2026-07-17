@@ -89,14 +89,6 @@ pub struct TerminalState {
     primary_scroll_region: Option<(u16, u16)>,
     /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
     alternate_scroll_region: Option<(u16, u16)>,
-    /// How many times the alternate screen's rows have moved — a scroll, an
-    /// inserted or deleted line — over the pane's lifetime. Monotonic, never
-    /// reset. The alternate screen keeps no scrollback, so a row move there is
-    /// recorded nowhere else; a reader that diffs this across a chunk of output
-    /// learns that row numbers no longer name the text they did (the runtime
-    /// drops the pane's highlights on that signal). Rewriting cells in place
-    /// does not count — only rows moving.
-    alt_rows_shifted: u64,
     /// The grapheme cluster currently being built at the cursor — the run of
     /// printed code points that fold into one cell (a base plus its combining
     /// marks and any emoji continuation: ZWJ-joined parts, variation selectors,
@@ -139,7 +131,6 @@ impl TerminalState {
             scrollback: Scrollback::new(ScrollbackLimit::default()),
             primary_scroll_region: None,
             alternate_scroll_region: None,
-            alt_rows_shifted: 0,
             cluster: String::new(),
             cluster_base: None,
             replies: Vec::new(),
@@ -237,24 +228,6 @@ impl TerminalState {
         match self.active {
             Screen::Primary => Arc::clone(&self.primary),
             Screen::Alternate => Arc::clone(&self.alternate),
-        }
-    }
-
-    /// How many times the alternate screen's rows have moved over the pane's
-    /// lifetime; see the field doc. Diff across a chunk of output to learn
-    /// whether alternate-screen row numbers still name the same text.
-    #[must_use]
-    pub fn alt_rows_shifted(&self) -> u64 {
-        self.alt_rows_shifted
-    }
-
-    /// Record that the alternate screen's rows moved, when `alternate` is the
-    /// active screen. Called by every operation that scrolls, inserts, or
-    /// deletes rows; a primary-screen move is recorded by the scrollback push
-    /// counter instead.
-    pub(crate) fn note_row_shift(&mut self) {
-        if self.active == Screen::Alternate {
-            self.alt_rows_shifted += 1;
         }
     }
 

@@ -45,7 +45,7 @@
 
 use std::collections::VecDeque;
 
-use koshi_core::command::GridPos;
+use koshi_core::command::{GridPos, Selection, SelectionKind};
 
 use crate::grid::state::{Cell, Grid, RowEnd};
 use crate::scrollback::Scrollback;
@@ -325,6 +325,62 @@ impl<'a> TextView<'a> {
         }
         (row, col)
     }
+}
+
+/// The text `selection` covers in `view`, as the string a copy places on the
+/// clipboard.
+///
+/// Reading order, both ends inclusive. A soft wrap continues the line — no
+/// newline — and a hard row end inserts `\n`, so a wrapped `hello world`
+/// comes out as one line and two `echo` outputs come out as two. A block
+/// takes the same column range from every row and always joins with `\n`.
+/// The blank right half of a wide glyph is skipped (the glyph's text lives in
+/// its left half); combining marks ride along with their base. Trailing
+/// blanks are dropped from each finished line — the padding right of the text
+/// is the screen's, not the text's — but not inside a soft-wrapped row, where
+/// spaces continue onto the next row. A row that no longer exists is skipped.
+#[must_use]
+pub fn selection_text(view: &TextView<'_>, selection: &Selection) -> String {
+    let ordered = order(selection.anchor, selection.cursor);
+    let (start, end) = (ordered.start, ordered.end);
+    let last_col = view.cols().saturating_sub(1);
+    let block = matches!(selection.kind, SelectionKind::Block);
+    let mut out = String::new();
+    let mut any_row_written = false;
+    for row in start.row..=end.row {
+        let Some((cells, _)) = view.row(row) else {
+            continue;
+        };
+        let (from, to) = if block {
+            (start.col.min(end.col), start.col.max(end.col))
+        } else {
+            (
+                if row == start.row { start.col } else { 0 },
+                if row == end.row { end.col } else { last_col },
+            )
+        };
+        if any_row_written && (block || !view.wraps(row - 1)) {
+            out.push('\n');
+        }
+        any_row_written = true;
+        let mut line = String::new();
+        for col in from..=to {
+            let Some(cell) = cells.get(col as usize) else {
+                break;
+            };
+            if cell.width() == 0 {
+                continue;
+            }
+            line.push(cell.ch());
+            line.extend(cell.combining());
+        }
+        if block || !view.wraps(row) {
+            out.push_str(line.trim_end());
+        } else {
+            out.push_str(&line);
+        }
+    }
+    out
 }
 
 /// A selection's two ends put into text order — `start` never comes after `end`.

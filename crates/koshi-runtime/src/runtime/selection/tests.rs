@@ -1224,10 +1224,12 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
 }
 
 #[test]
-fn a_highlight_on_the_alternate_screen_clears_when_the_app_scrolls() {
-    // Alternate-screen rows keep no scrollback, so when the app scrolls, rows
-    // move and the numbering records nothing — a stored highlight would sit at
-    // a fixed screen spot while different text slides under it. It must go.
+fn a_highlight_on_the_alternate_screen_survives_the_app_scrolling() {
+    // Same ruling on the alternate screen: an app scrolling its own rows
+    // (claude streaming, a build log) leaves the highlight where it was, even
+    // if different text now sits under it. Any key into the pane clears it
+    // (the exit rule), so keyboard-driven scrolling never even reaches this
+    // state.
     let (mut rt, client, pane) = runtime();
     let mut clock = Clock::new();
     feed(&mut rt, pane, b"\x1b[?1049h"); // enter the alternate screen
@@ -1245,14 +1247,82 @@ fn a_highlight_on_the_alternate_screen_clears_when_the_app_scrolls() {
         release_at(cell_at(&rt, client, pane, 4, 0)),
         clock.tick(),
     );
-    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+    let highlighted = selection(&mut rt, client, pane).expect("highlighted");
 
-    // The app scrolls: cursor to the last row, then a line feed there.
+    // The app scrolls on its own: cursor to the last row, a line feed there.
     feed(&mut rt, pane, b"\x1b[999;1H\n");
     assert_eq!(
         selection(&mut rt, client, pane),
-        None,
-        "the rows moved under the highlight, so it is gone"
+        Some(highlighted),
+        "the highlight stands until input into the pane clears it"
+    );
+}
+
+#[test]
+fn a_screen_highlight_survives_the_app_moving_rows_around() {
+    // The app deleting or inserting lines moves screen rows, possibly leaving
+    // the highlight over different text. Koshi leaves it alone — the app moved
+    // the text, not koshi, and zellij behaves the same. The next click or key
+    // into the pane clears it anyway, and copy captures the text at the drag's
+    // release, so a moved highlight never corrupts a copy.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    let highlighted = selection(&mut rt, client, pane).expect("highlighted");
+
+    // DL with the cursor on row 3: rows below slide up, nothing is pushed.
+    feed(&mut rt, pane, b"\x1b[3;1H\x1b[M");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        Some(highlighted),
+        "the highlight stands; what the app did to its rows is its business"
+    );
+}
+
+#[test]
+fn a_history_highlight_survives_a_primary_row_shift() {
+    // History rows do not move when screen rows do — their numbers still name
+    // the same text — so a highlight living entirely in history stands.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    for i in 0..60 {
+        feed(&mut rt, pane, format!("line{i}\r\n").as_bytes());
+    }
+
+    // Scrolled up three lines, the top three view rows are history rows.
+    rt.scroll_up(client, pane, 3);
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 1)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 1)),
+        clock.tick(),
+    );
+    let highlighted = selection(&mut rt, client, pane).expect("highlighted");
+
+    feed(&mut rt, pane, b"\x1b[10;1H\x1b[M");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        Some(highlighted),
+        "a highlight entirely in history is untouched by screen row moves"
     );
 }
 
@@ -1285,6 +1355,93 @@ fn a_highlight_on_the_alternate_screen_survives_a_redraw_in_place() {
         selection(&mut rt, client, pane),
         Some(highlighted),
         "no rows moved, so the highlight stands"
+    );
+}
+
+#[test]
+fn a_plain_click_copies_nothing() {
+    // A click's press highlights nothing, so its release has nothing to copy:
+    // no clipboard write, and the clipboard the user already had is untouched.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let at = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(at), clock.tick());
+    rt.handle_mouse_input(client, release_at(at), clock.tick());
+    assert_eq!(rt.take_host_writes(client), None);
+}
+
+#[test]
+fn releasing_the_gesture_is_the_copy() {
+    // No copy key exists: like zellij, releasing the selection IS the copy.
+    // The highlighted text goes to the client's outer terminal as OSC 52 —
+    // which sets the OS clipboard — and the highlight stays standing.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    assert_eq!(
+        rt.take_host_writes(client),
+        None,
+        "nothing is copied while the drag is still moving"
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+
+    // base64("hello") = aGVsbG8=
+    assert_eq!(
+        rt.take_host_writes(client).expect("queued clipboard write"),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
+    assert!(
+        selection(&mut rt, client, pane).is_some(),
+        "the highlight stays; the exit rules end it as usual"
+    );
+}
+
+#[test]
+fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
+    // The exact chord a person presses to "copy": Ctrl+C. It is not bound, so
+    // it falls through to the shell (SIGINT) — input reaching the pane's
+    // child — and the highlight clears, exactly the behavior zellij shows.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+
+    rt.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+        clock.tick(),
+    );
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "Ctrl+C reached the shell, so the highlight is gone"
     );
 }
 

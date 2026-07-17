@@ -7,6 +7,7 @@
 //! container.
 
 pub mod bootstrap;
+pub mod clipboard;
 pub mod command;
 pub mod driver;
 pub mod event;

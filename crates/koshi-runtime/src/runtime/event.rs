@@ -98,6 +98,15 @@ pub enum RuntimeEvent {
         /// The decoded event: kind, cell position, and modifiers.
         mouse: MouseInput,
     },
+    /// Text the client's outer terminal pasted — the OS paste key pressed in
+    /// the terminal koshi runs in, delivered whole so no character of it can
+    /// fire a keybinding.
+    HostPaste {
+        /// Client whose terminal pasted.
+        client_id: ClientId,
+        /// The pasted text, exactly as the outer terminal delivered it.
+        text: String,
+    },
     /// A command delivered over the IPC socket, from external or in-session CLI.
     Ipc(CommandEnvelope),
     /// A capability-checked command issued by a plugin.

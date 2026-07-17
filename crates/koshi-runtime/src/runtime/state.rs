@@ -11,7 +11,7 @@ use std::{
 
 use koshi_config::types::KoshiConfig;
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -104,6 +104,12 @@ pub struct Runtime {
     /// True once a `core:quit` command was applied. The event loop polls it
     /// after each event batch and exits; the flag never resets.
     pub(crate) quit_requested: bool,
+    /// Bytes waiting to be written to each client's own outer terminal —
+    /// escape sequences aimed at the terminal program the client runs in, not
+    /// at any pane's child. The copy command queues its OSC 52 clipboard
+    /// write here; the client's event loop drains the queue with
+    /// [`take_host_writes`](Self::take_host_writes) each turn.
+    host_writes: HashMap<ClientId, Vec<u8>>,
 }
 
 impl Runtime {
@@ -145,9 +151,25 @@ impl Runtime {
             draining: false,
             immediate_shutdown: false,
             quit_requested: false,
+            host_writes: HashMap::new(),
             config_layers,
             config,
         }
+    }
+
+    /// Take every byte queued for `client_id`'s outer terminal, or `None` when
+    /// nothing is queued. The caller writes them to the terminal verbatim.
+    pub fn take_host_writes(&mut self, client_id: ClientId) -> Option<Vec<u8>> {
+        self.host_writes.remove(&client_id)
+    }
+
+    /// Queue `bytes` for `client_id`'s outer terminal, behind anything already
+    /// queued.
+    pub(crate) fn queue_host_write(&mut self, client_id: ClientId, bytes: &[u8]) {
+        self.host_writes
+            .entry(client_id)
+            .or_default()
+            .extend_from_slice(bytes);
     }
 
     /// Whether a `core:quit` command was applied; the event loop exits when

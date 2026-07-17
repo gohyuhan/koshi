@@ -293,6 +293,10 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
         (ctrl_then('s', Key::Char('j')), bound("resize-pane-down")),
         (ctrl_then('s', Key::Char('k')), bound("resize-pane-up")),
         (ctrl_then('s', Key::Char('l')), bound("resize-pane-right")),
+        // Copy and paste have NO bindings — they follow the OS. Releasing a
+        // selection puts its text on the clipboard (through the outer
+        // terminal), and the OS paste key feeds the clipboard back in as
+        // input.
         // Tabs. Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
         // exception to the non-typeable-opening rule (2026-07-12): outside
         // locked mode the keymap owns Tab, so a shell only sees a literal Tab
