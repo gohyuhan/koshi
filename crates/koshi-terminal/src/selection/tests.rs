@@ -3,8 +3,9 @@
 
 use super::*;
 
-use koshi_core::command::GridPos;
+use koshi_core::{command::GridPos, process::PtySize};
 
+use crate::engine::TerminalEngine;
 use crate::scrollback::ScrollbackLimit;
 use crate::style::Style;
 
@@ -258,6 +259,36 @@ fn a_word_crosses_a_soft_wrap_out_of_history_onto_the_screen() {
 }
 
 #[test]
+fn a_live_autowrap_keeps_one_word_across_history_and_screen() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 3, rows: 2 });
+    let _ = engine.advance(b"abcdefg");
+    let view = engine.state().text_view();
+
+    assert_eq!(row_text(&view, 0), "abc");
+    assert_eq!(row_text(&view, 1), "def");
+    assert_eq!(row_text(&view, 2), "g");
+    assert_eq!(view.word_start(2, 0), (0, 0));
+    assert_eq!(view.word_end(0, 0), (2, 0));
+}
+
+#[test]
+fn a_wide_wrap_spacer_is_neither_a_word_break_nor_copied_text() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 3, rows: 2 });
+    let _ = engine.advance("abcde世".as_bytes());
+    let view = engine.state().text_view();
+
+    assert!(view.is_wide_wrap_spacer(1, 2));
+    assert_eq!(view.word_start(2, 0), (0, 0));
+    assert_eq!(view.word_end(0, 0), (2, 0));
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 2, col: 1 },
+    };
+    assert_eq!(selection_text(&view, &selection, false), "abcde世");
+}
+
+#[test]
 fn a_logical_line_spans_every_row_it_wrapped_over() {
     let scrollback = scrollback_of(&[], 100);
     let mut grid = grid_of(&["one", "two", "thr", "end"], 3);
@@ -440,7 +471,7 @@ fn selection_text_reads_the_range_inclusive() {
         anchor: GridPos { row: 0, col: 6 },
         cursor: GridPos { row: 0, col: 10 },
     };
-    assert_eq!(selection_text(&view, &selection), "world");
+    assert_eq!(selection_text(&view, &selection, true), "world");
 }
 
 #[test]
@@ -455,7 +486,7 @@ fn selection_text_joins_hard_rows_with_newlines_and_soft_wraps_with_nothing() {
         anchor: GridPos { row: 0, col: 0 },
         cursor: GridPos { row: 2, col: 2 },
     };
-    assert_eq!(selection_text(&view, &selection), "abcdef\nghi");
+    assert_eq!(selection_text(&view, &selection, true), "abcdef\nghi");
 }
 
 #[test]
@@ -468,7 +499,52 @@ fn selection_text_takes_the_same_columns_from_every_block_row() {
         anchor: GridPos { row: 0, col: 1 },
         cursor: GridPos { row: 2, col: 3 },
     };
-    assert_eq!(selection_text(&view, &selection), "bcd\nghi\nlmn");
+    assert_eq!(selection_text(&view, &selection, true), "bcd\nghi\nlmn");
+}
+
+#[test]
+fn selection_text_applies_the_trim_setting_to_every_selection_kind() {
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["ab  ", "c   "], 4);
+    let view = TextView::new(&scrollback, &grid);
+
+    for kind in [
+        SelectionKind::Character,
+        SelectionKind::Word,
+        SelectionKind::Line,
+    ] {
+        let selection = Selection {
+            kind,
+            anchor: GridPos { row: 0, col: 0 },
+            cursor: GridPos { row: 0, col: 3 },
+        };
+        assert_eq!(selection_text(&view, &selection, true), "ab");
+        assert_eq!(selection_text(&view, &selection, false), "ab  ");
+    }
+
+    let block = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 1, col: 3 },
+    };
+    assert_eq!(selection_text(&view, &block, true), "ab\nc");
+    assert_eq!(selection_text(&view, &block, false), "ab  \nc   ");
+}
+
+#[test]
+fn trimming_keeps_spaces_inside_a_soft_wrapped_line() {
+    let scrollback = scrollback_of(&[], 100);
+    let mut grid = grid_of(&["ab ", "cd "], 3);
+    grid.set_row_end(0, RowEnd::Soft);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 1, col: 2 },
+    };
+
+    assert_eq!(selection_text(&view, &selection, true), "ab cd");
+    assert_eq!(selection_text(&view, &selection, false), "ab cd ");
 }
 
 #[test]
@@ -490,7 +566,7 @@ fn selection_text_reads_a_wide_glyph_once_and_drops_trailing_blanks() {
     };
     // The width-0 half is skipped, and the blanks right of `x` are the
     // screen's padding, not the text's.
-    assert_eq!(selection_text(&view, &selection), "世x");
+    assert_eq!(selection_text(&view, &selection, true), "世x");
 }
 
 #[test]
@@ -503,7 +579,7 @@ fn selection_text_spans_history_and_screen() {
         anchor: GridPos { row: 0, col: 4 },
         cursor: GridPos { row: 1, col: 2 },
     };
-    assert_eq!(selection_text(&view, &selection), "line\nnew");
+    assert_eq!(selection_text(&view, &selection, true), "line\nnew");
 }
 
 #[test]

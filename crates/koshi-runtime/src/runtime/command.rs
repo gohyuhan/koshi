@@ -312,11 +312,12 @@ impl Runtime {
     }
 
     /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's
-    /// highlight in `args.pane`, leaving visual mode for that pane.
+    /// highlight and matching in-flight drag in `args.pane`, ending selection
+    /// activity for that pane.
     ///
-    /// Clearing a pane the client has no highlight in changes nothing and is not
-    /// an error: the ways a highlight ends (a click, a key press) fire without
-    /// first checking whether one was up.
+    /// Clearing a pane with neither state changes nothing and is not an error:
+    /// the ways selection ends (a click, a key press) fire without first
+    /// checking whether either was active.
     ///
     /// Dropping the highlight releases the hold it had on the view, so a view at
     /// the live bottom follows new output again. A view that had also been
@@ -332,6 +333,12 @@ impl Runtime {
             .client_mut(client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         client.clear_selection(args.pane);
+        if client
+            .selection_drag()
+            .is_some_and(|drag| drag.pane == args.pane)
+        {
+            client.set_selection_drag(None);
+        }
         Ok(Self::commit_events(
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {

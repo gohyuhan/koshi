@@ -107,12 +107,9 @@ impl vte::Perform for TerminalState {
         // overwrites in place; either way the parked latch is cleared.
         if self.active_cursor().pending_wrap {
             if self.modes.autowrap {
-                // The row the cursor leaves soft-wraps into the next: record
-                // it (before the linefeed, so a scroll carries the mark with
-                // the row) so a resize reflow re-joins the two rows.
-                let row = self.active_cursor().row;
-                self.active_grid_mut().set_row_end(row, RowEnd::Soft);
-                self.linefeed();
+                // The row the cursor leaves soft-wraps into the next, including
+                // when a bottom-margin scroll moves it above a fresh blank row.
+                self.wrap_linefeed(RowEnd::Soft);
                 self.active_cursor_mut().col = 0;
             }
             self.clear_wrap_latch();
@@ -148,8 +145,7 @@ impl vte::Perform for TerminalState {
             }
             // The freed last column is a wide-glyph spacer, not text: record
             // the wrap so a reflow re-joins the rows AND drops the spacer.
-            self.active_grid_mut().set_row_end(row, RowEnd::SoftWide);
-            self.linefeed();
+            self.wrap_linefeed(RowEnd::SoftWide);
             self.active_cursor_mut().col = 0;
             self.clear_wrap_latch();
         }

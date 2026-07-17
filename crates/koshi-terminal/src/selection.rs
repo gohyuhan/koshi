@@ -183,6 +183,16 @@ impl<'a> TextView<'a> {
             .is_some_and(|(_, end)| matches!(end, RowEnd::Soft | RowEnd::SoftWide))
     }
 
+    /// Whether `row`/`col` is the blank last-column spacer left when a wide
+    /// glyph wrapped whole onto the next row. The spacer carries layout only;
+    /// it is not selectable text.
+    #[must_use]
+    pub fn is_wide_wrap_spacer(&self, row: u64, col: u16) -> bool {
+        self.row(row).is_some_and(|(cells, end)| {
+            end == RowEnd::SoftWide && usize::from(col).checked_add(1) == Some(cells.len())
+        })
+    }
+
     /// The first row of the logical line containing `row`: walk up while the row
     /// above wrapped into this one.
     ///
@@ -237,7 +247,9 @@ impl<'a> TextView<'a> {
             } else {
                 return None;
             }
-            if self.cell(row, col).is_none_or(|cell| cell.width() != 0) {
+            if !self.is_wide_wrap_spacer(row, col)
+                && self.cell(row, col).is_none_or(|cell| cell.width() != 0)
+            {
                 return Some((row, col));
             }
         }
@@ -257,7 +269,9 @@ impl<'a> TextView<'a> {
             } else {
                 return None;
             }
-            if self.cell(row, col).is_none_or(|cell| cell.width() != 0) {
+            if !self.is_wide_wrap_spacer(row, col)
+                && self.cell(row, col).is_none_or(|cell| cell.width() != 0)
+            {
                 return Some((row, col));
             }
         }
@@ -336,11 +350,17 @@ impl<'a> TextView<'a> {
 /// takes the same column range from every row and always joins with `\n`.
 /// The blank right half of a wide glyph is skipped (the glyph's text lives in
 /// its left half); combining marks ride along with their base. Trailing
-/// blanks are dropped from each finished line — the padding right of the text
-/// is the screen's, not the text's — but not inside a soft-wrapped row, where
-/// spaces continue onto the next row. A row that no longer exists is skipped.
+/// When `trim_trailing_whitespace` is true, trailing blanks are dropped from
+/// each finished line — the padding right of the text is the screen's, not the
+/// text's — but not inside a soft-wrapped row, where spaces continue onto the
+/// next row. When false, every selected blank is preserved. A row that no
+/// longer exists is skipped.
 #[must_use]
-pub fn selection_text(view: &TextView<'_>, selection: &Selection) -> String {
+pub fn selection_text(
+    view: &TextView<'_>,
+    selection: &Selection,
+    trim_trailing_whitespace: bool,
+) -> String {
     let ordered = order(selection.anchor, selection.cursor);
     let (start, end) = (ordered.start, ordered.end);
     let last_col = view.cols().saturating_sub(1);
@@ -368,13 +388,13 @@ pub fn selection_text(view: &TextView<'_>, selection: &Selection) -> String {
             let Some(cell) = cells.get(col as usize) else {
                 break;
             };
-            if cell.width() == 0 {
+            if cell.width() == 0 || view.is_wide_wrap_spacer(row, col) {
                 continue;
             }
             line.push(cell.ch());
             line.extend(cell.combining());
         }
-        if block || !view.wraps(row) {
+        if trim_trailing_whitespace && (block || !view.wraps(row)) {
             out.push_str(line.trim_end());
         } else {
             out.push_str(&line);

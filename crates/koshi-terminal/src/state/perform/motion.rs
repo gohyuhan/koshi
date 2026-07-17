@@ -2,6 +2,7 @@
 //! index, save / restore cursor, absolute placement, the deferred-wrap latch,
 //! and tab-stop math.
 
+use crate::grid::state::RowEnd;
 use crate::state::{RenderState, SavedCursor, Screen, TerminalState};
 use crate::style::Style;
 
@@ -72,6 +73,29 @@ impl TerminalState {
             if self.active_cursor().row < last_row {
                 self.active_cursor_mut().row += 1;
             }
+        }
+    }
+
+    /// Soft-wrap the cursor row into the next line, preserving `end` across a
+    /// scroll at the bottom margin. The departing row carries `end` into
+    /// scrollback, and the row shifted above the new blank bottom keeps the same
+    /// link to the glyph written there next.
+    pub(super) fn wrap_linefeed(&mut self, end: RowEnd) {
+        let before = self.active_cursor().row;
+        let at_scroll_bottom = before == self.region_bounds().1;
+        self.active_grid_mut().set_row_end(before, end);
+        self.linefeed();
+
+        let after = self.active_cursor().row;
+        let continued_row = if after > before {
+            Some(before)
+        } else if at_scroll_bottom {
+            after.checked_sub(1)
+        } else {
+            None
+        };
+        if let Some(row) = continued_row {
+            self.active_grid_mut().set_row_end(row, end);
         }
     }
 

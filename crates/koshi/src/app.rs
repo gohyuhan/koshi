@@ -252,20 +252,20 @@ fn run_loop<B: Backend>(
         while let Ok(event) = runtime.inbox_rx().try_recv() {
             quit |= handle_event(runtime, event).is_break();
         }
-        if quit || runtime.quit_requested() {
-            break;
-        }
-        runtime.expire_key_sequences(Instant::now());
-        runtime.expire_selection_scrolls(Instant::now());
-        // Escapes aimed at this client's own outer terminal — a copy's OSC 52
-        // clipboard write — go straight to stdout; they draw nothing, so the
-        // frame diffing above them is undisturbed.
+        // Escapes aimed at this client's outer terminal — a copy's OSC 52
+        // clipboard write — reach stdout before a queued quit is honored.
+        // They draw nothing and do not change renderer state.
         if let Some(bytes) = runtime.take_host_writes(client_id) {
             use std::io::Write;
             let mut stdout = std::io::stdout();
             let _ = stdout.write_all(&bytes);
             let _ = stdout.flush();
         }
+        if quit || runtime.quit_requested() {
+            break;
+        }
+        runtime.expire_key_sequences(Instant::now());
+        runtime.expire_selection_scrolls(Instant::now());
         if runtime.poll_render(Instant::now()) {
             render(
                 terminal,

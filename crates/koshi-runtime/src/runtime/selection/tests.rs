@@ -1411,6 +1411,32 @@ fn releasing_the_gesture_is_the_copy() {
 }
 
 #[test]
+fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    rt.config.copy.trim_trailing_whitespace = false;
+    feed(&mut rt, pane, b"a");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, alt_press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 2, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 2, 0)),
+        clock.tick(),
+    );
+
+    assert_eq!(
+        rt.take_host_writes(client).expect("queued clipboard write"),
+        b"\x1b]52;c;YSAg\x07".to_vec()
+    );
+}
+
+#[test]
 fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
     // The exact chord a person presses to "copy": Ctrl+C. It is not bound, so
     // it falls through to the shell (SIGINT) — input reaching the pane's
@@ -1481,9 +1507,7 @@ fn typing_into_the_pane_clears_the_typists_highlight_there() {
 }
 
 #[test]
-fn typing_leaves_a_highlight_in_another_pane_alone() {
-    // Only the pane the key reaches exits visual mode; a highlight standing in
-    // some other pane is not this key's business.
+fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
     let (mut rt, client, pane) = runtime();
     let mut clock = Clock::new();
     feed(&mut rt, pane, b"hello world");
@@ -1495,12 +1519,79 @@ fn typing_leaves_a_highlight_in_another_pane_alone() {
         drag_at(cell_at(&rt, client, pane, 4, 0)),
         clock.tick(),
     );
+    assert!(selection(&mut rt, client, pane).is_some());
+    assert!(rt
+        .client_mut(client)
+        .expect("client")
+        .selection_drag()
+        .is_some());
+
+    rt.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+        clock.tick(),
+    );
+    assert_eq!(selection(&mut rt, client, pane), None);
+    assert_eq!(
+        rt.client_mut(client).expect("client").selection_drag(),
+        None
+    );
+
     rt.handle_mouse_input(
         client,
-        release_at(cell_at(&rt, client, pane, 4, 0)),
+        drag_at(cell_at(&rt, client, pane, 6, 0)),
+        clock.tick(),
+    );
+    assert_eq!(selection(&mut rt, client, pane), None);
+}
+
+#[test]
+fn typing_after_a_press_cancels_the_empty_gesture() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    assert_eq!(selection(&mut rt, client, pane), None);
+    assert!(rt
+        .client_mut(client)
+        .expect("client")
+        .selection_drag()
+        .is_some());
+
+    rt.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+        clock.tick(),
+    );
+    assert_eq!(
+        rt.client_mut(client).expect("client").selection_drag(),
+        None
+    );
+}
+
+#[test]
+fn typing_leaves_another_panes_highlight_and_drag_alone() {
+    // Only the pane the key reaches ends selection activity; another pane's
+    // highlight and in-flight drag are not this key's business.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
         clock.tick(),
     );
     let highlighted = selection(&mut rt, client, pane).expect("highlighted");
+    let drag = rt
+        .client_mut(client)
+        .expect("client")
+        .selection_drag()
+        .expect("dragging");
 
     // The split focuses the new pane, so the key types into it.
     let other = split(&mut rt, client);
@@ -1514,6 +1605,11 @@ fn typing_leaves_a_highlight_in_another_pane_alone() {
         selection(&mut rt, client, pane),
         Some(highlighted),
         "the highlight in the unfocused pane stands"
+    );
+    assert_eq!(
+        rt.client_mut(client).expect("client").selection_drag(),
+        Some(drag),
+        "the drag in the unfocused pane stands"
     );
 }
 

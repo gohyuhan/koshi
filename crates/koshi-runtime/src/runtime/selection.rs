@@ -152,11 +152,13 @@ impl Runtime {
     /// selection IS the copy, as zellij ships it. The highlighted text is
     /// read at this instant, while it is exactly what the user saw, and goes
     /// to the client's outer terminal as OSC 52, which sets the OS clipboard.
+    /// Trailing blanks are trimmed or preserved from the current copy config.
     /// Pressing the OS copy key afterward is a harmless no-op (the clipboard
     /// is already filled) — and being a key, it reaches the pane and so
     /// clears the highlight, like any input reaching the pane's child. A
     /// plain click, whose press highlighted nothing, copies nothing.
     pub(crate) fn end_selection_drag(&mut self, client_id: ClientId) {
+        let trim_trailing_whitespace = self.config.copy.trim_trailing_whitespace;
         let Some(drag) = self
             .client_mut(client_id)
             .and_then(|client| client.selection_drag())
@@ -173,8 +175,11 @@ impl Runtime {
             return;
         };
         if let Some(engine) = self.terminal_engines.get(&drag.pane) {
-            let text =
-                koshi_terminal::selection::selection_text(&engine.state().text_view(), &selection);
+            let text = koshi_terminal::selection::selection_text(
+                &engine.state().text_view(),
+                &selection,
+                trim_trailing_whitespace,
+            );
             if !text.is_empty() {
                 let sequence = crate::runtime::clipboard::osc52_copy(&text);
                 self.queue_host_write(client_id, &sequence);
@@ -292,7 +297,10 @@ impl Runtime {
         // never covers only an invisible cell.
         let view = state.text_view();
         let mut col = col;
-        while col > 0 && view.cell(row, col).is_some_and(|cell| cell.width() == 0) {
+        while col > 0
+            && (view.cell(row, col).is_some_and(|cell| cell.width() == 0)
+                || view.is_wide_wrap_spacer(row, col))
+        {
             col -= 1;
         }
         Some(GridPos { row, col })
@@ -468,15 +476,18 @@ impl Runtime {
         }
     }
 
-    /// Drop `client_id`'s highlight in `pane_id` because its input reached the
-    /// pane's child: the key or click belongs to the program running there, so
-    /// the highlight gets out of the way, the way typing replaces a selection
-    /// in an editor. A client with no highlight there dispatches nothing.
+    /// Drop `client_id`'s highlight and matching drag in `pane_id` because its
+    /// input reached the pane's child: the key or click belongs to the program
+    /// running there, so the selection gesture ends. A client with neither
+    /// state there dispatches nothing.
     pub(crate) fn clear_selection_on_pane_input(&mut self, client_id: ClientId, pane_id: PaneId) {
-        let highlighted = self
-            .client_mut(client_id)
-            .is_some_and(|client| client.selection(pane_id).is_some());
-        if highlighted {
+        let selecting = self.client_mut(client_id).is_some_and(|client| {
+            client.selection(pane_id).is_some()
+                || client
+                    .selection_drag()
+                    .is_some_and(|drag| drag.pane == pane_id)
+        });
+        if selecting {
             self.dispatch_visual(
                 client_id,
                 VisualCommand::ClearSelection(ClearSelectionArgs { pane: pane_id }),
