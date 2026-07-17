@@ -484,8 +484,8 @@ fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen(
 
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     let pane = snap.panes.iter().find(|p| p.id == pane_id).expect("pane");
-    // The alternate screen keeps no scrollback: the parked offset does not apply,
-    // so the view follows live and the renderer sees offset 0.
+    // The alternate screen keeps no scrollback: the client's stored offset does
+    // not apply there, so the renderer sees effective offset 0.
     assert_eq!(pane.grid_view.as_ref().unwrap().view_offset, 0);
 }
 

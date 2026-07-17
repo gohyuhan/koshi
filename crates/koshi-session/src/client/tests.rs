@@ -5,6 +5,7 @@
 
 use std::time::SystemTime;
 
+use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -271,6 +272,15 @@ fn re_attaching_the_same_id_replaces_and_returns_the_prior() {
     assert_eq!(registry.get(id).map(Client::active_tab), Some(tab_second));
 }
 
+/// A highlight, whose shape does not matter to the view rules under test.
+fn a_selection() -> Selection {
+    Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 4 },
+    }
+}
+
 #[test]
 fn scroll_offset_defaults_to_zero_for_an_unscrolled_pane() {
     let client = a_client(TabId::new());
@@ -289,7 +299,7 @@ fn set_scroll_offset_records_and_reads_back_per_pane() {
 }
 
 #[test]
-fn set_scroll_offset_zero_clears_the_entry_restoring_live_following() {
+fn set_scroll_offset_zero_clears_the_entry() {
     let mut client = a_client(TabId::new());
     let pane = PaneId::new();
 
@@ -309,6 +319,182 @@ fn list_attached_mut_reaches_every_client_for_in_place_updates() {
         client.set_scroll_offset(pane, 4);
     }
     assert!(registry.list_attached().all(|c| c.scroll_offset(pane) == 4));
+}
+
+// --- is_view_held: the two reasons a view is held ----------------------
+
+#[test]
+fn a_view_at_the_bottom_with_no_highlight_is_not_held() {
+    let client = a_client(TabId::new());
+    assert!(!client.is_view_held(PaneId::new()));
+}
+
+#[test]
+fn a_scrolled_up_view_is_held() {
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+
+    client.set_scroll_offset(pane, 1); // one line up is enough
+    assert!(client.is_view_held(pane));
+}
+
+#[test]
+fn a_highlight_holds_a_view_sitting_at_the_bottom() {
+    // The state an offset alone cannot express: at the newest line and held.
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+
+    client.set_selection(pane, a_selection());
+    assert_eq!(client.scroll_offset(pane), 0);
+    assert!(client.is_view_held(pane));
+}
+
+#[test]
+fn a_highlight_holds_its_view_no_matter_where_it_is_scrolled() {
+    // Both reasons at once: still held, and scrolling back to the bottom does not
+    // release it while the highlight is up.
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+    client.set_selection(pane, a_selection());
+
+    client.set_scroll_offset(pane, 5);
+    assert!(client.is_view_held(pane));
+
+    client.set_scroll_offset(pane, 0); // scrolled back to the newest line
+    assert!(client.is_view_held(pane));
+}
+
+#[test]
+fn clearing_a_highlight_at_the_bottom_releases_the_view() {
+    // Nothing has to remember to release it: the highlight was the only thing
+    // holding it, so dropping the highlight is the release.
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+    client.set_selection(pane, a_selection());
+    assert!(client.is_view_held(pane));
+
+    client.clear_selection(pane);
+    assert!(!client.is_view_held(pane));
+}
+
+#[test]
+fn clearing_a_highlight_leaves_a_scrolled_up_view_held() {
+    // The other reason survives on its own: the view is still 3 lines up, so it
+    // stays held until it is scrolled back to the bottom.
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+    client.set_selection(pane, a_selection());
+    client.set_scroll_offset(pane, 3);
+
+    client.clear_selection(pane);
+    assert!(client.is_view_held(pane));
+
+    client.set_scroll_offset(pane, 0);
+    assert!(!client.is_view_held(pane));
+}
+
+#[test]
+fn a_highlight_holds_only_its_own_pane() {
+    let mut client = a_client(TabId::new());
+    let (held, other) = (PaneId::new(), PaneId::new());
+
+    client.set_selection(held, a_selection());
+    assert!(client.is_view_held(held));
+    assert!(!client.is_view_held(other));
+}
+
+#[test]
+fn highlighting_a_second_pane_leaves_the_first_panes_highlight_alone() {
+    // One highlight per client, so starting one in `second` drops the one in
+    // `first` — and `first` has nothing holding it any more, so it follows live
+    // again. Nothing has to release it; the single `Option` is the whole rule.
+    let mut client = a_client(TabId::new());
+    let (first, second) = (PaneId::new(), PaneId::new());
+    client.set_selection(first, a_selection());
+
+    client.set_selection(second, a_selection());
+
+    assert_eq!(client.selection(first), Some(a_selection()));
+    assert_eq!(client.selection(second), Some(a_selection()));
+    assert!(client.is_view_held(first));
+    assert!(client.is_view_held(second));
+}
+
+#[test]
+fn selection_reads_back_per_pane() {
+    let mut client = a_client(TabId::new());
+    let (pane, other) = (PaneId::new(), PaneId::new());
+    assert_eq!(client.selection(pane), None);
+
+    client.set_selection(pane, a_selection());
+    assert_eq!(client.selection(pane), Some(a_selection()));
+    assert_eq!(client.selection(other), None);
+}
+
+#[test]
+fn setting_a_highlight_twice_in_one_pane_replaces_it() {
+    // A drag re-issues the highlight as it grows; the pane holds the latest.
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+    client.set_selection(pane, a_selection());
+
+    let grown = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 2, col: 7 },
+    };
+    client.set_selection(pane, grown);
+    assert_eq!(client.selection(pane), Some(grown));
+}
+
+#[test]
+fn clear_selection_drops_only_that_panes_highlight() {
+    let mut client = a_client(TabId::new());
+    let (pane, other) = (PaneId::new(), PaneId::new());
+    client.set_selection(pane, a_selection());
+    client.set_selection(other, a_selection());
+
+    client.clear_selection(other);
+
+    assert_eq!(client.selection(pane), Some(a_selection()));
+    assert!(client.is_view_held(pane));
+    assert_eq!(client.selection(other), None);
+    assert!(!client.is_view_held(other));
+}
+
+#[test]
+fn clearing_a_pane_with_no_highlight_changes_nothing() {
+    let mut client = a_client(TabId::new());
+    let pane = PaneId::new();
+
+    client.clear_selection(pane);
+    assert_eq!(client.selection(pane), None);
+    assert!(!client.is_view_held(pane));
+}
+
+#[test]
+fn one_clients_highlight_leaves_another_viewing_the_same_pane_alone() {
+    // Two clients on one pane: the highlight is per-client, so one selecting must
+    // not hold the other's view.
+    let mut registry = ClientRegistry::new();
+    let pane = PaneId::new();
+    let (first, second) = (a_client(TabId::new()), a_client(TabId::new()));
+    let (first_id, second_id) = (first.id(), second.id());
+    registry.attach(first);
+    registry.attach(second);
+
+    registry
+        .get_mut(first_id)
+        .expect("the client was just attached")
+        .set_selection(pane, a_selection());
+
+    let first = registry.get(first_id).expect("attached");
+    assert_eq!(first.selection(pane), Some(a_selection()));
+    assert!(first.is_view_held(pane));
+
+    let second = registry.get(second_id).expect("attached");
+    assert_eq!(second.selection(pane), None);
+    assert!(!second.is_view_held(pane));
 }
 
 // --- pane_viewport -----------------------------------------------------
