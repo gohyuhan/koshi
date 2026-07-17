@@ -168,8 +168,7 @@ impl TerminalState {
             }
             // The vacated last column is a wide-glyph spacer: record the wrap
             // so a resize reflow re-joins the rows and drops the spacer.
-            self.active_grid_mut().set_row_end(row, RowEnd::SoftWide);
-            self.linefeed();
+            self.wrap_linefeed(RowEnd::SoftWide);
             self.active_cursor_mut().col = 0;
             self.clear_wrap_latch();
 

@@ -17,13 +17,14 @@ use std::time::SystemTime;
 
 use koshi_core::{
     command::{
-        ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource,
-        FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs, NewPaneArgs,
-        NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, TabTarget, VisualCommand, WriteToPaneArgs,
+        ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
+        CommandSource, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
+        NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
+        RunCommandPaneArgs, SetSelectionArgs, TabTarget, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
+        SelectionChanged,
     },
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
@@ -221,7 +222,7 @@ impl Runtime {
                     envelope.issued_at,
                 )
             }
-            Command::Visual(command) => Ok(self.handle_visual(command_id, &command)),
+            Command::Visual(command) => self.handle_visual(command_id, &envelope.source, &command),
             Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
             Command::Quit => Ok(self.handle_quit(command_id)),
             Command::TogglePaneFullscreen => {
@@ -251,15 +252,124 @@ impl Runtime {
         }
     }
 
-    /// Route a [`Command::Visual`] sub-command to its handler. The exhaustive
-    /// match gives each [`VisualCommand`] variant its own routing seam; every
-    /// arm rejects with [`RejectReason::InvalidState`] until selection handling
-    /// lands.
-    fn handle_visual(&self, command_id: CommandId, command: &VisualCommand) -> CommandResult {
+    /// Route a [`Command::Visual`] sub-command to its handler.
+    ///
+    /// Every variant acts on the issuing client's own highlights — a highlight
+    /// belongs to one client, so there is no other client it could mean.
+    /// [`Self::validate`] has already confirmed the source names an attached
+    /// client (`Command::Visual` is in
+    /// [`requires_issuing_client`](Self::requires_issuing_client)).
+    fn handle_visual(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        command: &VisualCommand,
+    ) -> Result<CommandResult, Rejection> {
         match command {
-            VisualCommand::SetSelection(_) => self.reject(command_id, "selection"),
-            VisualCommand::ClearSelection => self.reject(command_id, "selection"),
-            VisualCommand::Copy(_) => self.reject(command_id, "selection"),
+            VisualCommand::SetSelection(args) => {
+                self.handle_set_selection(command_id, source, args)
+            }
+            VisualCommand::ClearSelection(args) => {
+                self.handle_clear_selection(command_id, source, args)
+            }
+            // The copy surface for commands (IPC, plugins) is unbuilt; the
+            // interactive copy happens at the selection gesture's release.
+            VisualCommand::Copy(_) => Ok(self.reject(command_id, "copy")),
+        }
+    }
+
+    /// Handle [`VisualCommand::SetSelection`]: highlight `args.selection` in
+    /// `args.pane` for the issuing client, replacing any highlight it had there.
+    ///
+    /// Only this client's highlight in this one pane moves — its highlights in
+    /// other panes, and every other client's, are untouched. Highlighting also
+    /// holds this client's view of the pane, so output arriving underneath
+    /// cannot drag the highlighted text off the screen
+    /// ([`Client::is_view_held`]).
+    ///
+    /// A pane that does not exist in the client's session is
+    /// [`RejectReason::TargetGone`] — the drag that named it raced a close.
+    fn handle_set_selection(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &SetSelectionArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let client_id = Self::issuing_client(source)?;
+        self.require_pane(client_id, args.pane)?;
+        let client = self
+            .client_mut(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        client.set_selection(args.pane, args.selection);
+        Ok(Self::commit_events(
+            command_id,
+            vec![Event::SelectionChanged(SelectionChanged {
+                client_id,
+                pane_id: args.pane,
+                selection: Some(args.selection),
+            })],
+        ))
+    }
+
+    /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's
+    /// highlight and matching in-flight drag in `args.pane`, ending selection
+    /// activity for that pane.
+    ///
+    /// Clearing a pane with neither state changes nothing and is not an error:
+    /// the ways selection ends (a click, a key press) fire without first
+    /// checking whether either was active.
+    ///
+    /// Dropping the highlight releases the hold it had on the view, so a view at
+    /// the live bottom follows new output again. A view that had also been
+    /// scrolled up stays held by the offset.
+    fn handle_clear_selection(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &ClearSelectionArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let client_id = Self::issuing_client(source)?;
+        let client = self
+            .client_mut(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
+        client.clear_selection(args.pane);
+        if client
+            .selection_drag()
+            .is_some_and(|drag| drag.pane == args.pane)
+        {
+            client.set_selection_drag(None);
+        }
+        Ok(Self::commit_events(
+            command_id,
+            vec![Event::SelectionChanged(SelectionChanged {
+                client_id,
+                pane_id: args.pane,
+                selection: None,
+            })],
+        ))
+    }
+
+    /// The client a command came from, for commands that act on that client's
+    /// own state and have no other target.
+    ///
+    /// [`Self::validate`] rejects such a command before any handler runs when
+    /// its source names no client, so reaching this with a clientless source
+    /// would mean the command escaped that gate.
+    fn issuing_client(source: &CommandSource) -> Result<ClientId, Rejection> {
+        source
+            .client_id()
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))
+    }
+
+    /// Confirm `pane_id` still exists in the session `client_id` is attached to.
+    fn require_pane(&self, client_id: ClientId, pane_id: PaneId) -> Result<(), Rejection> {
+        let exists = self
+            .session_for_client(client_id)
+            .is_some_and(|session| session.panes.get(pane_id).is_some());
+        if exists {
+            Ok(())
+        } else {
+            Err(Rejection::bare(RejectReason::TargetGone))
         }
     }
 
@@ -617,11 +727,11 @@ impl Runtime {
 
     /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
     /// size cache, terminal engine, each client's scroll offset for it (so the
-    /// per-view map holds no dead entries over the session's life), and any
-    /// client highlight that was in it. The one release point for pane
-    /// bookkeeping — every path that removes a pane funnels through here.
-    /// Explicit field refs so a caller can hold the owning session borrowed
-    /// alongside.
+    /// per-view map holds no dead entries over the session's life), any client
+    /// highlight that was in it, and any drag that was selecting in it. The one
+    /// release point for pane bookkeeping — every path that removes a pane
+    /// funnels through here. Explicit field refs so a caller can hold the owning
+    /// session borrowed alongside.
     fn release_pane_bookkeeping(
         pty_handles: &mut HashMap<PaneId, PtyHandle>,
         pty_sizes: &mut HashMap<PaneId, PtySize>,
@@ -635,6 +745,14 @@ impl Runtime {
         for client in clients.list_attached_mut() {
             client.set_scroll_offset(pane_id, 0);
             client.clear_selection(pane_id);
+            // A drag selecting in this pane has nothing left to select: the
+            // gesture ends with the pane rather than outliving it.
+            if client
+                .selection_drag()
+                .is_some_and(|drag| drag.pane == pane_id)
+            {
+                client.set_selection_drag(None);
+            }
         }
     }
 
@@ -2391,7 +2509,15 @@ impl Runtime {
             // Lock mode is client-scoped: the acting client (confirmed attached
             // by `acting_session`) is the whole target — no pane or tab to resolve.
             Command::ToggleLockMode | Command::SetLockMode(_) => Ok(()),
-            Command::TogglePaneFullscreen | Command::Visual(_) => {
+            // A highlight command names its own pane, so there is no default to
+            // resolve: the pane it names is the pane it means, and its handler
+            // confirms that one still exists. Falling back to the focused pane
+            // would let a command that named pane A act on pane B.
+            Command::Visual(VisualCommand::SetSelection(_) | VisualCommand::ClearSelection(_)) => {
+                Ok(())
+            }
+            // Copy carries no pane yet, so it still means the focused one.
+            Command::TogglePaneFullscreen | Command::Visual(VisualCommand::Copy(_)) => {
                 self.resolve_default_pane(source, session).map(drop)
             }
             Command::CloseTab(args) => self

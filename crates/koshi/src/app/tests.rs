@@ -13,10 +13,13 @@ use ratatui::backend::TestBackend;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
+use koshi_core::geometry::Point;
 use koshi_core::ids::{CommandId, PaneId};
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{ExitStatus, KillPolicy};
+use koshi_renderer::{hit_test, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
@@ -59,6 +62,20 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+/// The first screen cell belonging to the sole pane's terminal content.
+fn content_point(runtime: &Runtime, client_id: ClientId, pane_id: PaneId) -> Point {
+    let snapshot = runtime.build_snapshot(client_id).expect("snapshot");
+    for y in 0..snapshot.client.viewport.rows {
+        for x in 0..snapshot.client.viewport.cols {
+            let point = Point { x, y };
+            if hit_test(&snapshot, point) == (HitRegion::PaneContent { pane_id }) {
+                return point;
+            }
+        }
+    }
+    panic!("pane content cell");
 }
 
 #[test]
@@ -299,6 +316,43 @@ fn run_loop_exits_on_a_quit_event() {
         runtime.has_active_panes(),
         "the shell is still alive; the quit event ended the loop"
     );
+}
+
+#[test]
+fn selection_release_flushes_its_clipboard_write_before_queued_quit() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, tx, client_id, pane_id) = boot(&fake);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let start = content_point(&runtime, client_id, pane_id);
+    let end = Point {
+        x: start.x + 1,
+        y: start.y,
+    };
+    let mouse = |kind, at| RuntimeEvent::MouseInput {
+        client_id,
+        mouse: MouseInput {
+            kind,
+            at,
+            mods: ModFlags::NONE,
+        },
+    };
+
+    tx.send(RuntimeEvent::PtyOutput {
+        pane_id,
+        bytes: b"hi".to_vec(),
+    })
+    .expect("queue output");
+    tx.send(mouse(MouseKind::Press(MouseButton::Left), start))
+        .expect("queue press");
+    tx.send(mouse(MouseKind::Drag(MouseButton::Left), end))
+        .expect("queue drag");
+    tx.send(mouse(MouseKind::Release(MouseButton::Left), end))
+        .expect("queue release");
+    tx.send(RuntimeEvent::Quit).expect("queue quit");
+
+    run_loop(&mut runtime, &mut terminal, client_id).expect("loop");
+
+    assert_eq!(runtime.take_host_writes(client_id), None);
 }
 
 #[test]

@@ -10,6 +10,7 @@ pub mod error;
 pub mod grid;
 pub mod mouse_report;
 pub mod scrollback;
+pub mod selection;
 pub mod state;
 pub mod style;
 pub mod types;

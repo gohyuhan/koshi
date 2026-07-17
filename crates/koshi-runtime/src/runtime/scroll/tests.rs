@@ -102,7 +102,8 @@ fn held(rt: &Runtime, client: ClientId, pane: PaneId) -> bool {
 }
 
 /// Put the client in visual mode with a highlight in the pane, as the mouse layer
-/// does on a drag. The highlight's shape does not matter to the view rules.
+/// does on a drag. The highlight sits on row 0 — the oldest line — which the view
+/// rules do not care about, until an erase drops every line under it.
 fn highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
     let selection = Selection {
         kind: SelectionKind::Character,
@@ -300,10 +301,72 @@ fn erasing_the_scrollback_returns_a_scrolled_view_to_live_output() {
 }
 
 #[test]
-fn erasing_the_scrollback_leaves_a_highlighted_view_held() {
+fn erasing_the_scrollback_leaves_a_live_screen_highlight_held() {
     // ED 3 erases the scrollback and leaves the live screen alone, so a highlight
-    // at the newest line still covers exactly the text it did. The offset
+    // on the live screen still covers exactly the text it did. The offset
     // reclamps to 0 but the highlight keeps holding the view.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    // Three lines pushed, so the live screen's top row is line 3.
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 3, col: 0 },
+        cursor: GridPos { row: 3, col: 4 },
+    };
+    rt.client_mut(client)
+        .unwrap()
+        .set_selection(pane, selection);
+
+    rt.handle_pty_output(pane, b"\x1b[3J");
+    assert_eq!(retained(&rt, pane), 0);
+    assert_eq!(offset(&rt, client, pane), 0);
+    assert!(held(&rt, client, pane));
+}
+
+#[test]
+fn evicting_a_highlights_lines_leaves_the_view_scrolled_up() {
+    // A highlight holds the view, so output converts the hold into a rising
+    // scroll offset. When the cap then evicts every line under the highlight,
+    // the highlight is dropped and the offset simply remains: `offset > 0`
+    // with no highlight is exactly the state of a client who scrolled up by
+    // hand, and it behaves the same way — the view stays until the client
+    // scrolls down.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    highlight(&mut rt, client, pane); // row 0, in history
+
+    // First storm: the held view's offset rises with the output.
+    rt.handle_pty_output(pane, &b"\n".repeat(5_000));
+    assert_eq!(offset(&rt, client, pane), 5_000);
+    assert!(held(&rt, client, pane));
+
+    // Second storm pushes past the 10 000-line cap: row 0 is evicted.
+    rt.handle_pty_output(pane, &b"\n".repeat(6_000));
+    assert!(
+        rt.client_mut(client).unwrap().selection(pane).is_none(),
+        "the highlight's lines are gone, so it is dropped"
+    );
+    assert_eq!(
+        offset(&rt, client, pane),
+        10_000,
+        "the offset stays, clamped to the oldest retained line"
+    );
+    assert!(
+        held(&rt, client, pane),
+        "held by the offset now — an ordinary scrolled-up view"
+    );
+
+    // Scrolling down by hand returns to live, like any scrolled-up view.
+    rt.scroll_to_bottom(client, pane);
+    assert_eq!(offset(&rt, client, pane), 0);
+    assert!(!held(&rt, client, pane));
+}
+
+#[test]
+fn erasing_the_scrollback_drops_a_highlight_that_lived_only_there() {
+    // The counterpart: a highlight whose every line the erase removed can never
+    // draw again, so it is dropped rather than left holding the view over
+    // nothing. The helper's highlight sits on row 0, erased here.
     let (mut rt, pane, client) = runtime_with_pane();
     rt.handle_pty_output(pane, b"\n\n\n");
     highlight(&mut rt, client, pane);
@@ -311,7 +374,7 @@ fn erasing_the_scrollback_leaves_a_highlighted_view_held() {
     rt.handle_pty_output(pane, b"\x1b[3J");
     assert_eq!(retained(&rt, pane), 0);
     assert_eq!(offset(&rt, client, pane), 0);
-    assert!(held(&rt, client, pane));
+    assert!(!held(&rt, client, pane));
 }
 
 #[test]

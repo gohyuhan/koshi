@@ -7,6 +7,7 @@
 //! container.
 
 pub mod bootstrap;
+pub mod clipboard;
 pub mod command;
 pub mod driver;
 pub mod event;
@@ -18,6 +19,7 @@ pub mod pty_output;
 pub mod reload;
 pub mod render_schedule;
 pub mod scroll;
+pub mod selection;
 pub mod shutdown;
 pub mod snapshot;
 pub mod state;

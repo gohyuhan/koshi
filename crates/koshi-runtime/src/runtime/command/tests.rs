@@ -220,7 +220,9 @@ fn client_scoped_command_without_a_client_is_unauthorized() {
         Command::ToggleLockMode,
         Command::SetLockMode(LockModeArgs { locked: true }),
         Command::TogglePaneFullscreen,
-        Command::Visual(VisualCommand::ClearSelection),
+        Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+            pane: PaneId::new(),
+        })),
     ];
 
     for command in commands {
@@ -1582,10 +1584,10 @@ fn client_without_focused_pane_is_not_found() {
     add_client(&mut session, client_id, TabId::new(), None);
     rt.sessions.insert(session.id, session);
 
-    // A Visual command resolves the focused pane; this client has none.
+    // Fullscreen acts on the focused pane; this client has none.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::Visual(VisualCommand::ClearSelection),
+        Command::TogglePaneFullscreen,
     );
     let command_id = env.id;
     assert_eq!(
@@ -1610,7 +1612,7 @@ fn focused_pane_that_no_longer_exists_is_not_found() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::Visual(VisualCommand::ClearSelection),
+        Command::TogglePaneFullscreen,
     );
     let command_id = env.id;
     assert_eq!(
@@ -1624,7 +1626,46 @@ fn focused_pane_that_no_longer_exists_is_not_found() {
 }
 
 #[test]
-fn a_visual_command_resolves_the_focused_pane() {
+fn a_highlight_command_names_its_own_pane_and_ignores_the_focused_one() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let focused = PaneId::new();
+    let other = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, focused);
+    add_pane(&mut session, other);
+    add_tab(&mut session, tab, focused);
+    add_client(&mut session, client_id, tab, Some(focused));
+    rt.sessions.insert(session.id, session);
+
+    // Highlight the pane that is NOT focused: the command names it, so the
+    // focused pane is not consulted and never falls in as a default.
+    let selection = a_selection();
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::Visual(VisualCommand::SetSelection(SetSelectionArgs {
+            pane: other,
+            selection,
+        })),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let client = rt.client_mut(client_id).expect("client");
+    assert_eq!(
+        client.selection(other),
+        Some(selection),
+        "the named pane is highlighted"
+    );
+    assert_eq!(
+        client.selection(focused),
+        None,
+        "the focused pane is untouched"
+    );
+}
+
+#[test]
+fn a_highlight_command_for_a_pane_that_is_gone_is_rejected() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -1635,9 +1676,101 @@ fn a_visual_command_resolves_the_focused_pane() {
     add_client(&mut session, client_id, tab, Some(pane));
     rt.sessions.insert(session.id, session);
 
+    // A drag that raced the pane closing names a pane the session no longer has.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::Visual(VisualCommand::ClearSelection),
+        Command::Visual(VisualCommand::SetSelection(SetSelectionArgs {
+            pane: PaneId::new(),
+            selection: a_selection(),
+        })),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetGone,
+            help: None,
+        }
+    );
+}
+
+#[test]
+fn clearing_a_pane_with_no_highlight_is_accepted_and_changes_nothing() {
+    let (mut rt, _tx) = new_runtime();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    add_client(&mut session, client_id, tab, Some(pane));
+    rt.sessions.insert(session.id, session);
+
+    // The ways a highlight ends fire without first checking one was up, so
+    // clearing nothing must not be an error.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs { pane })),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(
+        rt.client_mut(client_id).expect("client").selection(pane),
+        None
+    );
+}
+
+#[test]
+fn a_host_paste_lands_whole_in_the_focused_pane() {
+    // The OS paste key pressed in the outer terminal: the text arrives as one
+    // block and is written whole — a pasted Tab lands in the shell instead of
+    // firing the tab-switch binding.
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
+
+    rt.handle_host_paste(client_id, "ls\ttmp\ncat");
+    let writes = fake.writes(pane_a).expect("pane writes");
+    assert_eq!(
+        writes.last().expect("one write"),
+        b"ls\ttmp\rcat",
+        "raw bytes, line break as the Enter byte"
+    );
+}
+
+#[test]
+fn a_host_paste_wraps_in_bracketed_markers_when_the_pane_turned_them_on() {
+    let (mut rt, fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
+    rt.handle_pty_output(pane_a, b"\x1b[?2004h");
+
+    rt.handle_host_paste(client_id, "ok");
+    let writes = fake.writes(pane_a).expect("pane writes");
+    assert_eq!(writes.last().expect("one write"), b"\x1b[200~ok\x1b[201~");
+}
+
+#[test]
+fn a_host_paste_clears_the_highlight_in_the_pasted_pane() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
+    let client = rt.client_mut(client_id).expect("client");
+    client.set_selection(pane_a, a_selection());
+
+    rt.handle_host_paste(client_id, "x");
+    assert_eq!(
+        rt.client_mut(client_id).expect("client").selection(pane_a),
+        None,
+        "pasted text reached the child, so the highlight is gone"
+    );
+}
+
+#[test]
+fn the_copy_command_surface_rejects_the_interactive_copy_is_the_release() {
+    // `VisualCommand::Copy` is the future IPC/plugin surface and is unbuilt;
+    // a person copies by releasing the selection, which needs no command.
+    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size) = resize_fixture();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::Visual(VisualCommand::Copy(CopyArgs {
+            target: CopyTarget::Osc52,
+        })),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1645,54 +1778,18 @@ fn a_visual_command_resolves_the_focused_pane() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("selection not yet implemented".to_string()),
+            help: Some("copy not yet implemented".to_string()),
         }
     );
 }
 
-#[test]
-fn every_visual_variant_routes_to_the_stub_reject() {
-    let (mut rt, _tx) = new_runtime();
-    let client_id = ClientId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
-    let mut session = bare_session(SessionId::new());
-    add_pane(&mut session, pane);
-    add_tab(&mut session, tab, pane);
-    add_client(&mut session, client_id, tab, Some(pane));
-    rt.sessions.insert(session.id, session);
-
-    // Every VisualCommand sub-variant resolves the same focused pane and routes
-    // through its own arm of the exhaustive match to the shared
-    // not-yet-implemented rejection. Three variants, not nine: there is no
-    // Enter/Exit (a selection appearing IS entering visual mode) and no
-    // MoveCursor (selecting is the mouse's alone).
-    let variants = vec![
-        VisualCommand::SetSelection(Selection {
-            kind: SelectionKind::Character,
-            anchor: GridPos { row: 0, col: 0 },
-            cursor: GridPos { row: 0, col: 1 },
-        }),
-        VisualCommand::ClearSelection,
-        VisualCommand::Copy(CopyArgs {
-            target: CopyTarget::Osc52,
-        }),
-    ];
-
-    for variant in variants {
-        let env = envelope_from(
-            CommandSource::key_binding(client_id),
-            Command::Visual(variant),
-        );
-        let command_id = env.id;
-        assert_eq!(
-            rt.dispatch(env),
-            CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::InvalidState,
-                help: Some("selection not yet implemented".to_string()),
-            }
-        );
+/// A one-cell character highlight, for tests that care which pane a command
+/// lands on rather than what it highlights.
+fn a_selection() -> Selection {
+    Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 1 },
     }
 }
 
@@ -2556,10 +2653,10 @@ fn focused_default_outside_active_tab_is_not_found() {
     add_client(&mut session, client_id, tab, Some(focused_elsewhere));
     rt.sessions.insert(session.id, session);
 
-    // A Visual command defaults through the focused pane; it is outside the tab.
+    // Fullscreen defaults through the focused pane; it is outside the tab.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::Visual(VisualCommand::ClearSelection),
+        Command::TogglePaneFullscreen,
     );
     let command_id = env.id;
     assert_eq!(

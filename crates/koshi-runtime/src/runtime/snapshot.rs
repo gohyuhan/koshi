@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use koshi_config::types::{RgbColor, ThemeConfig};
+use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_layout::content::content_rects;
@@ -26,10 +27,13 @@ use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
-    RenderSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
+    RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
+use koshi_terminal::grid::state::Grid;
+use koshi_terminal::scrollback::Scrollback;
+use koshi_terminal::selection::order;
 use koshi_terminal::state::Screen;
 use ratatui::style::Color;
 
@@ -123,7 +127,13 @@ impl Runtime {
         let panes: Vec<PaneSnapshot> = solve
             .panes
             .iter()
-            .map(|&(pane_id, _)| self.pane_snapshot(pane_id, client.scroll_offset(pane_id)))
+            .map(|&(pane_id, _)| {
+                self.pane_snapshot(
+                    pane_id,
+                    client.scroll_offset(pane_id),
+                    client.selection(pane_id),
+                )
+            })
             .collect();
 
         let active_tab = TabSnapshot {
@@ -181,10 +191,19 @@ impl Runtime {
     /// the two never disagree. At `0` the grid travels by reference (no copy); a
     /// scrolled-back offset composes a window of history over the live screen.
     ///
+    /// `selection` is the viewing client's highlight in this pane, resolved here
+    /// from absolute line numbers to the rows this frame actually shows.
+    ///
     /// A pane with no terminal engine — a plugin pane, or one not yet spawned —
     /// gets `grid_view = None` and a hidden cursor; the renderer draws no cells
     /// for it.
-    fn pane_snapshot(&self, pane_id: PaneId, view_offset: usize) -> PaneSnapshot {
+    #[allow(clippy::needless_pass_by_value)]
+    fn pane_snapshot(
+        &self,
+        pane_id: PaneId,
+        view_offset: usize,
+        selection: Option<Selection>,
+    ) -> PaneSnapshot {
         let Some(engine) = self.terminal_engines.get(&pane_id) else {
             return PaneSnapshot {
                 id: pane_id,
@@ -198,6 +217,7 @@ impl Runtime {
                 },
                 grid_view: None,
                 reverse_video: false,
+                selection: None,
                 scrollback: ScrollbackMeta {
                     truncated: false,
                     retained_lines: 0,
@@ -234,6 +254,8 @@ impl Runtime {
                 blink: state.cursor_blink(),
                 shape: state.cursor_shape(),
             },
+            selection: selection
+                .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
             grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),
             scrollback: ScrollbackMeta {
@@ -316,6 +338,76 @@ pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size) -> SolveRes
         mode,
         Rect::new(Point { x: 0, y: 0 }, viewport),
     )
+}
+
+/// Cut `selection` down to the rows this frame shows, as a column range per
+/// visible row, or [`None`] when none of it is on screen.
+///
+/// A selection stores absolute line numbers — every line the pane ever pushed
+/// into scrollback — while the renderer draws a window of rows numbered from its
+/// own top. This is the one place the two meet: the window's top row is line
+/// `total_pushed - view_offset`, so a line `a` draws at row `a - (total_pushed -
+/// view_offset)`, and a row outside `0..rows` is not on screen.
+///
+/// A highlight only partly on screen keeps the part that is: its first visible
+/// row starts at column 0 rather than at the selection's own start column,
+/// because the real start is somewhere above the window.
+///
+/// Example — a 5-row, 20-column pane at the live bottom (`view_offset = 0`) with
+/// `total_pushed = 100`, and a character selection from line 101 column 12 to
+/// line 103 column 4 → rows `[(1, 12, 19), (2, 0, 19), (3, 0, 4)]`: the first
+/// row from column 12 to the edge, the middle row whole, the last row up to
+/// column 4.
+fn selection_spans(
+    selection: &Selection,
+    grid: &Grid,
+    scrollback: &Scrollback,
+    view_offset: usize,
+) -> Option<SelectionSpans> {
+    let (rows, cols) = grid.dimensions();
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    // The absolute line number the window's top row is showing.
+    let top = scrollback.total_pushed() as i64 - view_offset as i64;
+    let ordered = order(selection.anchor, selection.cursor);
+    let first = ordered.start.row as i64 - top;
+    let last = ordered.end.row as i64 - top;
+    let bottom = i64::from(rows) - 1;
+    if last < 0 || first > bottom {
+        return None;
+    }
+    let last_col = cols - 1;
+    let mut spans = Vec::new();
+    for view_row in first.max(0)..=last.min(bottom) {
+        let (start_col, end_col) = match selection.kind {
+            // A block is the same columns on every row it covers.
+            SelectionKind::Block => (
+                ordered.start.col.min(ordered.end.col),
+                ordered.start.col.max(ordered.end.col),
+            ),
+            // The others run with the text: from the start column on the first
+            // row, through whole rows, to the end column on the last.
+            SelectionKind::Character | SelectionKind::Word | SelectionKind::Line => {
+                let start = if view_row == first {
+                    ordered.start.col
+                } else {
+                    0
+                };
+                let end = if view_row == last {
+                    ordered.end.col
+                } else {
+                    last_col
+                };
+                (start, end)
+            }
+        };
+        let end_col = end_col.min(last_col);
+        if start_col <= end_col {
+            spans.push((view_row as u16, start_col, end_col));
+        }
+    }
+    (!spans.is_empty()).then_some(SelectionSpans { rows: spans })
 }
 
 #[cfg(test)]

@@ -34,11 +34,11 @@
 //! touches session state), so it mutates only the client's
 //! [`tabline_offset`](koshi_session::client::Client::tabline_offset) and repaints.
 
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, ResizePaneArgs, TabTarget,
+    FocusTarget, ResizePaneArgs, TabTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
@@ -49,10 +49,11 @@ use koshi_renderer::snapshot::RenderSnapshot;
 use koshi_renderer::{
     hit_test, pane_content_rect, pane_local_cell, tabline_first_visible, HitRegion,
 };
-use koshi_session::client::{ResizeDragState, TablineDragState};
+use koshi_session::client::{ClickCount, ResizeDragState, TablineDragState};
 use koshi_terminal::mouse_report::{encode_mouse, reports};
 
 use crate::runtime::render_schedule::InvalidationReason;
+use crate::runtime::selection::CLICK_THRESHOLD;
 use crate::runtime::state::Runtime;
 
 /// Cells of horizontal drag that scroll the tab strip by one tab.
@@ -67,11 +68,11 @@ impl Runtime {
     /// wheel reads the frame to hit-test it; a drag or release consults the
     /// stored drag first; a buttonless move rebuilds nothing unless the focused
     /// pane is in any-motion mode, so an idle mouse still costs nothing.
-    pub fn handle_mouse_input(&mut self, client_id: ClientId, mouse: MouseInput) {
+    pub fn handle_mouse_input(&mut self, client_id: ClientId, mouse: MouseInput, now: Instant) {
         match mouse.kind {
             MouseKind::Press(MouseButton::Left) => {
                 if let Some((snapshot, region)) = self.frame_hit(client_id, mouse.at) {
-                    self.mouse_left_press(client_id, &snapshot, region, mouse);
+                    self.mouse_left_press(client_id, &snapshot, region, mouse, now);
                 }
             }
             MouseKind::Scroll(direction) => {
@@ -83,7 +84,8 @@ impl Runtime {
             }
             MouseKind::Drag(MouseButton::Left) => {
                 // A press begins exactly one gesture: a border drag resizes, a
-                // tabline drag scrolls, and any other drag is the program's.
+                // tabline drag scrolls, a content drag selects, and any other
+                // drag is the program's.
                 if self
                     .client_mut(client_id)
                     .is_some_and(|client| client.pending_resize_drag().is_some())
@@ -94,6 +96,11 @@ impl Runtime {
                     .is_some_and(|client| client.tabline_drag().is_some())
                 {
                     self.drag_tabline_to(client_id, mouse.at.x);
+                } else if self
+                    .client_mut(client_id)
+                    .is_some_and(|client| client.selection_drag().is_some())
+                {
+                    self.drag_selection_to(client_id, mouse.at, now);
                 } else {
                     self.forward_mouse_to_pane(client_id, mouse);
                 }
@@ -102,10 +109,13 @@ impl Runtime {
                 // A release that ends a koshi drag is koshi's; any other release
                 // belongs to the program under the pointer.
                 let ending_drag = self.client_mut(client_id).is_some_and(|client| {
-                    client.pending_resize_drag().is_some() || client.tabline_drag().is_some()
+                    client.pending_resize_drag().is_some()
+                        || client.tabline_drag().is_some()
+                        || client.selection_drag().is_some()
                 });
                 self.end_tabline_drag(client_id);
                 self.end_resize_drag(client_id);
+                self.end_selection_drag(client_id);
                 if !ending_drag {
                     self.forward_mouse_to_pane(client_id, mouse);
                 }
@@ -131,6 +141,7 @@ impl Runtime {
         snapshot: &RenderSnapshot,
         region: HitRegion,
         mouse: MouseInput,
+        now: Instant,
     ) {
         match region {
             HitRegion::Tab { tab_id } => self.mouse_focus_tab(client_id, tab_id),
@@ -138,7 +149,7 @@ impl Runtime {
                 self.set_tabline_offset(client_id, Some(to));
             }
             HitRegion::PaneContent { pane_id } => {
-                self.click_pane_content(client_id, pane_id, mouse);
+                self.click_pane_content(client_id, pane_id, mouse, now);
             }
             HitRegion::StackHeader { pane_id } => self.mouse_focus_pane(client_id, pane_id),
             HitRegion::PaneBorder { pane_id, side } => {
@@ -183,14 +194,55 @@ impl Runtime {
 
     /// Route a click on a pane's content: a click on a pane the client has not
     /// focused focuses it; a click on the pane it is already in goes through to
-    /// the program, so a mouse-aware TUI receives it. A first click focuses, a
-    /// second acts.
-    fn click_pane_content(&mut self, client_id: ClientId, pane_id: PaneId, mouse: MouseInput) {
+    /// the program when that program asked for mouse events, and otherwise
+    /// begins a text selection. A first click focuses, a second acts.
+    ///
+    /// **A mouse-aware program keeps the mouse.** `vim`, `htop`, and `lazygit`
+    /// turn mouse reporting on and act on clicks themselves, so a drag inside
+    /// one is theirs; a plain shell asks for nothing, so a drag there is a
+    /// selection. Which one it is is read from the pane's live mouse mode at the
+    /// moment of the press, so it follows a program turning reporting on and off.
+    fn click_pane_content(
+        &mut self,
+        client_id: ClientId,
+        pane_id: PaneId,
+        mouse: MouseInput,
+        now: Instant,
+    ) {
         if Some(pane_id) != self.typed_pane(client_id) {
             self.mouse_focus_pane(client_id, pane_id);
-        } else {
+        } else if self.pane_reports_mouse(pane_id, mouse.kind) {
             self.forward_mouse_to_pane(client_id, mouse);
+        } else {
+            let clicks = self.record_click(client_id, MouseButton::Left, now);
+            self.begin_selection_drag(client_id, pane_id, mouse.at, clicks, mouse.mods);
         }
+    }
+
+    /// Whether the program in `pane_id` asked to be told about `kind`.
+    ///
+    /// The cheap check the press path makes before deciding whether a gesture is
+    /// the program's or koshi's: it reads the pane's mouse mode alone and builds
+    /// no frame.
+    fn pane_reports_mouse(&self, pane_id: PaneId, kind: MouseKind) -> bool {
+        self.terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| reports(engine.state().mouse_tracking(), kind))
+    }
+
+    /// Record a press into this client's run of clicks and report what it makes:
+    /// one click, two, or three. See
+    /// [`MouseState::press`](koshi_session::client::MouseState::press).
+    fn record_click(
+        &mut self,
+        client_id: ClientId,
+        button: MouseButton,
+        now: Instant,
+    ) -> ClickCount {
+        self.client_mut(client_id)
+            .map_or(ClickCount::Single, |client| {
+                client.mouse_state_mut().press(button, now, CLICK_THRESHOLD)
+            })
     }
 
     /// Hand `mouse` to the program in the pane it belongs to, encoded as the
@@ -205,6 +257,9 @@ impl Runtime {
     ///
     /// The pane's tracking level is checked before the frame is rebuilt, so a
     /// bare move over a pane in no mouse mode costs nothing.
+    ///
+    /// An event that is written also drops this client's highlight in that
+    /// pane: input reaching the pane's child leaves visual mode.
     fn forward_mouse_to_pane(&mut self, client_id: ClientId, mouse: MouseInput) {
         let captured = self.mouse_capture(client_id);
         // A release ends the capture, whether or not it forwards. Which button
@@ -249,6 +304,7 @@ impl Runtime {
         };
         if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
             let _ = self.pty_backend().write(pane_id, &bytes);
+            self.clear_selection_on_pane_input(client_id, pane_id);
             // Capture with the press's own button — reliable, unlike a later
             // drag's or release's.
             if let MouseKind::Press(button) = mouse.kind {
@@ -320,6 +376,13 @@ impl Runtime {
     /// Envelope and dispatch a command attributed to `client_id`'s mouse.
     fn dispatch_mouse(&mut self, client_id: ClientId, command: Command) {
         let _ = self.dispatch_mouse_command(client_id, command);
+    }
+
+    /// Dispatch a selection command attributed to `client_id`'s mouse. The
+    /// selection layer's route into the command pipeline, so a highlight lands
+    /// through the same dispatch every other mutation does.
+    pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, command: VisualCommand) {
+        self.dispatch_mouse(client_id, Command::Visual(command));
     }
 
     /// Anchor a tab-strip peek-drag at column `anchor_x`, recording the first

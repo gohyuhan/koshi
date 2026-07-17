@@ -1,5 +1,7 @@
 //! Outer keyboard routing: keybinding resolution first, transparent
-//! fallthrough to the focused terminal pane second.
+//! fallthrough to the focused terminal pane second. Text the outer terminal
+//! pastes routes here too ([`Runtime::handle_host_paste`]) — it is input for
+//! the same pane, delivered as one block so none of it can fire a binding.
 //!
 //! A chord that no binding consumes becomes bytes here rather than back at the
 //! decoder: the bytes a pane expects depend on which pane receives them and
@@ -171,6 +173,10 @@ impl Runtime {
     /// An opaque mode writes nothing: the mode owns the keyboard while it is
     /// held, and a key it does not bind is not the pane's to see. Nothing is
     /// written either when [`Self::typed_pane`] finds no pane to type at.
+    ///
+    /// A press that is written also drops this client's highlight in that pane:
+    /// input reaching the pane's child leaves visual mode, the way typing
+    /// replaces a selection in an editor.
     fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
         if !transparent(mode) {
             return;
@@ -184,6 +190,41 @@ impl Runtime {
             .is_some_and(|engine| engine.state().app_cursor_keys());
         let bytes = encode(chord, app_cursor_keys);
         let _ = self.pty_backend().write(pane_id, &bytes);
+        self.clear_selection_on_pane_input(client_id, pane_id);
+    }
+
+    /// Write text the client's outer terminal pasted into the pane the client
+    /// is typing into — the OS paste key, arriving as one block instead of a
+    /// burst of keys, so no character of it can fire a keybinding (a pasted
+    /// `Tab` lands in the shell instead of switching tabs).
+    ///
+    /// The pane reads it the way a terminal pastes: wrapped in bracketed-paste
+    /// markers when the pane turned that mode on, raw bytes otherwise, line
+    /// breaks as the byte the Enter key sends. Like a keystroke, it goes only
+    /// to a visible terminal pane in a mode that passes input through, and —
+    /// input reaching the pane's child — it clears the client's highlight
+    /// there.
+    pub fn handle_host_paste(&mut self, client_id: ClientId, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mode = self
+            .session_for_client(client_id)
+            .and_then(|session| session.clients.get(client_id))
+            .map(koshi_session::client::Client::lock_mode);
+        if !mode.is_some_and(transparent) {
+            return;
+        }
+        let Some(pane_id) = self.typed_pane(client_id) else {
+            return;
+        };
+        let bracketed = self
+            .terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| engine.state().bracketed_paste());
+        let bytes = crate::runtime::clipboard::paste_bytes(text, bracketed);
+        let _ = self.pty_backend().write(pane_id, &bytes);
+        self.clear_selection_on_pane_input(client_id, pane_id);
     }
 
     /// The pane a keystroke from `client_id` types into: the pane it has focused
@@ -341,7 +382,9 @@ fn unlock() -> BoundAction {
 
 /// Whether a key that binds nothing reaches the pane. Normal and locked mode
 /// pass what they do not bind; the modal layers own the keyboard while they are
-/// held and discard it.
+/// held and discard it. A host paste is gated the same way — pasted text is
+/// input for the pane, and a mode that keeps keys from the pane keeps pastes
+/// from it too.
 fn transparent(mode: LockMode) -> bool {
     matches!(mode, LockMode::Normal | LockMode::Locked)
 }

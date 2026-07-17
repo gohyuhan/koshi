@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use koshi_config::types::{RgbColor, ThemeConfig};
+use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -502,4 +503,172 @@ fn shorten_home_replaces_the_prefix_only_on_a_path_boundary() {
         "/Users/ab2/x"
     );
     assert_eq!(shorten_home(Path::new("/tmp"), None), "/tmp");
+}
+
+// ============================================================================
+// Highlight resolution: absolute line numbers to the rows a frame shows
+// ============================================================================
+
+/// A runtime with one client and a pane whose terminal has run `bytes`.
+fn runtime_with_text(bytes: &[u8]) -> (Runtime, PaneId, ClientId) {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab, pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+    let mut engine = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+    let _ = engine.advance(bytes);
+    rt.terminal_engines.insert(pane_id, engine);
+    (rt, pane_id, client_id)
+}
+
+/// The highlight rows the frame carries for the client's only pane.
+fn spans(rt: &Runtime, client: ClientId) -> Option<Vec<(u16, u16, u16)>> {
+    let snap = rt.build_snapshot(client).expect("snapshot");
+    snap.panes[0]
+        .selection
+        .as_ref()
+        .map(|spans| spans.rows.clone())
+}
+
+fn character(anchor: GridPos, cursor: GridPos) -> Selection {
+    Selection {
+        kind: SelectionKind::Character,
+        anchor,
+        cursor,
+    }
+}
+
+#[test]
+fn a_pane_with_no_highlight_carries_none() {
+    let (rt, _pane, client) = runtime_with_text(b"hello");
+    assert_eq!(spans(&rt, client), None);
+}
+
+#[test]
+fn a_highlight_on_one_row_is_one_span() {
+    let (mut rt, pane, client) = runtime_with_text(b"hello world");
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 0, col: 6 }, GridPos { row: 0, col: 10 }),
+    );
+
+    assert_eq!(spans(&rt, client), Some(vec![(0, 6, 10)]));
+}
+
+#[test]
+fn a_highlight_over_three_rows_runs_with_the_text() {
+    let (mut rt, pane, client) = runtime_with_text(b"a\r\nb\r\nc\r\nd");
+    // From column 12 of row 1 to column 33 of row 3: the first row runs to its
+    // end, the middle row is whole, the last stops at its column.
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 1, col: 12 }, GridPos { row: 3, col: 33 }),
+    );
+
+    assert_eq!(
+        spans(&rt, client),
+        Some(vec![(1, 12, 79), (2, 0, 79), (3, 0, 33)])
+    );
+}
+
+#[test]
+fn a_block_highlight_is_the_same_columns_on_every_row() {
+    let (mut rt, pane, client) = runtime_with_text(b"a\r\nb\r\nc");
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        Selection {
+            kind: SelectionKind::Block,
+            anchor: GridPos { row: 0, col: 4 },
+            cursor: GridPos { row: 2, col: 9 },
+        },
+    );
+
+    assert_eq!(
+        spans(&rt, client),
+        Some(vec![(0, 4, 9), (1, 4, 9), (2, 4, 9)]),
+        "a rectangle, not a run of text"
+    );
+}
+
+#[test]
+fn a_block_dragged_leftward_still_covers_the_columns_between() {
+    let (mut rt, pane, client) = runtime_with_text(b"a\r\nb");
+    // The anchor's column is to the RIGHT of the cursor's.
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        Selection {
+            kind: SelectionKind::Block,
+            anchor: GridPos { row: 0, col: 9 },
+            cursor: GridPos { row: 1, col: 4 },
+        },
+    );
+
+    assert_eq!(spans(&rt, client), Some(vec![(0, 4, 9), (1, 4, 9)]));
+}
+
+#[test]
+fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
+    // 30 lines through a 24-row screen: rows 0..=6 are in history, and the view
+    // follows live output, so a highlight back at row 1 is off screen.
+    let mut bytes = Vec::new();
+    for i in 0..30 {
+        bytes.extend_from_slice(format!("line{i}\r\n").as_bytes());
+    }
+    let (mut rt, pane, client) = runtime_with_text(&bytes);
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 1, col: 0 }, GridPos { row: 1, col: 3 }),
+    );
+
+    assert_eq!(spans(&rt, client), None, "nothing of it is on screen");
+}
+
+#[test]
+fn scrolling_back_to_a_highlight_draws_it_again() {
+    let mut bytes = Vec::new();
+    for i in 0..30 {
+        bytes.extend_from_slice(format!("line{i}\r\n").as_bytes());
+    }
+    let (mut rt, pane, client) = runtime_with_text(&bytes);
+    let client_mut = rt.client_mut(client).expect("client");
+    client_mut.set_selection(
+        pane,
+        character(GridPos { row: 1, col: 0 }, GridPos { row: 1, col: 3 }),
+    );
+    // Scroll up far enough that line 1 is back on screen.
+    client_mut.set_scroll_offset(pane, 7);
+
+    assert_eq!(
+        spans(&rt, client),
+        Some(vec![(1, 0, 3)]),
+        "the same absolute row, now drawn at a screen row the scroll put it on"
+    );
+}
+
+#[test]
+fn a_highlight_running_off_the_top_of_the_view_starts_at_the_first_visible_row() {
+    let mut bytes = Vec::new();
+    for i in 0..30 {
+        bytes.extend_from_slice(format!("line{i}\r\n").as_bytes());
+    }
+    let (mut rt, pane, client) = runtime_with_text(&bytes);
+    // Rows 0..=6 are in history and the view follows live, so the visible rows
+    // are 7..=30. A highlight from row 2 to row 9 is half off the top.
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 2, col: 4 }, GridPos { row: 9, col: 5 }),
+    );
+
+    let rows = spans(&rt, client).expect("the visible part is drawn");
+    assert_eq!(
+        rows.first().copied(),
+        Some((0, 0, 79)),
+        "the first visible row starts at column 0, not the selection's own \
+         start column, which is above the view"
+    );
+    assert_eq!(
+        rows.last().copied(),
+        Some((2, 0, 5)),
+        "and ends where it ends"
+    );
 }

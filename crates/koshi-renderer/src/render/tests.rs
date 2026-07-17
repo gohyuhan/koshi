@@ -24,7 +24,7 @@ use koshi_terminal::state::CursorShape;
 
 use crate::snapshot::{
     ClientSnapshot, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot, PaneSnapshot,
-    PluginUiSnapshot, ScrollbackMeta, SessionSnapshot, TabMeta, TabSnapshot,
+    PluginUiSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -77,6 +77,7 @@ fn build(
             },
             grid_view: None,
             reverse_video: false,
+            selection: None,
             scrollback: ScrollbackMeta {
                 truncated: false,
                 retained_lines: 0,
@@ -1581,4 +1582,137 @@ fn one_by_one_viewport_draws_without_panicking() {
     let buf = render(&snap, 1, 1);
 
     assert_eq!(buf[(0, 0)].symbol(), " ");
+}
+
+// ============================================================================
+// Drawing the highlight
+// ============================================================================
+
+/// `content_snap` with `rows` highlighted.
+fn highlighted_snap(grid: Grid, spans: Vec<(u16, u16, u16)>) -> RenderSnapshot {
+    let mut snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    snap.panes[0].selection = Some(SelectionSpans { rows: spans });
+    snap
+}
+
+/// A grid whose row 0 reads `abcdef`.
+fn abcdef_grid() -> Grid {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    for (col, ch) in "abcdef".chars().enumerate() {
+        *grid.cell_mut(0, col as u16).unwrap() = Cell::new(ch, 1, TermStyle::default());
+    }
+    grid
+}
+
+#[test]
+fn highlighted_cells_are_drawn_in_reverse_and_the_rest_are_not() {
+    // Highlight columns 1..=3 of row 0: `bcd` of `abcdef`.
+    let snap = highlighted_snap(abcdef_grid(), vec![(0, 1, 3)]);
+    let buf = render(&snap, 40, 8);
+
+    // Content origin is (1, 2): the one-cell border offsets it.
+    assert!(
+        !buf[(1, 2)].modifier.contains(Modifier::REVERSED),
+        "`a` is outside the highlight"
+    );
+    for x in 2..=4 {
+        assert!(
+            buf[(x, 2)].modifier.contains(Modifier::REVERSED),
+            "column {x} is highlighted"
+        );
+    }
+    assert!(
+        !buf[(5, 2)].modifier.contains(Modifier::REVERSED),
+        "`e` is past the highlight"
+    );
+}
+
+#[test]
+fn a_pane_with_no_highlight_draws_nothing_in_reverse() {
+    let snap = content_snap(
+        abcdef_grid(),
+        rect(0, 1, 40, 6),
+        false,
+        Size { cols: 40, rows: 8 },
+    );
+    let buf = render(&snap, 40, 8);
+
+    for x in 1..=6 {
+        assert!(!buf[(x, 2)].modifier.contains(Modifier::REVERSED));
+    }
+}
+
+#[test]
+fn only_the_highlighted_row_is_reversed() {
+    let mut grid = abcdef_grid();
+    for (col, ch) in "ghijkl".chars().enumerate() {
+        *grid.cell_mut(1, col as u16).unwrap() = Cell::new(ch, 1, TermStyle::default());
+    }
+    // Row 1 is highlighted; row 0 is not.
+    let snap = highlighted_snap(grid, vec![(1, 0, 2)]);
+    let buf = render(&snap, 40, 8);
+
+    assert!(
+        !buf[(1, 2)].modifier.contains(Modifier::REVERSED),
+        "row 0 is untouched"
+    );
+    assert!(
+        buf[(1, 3)].modifier.contains(Modifier::REVERSED),
+        "row 1 is highlighted"
+    );
+}
+
+#[test]
+fn highlighting_a_cell_that_is_already_reverse_swaps_it_back() {
+    // The highlight combines with the cell's own reverse by exclusive-or, so
+    // highlighted reverse text still reads against its surroundings rather than
+    // vanishing into them.
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut style = TermStyle::default();
+    style.set_reverse(true);
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('a', 1, style);
+    let snap = highlighted_snap(grid, vec![(0, 0, 0)]);
+    let buf = render(&snap, 40, 8);
+
+    assert!(
+        !buf[(1, 2)].modifier.contains(Modifier::REVERSED),
+        "already-reverse text highlighted swaps back to normal"
+    );
+}
+
+#[test]
+fn a_highlight_under_screen_wide_reverse_video_swaps_back() {
+    // DECSCNM reverses the whole screen; a highlight on top of it swaps those
+    // cells back, by the same exclusive-or.
+    let mut snap = content_snap(
+        abcdef_grid(),
+        rect(0, 1, 40, 6),
+        true,
+        Size { cols: 40, rows: 8 },
+    );
+    snap.panes[0].selection = Some(SelectionSpans {
+        rows: vec![(0, 0, 1)],
+    });
+    let buf = render(&snap, 40, 8);
+
+    assert!(
+        !buf[(1, 2)].modifier.contains(Modifier::REVERSED),
+        "highlighted, so swapped back out of the screen-wide reverse"
+    );
+    assert!(
+        buf[(3, 2)].modifier.contains(Modifier::REVERSED),
+        "not highlighted, so still reverse from DECSCNM"
+    );
+}
+
+#[test]
+fn a_highlight_span_wider_than_the_grid_draws_only_real_cells() {
+    // A span naming columns past the grid's width cannot paint outside it.
+    let snap = highlighted_snap(abcdef_grid(), vec![(0, 0, 200)]);
+    let buf = render(&snap, 40, 8);
+
+    // The pane's content is 38 wide from x=1, so x=38 is its last column.
+    assert!(buf[(38, 2)].modifier.contains(Modifier::REVERSED));
+    // The border column past it is untouched.
+    assert!(!buf[(39, 2)].modifier.contains(Modifier::REVERSED));
 }

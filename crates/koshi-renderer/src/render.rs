@@ -33,7 +33,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::{CursorStyle, PaneSnapshot, RenderSnapshot};
+use crate::snapshot::{CursorStyle, PaneSnapshot, RenderSnapshot, SelectionSpans};
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
 
@@ -280,7 +280,13 @@ fn draw_pane_contents(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer
         let Some(view) = &pane.grid_view else {
             continue;
         };
-        draw_grid(&view.grid, place(inner, offset), pane.reverse_video, buf);
+        draw_grid(
+            &view.grid,
+            place(inner, offset),
+            pane.reverse_video,
+            pane.selection.as_ref(),
+            buf,
+        );
     }
 }
 
@@ -293,12 +299,26 @@ fn draw_pane_contents(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer
 /// so no half-glyph bleeds past the edge. `reverse_video` (DECSCNM) toggles
 /// reverse for every cell. `area` is clipped to the buffer so an oversized rect
 /// cannot index out of bounds.
-fn draw_grid(grid: &Grid, area: RatatuiRect, reverse_video: bool, buf: &mut Buffer) {
+///
+/// A highlighted cell (`selection`) is drawn in reverse, the way a terminal has
+/// always shown selected text. It combines with the cell's own reverse and with
+/// `reverse_video` by exclusive-or, so highlighting text that is already reverse
+/// swaps it back and the highlight still reads against its surroundings.
+fn draw_grid(
+    grid: &Grid,
+    area: RatatuiRect,
+    reverse_video: bool,
+    selection: Option<&SelectionSpans>,
+    buf: &mut Buffer,
+) {
     let area = area.intersection(buf.area);
     let (grid_rows, grid_cols) = grid.dimensions();
     let rows = grid_rows.min(area.height);
     let cols = grid_cols.min(area.width);
     for row in 0..rows {
+        // Once per row, not once per cell: a highlight is a column range on a
+        // row, so the row's range is looked up before walking its cells.
+        let span = selection.and_then(|spans| spans.row_span(row));
         for col in 0..cols {
             let Some(cell) = grid.cell(row, col) else {
                 continue;
@@ -309,7 +329,8 @@ fn draw_grid(grid: &Grid, area: RatatuiRect, reverse_video: bool, buf: &mut Buff
             }
             let x = area.x + col;
             let y = area.y + row;
-            let style = cell_style(cell.style(), reverse_video);
+            let selected = span.is_some_and(|(start, end)| col >= start && col <= end);
+            let style = cell_style(cell.style(), reverse_video ^ selected);
             if width >= 2 && col + 1 >= cols {
                 buf[(x, y)].set_char(' ').set_style(style);
                 continue;
