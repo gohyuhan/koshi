@@ -27,7 +27,10 @@ impl Runtime {
     ///
     /// Lines this chunk scrolls off the top feed the scrollback; every client
     /// whose view of this pane is held is then re-anchored by that many lines so
-    /// it keeps showing the same text while live output accumulates below.
+    /// it keeps showing the same text while live output accumulates below. A
+    /// highlight whose every line this chunk erased (`CSI 3 J`) or evicted past
+    /// the scrollback cap is dropped first — it could never draw again, yet it
+    /// would keep holding its client's view.
     ///
     /// A chunk that switches the pane between its primary and alternate screens
     /// drops every client's highlight in it: a highlight names a line by how many
@@ -44,22 +47,30 @@ impl Runtime {
         let pushed_before = before.total_pushed();
         let len_before = before.len();
         let screen_before = engine.state().active_screen();
+        let alt_shifts_before = engine.state().alt_rows_shifted();
         let replies = engine.advance(bytes);
         let after = engine.state().scrollback();
         let len_after = after.len();
         let pushed = (after.total_pushed() - pushed_before) as usize;
         let screen_after = engine.state().active_screen();
+        let alt_rows_moved = engine.state().alt_rows_shifted() != alt_shifts_before;
 
         if !replies.is_empty() {
             let _ = self.pty_backend().write(pane_id, &replies);
         }
-        if screen_before != screen_after {
+        // A switch between the screens, or rows moving on the alternate screen
+        // (which records no scrollback), both leave a highlight's row numbers
+        // naming text that is no longer there.
+        if screen_before != screen_after || alt_rows_moved {
             self.clear_pane_selections(pane_id);
         }
         // Held views need adjusting only when history gained lines (offsets rise)
         // or shrank under an erase (offsets reclamp); the common chunk that
-        // touches no history skips the client walk entirely.
+        // touches no history skips the client walk entirely. A highlight whose
+        // every line the chunk erased or evicted is dropped first, so it stops
+        // holding a view over text that no longer exists.
         if pushed > 0 || len_after < len_before {
+            self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed, len_after);
         }
         self.render_scheduler

@@ -171,6 +171,10 @@ impl Runtime {
     /// An opaque mode writes nothing: the mode owns the keyboard while it is
     /// held, and a key it does not bind is not the pane's to see. Nothing is
     /// written either when [`Self::typed_pane`] finds no pane to type at.
+    ///
+    /// A press that is written also drops this client's highlight in that pane:
+    /// input reaching the pane's child leaves visual mode, the way typing
+    /// replaces a selection in an editor.
     fn fall_through(&mut self, client_id: ClientId, mode: LockMode, chord: KeyChord) {
         if !transparent(mode) {
             return;
@@ -184,6 +188,7 @@ impl Runtime {
             .is_some_and(|engine| engine.state().app_cursor_keys());
         let bytes = encode(chord, app_cursor_keys);
         let _ = self.pty_backend().write(pane_id, &bytes);
+        self.clear_selection_on_pane_input(client_id, pane_id);
     }
 
     /// The pane a keystroke from `client_id` types into: the pane it has focused

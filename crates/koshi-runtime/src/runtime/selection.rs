@@ -22,7 +22,9 @@
 //! events, though — so the scroll cannot be driven by drag events, and a timer
 //! carries it instead. While the pointer is outside, the drag arms a wakeup
 //! every 15ms; each firing scrolls one line and re-extends the highlight from
-//! the pointer's last known cell, then re-arms. Moving back inside disarms it.
+//! the pointer's last known cell, then re-arms. Moving back inside disarms it,
+//! and so does reaching a limit — the oldest retained line, or the live
+//! bottom — where a firing would move nothing; the next drag event re-arms.
 
 use std::time::{Duration, Instant};
 
@@ -256,10 +258,17 @@ impl Runtime {
         let state = engine.state();
         let effective = state.effective_view_offset(offset) as u64;
         let total_pushed = state.scrollback().total_pushed();
-        Some(GridPos {
-            row: (total_pushed + u64::from(row)).saturating_sub(effective),
-            col,
-        })
+        let row = (total_pushed + u64::from(row)).saturating_sub(effective);
+        // The blank right half of a wide (CJK/emoji) glyph is a width-0 cell
+        // the renderer never paints; the glyph's text lives in its left half.
+        // A pointer on either half names the glyph's own cell, so a highlight
+        // never covers only an invisible cell.
+        let view = state.text_view();
+        let mut col = col;
+        while col > 0 && view.cell(row, col).is_some_and(|cell| cell.width() == 0) {
+            col -= 1;
+        }
+        Some(GridPos { row, col })
     }
 
     /// The 0-based cell inside `pane_id`'s content that `at` names, pulled to the
@@ -349,7 +358,9 @@ impl Runtime {
     }
 
     /// One scroll step for `client_id`'s held drag: move the view a line toward
-    /// the pointer, re-extend the highlight, and re-arm the next step.
+    /// the pointer, re-extend the highlight, and re-arm the next step. A view
+    /// already at its limit — the oldest retained line, or the live bottom —
+    /// moves nothing and disarms instead; the next drag event re-arms.
     fn scroll_selection_drag(&mut self, client_id: ClientId, now: Instant) {
         let Some(drag) = self
             .client_mut(client_id)
@@ -363,10 +374,17 @@ impl Runtime {
             self.disarm_selection_scroll(client_id, drag);
             return;
         };
+        let before = self.view_offset(client_id, drag.pane);
         if direction < 0 {
             self.scroll_up(client_id, drag.pane, SELECTION_SCROLL_LINES);
         } else {
             self.scroll_down(client_id, drag.pane, SELECTION_SCROLL_LINES);
+        }
+        if self.view_offset(client_id, drag.pane) == before {
+            // Nowhere left to go: the highlight already reaches this edge, so
+            // firing again every 15ms would only repeat the same highlight.
+            self.disarm_selection_scroll(client_id, drag);
+            return;
         }
         if let Some(client) = self.client_mut(client_id) {
             client.set_selection_drag(Some(SelectionDragState {
@@ -384,6 +402,54 @@ impl Runtime {
                 scroll_at: None,
                 ..drag
             }));
+        }
+    }
+
+    /// Drop every highlight in `pane_id` whose lines have all been dropped from
+    /// the pane's text — erased by the child (`CSI 3 J`) or evicted by the
+    /// scrollback cap.
+    ///
+    /// Such a highlight can never draw again, yet it would keep holding its
+    /// client's view against live output ([`Client::is_view_held`]) with
+    /// nothing on screen to explain why; dropping it lets the view follow live
+    /// output again. A highlight with any line still retained keeps what
+    /// remains.
+    ///
+    /// [`Client::is_view_held`]: koshi_session::client::Client::is_view_held
+    pub(crate) fn drop_evicted_selections(&mut self, pane_id: PaneId) {
+        let Some(engine) = self.terminal_engines.get(&pane_id) else {
+            return;
+        };
+        let first_row = engine.state().text_view().first_row();
+        let Some(session) = self.session_for_pane_mut(pane_id) else {
+            return;
+        };
+        for client in session.clients.list_attached_mut() {
+            let dead = client.selection(pane_id).is_some_and(|selection| {
+                koshi_terminal::selection::order(selection.anchor, selection.cursor)
+                    .end
+                    .row
+                    < first_row
+            });
+            if dead {
+                client.clear_selection(pane_id);
+            }
+        }
+    }
+
+    /// Drop `client_id`'s highlight in `pane_id` because its input reached the
+    /// pane's child: the key or click belongs to the program running there, so
+    /// the highlight gets out of the way, the way typing replaces a selection
+    /// in an editor. A client with no highlight there dispatches nothing.
+    pub(crate) fn clear_selection_on_pane_input(&mut self, client_id: ClientId, pane_id: PaneId) {
+        let highlighted = self
+            .client_mut(client_id)
+            .is_some_and(|client| client.selection(pane_id).is_some());
+        if highlighted {
+            self.dispatch_visual(
+                client_id,
+                VisualCommand::ClearSelection(ClearSelectionArgs { pane: pane_id }),
+            );
         }
     }
 

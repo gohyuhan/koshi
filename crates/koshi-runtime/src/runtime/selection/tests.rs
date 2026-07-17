@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc};
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPaneArgs, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{CommandId, TabId};
-use koshi_core::key::ModFlags;
+use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -882,10 +882,23 @@ fn a_double_click_on_empty_space_leaves_no_view_held_over_nothing() {
     rt.handle_mouse_input(client, press_at(at), clock.quick());
     rt.handle_mouse_input(client, release_at(at), clock.quick());
 
-    // Blanks are separators, so the word is the single cell under the pointer —
-    // a real one-cell highlight, not an empty one.
-    let selection = selection(&mut rt, client, pane).expect("the cell under the pointer");
-    assert_eq!(selection.anchor, selection.cursor);
+    // Blanks are separators, and a click on a separator selects the run of that
+    // character: every blank from the end of `hi` to the row's edge — a real
+    // highlight, not an empty one.
+    let selection = selection(&mut rt, client, pane).expect("the blank run under the pointer");
+    assert_eq!(
+        selection.anchor,
+        GridPos { row: 0, col: 2 },
+        "the run starts right after `hi`"
+    );
+    assert_eq!(
+        selection.cursor,
+        GridPos {
+            row: 0,
+            col: last_col(&rt, client, pane),
+        },
+        "and reaches the row's edge"
+    );
     assert!(
         rt.client_mut(client).expect("client").is_view_held(pane),
         "a real highlight holds the view, and a click clears it again"
@@ -1043,5 +1056,338 @@ fn a_drag_past_a_corner_scrolls_and_clamps_the_column() {
             .scroll_at
             .is_some(),
         "and the vertical overshoot still arms the scroll"
+    );
+}
+
+#[test]
+fn erasing_all_history_under_a_highlight_drops_it_and_frees_the_view() {
+    // A highlight whose every line has been erased (`CSI 3 J`) can never draw
+    // again, but it would still hold the view against live output with nothing
+    // on screen to explain why. It must go.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 6, 0); // the `w`
+    let to = cell_at(&rt, client, pane, 10, 0); // the `d`
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(client, drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+
+    // Sixty lines of output push `hello world` into history; the held view's
+    // offset rises with it.
+    for i in 0..60 {
+        feed(&mut rt, pane, format!("line{i}\r\n").as_bytes());
+    }
+    assert!(
+        selection(&mut rt, client, pane).is_some(),
+        "output alone never clears a highlight"
+    );
+
+    // The child erases its scrollback. Every line under the highlight is gone.
+    feed(&mut rt, pane, b"\x1b[3J");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "a highlight with nothing left to name is dropped"
+    );
+    assert!(
+        !rt.client_mut(client).expect("client").is_view_held(pane),
+        "and the view follows live output again"
+    );
+}
+
+#[test]
+fn a_highlight_still_partly_on_screen_survives_a_history_erase() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    for i in 0..60 {
+        feed(&mut rt, pane, format!("line{i}\r\n").as_bytes());
+    }
+
+    // Scrolled up three lines, the top three view rows are history rows; a drag
+    // from the top row down onto the live screen spans the boundary.
+    rt.scroll_up(client, pane, 3);
+    let from = cell_at(&rt, client, pane, 0, 0);
+    let to = cell_at(&rt, client, pane, 4, 10);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(client, drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    let before = selection(&mut rt, client, pane).expect("a highlight");
+
+    feed(&mut rt, pane, b"\x1b[3J");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        Some(before),
+        "a highlight with lines still on the live screen keeps them"
+    );
+}
+
+#[test]
+fn a_press_on_the_right_half_of_a_wide_glyph_names_the_glyph_itself() {
+    // The pointer can land on the blank right half of a wide (CJK) glyph, a
+    // width-0 cell the renderer never paints. The position must name the
+    // glyph's own cell, or a highlight could cover only invisible cells.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, "世界x".as_bytes());
+
+    // 世 covers columns 0-1, 界 columns 2-3, x column 4. Press on 世's blank
+    // half, drag onto 界's blank half.
+    let from = cell_at(&rt, client, pane, 1, 0);
+    let to = cell_at(&rt, client, pane, 3, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(client, drag_at(to), clock.tick());
+
+    let selection = selection(&mut rt, client, pane).expect("a highlight");
+    assert_eq!(
+        selection.anchor,
+        GridPos { row: 0, col: 0 },
+        "the anchor is 世's own cell, not its blank half"
+    );
+    assert_eq!(
+        selection.cursor,
+        GridPos { row: 0, col: 2 },
+        "the cursor is 界's own cell, not its blank half"
+    );
+}
+
+#[test]
+fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
+    // At the live bottom a drag held below the pane has nothing to scroll
+    // toward. The timer must stop rather than fire every 15ms doing nothing;
+    // the next drag event re-arms it.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    let below = Point {
+        x: from.x,
+        y: origin(&rt, client, pane).y + 40,
+    };
+    rt.handle_mouse_input(client, drag_at(below), clock.tick());
+    let now = clock.tick();
+    assert!(
+        rt.next_selection_scroll_wakeup(now).is_some(),
+        "the overshoot arms the scroll"
+    );
+
+    // The firing finds the view already at the live bottom and moves nothing.
+    rt.expire_selection_scrolls(now + Duration::from_millis(15));
+    assert_eq!(
+        rt.next_selection_scroll_wakeup(now + Duration::from_millis(15)),
+        None,
+        "a firing that moved nothing disarms the timer"
+    );
+
+    // The pointer moving again — still below the pane — re-arms it.
+    rt.handle_mouse_input(client, drag_at(below), clock.tick());
+    assert!(
+        rt.next_selection_scroll_wakeup(clock.tick()).is_some(),
+        "the next drag event arms it again"
+    );
+}
+
+#[test]
+fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
+    // The top-edge mirror: at the oldest line nothing more will ever appear
+    // above, so a firing that moved nothing must not re-arm.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    for i in 0..60 {
+        feed(&mut rt, pane, format!("line{i}\r\n").as_bytes());
+    }
+    rt.scroll_to_top(client, pane);
+
+    let from = cell_at(&rt, client, pane, 0, 5);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    let above = Point {
+        x: from.x,
+        y: origin(&rt, client, pane).y.saturating_sub(3),
+    };
+    rt.handle_mouse_input(client, drag_at(above), clock.tick());
+    let now = clock.tick();
+    assert!(
+        rt.next_selection_scroll_wakeup(now).is_some(),
+        "the overshoot arms the scroll"
+    );
+
+    rt.expire_selection_scrolls(now + Duration::from_millis(15));
+    assert_eq!(
+        rt.next_selection_scroll_wakeup(now + Duration::from_millis(15)),
+        None,
+        "already at the oldest line, so the firing disarms the timer"
+    );
+}
+
+#[test]
+fn a_highlight_on_the_alternate_screen_clears_when_the_app_scrolls() {
+    // Alternate-screen rows keep no scrollback, so when the app scrolls, rows
+    // move and the numbering records nothing — a stored highlight would sit at
+    // a fixed screen spot while different text slides under it. It must go.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"\x1b[?1049h"); // enter the alternate screen
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+
+    // The app scrolls: cursor to the last row, then a line feed there.
+    feed(&mut rt, pane, b"\x1b[999;1H\n");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "the rows moved under the highlight, so it is gone"
+    );
+}
+
+#[test]
+fn a_highlight_on_the_alternate_screen_survives_a_redraw_in_place() {
+    // Rewriting cells without moving rows — how a full-screen app updates a
+    // status line — leaves the highlight standing, exactly as an in-place
+    // redraw does on the primary screen.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"\x1b[?1049h");
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    let highlighted = selection(&mut rt, client, pane).expect("highlighted");
+
+    feed(&mut rt, pane, b"\x1b[2;1Hredrawn text");
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        Some(highlighted),
+        "no rows moved, so the highlight stands"
+    );
+}
+
+#[test]
+fn typing_into_the_pane_clears_the_typists_highlight_there() {
+    // The exit rule: input reaching the pane's child leaves visual mode. A key
+    // no binding consumes is written to the child, so it clears the highlight,
+    // the way typing replaces a selection in an editor.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+
+    rt.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+        clock.tick(),
+    );
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "the key reached the child, so the highlight is gone"
+    );
+}
+
+#[test]
+fn typing_leaves_a_highlight_in_another_pane_alone() {
+    // Only the pane the key reaches exits visual mode; a highlight standing in
+    // some other pane is not this key's business.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    let highlighted = selection(&mut rt, client, pane).expect("highlighted");
+
+    // The split focuses the new pane, so the key types into it.
+    let other = split(&mut rt, client);
+    assert_ne!(other, pane);
+    rt.handle_key_input(
+        client,
+        KeyChord::new(ModFlags::NONE, Key::Char('x')),
+        clock.tick(),
+    );
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        Some(highlighted),
+        "the highlight in the unfocused pane stands"
+    );
+}
+
+#[test]
+fn a_click_forwarded_to_a_mouse_aware_program_clears_the_highlight() {
+    // Same exit rule for the mouse: a click the program asked to see reaches
+    // the child, so the highlight gets out of its way.
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(&rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
+
+    // The program turns mouse reporting on; the next press is its, not koshi's.
+    feed(&mut rt, pane, b"\x1b[?1000h");
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "the forwarded click reached the child, so the highlight is gone"
     );
 }

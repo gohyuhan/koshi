@@ -89,6 +89,14 @@ pub struct TerminalState {
     primary_scroll_region: Option<(u16, u16)>,
     /// Alternate screen's scroll-region margins; see `primary_scroll_region`.
     alternate_scroll_region: Option<(u16, u16)>,
+    /// How many times the alternate screen's rows have moved — a scroll, an
+    /// inserted or deleted line — over the pane's lifetime. Monotonic, never
+    /// reset. The alternate screen keeps no scrollback, so a row move there is
+    /// recorded nowhere else; a reader that diffs this across a chunk of output
+    /// learns that row numbers no longer name the text they did (the runtime
+    /// drops the pane's highlights on that signal). Rewriting cells in place
+    /// does not count — only rows moving.
+    alt_rows_shifted: u64,
     /// The grapheme cluster currently being built at the cursor — the run of
     /// printed code points that fold into one cell (a base plus its combining
     /// marks and any emoji continuation: ZWJ-joined parts, variation selectors,
@@ -131,6 +139,7 @@ impl TerminalState {
             scrollback: Scrollback::new(ScrollbackLimit::default()),
             primary_scroll_region: None,
             alternate_scroll_region: None,
+            alt_rows_shifted: 0,
             cluster: String::new(),
             cluster_base: None,
             replies: Vec::new(),
@@ -231,26 +240,24 @@ impl TerminalState {
         }
     }
 
-    /// The active screen buffer the renderer should draw at scrollback view
-    /// `offset` — lines scrolled up from the live bottom, `0` following live
-    /// output — paired with the *effective* offset actually shown.
-    ///
-    /// The effective offset is the single source of truth for how far the view is
-    /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
-    /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
-    /// with empty history. In every other case it is `offset` clamped to the
-    /// retained line count, so an over-scrolled or stale value stops at the
-    /// oldest line and never indexes past it. Returning it here keeps the
-    /// composed grid, the scroll indicator, and cursor suppression from ever
-    /// disagreeing about whether the view is scrolled.
-    ///
-    /// A non-zero effective offset composes a fresh window `rows` tall from the
-    /// primary screen: its top rows are the newest scrollback lines, its lower
-    /// rows the top of the live grid, so a view scrolled that many lines up shows
-    /// that much history with the rest of the live screen below. History rows
-    /// captured at a narrower width are padded to the current width with the
-    /// primary screen's background ([`Style::bg_fill`]), the same fill every
-    /// erase and scroll uses.
+    /// How many times the alternate screen's rows have moved over the pane's
+    /// lifetime; see the field doc. Diff across a chunk of output to learn
+    /// whether alternate-screen row numbers still name the same text.
+    #[must_use]
+    pub fn alt_rows_shifted(&self) -> u64 {
+        self.alt_rows_shifted
+    }
+
+    /// Record that the alternate screen's rows moved, when `alternate` is the
+    /// active screen. Called by every operation that scrolls, inserts, or
+    /// deletes rows; a primary-screen move is recorded by the scrollback push
+    /// counter instead.
+    pub(crate) fn note_row_shift(&mut self) {
+        if self.active == Screen::Alternate {
+            self.alt_rows_shifted += 1;
+        }
+    }
+
     /// This pane's text as one space addressed by absolute row number: the
     /// retained history plus the live screen on the primary, and the screen
     /// alone on the alternate, which keeps no history of its own.
@@ -283,6 +290,26 @@ impl TerminalState {
         offset.min(self.scrollback.len())
     }
 
+    /// The active screen buffer the renderer should draw at scrollback view
+    /// `offset` — lines scrolled up from the live bottom, `0` following live
+    /// output — paired with the *effective* offset actually shown.
+    ///
+    /// The effective offset is the single source of truth for how far the view is
+    /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
+    /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
+    /// with empty history. In every other case it is `offset` clamped to the
+    /// retained line count, so an over-scrolled or stale value stops at the
+    /// oldest line and never indexes past it. Returning it here keeps the
+    /// composed grid, the scroll indicator, and cursor suppression from ever
+    /// disagreeing about whether the view is scrolled.
+    ///
+    /// A non-zero effective offset composes a fresh window `rows` tall from the
+    /// primary screen: its top rows are the newest scrollback lines, its lower
+    /// rows the top of the live grid, so a view scrolled that many lines up shows
+    /// that much history with the rest of the live screen below. History rows
+    /// captured at a narrower width are padded to the current width with the
+    /// primary screen's background ([`Style::bg_fill`]), the same fill every
+    /// erase and scroll uses.
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
         let scrolled = self.effective_view_offset(offset);
         if scrolled == 0 {

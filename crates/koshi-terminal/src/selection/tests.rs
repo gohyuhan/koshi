@@ -413,3 +413,37 @@ fn a_word_grows_the_same_from_either_half_of_a_wide_glyph() {
     assert_eq!(view.word_start(0, 2), (0, 0));
     assert_eq!(view.word_end(0, 2), (0, 2));
 }
+
+#[test]
+fn a_word_lookup_on_a_separator_covers_the_run_of_that_same_separator() {
+    // Double-clicking the gap in `foo  bar` must select the two spaces, never
+    // `foo  bar` entire: a lookup that starts ON a separator grows over the
+    // run of that character, not into the words around it.
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["foo  bar"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    // The spaces sit at columns 3 and 4; from either one the answer is the run.
+    assert_eq!(view.word_start(0, 3), (0, 3));
+    assert_eq!(view.word_end(0, 3), (0, 4));
+    assert_eq!(view.word_start(0, 4), (0, 3));
+    assert_eq!(view.word_end(0, 4), (0, 4));
+}
+
+#[test]
+fn different_separators_do_not_join_into_one_run() {
+    // `(` and `)` are both separators, but a run is one repeated character:
+    // double-clicking `(` in `a() b` selects `(` alone.
+    let scrollback = scrollback_of(&[], 100);
+    let grid = grid_of(&["a() b"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert_eq!(view.word_start(0, 1), (0, 1));
+    assert_eq!(
+        view.word_end(0, 1),
+        (0, 1),
+        "`)` next door is a different run"
+    );
+    assert_eq!(view.word_start(0, 2), (0, 2));
+    assert_eq!(view.word_end(0, 2), (0, 2), "the space after `)` is too");
+}

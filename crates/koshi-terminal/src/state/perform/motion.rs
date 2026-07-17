@@ -54,7 +54,16 @@ impl TerminalState {
                 }
             }
         }
+        self.note_row_shift();
         self.active_grid_mut().delete_lines(first, bottom, n, fill);
+    }
+
+    /// Insert `n` blank lines at `first`, scrolling `first..=last` down — the
+    /// shared step behind RI at the top margin, IL, and SD — recording the row
+    /// movement for the alternate screen's shift counter.
+    pub(super) fn insert_lines_on_screen(&mut self, first: u16, last: u16, n: u16, fill: Style) {
+        self.note_row_shift();
+        self.active_grid_mut().insert_lines(first, last, n, fill);
     }
 
     /// Move the cursor down one line. At the scroll region's bottom margin the
@@ -81,7 +90,7 @@ impl TerminalState {
         let fill = self.active_render().style.bg_fill();
         let (top, bottom) = self.region_bounds();
         if self.active_cursor().row == top {
-            self.active_grid_mut().insert_lines(top, bottom, 1, fill);
+            self.insert_lines_on_screen(top, bottom, 1, fill);
         } else if self.active_cursor().row > 0 {
             self.active_cursor_mut().row -= 1;
         }

@@ -4363,3 +4363,53 @@ fn unsupported_dec_modes_are_ignored() {
     state.print('x');
     assert_eq!(glyph(&state, 0, 0), Some('x'));
 }
+
+// --- the alternate screen's row-shift counter ---
+
+#[test]
+fn every_row_moving_operation_on_the_alternate_screen_counts_a_shift() {
+    // The alternate screen records no scrollback, so this counter is the only
+    // trace that its rows moved. Each operation class ticks it exactly once.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1049h");
+    assert_eq!(state.alt_rows_shifted(), 0);
+
+    advance(&mut state, b"\x1b[3;1H\n"); // linefeed at the last row scrolls
+    assert_eq!(state.alt_rows_shifted(), 1);
+    advance(&mut state, b"\x1b[1;1H\x1bM"); // RI at the top scrolls down
+    assert_eq!(state.alt_rows_shifted(), 2);
+    advance(&mut state, b"\x1b[S"); // SU
+    assert_eq!(state.alt_rows_shifted(), 3);
+    advance(&mut state, b"\x1b[T"); // SD
+    assert_eq!(state.alt_rows_shifted(), 4);
+    advance(&mut state, b"\x1b[L"); // IL
+    assert_eq!(state.alt_rows_shifted(), 5);
+    advance(&mut state, b"\x1b[M"); // DL
+    assert_eq!(state.alt_rows_shifted(), 6);
+}
+
+#[test]
+fn printing_in_place_on_the_alternate_screen_counts_nothing() {
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b[?1049h");
+    advance(&mut state, b"\x1b[2;1Habc\x1b[1;1Hxy");
+    assert_eq!(
+        state.alt_rows_shifted(),
+        0,
+        "no rows moved, only cells wrote"
+    );
+}
+
+#[test]
+fn primary_screen_scrolls_never_touch_the_alternate_shift_counter() {
+    // A primary full-screen scroll is recorded by the scrollback push counter;
+    // this counter is the alternate's alone.
+    let mut state = state(5, 3);
+    advance(&mut state, b"a\r\nb\r\nc\n\n"); // scrolls the primary twice
+    advance(&mut state, b"\x1b[M"); // DL on the primary
+    assert_eq!(state.alt_rows_shifted(), 0);
+    assert!(
+        state.scrollback().total_pushed() > 0,
+        "the primary recorded its scrolls"
+    );
+}

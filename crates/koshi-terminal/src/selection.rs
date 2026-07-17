@@ -56,7 +56,9 @@ use crate::scrollback::Scrollback;
 /// `/`, `.`, `-`, and `_` do not, so a path, a URL, or a dotted filename is one
 /// word. Double-clicking `local` in `/usr/local/bin` selects `/usr/local/bin`;
 /// double-clicking inside `(foo bar)` selects `foo` alone, because the space and
-/// the parentheses are separators.
+/// the parentheses are separators. Double-clicking a separator itself selects
+/// the run of that same character — the two spaces in `foo  bar`, not the words
+/// around them.
 pub const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
 
 /// One pane's text — its scrollback history and its live screen — addressed by
@@ -261,17 +263,38 @@ impl<'a> TextView<'a> {
         }
     }
 
+    /// The separator character at `row`/`col`, or `None` when the cell holds
+    /// part of a word, is the width-0 half of a wide glyph (the glyph's own
+    /// cell is the text there), or holds nothing.
+    fn separator_char(&self, row: u64, col: u16) -> Option<char> {
+        self.cell(row, col)
+            .filter(|cell| cell.width() != 0)
+            .map(|cell| cell.ch())
+            .filter(|ch| WORD_SEPARATORS.contains(*ch))
+    }
+
     /// The start of the word at `row`/`col`: step left while the cell there is
     /// part of a word, and stop on the last one that was.
     ///
     /// `cargo build` with the pointer on the `i` of `build`: walking left hits
     /// the space after `cargo`, which is a separator, so the word starts at the
     /// `b`.
+    ///
+    /// Starting ON a separator, the "word" is the run of that same character:
+    /// the space in `foo  bar` grows over the two spaces, never into `foo`, and
+    /// `(` next to `)` stays alone — each separator is its own run.
     #[must_use]
     pub fn word_start(&self, row: u64, col: u16) -> (u64, u16) {
+        let run = self.separator_char(row, col);
         let (mut row, mut col) = (row, col);
         while let Some((prev_row, prev_col)) = self.prev_cell(row, col) {
-            if self.is_separator(prev_row, prev_col) {
+            let stop = match run {
+                Some(ch) => self
+                    .cell(prev_row, prev_col)
+                    .is_none_or(|cell| cell.ch() != ch),
+                None => self.is_separator(prev_row, prev_col),
+            };
+            if stop {
                 break;
             }
             row = prev_row;
@@ -281,12 +304,20 @@ impl<'a> TextView<'a> {
     }
 
     /// The end of the word at `row`/`col`: the mirror of
-    /// [`word_start`](Self::word_start), stepping right.
+    /// [`word_start`](Self::word_start), stepping right — including the
+    /// separator-run rule for a start cell that is itself a separator.
     #[must_use]
     pub fn word_end(&self, row: u64, col: u16) -> (u64, u16) {
+        let run = self.separator_char(row, col);
         let (mut row, mut col) = (row, col);
         while let Some((next_row, next_col)) = self.next_cell(row, col) {
-            if self.is_separator(next_row, next_col) {
+            let stop = match run {
+                Some(ch) => self
+                    .cell(next_row, next_col)
+                    .is_none_or(|cell| cell.ch() != ch),
+                None => self.is_separator(next_row, next_col),
+            };
+            if stop {
                 break;
             }
             row = next_row;

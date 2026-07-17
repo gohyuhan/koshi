@@ -257,6 +257,9 @@ impl Runtime {
     ///
     /// The pane's tracking level is checked before the frame is rebuilt, so a
     /// bare move over a pane in no mouse mode costs nothing.
+    ///
+    /// An event that is written also drops this client's highlight in that
+    /// pane: input reaching the pane's child leaves visual mode.
     fn forward_mouse_to_pane(&mut self, client_id: ClientId, mouse: MouseInput) {
         let captured = self.mouse_capture(client_id);
         // A release ends the capture, whether or not it forwards. Which button
@@ -301,6 +304,7 @@ impl Runtime {
         };
         if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
             let _ = self.pty_backend().write(pane_id, &bytes);
+            self.clear_selection_on_pane_input(client_id, pane_id);
             // Capture with the press's own button — reliable, unlike a later
             // drag's or release's.
             if let MouseKind::Press(button) = mouse.kind {
