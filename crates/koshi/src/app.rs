@@ -217,8 +217,11 @@ fn run_loop<B: Backend>(
     loop {
         let now = Instant::now();
         let next = earliest(
-            runtime.next_render_wakeup(now),
-            runtime.next_key_wakeup(now),
+            earliest(
+                runtime.next_render_wakeup(now),
+                runtime.next_key_wakeup(now),
+            ),
+            runtime.next_selection_scroll_wakeup(now),
         );
         let event = match next {
             Some(timeout) => match runtime.inbox_rx().recv_timeout(timeout) {
@@ -243,6 +246,7 @@ fn run_loop<B: Backend>(
             break;
         }
         runtime.expire_key_sequences(Instant::now());
+        runtime.expire_selection_scrolls(Instant::now());
         if runtime.poll_render(Instant::now()) {
             render(
                 terminal,
@@ -279,7 +283,7 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
             runtime.handle_key_input(client_id, chord, Instant::now());
         }
         RuntimeEvent::MouseInput { client_id, mouse } => {
-            runtime.handle_mouse_input(client_id, mouse);
+            runtime.handle_mouse_input(client_id, mouse, Instant::now());
         }
         RuntimeEvent::ClientAttached {
             session_id,

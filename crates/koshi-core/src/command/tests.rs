@@ -104,12 +104,21 @@ fn write_to_pane_roundtrips() {
 
 #[test]
 fn visual_commands_roundtrip() {
-    roundtrip(&Command::Visual(VisualCommand::SetSelection(Selection {
-        kind: SelectionKind::Block,
-        anchor: GridPos { row: 10, col: 0 },
-        cursor: GridPos { row: 12, col: 40 },
-    })));
-    roundtrip(&Command::Visual(VisualCommand::ClearSelection));
+    roundtrip(&Command::Visual(VisualCommand::SetSelection(
+        SetSelectionArgs {
+            pane: PaneId::new(),
+            selection: Selection {
+                kind: SelectionKind::Block,
+                anchor: GridPos { row: 10, col: 0 },
+                cursor: GridPos { row: 12, col: 40 },
+            },
+        },
+    )));
+    roundtrip(&Command::Visual(VisualCommand::ClearSelection(
+        ClearSelectionArgs {
+            pane: PaneId::new(),
+        },
+    )));
     roundtrip(&Command::Visual(VisualCommand::Copy(CopyArgs {
         target: CopyTarget::Osc52,
     })));
@@ -194,7 +203,12 @@ fn command_variant_names_are_canonical() {
             }),
             "RunCommandPane",
         ),
-        (Command::Visual(VisualCommand::ClearSelection), "Visual"),
+        (
+            Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+                pane: PaneId::new(),
+            })),
+            "Visual",
+        ),
         (
             Command::Plugin(PluginCommand::Reload(ReloadPluginArgs {
                 plugin: PluginId::new(),
@@ -232,14 +246,22 @@ fn visual_variant_names_are_canonical() {
     // selecting is the mouse's alone.
     let cases: Vec<(VisualCommand, &str)> = vec![
         (
-            VisualCommand::SetSelection(Selection {
-                kind: SelectionKind::Character,
-                anchor: GridPos { row: 0, col: 0 },
-                cursor: GridPos { row: 0, col: 1 },
+            VisualCommand::SetSelection(SetSelectionArgs {
+                pane: PaneId::new(),
+                selection: Selection {
+                    kind: SelectionKind::Character,
+                    anchor: GridPos { row: 0, col: 0 },
+                    cursor: GridPos { row: 0, col: 1 },
+                },
             }),
             "SetSelection",
         ),
-        (VisualCommand::ClearSelection, "ClearSelection"),
+        (
+            VisualCommand::ClearSelection(ClearSelectionArgs {
+                pane: PaneId::new(),
+            }),
+            "ClearSelection",
+        ),
         (
             VisualCommand::Copy(CopyArgs {
                 target: CopyTarget::Osc52,
@@ -325,7 +347,9 @@ fn command_kind_mirrors_command() {
             CommandKind::RunCommandPane,
         ),
         (
-            Command::Visual(VisualCommand::ClearSelection),
+            Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+                pane: PaneId::new(),
+            })),
             CommandKind::Visual,
         ),
         (

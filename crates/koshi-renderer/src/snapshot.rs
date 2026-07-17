@@ -167,8 +167,43 @@ pub struct PaneSnapshot {
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
     pub reverse_video: bool,
+    /// The viewing client's highlighted text in this pane, already cut down to
+    /// the rows this frame shows. `None` when the client has nothing highlighted
+    /// here, or when the highlight is entirely outside the visible rows.
+    pub selection: Option<SelectionSpans>,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: ScrollbackMeta,
+}
+
+/// Which cells of a pane are highlighted this frame, as a column range per
+/// visible row.
+///
+/// The highlight is resolved to the rendered window's own rows and columns
+/// before it gets here, so the renderer never has to know how a selection is
+/// stored or how far the view is scrolled — it paints the rows it is handed.
+/// Rows are in ascending order, and a row the highlight does not touch has no
+/// entry.
+///
+/// A highlight running from mid-way along row 4 to mid-way along row 6 of an
+/// 80-column pane arrives as `[(4, 12, 79), (5, 0, 79), (6, 0, 33)]`: the first
+/// row from the start column to its end, whole rows in between, the last row up
+/// to its end column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionSpans {
+    /// One entry per highlighted row: the row, then the first and last
+    /// highlighted column on it. Both columns are inclusive.
+    pub rows: Vec<(u16, u16, u16)>,
+}
+
+impl SelectionSpans {
+    /// The highlighted column range on `row`, or `None` if it has none.
+    #[must_use]
+    pub fn row_span(&self, row: u16) -> Option<(u16, u16)> {
+        self.rows
+            .iter()
+            .find(|(candidate, _, _)| *candidate == row)
+            .map(|&(_, start, end)| (start, end))
+    }
 }
 
 /// The cursor's on-screen position, relative to the content area's origin, plus

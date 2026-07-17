@@ -8,6 +8,7 @@
 use super::*;
 
 use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use koshi_core::command::{NewPaneArgs, NewTabArgs};
 use koshi_core::geometry::{Direction, Size};
@@ -21,6 +22,27 @@ use crate::placeholder::{NullSnapshotProvider, NullStorage};
 fn runtime() -> (Runtime, ClientId) {
     let (runtime, _fake, client) = runtime_with_fake();
     (runtime, client)
+}
+
+/// Feed one mouse event, timed far enough from any other that no two presses
+/// read as a double click.
+///
+/// The runtime tells a double click from two separate clicks by the gap between
+/// them, so a test that pressed twice at the wall clock would double-click by
+/// accident. Every event here is stamped an hour on, which no threshold reaches.
+/// A test that wants a real double click drives
+/// [`Runtime::handle_mouse_input`] with its own instants.
+fn mouse(runtime: &mut Runtime, client: ClientId, input: MouseInput) {
+    runtime.handle_mouse_input(client, input, far_apart());
+}
+
+/// An instant an hour after the last one this returned, so successive presses
+/// never fall inside a click threshold.
+fn far_apart() -> Instant {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static HOURS: AtomicU64 = AtomicU64::new(1);
+    let hours = HOURS.fetch_add(1, Ordering::Relaxed);
+    Instant::now() + Duration::from_secs(hours * 3600)
 }
 
 fn runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
@@ -125,7 +147,7 @@ fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
         region == HitRegion::Tab { tab_id: first_tab }
     });
 
-    runtime.handle_mouse_input(client, press(x, 0));
+    mouse(&mut runtime, client, press(x, 0));
 
     let snapshot = runtime.build_snapshot(client).unwrap();
     assert_eq!(
@@ -157,7 +179,7 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
         other => panic!("expected a right scroll arrow, got {other:?}"),
     };
 
-    runtime.handle_mouse_input(client, press(x, 0));
+    mouse(&mut runtime, client, press(x, 0));
 
     assert!(to > 0, "the right arrow scrolls toward the end");
     assert_eq!(offset(&runtime, client), Some(to));
@@ -186,7 +208,7 @@ fn wheel_over_the_tabline_steps_the_offset() {
         mods: ModFlags::NONE,
     };
 
-    runtime.handle_mouse_input(client, wheel);
+    mouse(&mut runtime, client, wheel);
 
     assert_eq!(
         offset(&runtime, client),
@@ -212,7 +234,7 @@ fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
         at: Point { x: 40, y: 10 },
         mods: ModFlags::NONE,
     };
-    runtime.handle_mouse_input(client, wheel);
+    mouse(&mut runtime, client, wheel);
 
     assert_eq!(
         offset(&runtime, client),
@@ -233,7 +255,8 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
         .set_tabline_offset(Some(2));
 
     // Buttonless motion over the tabline scrolls nothing and begins no drag.
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Motion,
@@ -242,7 +265,8 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
         },
     );
     // A right press over a tab is neither a focus nor a scroll.
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Press(MouseButton::Right),
@@ -274,7 +298,7 @@ fn pressing_a_bare_tabline_cell_begins_a_drag() {
         .set_tabline_offset(Some(0));
 
     let x = find_on_tabline(&runtime, client, 10, |region| region == HitRegion::Tabline);
-    runtime.handle_mouse_input(client, press(x, 0));
+    mouse(&mut runtime, client, press(x, 0));
 
     let drag = runtime
         .client_mut(client)
@@ -302,7 +326,8 @@ fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
 
     // Drag left by two steps' worth of cells: scroll two tabs toward the end.
     let x = 40 - 2 * TABLINE_DRAG_STEP as u16;
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Drag(MouseButton::Left),
@@ -313,7 +338,8 @@ fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
     assert_eq!(offset(&runtime, client), Some(4), "two steps past anchor 2");
 
     // Release ends the drag, leaving the scrolled offset.
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
@@ -471,8 +497,12 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
-    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 3), cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_x(side, cell.x, 3), cell.y),
+    );
 
     assert_eq!(
         pane_cols(&runtime, client, pane),
@@ -489,10 +519,14 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
 
     // Drag three cells inward to shrink the pane.
-    runtime.handle_mouse_input(client, drag(inward_x(side, cell.x, 3), cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(inward_x(side, cell.x, 3), cell.y),
+    );
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before - 3,
@@ -501,7 +535,11 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
 
     // One more cell inward from the new pointer position shrinks by exactly one
     // more: the anchor followed the pointer, so it is not a sudden jump.
-    runtime.handle_mouse_input(client, drag(inward_x(side, cell.x, 4), cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(inward_x(side, cell.x, 4), cell.y),
+    );
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before - 4,
@@ -515,11 +553,15 @@ fn a_release_ends_the_resize_drag_so_a_later_drag_does_nothing() {
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
-    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 2), cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_x(side, cell.x, 2), cell.y),
+    );
     let after_drag = pane_cols(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, release());
+    mouse(&mut runtime, client, release());
     assert!(
         runtime
             .client_mut(client)
@@ -530,7 +572,11 @@ fn a_release_ends_the_resize_drag_so_a_later_drag_does_nothing() {
     );
 
     // With no resize drag in progress, a stray drag resizes nothing.
-    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 6), cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_x(side, cell.x, 6), cell.y),
+    );
     assert_eq!(
         pane_cols(&runtime, client, pane),
         after_drag,
@@ -547,12 +593,16 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
     let before = pane_cols(&runtime, client, pane);
     let viewport_cols = runtime.build_snapshot(client).unwrap().client.viewport.cols;
 
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
 
     // One big jump past the wall: the drag is applied a cell at a time, so it
     // grows the pane as far as the neighbor can donate instead of refusing the
     // whole move.
-    runtime.handle_mouse_input(client, drag(outward_edge_x(side, viewport_cols), cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_edge_x(side, viewport_cols), cell.y),
+    );
     let grown = pane_cols(&runtime, client, pane);
     assert!(
         grown > before,
@@ -561,7 +611,11 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
 
     // Pointer still further out: the neighbor is already at its minimum, so the
     // anchor sits at the wall and nothing more moves.
-    runtime.handle_mouse_input(client, drag(outward_edge_x(side, viewport_cols), cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_edge_x(side, viewport_cols), cell.y),
+    );
     assert_eq!(
         pane_cols(&runtime, client, pane),
         grown,
@@ -570,7 +624,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
 
     // Reverse straight back to the original border cell: the anchor held at the
     // wall, so the pane shrinks back with no dead zone.
-    runtime.handle_mouse_input(client, drag(cell.x, cell.y));
+    mouse(&mut runtime, client, drag(cell.x, cell.y));
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before,
@@ -704,8 +758,12 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
     let (cell, pane, side) = find_horizontal_border(&runtime, client);
     let before = pane_rows(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
-    runtime.handle_mouse_input(client, drag(cell.x, outward_y(side, cell.y, 3)));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(cell.x, outward_y(side, cell.y, 3)),
+    );
 
     assert_eq!(
         pane_rows(&runtime, client, pane),
@@ -729,7 +787,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
 
     // The outer frame sits at the tab edge and cannot move, so grabbing it starts
     // no resize drag.
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
     assert!(
         runtime
             .client_mut(client)
@@ -740,7 +798,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
     );
 
     // A drag inward after that changes nothing either.
-    runtime.handle_mouse_input(client, drag(cell.x - 3, cell.y));
+    mouse(&mut runtime, client, drag(cell.x - 3, cell.y));
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before,
@@ -770,7 +828,7 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     // visible under a zoom, so no resize begins, the zoom stands, and the
     // hidden tiled layout is untouched.
     let (cell, _, _) = find_vertical_border(&runtime, client);
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
     assert!(
         runtime
             .client_mut(client)
@@ -780,7 +838,7 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
         "a zoomed view has no draggable border, so no resize drag begins"
     );
 
-    runtime.handle_mouse_input(client, drag(cell.x - 3, cell.y));
+    mouse(&mut runtime, client, drag(cell.x - 3, cell.y));
     assert!(
         matches!(
             runtime.client_mut(client).unwrap().layout_mode(active_tab),
@@ -812,7 +870,7 @@ fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(at.x, at.y));
+    mouse(&mut runtime, client, press(at.x, at.y));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -827,7 +885,7 @@ fn a_click_forwards_nothing_when_the_program_wants_no_mouse() {
     let pane = only_pane(&runtime);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(at.x, at.y));
+    mouse(&mut runtime, client, press(at.x, at.y));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -844,9 +902,10 @@ fn a_press_drag_release_gesture_forwards_each_event() {
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(at.x, at.y));
-    runtime.handle_mouse_input(client, drag(at.x, at.y));
-    runtime.handle_mouse_input(
+    mouse(&mut runtime, client, press(at.x, at.y));
+    mouse(&mut runtime, client, drag(at.x, at.y));
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
@@ -880,7 +939,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
     // Normal tracking does not report motion: the move forwards nothing (and the
     // frame is never rebuilt to check).
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
-    runtime.handle_mouse_input(client, motion);
+    mouse(&mut runtime, client, motion);
     assert_eq!(
         fake.writes(pane).expect("writes"),
         Vec::<Vec<u8>>::new(),
@@ -889,7 +948,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
 
     // Any-motion tracking reports it: no-button 3 + motion bit 32 = 35.
     runtime.handle_pty_output(pane, b"\x1b[?1003h");
-    runtime.handle_mouse_input(client, motion);
+    mouse(&mut runtime, client, motion);
     assert_eq!(
         fake.writes(pane).expect("writes"),
         vec![format!("\x1b[<35;{col};{row}M").into_bytes()],
@@ -905,7 +964,8 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     let (at, col, row) = a_content_cell(&runtime, client, pane);
 
     // A right press captures the gesture (button 2).
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Press(MouseButton::Right),
@@ -915,7 +975,8 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     );
     // The terminal reports the release as the left button (a stand-in); it must
     // still reach the program as a right release, matching the press.
-    runtime.handle_mouse_input(
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
@@ -943,8 +1004,9 @@ fn a_drag_with_no_captured_press_is_dropped() {
 
     // A drag arrives without a press to capture the gesture (a release with no
     // matching press is the orphan-release case) — nothing is forwarded.
-    runtime.handle_mouse_input(client, drag(at.x, at.y));
-    runtime.handle_mouse_input(
+    mouse(&mut runtime, client, drag(at.x, at.y));
+    mouse(
+        &mut runtime,
         client,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
@@ -970,8 +1032,8 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
     // Press inside the pane to capture the gesture, then drag far past its top-
     // left corner (0, 0 is the tabline row, outside the pane); the captured drag
     // clamps to the pane's first cell.
-    runtime.handle_mouse_input(client, press(at.x, at.y));
-    runtime.handle_mouse_input(client, drag(0, 0));
+    mouse(&mut runtime, client, press(at.x, at.y));
+    mouse(&mut runtime, client, drag(0, 0));
 
     assert_eq!(
         fake.writes(pane).expect("writes").last().expect("a drag"),
@@ -989,8 +1051,12 @@ fn border_resize_off_leaves_a_border_press_inert() {
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    runtime.handle_mouse_input(client, press(cell.x, cell.y));
-    runtime.handle_mouse_input(client, drag(outward_x(side, cell.x, 3), cell.y));
+    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(
+        &mut runtime,
+        client,
+        drag(outward_x(side, cell.x, 3), cell.y),
+    );
 
     assert_eq!(
         pane_cols(&runtime, client, pane),
@@ -1019,7 +1085,7 @@ fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
     runtime.handle_pty_output(other, b"\x1b[?1000h\x1b[?1006h");
     let (at, _, _) = a_content_cell(&runtime, client, other);
 
-    runtime.handle_mouse_input(client, press(at.x, at.y));
+    mouse(&mut runtime, client, press(at.x, at.y));
 
     assert_eq!(
         runtime.typed_pane(client),

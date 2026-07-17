@@ -71,6 +71,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
             view_offset: 0,
         }),
         reverse_video: false,
+        selection: None,
         scrollback: ScrollbackMeta {
             truncated: false,
             retained_lines: 0,

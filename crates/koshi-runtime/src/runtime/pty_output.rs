@@ -28,6 +28,11 @@ impl Runtime {
     /// Lines this chunk scrolls off the top feed the scrollback; every client
     /// whose view of this pane is held is then re-anchored by that many lines so
     /// it keeps showing the same text while live output accumulates below.
+    ///
+    /// A chunk that switches the pane between its primary and alternate screens
+    /// drops every client's highlight in it: a highlight names a line by how many
+    /// the pane had pushed into scrollback, and the alternate screen keeps no
+    /// scrollback and shares no lines, so the name means nothing there.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, bytes: &[u8]) {
         let Some(engine) = self.terminal_engines.get_mut(&pane_id) else {
             return;
@@ -38,13 +43,18 @@ impl Runtime {
         let before = engine.state().scrollback();
         let pushed_before = before.total_pushed();
         let len_before = before.len();
+        let screen_before = engine.state().active_screen();
         let replies = engine.advance(bytes);
         let after = engine.state().scrollback();
         let len_after = after.len();
         let pushed = (after.total_pushed() - pushed_before) as usize;
+        let screen_after = engine.state().active_screen();
 
         if !replies.is_empty() {
             let _ = self.pty_backend().write(pane_id, &replies);
+        }
+        if screen_before != screen_after {
+            self.clear_pane_selections(pane_id);
         }
         // Held views need adjusting only when history gained lines (offsets rise)
         // or shrank under an erase (offsets reclamp); the common chunk that

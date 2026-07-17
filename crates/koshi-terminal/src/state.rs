@@ -26,6 +26,7 @@ use koshi_core::process::PtySize;
 
 use crate::grid::state::{Cell, Grid};
 use crate::scrollback::{Scrollback, ScrollbackLimit};
+use crate::selection::TextView;
 use crate::style::Style;
 
 mod clipped_row;
@@ -250,8 +251,41 @@ impl TerminalState {
     /// captured at a narrower width are padded to the current width with the
     /// primary screen's background ([`Style::bg_fill`]), the same fill every
     /// erase and scroll uses.
+    /// This pane's text as one space addressed by absolute row number: the
+    /// retained history plus the live screen on the primary, and the screen
+    /// alone on the alternate, which keeps no history of its own.
+    ///
+    /// **The screen decides which.** The scrollback belongs to the primary and
+    /// is still there while the alternate is up, so pairing it with the
+    /// alternate's grid would let a word or line grown from the alternate's top
+    /// row step up into the primary's text. Building the view here rather than
+    /// at each call site is what makes that impossible to write.
+    pub fn text_view(&self) -> TextView<'_> {
+        match self.active {
+            Screen::Primary => TextView::new(&self.scrollback, self.active_grid()),
+            Screen::Alternate => {
+                TextView::screen_only(self.active_grid(), self.scrollback.total_pushed())
+            }
+        }
+    }
+
+    /// How far the view is *actually* scrolled when `offset` was asked for:
+    /// `offset` clamped to the retained line count, and `0` on the alternate
+    /// screen (which keeps no scrollback) or with no history to show.
+    ///
+    /// This is the one place the clamp happens, so the composed grid, the scroll
+    /// indicator, cursor suppression, and the row a selection resolves to can
+    /// never disagree about how far back the view sits.
+    pub fn effective_view_offset(&self, offset: usize) -> usize {
+        if !matches!(self.active, Screen::Primary) {
+            return 0;
+        }
+        offset.min(self.scrollback.len())
+    }
+
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
-        if offset == 0 || !matches!(self.active, Screen::Primary) {
+        let scrolled = self.effective_view_offset(offset);
+        if scrolled == 0 {
             return (self.active_grid_arc(), 0);
         }
 
@@ -259,10 +293,6 @@ impl TerminalState {
         let (rows, cols) = grid.dimensions();
         let history = self.scrollback.lines();
         let retained = history.len();
-        let scrolled = offset.min(retained);
-        if scrolled == 0 {
-            return (self.active_grid_arc(), 0);
-        }
 
         // The visible window: the `scrolled` newest history rows, then the live
         // rows, capped at the screen height. The live grid alone is `rows` tall,

@@ -352,33 +352,96 @@ pub struct RenameSessionArgs {
 /// program in the pane — `vim`, readline, and `less` all bind them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisualCommand {
-    /// Begin or extend a selection. Issued by the mouse layer as a drag moves.
-    SetSelection(Selection),
-    /// Clear the active selection, leaving visual mode.
-    ClearSelection,
+    /// Begin or extend a selection in one pane. Issued by the mouse layer as a
+    /// drag moves.
+    SetSelection(SetSelectionArgs),
+    /// Clear one pane's selection, leaving visual mode for that pane.
+    ClearSelection(ClearSelectionArgs),
     /// Copy the current selection to a clipboard target.
     Copy(CopyArgs),
 }
 
-/// The shape of a selection.
+/// Arguments for [`VisualCommand::SetSelection`].
+///
+/// **The pane is named, never inferred.** A highlight belongs to one pane and
+/// panes keep their own, so several can be up at once for one client — leaving
+/// the pane out would make "highlight this" ambiguous the moment a second pane
+/// had a highlight. The mouse layer knows the pane its drag hit, so it says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSelectionArgs {
+    /// The pane to highlight in.
+    pub pane: PaneId,
+    /// The highlight to put there, replacing any the pane already had.
+    pub selection: Selection,
+}
+
+/// Arguments for [`VisualCommand::ClearSelection`].
+///
+/// **The pane is named, never inferred** — same reason as
+/// [`SetSelectionArgs`]: with highlights up in two panes, "clear the selection"
+/// alone cannot say which one. Clearing a pane that has no highlight is not an
+/// error; it changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearSelectionArgs {
+    /// The pane whose highlight is dropped.
+    pub pane: PaneId,
+}
+
+/// The shape of a selection, and with it the gesture that made it: a plain drag
+/// selects [`Character`](Self::Character), a double-click drag
+/// [`Word`](Self::Word), a triple-click drag [`Line`](Self::Line), and holding
+/// `Alt` while dragging [`Block`](Self::Block).
+///
+/// The kind is fixed when the drag starts and holds for the whole drag, so
+/// extending a double-click drag keeps snapping to whole words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionKind {
-    /// A contiguous character range across wrapped lines.
+    /// A contiguous character range that follows the text across soft-wrapped
+    /// lines: the end of one row continues at the start of the next.
     Character,
-    /// Endpoints snapped to word boundaries.
+    /// Both ends grown outward to whole words. Dragging from the middle of
+    /// `hello` to the middle of `world` selects `hello world` entire.
     Word,
-    /// Whole logical lines.
+    /// Whole logical lines, soft-wrap included: a line that wrapped over three
+    /// rows is selected as all three.
     Line,
-    /// A rectangular column range across rows.
+    /// A rectangle — the same column range on every row the drag spans, which
+    /// is how one column is lifted out of tabular output.
     Block,
 }
 
-/// A grid position that spans both the scrollback history and the currently
-/// visible grid (row 0 is the oldest visible line in scrollback or the top of
-/// the visible grid if scrollback is empty).
+/// A position in one pane's text, spanning its scrollback history and its live
+/// screen as one continuous space.
+///
+/// **A position is a whole cell.** A terminal reports the pointer as a column
+/// and a row and nothing finer, so there is no sub-cell position to hold: by the
+/// time a mouse event reaches koshi the outer terminal has already rounded the
+/// pointer to a cell. Both ends of a selection are therefore inclusive — the
+/// cell under the pointer is part of the highlight.
+///
+/// **The row is an absolute line number: how many lines the pane had ever
+/// pushed into scrollback when this line was the top of the live screen.** It
+/// counts every line the pane has ever produced, so it never changes meaning —
+/// new output does not renumber it, and neither does the scrollback dropping
+/// its oldest lines to stay under its cap. A row that has been dropped is
+/// simply gone, which is a question about what still exists rather than about
+/// what the number means.
+///
+/// Example: a pane has pushed 1000 lines into history and its scrollback holds
+/// the newest 500 (lines 500..=999). The oldest line you can still scroll back
+/// to is row `500`; the top line of the live screen is row `1000`; the row
+/// below it is `1001`. Ten more lines of output arrive: the live screen's top
+/// line is now row `1010`, and the line that was row `1000` is still row
+/// `1000` — now the newest line in history. Cap eviction drops lines 500..=509;
+/// the oldest line you can reach is now row `510`, and every surviving line
+/// kept the number it had.
+///
+/// Both numbers are derived from the running total of lines a pane has pushed
+/// into its scrollback and the count it still retains, which the terminal
+/// engine already tracks (`Scrollback::total_pushed` and `Scrollback::len`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridPos {
-    /// Row number: 0 is the top of scrollback/visible area, increasing downward.
+    /// Absolute line number — see the type docs. Never renumbered.
     pub row: u64,
     /// Column in cells, 0-indexed from the left.
     pub col: u16,
@@ -387,22 +450,30 @@ pub struct GridPos {
 /// A selection: a highlighted range of text, always made with the mouse — a
 /// drag over a pane's content starts one, and a click or any key press drops it.
 ///
-/// **One type, not two.** This is both what [`VisualCommand::SetSelection`]
-/// carries and what [`SelectionChanged`](crate::event::SelectionChanged)
-/// reports, because they are the same fact: the command asks for a selection and
-/// the event announces the selection that resulted. A separate args struct of
-/// identical shape would only be a place for the two to drift — a field added to
-/// one and not the other would compile and be silently dropped at the
-/// conversion between them.
+/// **One type, not two.** This is both what
+/// [`SetSelectionArgs`] carries and what
+/// [`SelectionChanged`](crate::event::SelectionChanged) reports, because they
+/// are the same fact: the command asks for a selection and the event announces
+/// the selection that resulted. A separate args struct of identical shape would
+/// only be a place for the two to drift — a field added to one and not the
+/// other would compile and be silently dropped at the conversion between them.
 ///
-/// Both ends are grid positions the mouse layer resolved from a drag.
+/// Both ends are positions the mouse layer resolved from a drag, and either end
+/// may be the earlier one in the text: dragging up or leftward puts `cursor`
+/// before `anchor`. Readers that need the range in text order order the pair
+/// themselves.
+///
+/// The pane a selection is in is not a field here — the command
+/// ([`SetSelectionArgs::pane`]) and the event
+/// ([`SelectionChanged::pane_id`](crate::event::SelectionChanged::pane_id))
+/// each name it, and the client keys its highlights by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     /// Selection shape.
     pub kind: SelectionKind,
-    /// The fixed end of the selection.
+    /// The end that stays put — where the drag started.
     pub anchor: GridPos,
-    /// The moving end of the selection.
+    /// The end that follows the pointer.
     pub cursor: GridPos,
 }
 
