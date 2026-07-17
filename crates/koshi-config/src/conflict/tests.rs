@@ -418,14 +418,14 @@ fn bindings_in_an_orphan_mode_do_not_collide() {
 
 #[test]
 fn coming_soon_binding_warns_without_revert() {
-    // `core:copy-mode-enter` is seeded but not implemented; the binding cannot fire.
+    // `core:copy-selection` is seeded but not implemented; the binding cannot fire.
     let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
             LayerOrigin::User,
             "normal",
-            vec![(key.clone(), bound("copy-mode-enter"))],
+            vec![(key.clone(), bound("copy-selection"))],
         ),
     ]);
     assert_eq!(
@@ -434,7 +434,7 @@ fn coming_soon_binding_warns_without_revert() {
             origin: LayerOrigin::User,
             mode: mode("normal"),
             key,
-            action: core("copy-mode-enter"),
+            action: core("copy-selection"),
         }]
     );
     assert_eq!(report.verdict(), KeymapVerdict::Apply);
@@ -451,12 +451,12 @@ fn coming_soon_claims_do_not_collide() {
         layer(
             LayerOrigin::User,
             "normal",
-            vec![(key.clone(), bound("copy-mode-enter"))],
+            vec![(key.clone(), bound("copy-selection"))],
         ),
         layer(
             LayerOrigin::Session,
             "normal",
-            vec![(key.clone(), bound("copy-mode-exit"))],
+            vec![(key.clone(), bound("plugin-install"))],
         ),
     ]);
     assert_eq!(
@@ -466,13 +466,13 @@ fn coming_soon_claims_do_not_collide() {
                 origin: LayerOrigin::User,
                 mode: mode("normal"),
                 key: key.clone(),
-                action: core("copy-mode-enter"),
+                action: core("copy-selection"),
             },
             ConflictDiagnostic::ComingSoonAction {
                 origin: LayerOrigin::Session,
                 mode: mode("normal"),
                 key,
-                action: core("copy-mode-exit"),
+                action: core("plugin-install"),
             },
         ]
     );
@@ -1284,7 +1284,7 @@ fn severity_table() {
                 origin: LayerOrigin::User,
                 mode: mode("normal"),
                 key: seq(ModFlags::CTRL, 'y'),
-                action: core("copy-mode-enter"),
+                action: core("copy-selection"),
             },
             ConflictSeverity::Warning,
         ),
@@ -1457,11 +1457,11 @@ fn display_messages_are_exact() {
         origin: LayerOrigin::User,
         mode: mode("normal"),
         key: seq(ModFlags::CTRL, 'y'),
-        action: core("copy-mode-enter"),
+        action: core("copy-selection"),
     };
     assert_eq!(
         coming_soon.to_string(),
-        "`<C-y>` in mode `normal` (user) binds `core:copy-mode-enter`, which is not implemented \
+        "`<C-y>` in mode `normal` (user) binds `core:copy-selection`, which is not implemented \
          yet; the binding cannot fire until it is"
     );
 

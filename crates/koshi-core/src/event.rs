@@ -17,7 +17,7 @@
 //! context and the resulting [`PrivacyTier`] together, and every non-public
 //! variant is unit-shaped with no content field.
 
-use crate::command::{CopyTarget, GridPos, SelectionKind};
+use crate::command::{CopyTarget, Selection};
 use crate::geometry::{Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::mouse::{MouseButton, ScrollDirection};
@@ -28,7 +28,7 @@ use std::time::SystemTime;
 /// A completed fact emitted by the runtime.
 ///
 /// Variants are grouped to match the sections further down the file: pane/tab
-/// lifecycle, input modes, input privacy, mouse, delivery, copy/search, and
+/// lifecycle, input modes, input privacy, mouse, delivery, selection/copy, and
 /// plugins. Each variant wraps a like-named payload struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
@@ -81,7 +81,7 @@ pub enum Event {
     ConfigReloadFailed(ConfigReloadFailed),
 
     // Input modes and keybindings.
-    /// The active input mode changed (e.g. normal, locked, copy).
+    /// The active input mode changed (normal or locked).
     InputModeChanged(InputModeChanged),
     /// A keybinding matched and resolved to a command.
     KeybindingMatched(KeybindingMatched),
@@ -121,17 +121,15 @@ pub enum Event {
     /// A command was rejected by validation or target resolution.
     CommandRejected(CommandRejected),
 
-    // Copy mode, selection, and search.
-    /// Copy mode was entered for a pane.
-    CopyModeEntered(CopyModeEntered),
-    /// Copy mode was exited for a pane.
-    CopyModeExited(CopyModeExited),
+    // Selection and copy.
     /// The active selection changed (or was cleared).
+    ///
+    /// There is no separate entered/exited event: a selection appearing IS
+    /// entering visual mode and it clearing IS leaving, so this one event
+    /// already carries the fact.
     SelectionChanged(SelectionChanged),
     /// A selection was copied to a clipboard target.
     Copied(Copied),
-    /// Search state changed (new query, match navigation).
-    SearchUpdated(SearchUpdated),
 
     // Plugin lifecycle.
     /// A plugin lifecycle fact.
@@ -343,15 +341,18 @@ pub struct ConfigReloadFailed {
 // Input modes and keybindings
 // ============================================================================
 
-/// The input mode a pane is in.
+/// The input mode a client is in.
+///
+/// Visual mode is deliberately absent: an input mode decides what a keystroke
+/// does, and visual mode never interprets one — every key clears the selection
+/// and reaches the program. Highlighted text is reported by
+/// [`Event::SelectionChanged`], not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
     /// Normal keybinding interpretation.
     Normal,
     /// Locked: input passed through to the pane verbatim.
     Locked,
-    /// Copy mode: keyboard drives selection and search.
-    CopyMode,
 }
 
 /// Payload for [`Event::InputModeChanged`].
@@ -685,41 +686,17 @@ pub struct CommandRejected {
 }
 
 // ============================================================================
-// Copy mode, selection, and search
+// Selection and copy
 // ============================================================================
-
-/// Payload for [`Event::CopyModeEntered`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CopyModeEntered {
-    /// The pane that entered copy mode.
-    pub pane_id: PaneId,
-}
-
-/// Payload for [`Event::CopyModeExited`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CopyModeExited {
-    /// The pane that exited copy mode.
-    pub pane_id: PaneId,
-}
-
-/// An active selection.
-///
-/// Mouse drag and keyboard selection use the same representation; selection
-/// shape and navigation are input-source-agnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Selection {
-    /// Selection shape.
-    pub kind: SelectionKind,
-    /// The fixed end of the selection.
-    pub anchor: GridPos,
-    /// The moving end of the selection.
-    pub cursor: GridPos,
-}
 
 /// Payload for [`Event::SelectionChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionChanged {
-    /// The pane whose selection changed.
+    /// The client whose selection changed. A selection belongs to one client:
+    /// two clients viewing the same pane select independently, so the pane
+    /// alone cannot say whose selection this is.
+    pub client_id: ClientId,
+    /// The pane the selection is in.
     pub pane_id: PaneId,
     /// The current selection, or `None` when cleared.
     pub selection: Option<Selection>,
@@ -730,23 +707,16 @@ pub struct SelectionChanged {
 /// Carries only the byte length of the copied text, never the text itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Copied {
+    /// The client that copied. A copy belongs to one client, and for
+    /// [`CopyTarget::Osc52`] it names the terminal that received the escape:
+    /// OSC 52 reaches one client's outer terminal, not every attached one.
+    pub client_id: ClientId,
     /// The pane the text was copied from.
     pub pane_id: PaneId,
     /// Where the text was copied to.
     pub target: CopyTarget,
     /// The byte length of the copied text.
     pub byte_len: usize,
-}
-
-/// Payload for [`Event::SearchUpdated`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchUpdated {
-    /// The pane being searched.
-    pub pane_id: PaneId,
-    /// How many matches the current query has.
-    pub match_count: usize,
-    /// The zero-based index of the active match, if any.
-    pub current_match: Option<usize>,
 }
 
 // ============================================================================

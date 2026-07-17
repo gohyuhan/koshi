@@ -16,7 +16,7 @@ where
 
 #[test]
 fn action_name_accepts_valid_grammar() {
-    for name in ["a", "new-pane", "copy-mode-search-prev", "x9", "a-1-b-2"] {
+    for name in ["a", "new-pane", "toggle-pane-fullscreen", "x9", "a-1-b-2"] {
         assert!(ActionName::new(name).is_ok(), "{name:?} should be valid");
     }
     // Exactly the maximum length (1 + 30) is allowed.
@@ -243,7 +243,7 @@ fn lock_and_focus_seeds_are_client_scoped() {
     }
 }
 
-/// Pins which seeds are coming-soon: the copy-mode and plugin command families
+/// Pins which seeds are coming-soon: the selection, search, and plugin families
 /// and `quit` have no runtime handler yet, so each is seeded `ComingSoon` and
 /// every other action is `Available`. When one lands, its `core_seed`
 /// declaration flips and this list shrinks.
@@ -256,16 +256,12 @@ fn coming_soon_seeds_are_pinned() {
         .collect();
     coming_soon.sort();
 
+    // Visual mode contributes exactly one action — copying the highlight.
+    // Entering and leaving it are not actions (a drag enters, any key leaves),
+    // and setting/clearing the selection is the mouse layer's command, not a
+    // name a user can bind.
     let mut expected = [
-        "core:copy-mode-clear-selection",
-        "core:copy-mode-copy",
-        "core:copy-mode-enter",
-        "core:copy-mode-exit",
-        "core:copy-mode-move-cursor",
-        "core:copy-mode-search",
-        "core:copy-mode-search-next",
-        "core:copy-mode-search-prev",
-        "core:copy-mode-set-selection",
+        "core:copy-selection",
         "core:plugin-disable",
         "core:plugin-enable",
         "core:plugin-install",
@@ -295,15 +291,7 @@ fn core_seed_snapshot_is_stable() {
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
-        "core:copy-mode-clear-selection",
-        "core:copy-mode-copy",
-        "core:copy-mode-enter",
-        "core:copy-mode-exit",
-        "core:copy-mode-move-cursor",
-        "core:copy-mode-search",
-        "core:copy-mode-search-next",
-        "core:copy-mode-search-prev",
-        "core:copy-mode-set-selection",
+        "core:copy-selection",
         "core:focus-pane",
         "core:focus-pane-down",
         "core:focus-pane-left",

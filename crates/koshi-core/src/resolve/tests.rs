@@ -407,7 +407,7 @@ fn coming_soon_actions_are_refused() {
         .map(|(action, _)| action)
         .collect();
 
-    assert_eq!(coming_soon.len(), 15);
+    assert_eq!(coming_soon.len(), 7);
     for action in coming_soon {
         assert_eq!(
             resolve_action(&action, &ActionArgs::None, &registry),
@@ -431,15 +431,7 @@ fn coming_soon_names_are_pinned() {
     assert_eq!(
         names,
         vec![
-            "copy-mode-clear-selection",
-            "copy-mode-copy",
-            "copy-mode-enter",
-            "copy-mode-exit",
-            "copy-mode-move-cursor",
-            "copy-mode-search",
-            "copy-mode-search-next",
-            "copy-mode-search-prev",
-            "copy-mode-set-selection",
+            "copy-selection",
             "plugin-disable",
             "plugin-enable",
             "plugin-install",
@@ -564,14 +556,14 @@ fn a_sequence_resolves_each_step_in_order() {
 fn a_sequence_halts_on_the_first_failing_step() {
     let registry = registry_with_macro(
         "lock-then-copy",
-        vec![core("lock"), core("copy-mode-enter"), core("unlock")],
+        vec![core("lock"), core("copy-selection"), core("unlock")],
     );
     let macro_ref = user("lock-then-copy");
 
     assert_eq!(
         resolve_action(&macro_ref, &ActionArgs::None, &registry),
         Err(ResolveError::ComingSoon {
-            action: core("copy-mode-enter"),
+            action: core("copy-selection"),
         })
     );
 }
@@ -721,12 +713,12 @@ fn resolve_error_is_a_recoverable_config_error() {
 
 #[test]
 fn coming_soon_status_is_checked_before_args_mismatch() {
-    // `copy-mode-enter` is seeded `ComingSoon` and takes `ActionArgs::None`.
+    // `copy-selection` is seeded `ComingSoon` and takes `ActionArgs::None`.
     // The status check runs before the handler is even matched on, so a
     // shape that would otherwise be an `ArgsMismatch` still reports
     // `ComingSoon` first.
     let registry = ActionRegistry::new();
-    let action = core("copy-mode-enter");
+    let action = core("copy-selection");
     let wrong_args = ActionArgs::Run {
         program: run_program(),
         args: vec![],

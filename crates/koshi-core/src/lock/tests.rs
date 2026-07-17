@@ -12,7 +12,7 @@ fn all_lists_every_mode_once_with_its_keymap_name() {
     let names: Vec<&str> = LockMode::ALL.iter().map(|mode| mode.name()).collect();
     assert_eq!(
         names,
-        ["normal", "locked", "resize", "pane", "tab", "scroll", "search"]
+        ["normal", "locked", "resize", "pane", "tab", "scroll"]
     );
 }
 
@@ -25,7 +25,6 @@ fn a_lock_mode_survives_a_serde_round_trip() {
         LockMode::PaneMode,
         LockMode::TabMode,
         LockMode::ScrollMode,
-        LockMode::SearchMode,
     ] {
         let json = serde_json::to_string(&mode).expect("serialize");
         let restored: LockMode = serde_json::from_str(&json).expect("deserialize");

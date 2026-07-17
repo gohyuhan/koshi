@@ -440,11 +440,11 @@ fn core_seed(
 /// builds — `lock`/`unlock` both build `SetLockMode`; the `new-pane-*`,
 /// `focus-pane-*`, and `resize-pane-*` families each build their family's
 /// command with the named direction; `next-tab`/`previous-tab`/`focus-tab`
-/// all build `FocusTab`; the `copy-mode-*` actions all build `CopyMode`.
+/// all build `FocusTab`.
 ///
-/// Each entry declares its own [`ActionStatus`]. The `copy-mode-*` and
-/// `plugin-*` actions have no runtime handler yet and are seeded
-/// `ComingSoon`, so introspection hides them; every other action is
+/// Each entry declares its own [`ActionStatus`]. The `copy-selection` and
+/// `plugin-*` actions have no runtime handler yet and are
+/// seeded `ComingSoon`, so introspection hides them; every other action is
 /// `Available`. Status is per-action, so a family lands one member at a time
 /// rather than all at once.
 #[must_use]
@@ -768,57 +768,22 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         ),
     ];
 
-    // --- Copy mode --- (all: PaneSession scope, Pane target, CopyMode command, ComingSoon)
-    let copy_mode_seeds = [
-        (
-            "copy-mode-enter",
-            "Enter Copy Mode",
-            "Enter copy mode in the focused pane",
-        ),
-        ("copy-mode-exit", "Exit Copy Mode", "Leave copy mode"),
-        (
-            "copy-mode-move-cursor",
-            "Move Copy Cursor",
-            "Move the copy-mode cursor",
-        ),
-        (
-            "copy-mode-set-selection",
-            "Set Selection",
-            "Begin or extend the copy-mode selection",
-        ),
-        (
-            "copy-mode-clear-selection",
-            "Clear Selection",
-            "Clear the active copy-mode selection",
-        ),
-        (
-            "copy-mode-copy",
-            "Copy Selection",
-            "Copy the current selection to a clipboard target",
-        ),
-        ("copy-mode-search", "Search", "Start a search in copy mode"),
-        (
-            "copy-mode-search-next",
-            "Search Next",
-            "Jump to the next search match",
-        ),
-        (
-            "copy-mode-search-prev",
-            "Search Previous",
-            "Jump to the previous search match",
-        ),
-    ];
-    seeds.extend(copy_mode_seeds.map(|(name, display_name, description)| {
-        core_seed(
-            name,
-            display_name,
-            description,
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::CopyMode),
-            ComingSoon,
-        )
-    }));
+    // --- Copy the selection --- (PaneSession scope, Pane target, Visual command,
+    // ComingSoon)
+    //
+    // The only action of visual mode. Entering and leaving it are NOT actions:
+    // a mouse drag starts a selection and a click or any key press drops it, so
+    // there is no name for a user to bind. Setting and clearing the selection
+    // are not actions either — the mouse layer issues those commands directly.
+    seeds.push(core_seed(
+        "copy-selection",
+        "Copy Selection",
+        "Copy the highlighted text to a clipboard target",
+        PaneSession,
+        vec![Pane],
+        CoreCommand(CommandKind::Visual),
+        ComingSoon,
+    ));
 
     // --- Plugin lifecycle --- (all: Global scope, no targets, Plugin command, ComingSoon)
     let plugin_seeds = [
