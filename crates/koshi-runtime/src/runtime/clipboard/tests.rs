@@ -23,6 +23,22 @@ fn empty_text_encodes_an_empty_payload() {
 }
 
 #[test]
+fn osc52_uses_the_shared_clipboard_writer() {
+    let mut clipboard = Osc52Clipboard::default();
+
+    assert!(clipboard.write("hello"));
+    assert_eq!(clipboard.bytes, b"\x1b]52;c;aGVsbG8=\x07");
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn arboard_uses_the_shared_clipboard_writer() {
+    fn accepts_writer<T: ClipboardWriter>() {}
+
+    accepts_writer::<ArboardClipboard>();
+}
+
+#[test]
 fn paste_bytes_writes_every_line_break_as_one_return() {
     // Clipboard text from Windows or a browser carries `\r\n`; a paste must
     // send ONE Enter per line break, never two.

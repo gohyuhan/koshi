@@ -28,6 +28,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "native")]
+use crate::runtime::clipboard::ClipboardWriter;
+
 /// Owns all mutable state for one koshi process: the sessions and their layout
 /// trees, the per-pane terminal engines, the shared PTY backend, the action
 /// registry, and the service handles the event loop drives. One process holds
@@ -106,10 +109,14 @@ pub struct Runtime {
     pub(crate) quit_requested: bool,
     /// Bytes waiting to be written to each client's own outer terminal —
     /// escape sequences aimed at the terminal program the client runs in, not
-    /// at any pane's child. The copy command queues its OSC 52 clipboard
-    /// write here; the client's event loop drains the queue with
+    /// at any pane's child. An OSC 52 clipboard target queues its write here;
+    /// the client's event loop drains the queue with
     /// [`take_host_writes`](Self::take_host_writes) each turn.
     host_writes: HashMap<ClientId, Vec<u8>>,
+    /// Lazily opened operating system clipboard used by native clipboard
+    /// targets. `None` retries the open on the next copy.
+    #[cfg(feature = "native")]
+    pub(crate) native_clipboard: Option<Box<dyn ClipboardWriter>>,
 }
 
 impl Runtime {
@@ -152,6 +159,8 @@ impl Runtime {
             immediate_shutdown: false,
             quit_requested: false,
             host_writes: HashMap::new(),
+            #[cfg(feature = "native")]
+            native_clipboard: None,
             config_layers,
             config,
         }

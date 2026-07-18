@@ -116,7 +116,6 @@ fn sections_from_different_layers_combine() {
 fn copy_and_terminal_scalar_overrides() {
     let layer = PartialKoshiConfig {
         copy: Some(PartialCopyConfig {
-            copy_on_select: Some(true),
             trim_trailing_whitespace: None,
             clipboard: Some(ClipboardBackend::Native),
         }),
@@ -129,7 +128,7 @@ fn copy_and_terminal_scalar_overrides() {
     };
     let merged = merge(KoshiConfig::default(), vec![layer]);
 
-    assert!(merged.copy.copy_on_select);
+    assert!(merged.copy.copy_on_select); // internal default kept
     assert!(merged.copy.trim_trailing_whitespace); // default kept
     assert_eq!(merged.copy.clipboard, ClipboardBackend::Native);
     assert_eq!(merged.terminal.term, "screen-256color");

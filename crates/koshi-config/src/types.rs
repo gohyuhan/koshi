@@ -481,7 +481,8 @@ pub enum WheelScroll {
 /// Selection and clipboard behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyConfig {
-    /// Whether completing a selection copies it immediately.
+    /// Whether completing a selection copies it immediately. Kept internal
+    /// until copy actions and user keybindings can provide another copy path.
     pub copy_on_select: bool,
     /// Whether trailing whitespace is trimmed from copied text.
     pub trim_trailing_whitespace: bool,
@@ -492,7 +493,7 @@ pub struct CopyConfig {
 impl Default for CopyConfig {
     fn default() -> Self {
         Self {
-            copy_on_select: false,
+            copy_on_select: true,
             trim_trailing_whitespace: true,
             clipboard: ClipboardBackend::Osc52,
         }

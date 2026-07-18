@@ -34,3 +34,6 @@ koshi-terminal = { version = "0.1.0", path = "../koshi-terminal" }
 
 [dev-dependencies]
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }
+
+[features]
+native = ["koshi-runtime/native"]

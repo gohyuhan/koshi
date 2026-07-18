@@ -5,6 +5,10 @@ use super::*;
 
 use std::sync::{mpsc, Arc};
 
+#[cfg(feature = "native")]
+use std::sync::Mutex;
+
+use koshi_config::types::ClipboardBackend;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPaneArgs, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{CommandId, TabId};
@@ -15,6 +19,35 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use std::time::SystemTime;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
+
+#[cfg(feature = "native")]
+use crate::runtime::clipboard::ClipboardWriter;
+
+#[cfg(feature = "native")]
+struct RecordingClipboard {
+    writes: Arc<Mutex<Vec<String>>>,
+}
+
+#[cfg(feature = "native")]
+impl ClipboardWriter for RecordingClipboard {
+    fn write(&mut self, text: &str) -> bool {
+        self.writes
+            .lock()
+            .expect("recording lock")
+            .push(text.to_owned());
+        true
+    }
+}
+
+#[cfg(feature = "native")]
+struct FailingClipboard;
+
+#[cfg(feature = "native")]
+impl ClipboardWriter for FailingClipboard {
+    fn write(&mut self, _text: &str) -> bool {
+        false
+    }
+}
 
 /// A runtime with one bootstrapped 80x24 client and its single pane.
 fn runtime() -> (Runtime, ClientId, PaneId) {
@@ -101,6 +134,22 @@ fn release_at(at: Point) -> MouseInput {
         at,
         mods: ModFlags::NONE,
     }
+}
+
+fn select_hello(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+    let mut clock = Clock::new();
+    let from = cell_at(rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
 }
 
 /// A clock whose every reading is a second after the last, so no two presses
@@ -1408,6 +1457,110 @@ fn releasing_the_gesture_is_the_copy() {
         selection(&mut rt, client, pane).is_some(),
         "the highlight stays; the exit rules end it as usual"
     );
+}
+
+#[test]
+fn internal_copy_on_select_switch_can_hold_the_copy_for_a_future_action() {
+    let (mut rt, client, pane) = runtime();
+    rt.config.copy.copy_on_select = false;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(rt.take_host_writes(client), None);
+    assert!(selection(&mut rt, client, pane).is_some());
+}
+
+#[cfg(not(feature = "native"))]
+#[test]
+fn native_target_falls_back_to_osc52_without_native_support() {
+    let (mut rt, client, pane) = runtime();
+    rt.config.copy.clipboard = ClipboardBackend::Native;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(
+        rt.take_host_writes(client).expect("OSC 52 fallback"),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn native_target_writes_only_to_the_native_clipboard() {
+    let (mut rt, client, pane) = runtime();
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    rt.native_clipboard = Some(Box::new(RecordingClipboard {
+        writes: Arc::clone(&writes),
+    }));
+    rt.config.copy.clipboard = ClipboardBackend::Native;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(rt.take_host_writes(client), None);
+    assert_eq!(*writes.lock().expect("recording lock"), vec!["hello"]);
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn osc52_target_leaves_the_native_clipboard_untouched() {
+    let (mut rt, client, pane) = runtime();
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    rt.native_clipboard = Some(Box::new(RecordingClipboard {
+        writes: Arc::clone(&writes),
+    }));
+    rt.config.copy.clipboard = ClipboardBackend::Osc52;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(
+        rt.take_host_writes(client).expect("OSC 52 write"),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
+    assert!(writes.lock().expect("recording lock").is_empty());
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn native_write_failure_leaves_koshi_running() {
+    let (mut rt, client, pane) = runtime();
+    rt.native_clipboard = Some(Box::new(FailingClipboard));
+    rt.config.copy.clipboard = ClipboardBackend::Native;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(rt.take_host_writes(client), None);
+    assert!(selection(&mut rt, client, pane).is_some());
+    assert!(rt.has_active_panes());
+}
+
+#[test]
+fn both_target_always_writes_osc52() {
+    let (mut rt, client, pane) = runtime();
+    rt.config.copy.clipboard = ClipboardBackend::Both;
+    feed(&mut rt, pane, b"hello world");
+
+    #[cfg(feature = "native")]
+    let writes = {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        rt.native_clipboard = Some(Box::new(RecordingClipboard {
+            writes: Arc::clone(&writes),
+        }));
+        writes
+    };
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(
+        rt.take_host_writes(client).expect("OSC 52 write"),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
+    #[cfg(feature = "native")]
+    assert_eq!(*writes.lock().expect("recording lock"), vec!["hello"]);
 }
 
 #[test]

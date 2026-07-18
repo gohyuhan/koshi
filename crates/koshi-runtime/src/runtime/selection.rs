@@ -149,15 +149,18 @@ impl Runtime {
     /// highlight standing.
     ///
     /// The clipboard follows the OS, with no copy key — releasing the
-    /// selection IS the copy, as zellij ships it. The highlighted text is
-    /// read at this instant, while it is exactly what the user saw, and goes
-    /// to the client's outer terminal as OSC 52, which sets the OS clipboard.
-    /// Trailing blanks are trimmed or preserved from the current copy config.
+    /// selection IS the copy, as zellij ships it. The highlighted text is read
+    /// at this instant, while it is exactly what the user saw, and goes to the
+    /// clipboard targets in the current config. Trailing blanks are trimmed or
+    /// preserved from the current copy config. The internal `copy_on_select`
+    /// switch can hold the highlight without copying once another copy path
+    /// exists; users cannot set it yet.
     /// Pressing the OS copy key afterward is a harmless no-op (the clipboard
     /// is already filled) — and being a key, it reaches the pane and so
     /// clears the highlight, like any input reaching the pane's child. A
     /// plain click, whose press highlighted nothing, copies nothing.
     pub(crate) fn end_selection_drag(&mut self, client_id: ClientId) {
+        let copy_on_select = self.config.copy.copy_on_select;
         let trim_trailing_whitespace = self.config.copy.trim_trailing_whitespace;
         let Some(drag) = self
             .client_mut(client_id)
@@ -167,6 +170,9 @@ impl Runtime {
         };
         if let Some(client) = self.client_mut(client_id) {
             client.set_selection_drag(None);
+        }
+        if !copy_on_select {
+            return;
         }
         let Some(selection) = self
             .client_mut(client_id)
@@ -181,8 +187,7 @@ impl Runtime {
                 trim_trailing_whitespace,
             );
             if !text.is_empty() {
-                let sequence = crate::runtime::clipboard::osc52_copy(&text);
-                self.queue_host_write(client_id, &sequence);
+                self.copy_to_clipboard(client_id, &text);
             }
         }
     }

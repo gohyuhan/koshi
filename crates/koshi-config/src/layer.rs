@@ -234,8 +234,6 @@ impl PartialMouseConfig {
 /// Copy and clipboard overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialCopyConfig {
-    /// Whether completing a selection copies it immediately.
-    pub copy_on_select: Option<bool>,
     /// Whether trailing whitespace is trimmed from copied text.
     pub trim_trailing_whitespace: Option<bool>,
     /// Which clipboard backend receives copied text.
@@ -244,7 +242,6 @@ pub struct PartialCopyConfig {
 
 impl PartialCopyConfig {
     fn apply(self, target: &mut CopyConfig) {
-        merge_field(&mut target.copy_on_select, self.copy_on_select);
         merge_field(
             &mut target.trim_trailing_whitespace,
             self.trim_trailing_whitespace,

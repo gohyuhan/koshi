@@ -19,13 +19,16 @@ ignore = []
 # the current tree via `cargo metadata`. Extend when a new dependency
 # introduces a license not listed here (`cargo deny check licenses` reports
 # the gap). MPL-2.0 is file-level (weak) copyleft, pulled in transitively
-# by `option-ext`.
+# by `option-ext`. BSL-1.0 (Boost, permissive, OSI-approved) comes from
+# `clipboard-win`/`error-code`, the Windows clipboard backend of the
+# optional `arboard` dependency behind the `native` feature.
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Unicode-3.0",
     "Zlib",
