@@ -611,6 +611,11 @@ impl Runtime {
     /// Scroll `client_id`'s koshi scrollback view of `pane_id` by the wheel
     /// `direction`. A vertical wheel moves the view; a horizontal wheel leaves
     /// the scrollback alone.
+    ///
+    /// Koshi scrollback exists only on the primary screen, so a pane on the
+    /// alternate screen scrolls nothing: the alternate screen keeps no history,
+    /// and storing an offset there would surface as an unexpectedly scrolled-back
+    /// shell once the full-screen program exits back to the primary.
     fn wheel_scroll_scrollback(
         &mut self,
         client_id: ClientId,
@@ -618,6 +623,9 @@ impl Runtime {
         direction: ScrollDirection,
         lines: usize,
     ) {
+        if !self.pane_on_primary(pane_id) {
+            return;
+        }
         match direction {
             ScrollDirection::Up => self.scroll_up(client_id, pane_id, lines),
             ScrollDirection::Down => self.scroll_down(client_id, pane_id, lines),
@@ -642,10 +650,23 @@ impl Runtime {
         })
     }
 
+    /// Whether `pane_id`'s program is on the primary screen — the only screen
+    /// with koshi scrollback to scroll.
+    fn pane_on_primary(&self, pane_id: PaneId) -> bool {
+        self.terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| engine.state().active_screen() == Screen::Primary)
+    }
+
     /// Hand a wheel tick to the program in `pane_id`, encoded as the mouse report
-    /// its mode asked for, at the pointer's cell. The pane's tracking level was
-    /// already checked by [`wheel_on_pane`](Self::wheel_on_pane), so a program in
-    /// no mouse mode is never reached here.
+    /// its mode asked for. The pane's tracking level was already checked by
+    /// [`wheel_on_pane`](Self::wheel_on_pane), so a program in no mouse mode is
+    /// never reached here.
+    ///
+    /// The pointer's cell is clamped into the pane, so a wheel that landed on
+    /// chrome (a border, the status line) and was routed to the focused pane
+    /// still reaches it at the nearest edge, the same way a captured drag does —
+    /// a wheel over no pane goes to the focused one.
     fn forward_wheel_to_pane(
         &mut self,
         snapshot: &RenderSnapshot,
@@ -662,7 +683,7 @@ impl Runtime {
             return;
         };
         let kind = MouseKind::Scroll(direction);
-        let Some((col, row)) = pane_local_cell(snapshot, pane_id, mouse.at) else {
+        let Some((col, row)) = pane_cell(snapshot, pane_id, mouse.at, true) else {
             return;
         };
         if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {

@@ -1451,3 +1451,68 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
         "the focused pane receives nothing"
     );
 }
+
+#[test]
+fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    // Enter the alternate screen with neither mouse mode nor alt-scroll (?1007):
+    // a full-screen app that ignores the wheel.
+    runtime.handle_pty_output(pane, b"\x1b[?1049h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    // The alternate screen keeps no scrollback, so the wheel stores no offset —
+    // otherwise the shell would be scrolled back when the app exits.
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "a wheel on the alternate screen leaves the primary offset at 0"
+    );
+}
+
+/// A screen cell that is chrome, not any pane's content — a pane border, the
+/// status line, or a gap — where a wheel falls through to the focused pane.
+fn a_chrome_cell(runtime: &Runtime, client: ClientId) -> Point {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let viewport = snapshot.client.viewport;
+    for y in 0..viewport.rows {
+        for x in 0..viewport.cols {
+            let at = Point { x, y };
+            if matches!(
+                hit_test(&snapshot, at),
+                HitRegion::PaneBorder { .. } | HitRegion::Statusline | HitRegion::None
+            ) {
+                return at;
+            }
+        }
+    }
+    panic!("no chrome cell in the frame");
+}
+
+#[test]
+fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // The focused pane's program wants the mouse: normal tracking, SGR.
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+
+    // A wheel over chrome (no pane under the pointer) goes to the focused pane,
+    // clamped to its edge, instead of being dropped.
+    let chrome = a_chrome_cell(&runtime, client);
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, chrome));
+
+    let writes = fake.writes(pane).expect("writes");
+    assert_eq!(
+        writes.len(),
+        1,
+        "the wheel reached the focused pane: {writes:?}"
+    );
+    assert!(
+        writes[0].starts_with(b"\x1b[<64;"),
+        "an SGR wheel-up report (button 64): {:?}",
+        writes[0]
+    );
+}
