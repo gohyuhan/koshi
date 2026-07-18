@@ -58,22 +58,15 @@ fn button(b: HostButton) -> MouseButton {
 }
 
 /// The modifiers held during the event. Unlike a key press, a mouse event folds
-/// nothing into Shift, so all four modifiers pass straight through.
+/// nothing into Shift, so all four modifiers pass straight through: the
+/// keyboard decoder supplies Ctrl/Alt/Super and Shift is added here.
 fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
-    let mut mods = ModFlags::NONE;
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        mods = mods.union(ModFlags::CTRL);
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        mods = mods.union(ModFlags::ALT);
-    }
+    let mods = crate::keyboard::decode_mods(modifiers);
     if modifiers.contains(KeyModifiers::SHIFT) {
-        mods = mods.union(ModFlags::SHIFT);
+        mods.union(ModFlags::SHIFT)
+    } else {
+        mods
     }
-    if modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META) {
-        mods = mods.union(ModFlags::SUPER);
-    }
-    mods
 }
 
 #[cfg(test)]

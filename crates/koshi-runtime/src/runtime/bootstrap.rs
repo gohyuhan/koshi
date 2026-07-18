@@ -76,15 +76,7 @@ impl Runtime {
         );
 
         self.sessions.insert(session_id, session);
-        Self::park_pane_pty(
-            &mut self.pty_handles,
-            &mut self.pty_sizes,
-            &mut self.terminal_engines,
-            &self.inbox_tx,
-            pane_id,
-            handle,
-            spawn_size,
-        );
+        self.park_pane_pty(pane_id, handle, spawn_size);
         self.render_scheduler
             .invalidate(InvalidationReason::LayoutChanged);
 

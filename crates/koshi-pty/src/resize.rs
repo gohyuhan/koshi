@@ -67,10 +67,10 @@ pub fn resize_for_layout_change(
     backend: &dyn PtyBackend,
     pane_items: impl IntoIterator<Item = (PaneId, Option<Rect>)>,
 ) -> Vec<ResizeResult> {
-    let mut updated_pane_result = Vec::new();
+    let mut results = Vec::new();
 
-    for (pane_id, pane_size) in pane_items {
-        let result = match pane_size {
+    for (pane_id, content) in pane_items {
+        let result = match content {
             None => ResizeResult {
                 pane_id,
                 applied: None,
@@ -92,10 +92,10 @@ pub fn resize_for_layout_change(
                 }
             }
         };
-        updated_pane_result.push(result);
+        results.push(result);
     }
 
-    updated_pane_result
+    results
 }
 
 #[cfg(test)]

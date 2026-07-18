@@ -349,7 +349,7 @@ impl<'a> TextView<'a> {
 /// comes out as one line and two `echo` outputs come out as two. A block
 /// takes the same column range from every row and always joins with `\n`.
 /// The blank right half of a wide glyph is skipped (the glyph's text lives in
-/// its left half); combining marks ride along with their base. Trailing
+/// its left half); combining marks ride along with their base.
 /// When `trim_trailing_whitespace` is true, trailing blanks are dropped from
 /// each finished line — the padding right of the text is the screen's, not the
 /// text's — but not inside a soft-wrapped row, where spaces continue onto the

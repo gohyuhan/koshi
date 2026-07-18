@@ -24,31 +24,21 @@
 //!   ([`KeymapVerdict::Reject`]): a config that can trap the user in locked
 //!   mode never applies.
 //!
-//! Every firing-relevant judgment runs on **firing bindings only**. A
-//! binding fires when both halves hold: action resolution accepts it as
-//! written (each binding is handed to the real resolver), and a keypress
-//! can reach it — in locked mode the reserved unlock chord resolves
-//! instantly wherever it is pressed, so a multi-chord sequence holding it
-//! anywhere is unreachable, a
-//! sequence longer than the `max_chord_depth` cap is one the input path
-//! never accumulates, and a
-//! `remove` in a higher-precedence layer voids the binding outright. A
-//! binding that fails either half is warned per layer — exactly once, with
-//! the most specific reason — and is otherwise transparent: it claims no
-//! key in the collision scan, never pairs in the prefix scan, steals no
-//! typeable key, and neither shadows nor satisfies the unlock escape. Each
-//! dead class re-surfaces exactly when it could start to matter:
-//! unregistered actions when their plugin registers (detection re-runs on
-//! plugin lifecycle), the build-fixed classes at the first load of a build
-//! that implements them. A binding voided by a remove draws no warning at
-//! all: the removal is the user's own authored intent, and removing a key
-//! then rebinding it in a higher layer is the supported way to move a key
-//! between user-authored layers without a collision.
+//! Every judgment above runs on **firing bindings only**. A binding fires
+//! when the resolver accepts it as written AND a keypress can actually reach
+//! it — it is dead when its sequence contains the reserved unlock chord
+//! (which resolves instantly, so the rest is unreachable), when it is longer
+//! than `max_chord_depth`, or when a higher layer `remove`s its key. A dead
+//! binding is warned once per layer with the most specific reason, and is
+//! otherwise invisible: it claims no key in the collision scan and steals
+//! nothing. Exception: a binding voided by a `remove` gets no warning — the
+//! removal is the user's own intent, and remove-then-rebind-above is the
+//! supported way to move a key between layers without a collision. A dead
+//! binding is re-judged whenever its reason could have changed: on every
+//! config load/reload and on every plugin load or unload.
 //!
-//! Detection is pure: it reads the layers and writes nothing. Applying the
-//! verdict — at load, new-session, or reload time — is the caller's step.
-//! Detection runs on every config load and reload and on every plugin load
-//! or unload (a plugin lifecycle change can orphan or un-orphan a binding).
+//! Detection is pure — it reads the layers and writes nothing. Applying the
+//! verdict is the caller's step.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

@@ -354,11 +354,8 @@ impl Client {
     ///   drag the view out from under text the user is selecting. It ends when
     ///   the highlight clears.
     ///
-    /// They overlap freely, so this is derived rather than stored: a held flag
-    /// would be a second place the same fact lives, and a view could be left held
-    /// by a highlight that had already cleared. Being scrolled up *at all* means
-    /// held, so the only state an offset cannot express is a highlight at the
-    /// live bottom — and the highlight answers that directly.
+    /// The answer is derived from those two facts on every call, never stored
+    /// as its own flag, so it can never disagree with them.
     ///
     /// Example: highlight up in this pane at offset `0` → held, so three lines of
     /// output move the offset to `3` and the same text stays on screen. Clicking

@@ -242,7 +242,7 @@ impl PtyBackend for PortablePtyBackend {
         // 7. Reader thread: block on the master read half, forwarding each chunk
         //    of child output into the output channel until EOF (child gone) or
         //    the caller drops the receiver.
-        let r_handle = thread::spawn(move || {
+        let reader_thread = thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut reader = reader;
             loop {
@@ -262,7 +262,7 @@ impl PtyBackend for PortablePtyBackend {
         //    our `ExitStatus`, flip `exited` so `kill` won't signal a corpse, then
         //    publish the status on the exit channel.
         let exited_w = Arc::clone(&exited);
-        let w_handle = thread::spawn(move || {
+        let watcher_thread = thread::spawn(move || {
             let mut child = child; // owns it; wait() needs &mut
             let status = match child.wait() {
                 Ok(s) => map_status(s),
@@ -279,7 +279,7 @@ impl PtyBackend for PortablePtyBackend {
         //    `kill`/teardown → `Disconnected`), or the watcher flagging the child
         //    as exited — `recv_timeout` wakes periodically to check `exited` so a
         //    pane kept open past its child's death still reclaims the thread.
-        let (writer_sender_handler, writer_receiver) = channel::<Vec<u8>>();
+        let (writer_sender, writer_receiver) = channel::<Vec<u8>>();
         let exited_writer = Arc::clone(&exited);
 
         let _ = thread::spawn(move || {
@@ -313,11 +313,11 @@ impl PtyBackend for PortablePtyBackend {
             pane_id,
             PaneEntry {
                 master: pair.master,
-                writer: writer_sender_handler,
+                writer: writer_sender,
                 killer,
                 exited,
-                reader: r_handle,
-                watcher: w_handle,
+                reader: reader_thread,
+                watcher: watcher_thread,
             },
         );
         drop(panes);
@@ -325,10 +325,10 @@ impl PtyBackend for PortablePtyBackend {
     }
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<(), PtyError> {
         let panes = self.panes.lock().unwrap();
-        let Some(target_pane) = panes.get(&pane) else {
+        let Some(entry) = panes.get(&pane) else {
             return Err(PtyError::UnknownPane { pane });
         };
-        target_pane
+        entry
             .master
             .resize(to_pp_size(size))
             .map_err(|e| PtyError::Io {
@@ -337,19 +337,16 @@ impl PtyBackend for PortablePtyBackend {
     }
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError> {
         let mut panes = self.panes.lock().unwrap();
-        let Some(target_pane) = panes.get_mut(&pane) else {
+        let Some(entry) = panes.get_mut(&pane) else {
             return Err(PtyError::UnknownPane { pane });
         };
 
-        target_pane
-            .writer
-            .send(bytes.to_vec())
-            .map_err(|e| PtyError::Io {
-                detail: e.to_string(),
-            })
+        entry.writer.send(bytes.to_vec()).map_err(|e| PtyError::Io {
+            detail: e.to_string(),
+        })
     }
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
-        let target_panes = self
+        let entry = self
             .panes
             .lock()
             .unwrap()
@@ -366,40 +363,40 @@ impl PtyBackend for PortablePtyBackend {
         // the group is empty).
         match kill_policy {
             KillPolicy::Force => {
-                if !target_panes.exited.load(Ordering::SeqCst) {
-                    let _ = target_panes.killer.force();
+                if !entry.exited.load(Ordering::SeqCst) {
+                    let _ = entry.killer.force();
                 }
             }
             KillPolicy::Tree => {
-                let _ = target_panes.killer.tree();
+                let _ = entry.killer.tree();
             }
             KillPolicy::Graceful { timeout } => {
-                if !target_panes.exited.load(Ordering::SeqCst) {
+                if !entry.exited.load(Ordering::SeqCst) {
                     // Ask the leader to exit, give it the grace window; SIGKILL
                     // only if it overstays the deadline.
-                    let _ = target_panes.killer.request_stop();
-                    if !wait_for_exit(&target_panes.exited, timeout) {
-                        let _ = target_panes.killer.force();
+                    let _ = entry.killer.request_stop();
+                    if !wait_for_exit(&entry.exited, timeout) {
+                        let _ = entry.killer.force();
                     }
                 }
             }
             KillPolicy::GracefulTree { timeout } => {
-                if !target_panes.exited.load(Ordering::SeqCst) {
+                if !entry.exited.load(Ordering::SeqCst) {
                     // Ask the whole group to exit — every member gets the stop
                     // request and the grace window — then wait for the leader.
-                    let _ = target_panes.killer.request_stop_tree();
-                    wait_for_exit(&target_panes.exited, timeout);
+                    let _ = entry.killer.request_stop_tree();
+                    wait_for_exit(&entry.exited, timeout);
                 }
 
                 // Group-kill even when the leader already exited: a disowned
                 // descendant can keep the group alive past its leader, and
                 // `killpg`/`TerminateJobObject` reaps it with the rest.
-                let _ = target_panes.killer.tree();
+                let _ = entry.killer.tree();
             }
         }
 
-        drop(target_panes.writer);
-        let _ = target_panes.watcher.join();
+        drop(entry.writer);
+        let _ = entry.watcher.join();
 
         Ok(())
     }

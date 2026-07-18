@@ -174,12 +174,14 @@ pub struct NewPaneArgs {
     pub cwd: Option<PathBuf>,
     /// Command to run; `None` launches the default shell.
     pub command: Option<SpawnSpec>,
-    /// Client to show the new pane on. When set, that client is targeted and takes
-    /// priority even over an in-session issuer; a client not attached to the target
-    /// session is rejected outright (no fallback). `None` targets the issuing
-    /// client (for an in-session source) or, for a source with no client, the
-    /// session's sole client — a session with several attached clients and no named
-    /// target is rejected rather than switching an arbitrary one.
+    /// Client to show the new pane on.
+    ///
+    /// - `Some(client)`: that client is targeted, even over an in-session
+    ///   issuer. A client not attached to the target session is rejected
+    ///   outright — no fallback.
+    /// - `None`: the issuing client; for a source with no client, the
+    ///   session's sole client. A session with several attached clients and
+    ///   no named target is rejected rather than switching an arbitrary one.
     pub client: Option<ClientId>,
 }
 
@@ -457,13 +459,10 @@ pub struct GridPos {
 /// A selection: a highlighted range of text, always made with the mouse — a
 /// drag over a pane's content starts one, and a click or any key press drops it.
 ///
-/// **One type, not two.** This is both what
-/// [`SetSelectionArgs`] carries and what
-/// [`SelectionChanged`](crate::event::SelectionChanged) reports, because they
-/// are the same fact: the command asks for a selection and the event announces
-/// the selection that resulted. A separate args struct of identical shape would
-/// only be a place for the two to drift — a field added to one and not the
-/// other would compile and be silently dropped at the conversion between them.
+/// This one type is both what [`SetSelectionArgs`] carries and what
+/// [`SelectionChanged`](crate::event::SelectionChanged) reports: the command
+/// asks for a selection and the event announces the selection that resulted,
+/// so they share the shape of that one fact.
 ///
 /// Both ends are positions the mouse layer resolved from a drag, and either end
 /// may be the earlier one in the text: dragging up or leftward puts `cursor`

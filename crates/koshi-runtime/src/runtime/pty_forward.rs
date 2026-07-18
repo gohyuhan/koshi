@@ -9,11 +9,6 @@
 //! inbox — so the child's I/O reaches the dispatcher the same way every other
 //! event does.
 //!
-//! `park_pane_pty` takes the PTY maps and inbox sender by explicit reference
-//! (not `&mut self`) so a caller mid-way through a session borrow can still
-//! register a pane, matching the `reflow_changed` idiom.
-
-use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
@@ -31,21 +26,14 @@ impl Runtime {
     /// threads, then record its handle (as the live-pane token), its size, and
     /// a new terminal engine. Every spawn path funnels through here so output
     /// forwarding is wired identically wherever a pane is born.
-    pub(crate) fn park_pane_pty(
-        pty_handles: &mut HashMap<PaneId, PtyHandle>,
-        pty_sizes: &mut HashMap<PaneId, PtySize>,
-        terminal_engines: &mut HashMap<PaneId, TerminalEngine>,
-        inbox_tx: &Sender<RuntimeEvent>,
-        pane_id: PaneId,
-        mut handle: PtyHandle,
-        size: PtySize,
-    ) {
+    pub(crate) fn park_pane_pty(&mut self, pane_id: PaneId, mut handle: PtyHandle, size: PtySize) {
         if let Some((output_rx, exit_rx)) = handle.take_receivers() {
-            Self::spawn_pty_forwarder(inbox_tx, pane_id, output_rx, exit_rx);
+            Self::spawn_pty_forwarder(&self.inbox_tx, pane_id, output_rx, exit_rx);
         }
-        pty_handles.insert(pane_id, handle);
-        pty_sizes.insert(pane_id, size);
-        terminal_engines.insert(pane_id, TerminalEngine::new(size));
+        self.pty_handles.insert(pane_id, handle);
+        self.pty_sizes.insert(pane_id, size);
+        self.terminal_engines
+            .insert(pane_id, TerminalEngine::new(size));
     }
 
     /// Spawn the single relay thread for one pane. It forwards every output

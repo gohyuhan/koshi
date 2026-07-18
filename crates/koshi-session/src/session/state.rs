@@ -295,7 +295,7 @@ impl Session {
     /// failing fast means one call surfaces the whole picture, not just the
     /// first fault. See [`SessionConsistencyError`] for the individual checks.
     pub fn validate(&self) -> Result<(), Vec<SessionConsistencyError>> {
-        let mut consistency_error = vec![];
+        let mut violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf. Built once here,
         // then reused to check the leaf/registry relationship in both directions.
         let mut panes_in_layout_nodes: HashMap<PaneId, Vec<TabId>> = HashMap::new();
@@ -305,7 +305,7 @@ impl Session {
         for (tab_id, tab) in self.tabs.iter() {
             // A tab keyed under anything but its own id breaks every by-id lookup.
             if *tab_id != tab.id {
-                consistency_error.push(SessionConsistencyError::TabKeyMismatch {
+                violations.push(SessionConsistencyError::TabKeyMismatch {
                     key: *tab_id,
                     tab_id: tab.id,
                 });
@@ -313,7 +313,7 @@ impl Session {
 
             // A `Closed` tab is terminal and should have left the map.
             if *tab.lifecycle() == TabLifecycle::Closed {
-                consistency_error.push(SessionConsistencyError::LingeringClosedTab { tab: tab.id });
+                violations.push(SessionConsistencyError::LingeringClosedTab { tab: tab.id });
             }
 
             *tab_index_counts.entry(tab.index).or_insert(0) += 1;
@@ -325,7 +325,7 @@ impl Session {
                     .push(tab.id);
 
                 let Some(p) = self.panes.get(pane_id) else {
-                    consistency_error.push(SessionConsistencyError::PaneNotInRegistry {
+                    violations.push(SessionConsistencyError::PaneNotInRegistry {
                         tab: tab.id,
                         pane: pane_id,
                     });
@@ -333,7 +333,7 @@ impl Session {
                 };
                 // A `Removed` pane should be gone from both layout and registry.
                 if *p.lifecycle() == PaneLifecycle::Removed {
-                    consistency_error.push(SessionConsistencyError::RemovedPaneInLayout {
+                    violations.push(SessionConsistencyError::RemovedPaneInLayout {
                         tab: tab.id,
                         pane: pane_id,
                     });
@@ -344,15 +344,14 @@ impl Session {
         // No two tabs may claim the same bar position.
         for (index, count) in &tab_index_counts {
             if *count > 1 {
-                consistency_error
-                    .push(SessionConsistencyError::DuplicateTabIndex { index: *index });
+                violations.push(SessionConsistencyError::DuplicateTabIndex { index: *index });
             }
         }
 
         // A pane belongs to exactly one tab at one position.
         for (pane_id, tab_ids) in &panes_in_layout_nodes {
             if tab_ids.len() > 1 {
-                consistency_error.push(SessionConsistencyError::PaneInMultipleLayouts {
+                violations.push(SessionConsistencyError::PaneInMultipleLayouts {
                     pane: *pane_id,
                     tabs: tab_ids.clone(),
                 });
@@ -363,10 +362,10 @@ impl Session {
         // record must not linger in the registry at all.
         for pane in self.panes.list() {
             if *pane.lifecycle() == PaneLifecycle::Removed {
-                consistency_error
+                violations
                     .push(SessionConsistencyError::LingeringRemovedRecord { pane: pane.id() });
             } else if !panes_in_layout_nodes.contains_key(&pane.id()) {
-                consistency_error.push(SessionConsistencyError::OrphanedPaneRecord {
+                violations.push(SessionConsistencyError::OrphanedPaneRecord {
                     pane: pane.id(),
                     lifecycle: *pane.lifecycle(),
                 });
@@ -376,7 +375,7 @@ impl Session {
         for client in self.clients.list_attached() {
             // A client in this registry must belong to this session.
             if client.session_id() != self.id {
-                consistency_error.push(SessionConsistencyError::ClientSessionMismatch {
+                violations.push(SessionConsistencyError::ClientSessionMismatch {
                     client: client.id(),
                     found: client.session_id(),
                 });
@@ -388,7 +387,7 @@ impl Session {
             // until the transport disconnects them every client's
             // `active_tab` names the closed tab by definition.
             if !self.tabs.is_empty() && !self.tabs.contains_key(&client.active_tab()) {
-                consistency_error.push(SessionConsistencyError::ActiveTabMissing {
+                violations.push(SessionConsistencyError::ActiveTabMissing {
                     client: client.id(),
                     tab: client.active_tab(),
                 });
@@ -398,7 +397,7 @@ impl Session {
             // the tab it was focused in.
             for (&tab_id, &focused_pane_id) in client.focused_panes() {
                 if self.panes.get(focused_pane_id).is_none() {
-                    consistency_error.push(SessionConsistencyError::FocusPaneNotInRegistry {
+                    violations.push(SessionConsistencyError::FocusPaneNotInRegistry {
                         client: client.id(),
                         tab: tab_id,
                         pane: focused_pane_id,
@@ -406,12 +405,12 @@ impl Session {
                 }
 
                 match self.tabs.get(&tab_id) {
-                    None => consistency_error.push(SessionConsistencyError::FocusTabMissing {
+                    None => violations.push(SessionConsistencyError::FocusTabMissing {
                         client: client.id(),
                         tab: tab_id,
                     }),
                     Some(tab) if !tab.layout.contains_pane(focused_pane_id) => {
-                        consistency_error.push(SessionConsistencyError::FocusTargetMissing {
+                        violations.push(SessionConsistencyError::FocusTargetMissing {
                             client: client.id(),
                             tab: tab_id,
                             pane: focused_pane_id,
@@ -433,7 +432,7 @@ impl Session {
                         .get(&tab_id)
                         .is_some_and(|tab| tab.layout.contains_pane(zoomed_pane_id));
                 if !live_leaf {
-                    consistency_error.push(SessionConsistencyError::ZoomTargetMissing {
+                    violations.push(SessionConsistencyError::ZoomTargetMissing {
                         client: client.id(),
                         tab: tab_id,
                         pane: zoomed_pane_id,
@@ -442,10 +441,10 @@ impl Session {
             }
         }
 
-        if consistency_error.is_empty() {
+        if violations.is_empty() {
             Ok(())
         } else {
-            Err(consistency_error)
+            Err(violations)
         }
     }
 }
