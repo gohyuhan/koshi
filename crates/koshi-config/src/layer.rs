@@ -25,9 +25,9 @@ use koshi_core::key::KeyChord;
 
 use crate::key::Leader;
 use crate::types::{
-    ClipboardBackend, ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults,
-    LoggingConfig, ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation,
-    PluginActivationConfig, RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, WheelScroll,
+    ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults, LoggingConfig,
+    ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation, PluginActivationConfig,
+    RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, WheelScroll,
 };
 
 /// Folds `layers` onto `base` in order and returns the effective config.
@@ -69,7 +69,7 @@ pub struct PartialKoshiConfig {
     pub plugins: Option<PartialPluginActivationConfig>,
     /// Mouse behavior overrides.
     pub mouse: Option<PartialMouseConfig>,
-    /// Copy and clipboard overrides.
+    /// Copy overrides.
     pub copy: Option<PartialCopyConfig>,
     /// Terminal environment overrides.
     pub terminal: Option<PartialTerminalConfig>,
@@ -231,25 +231,19 @@ impl PartialMouseConfig {
     }
 }
 
-/// Copy and clipboard overrides.
+/// Copy overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialCopyConfig {
-    /// Whether completing a selection copies it immediately.
-    pub copy_on_select: Option<bool>,
     /// Whether trailing whitespace is trimmed from copied text.
     pub trim_trailing_whitespace: Option<bool>,
-    /// Which clipboard backend receives copied text.
-    pub clipboard: Option<ClipboardBackend>,
 }
 
 impl PartialCopyConfig {
     fn apply(self, target: &mut CopyConfig) {
-        merge_field(&mut target.copy_on_select, self.copy_on_select);
         merge_field(
             &mut target.trim_trailing_whitespace,
             self.trim_trailing_whitespace,
         );
-        merge_field(&mut target.clipboard, self.clipboard);
     }
 }
 

@@ -45,7 +45,7 @@ fn default_loads_with_expected_values() {
     assert_eq!(config.mouse.scroll_lines, 3);
     assert_eq!(config.mouse.wheel, WheelScroll::ScrollScrollback);
 
-    assert!(!config.copy.copy_on_select);
+    assert!(config.copy.copy_on_select);
     assert!(config.copy.trim_trailing_whitespace);
     assert_eq!(config.copy.clipboard, ClipboardBackend::Osc52);
 
