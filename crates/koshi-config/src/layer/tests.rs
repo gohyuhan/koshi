@@ -8,8 +8,7 @@ use koshi_core::key::{Key, KeyChord, ModFlags};
 
 use super::*;
 use crate::types::{
-    ActivationAction, ActivationScope, ClipboardBackend, KeymapOptIn, KoshiConfig, ModeBindings,
-    ModeName, RgbColor,
+    ActivationAction, ActivationScope, KeymapOptIn, KoshiConfig, ModeBindings, ModeName, RgbColor,
 };
 
 #[test]
@@ -116,9 +115,7 @@ fn sections_from_different_layers_combine() {
 fn copy_and_terminal_scalar_overrides() {
     let layer = PartialKoshiConfig {
         copy: Some(PartialCopyConfig {
-            copy_on_select: Some(true),
-            trim_trailing_whitespace: None,
-            clipboard: Some(ClipboardBackend::Native),
+            trim_trailing_whitespace: Some(false),
         }),
         terminal: Some(PartialTerminalConfig {
             term: Some("screen-256color".to_string()),
@@ -129,9 +126,8 @@ fn copy_and_terminal_scalar_overrides() {
     };
     let merged = merge(KoshiConfig::default(), vec![layer]);
 
-    assert!(merged.copy.copy_on_select);
-    assert!(merged.copy.trim_trailing_whitespace); // default kept
-    assert_eq!(merged.copy.clipboard, ClipboardBackend::Native);
+    assert!(merged.copy.copy_on_select); // internal default kept
+    assert!(!merged.copy.trim_trailing_whitespace); // overridden to false
     assert_eq!(merged.terminal.term, "screen-256color");
     assert_eq!(merged.terminal.colorterm, "truecolor"); // default kept
 }

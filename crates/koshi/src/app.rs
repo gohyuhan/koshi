@@ -252,7 +252,7 @@ fn run_loop<B: Backend>(
         while let Ok(event) = runtime.inbox_rx().try_recv() {
             quit |= handle_event(runtime, event).is_break();
         }
-        // Escapes aimed at this client's outer terminal — a copy's OSC 52
+        // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
         // They draw nothing and do not change renderer state.
         if let Some(bytes) = runtime.take_host_writes(client_id) {

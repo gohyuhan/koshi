@@ -106,8 +106,8 @@ pub struct Runtime {
     pub(crate) quit_requested: bool,
     /// Bytes waiting to be written to each client's own outer terminal —
     /// escape sequences aimed at the terminal program the client runs in, not
-    /// at any pane's child. The copy command queues its OSC 52 clipboard
-    /// write here; the client's event loop drains the queue with
+    /// at any pane's child. The copy queues its OSC 52 clipboard write here;
+    /// the client's event loop drains the queue with
     /// [`take_host_writes`](Self::take_host_writes) each turn.
     host_writes: HashMap<ClientId, Vec<u8>>,
 }

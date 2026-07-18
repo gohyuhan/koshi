@@ -481,7 +481,8 @@ pub enum WheelScroll {
 /// Selection and clipboard behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyConfig {
-    /// Whether completing a selection copies it immediately.
+    /// Whether completing a selection copies it immediately. Kept internal
+    /// until copy actions and user keybindings can provide another copy path.
     pub copy_on_select: bool,
     /// Whether trailing whitespace is trimmed from copied text.
     pub trim_trailing_whitespace: bool,
@@ -492,23 +493,21 @@ pub struct CopyConfig {
 impl Default for CopyConfig {
     fn default() -> Self {
         Self {
-            copy_on_select: false,
+            copy_on_select: true,
             trim_trailing_whitespace: true,
             clipboard: ClipboardBackend::Osc52,
         }
     }
 }
 
-/// The clipboard backend copied text is written to.
+/// The clipboard backend copied text is written to. OSC 52 is the only backend
+/// koshi builds today; a native operating-system backend adds its own variant
+/// here without reshaping the copy flow.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClipboardBackend {
     /// Write to the outer terminal's clipboard via OSC 52.
     #[default]
     Osc52,
-    /// Write to the operating system clipboard.
-    Native,
-    /// Write to both the OSC 52 and the OS clipboard.
-    Both,
 }
 
 /// Terminal environment presented to child processes.

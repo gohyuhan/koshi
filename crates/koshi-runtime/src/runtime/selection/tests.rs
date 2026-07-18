@@ -103,6 +103,22 @@ fn release_at(at: Point) -> MouseInput {
     }
 }
 
+fn select_hello(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+    let mut clock = Clock::new();
+    let from = cell_at(rt, client, pane, 0, 0);
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(
+        client,
+        drag_at(cell_at(rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+    rt.handle_mouse_input(
+        client,
+        release_at(cell_at(rt, client, pane, 4, 0)),
+        clock.tick(),
+    );
+}
+
 /// A clock whose every reading is a second after the last, so no two presses
 /// fall inside the click threshold unless a test asks them to.
 struct Clock(Instant);
@@ -1408,6 +1424,18 @@ fn releasing_the_gesture_is_the_copy() {
         selection(&mut rt, client, pane).is_some(),
         "the highlight stays; the exit rules end it as usual"
     );
+}
+
+#[test]
+fn internal_copy_on_select_switch_can_hold_the_copy_for_a_future_action() {
+    let (mut rt, client, pane) = runtime();
+    rt.config.copy.copy_on_select = false;
+    feed(&mut rt, pane, b"hello world");
+
+    select_hello(&mut rt, client, pane);
+
+    assert_eq!(rt.take_host_writes(client), None);
+    assert!(selection(&mut rt, client, pane).is_some());
 }
 
 #[test]
