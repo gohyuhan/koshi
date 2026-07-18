@@ -33,7 +33,7 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::{CursorStyle, PaneSnapshot, RenderSnapshot, SelectionSpans};
+use crate::snapshot::{ClientSnapshot, CursorStyle, PaneSnapshot, RenderSnapshot, SelectionSpans};
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
 
@@ -654,7 +654,7 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
 /// position lives in its own bottom border (see [`draw_panes`]), not here.
 fn right_block(snapshot: &RenderSnapshot) -> Line<'static> {
     Line::from(Span::styled(
-        format!(" {} ", mode_tag(snapshot.client.lock_mode)),
+        format!(" {} ", mode_tags(&snapshot.client)),
         mode_style(&snapshot.theme),
     ))
 }
@@ -684,15 +684,38 @@ fn tab_line(snapshot: &RenderSnapshot, meta_index: usize) -> Line<'static> {
     ])
 }
 
-/// The short mode tag shown in the tabline for each input mode.
-fn mode_tag(mode: LockMode) -> &'static str {
+/// The mode indicator shown in the tabline: every active mode label joined with
+/// ` · `, or `BASE` when the client is in plain mode with the mouse ungrabbed.
+///
+/// The labels compose from independent axes: the `lock_mode` layer contributes
+/// at most one tag (nothing when `Normal`), and `mouse_select` adds `SELECT`.
+/// So a locked client grabbing the mouse reads `LOCK · SELECT`, and a plain one
+/// grabbing it reads `SELECT`.
+fn mode_tags(client: &ClientSnapshot) -> String {
+    let mut tags: Vec<&'static str> = Vec::new();
+    if let Some(tag) = lock_mode_tag(client.lock_mode) {
+        tags.push(tag);
+    }
+    if client.mouse_select {
+        tags.push("SELECT");
+    }
+    if tags.is_empty() {
+        "BASE".to_string()
+    } else {
+        tags.join(" · ")
+    }
+}
+
+/// The tag for a non-plain lock mode, or `None` for `Normal` — which shows as
+/// `BASE` only when no other mode is active.
+fn lock_mode_tag(mode: LockMode) -> Option<&'static str> {
     match mode {
-        LockMode::Normal => "BASE",
-        LockMode::Locked => "LOCK",
-        LockMode::Resize => "RESIZE",
-        LockMode::PaneMode => "PANE",
-        LockMode::TabMode => "TAB",
-        LockMode::ScrollMode => "SCROLL",
+        LockMode::Normal => None,
+        LockMode::Locked => Some("LOCK"),
+        LockMode::Resize => Some("RESIZE"),
+        LockMode::PaneMode => Some("PANE"),
+        LockMode::TabMode => Some("TAB"),
+        LockMode::ScrollMode => Some("SCROLL"),
     }
 }
 

@@ -53,7 +53,6 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
-use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneKind;
@@ -221,12 +220,12 @@ impl Runtime {
     /// selection. Which one it is is read from the pane's live mouse mode at the
     /// moment of the press, so it follows a program turning reporting on and off.
     ///
-    /// **Holding `Shift` takes the mouse back.** A `Shift`+press begins a koshi
-    /// selection even over a mouse-aware program — the only way to highlight and
-    /// copy text out of a full-screen `vim` or `htop`, and what every terminal
-    /// does — and that program never sees the gesture. Shift is read at the
-    /// press alone: once a `Shift`+press starts a selection, the drag and release
-    /// that finish it stay koshi's whether or not Shift is still held.
+    /// **Mouse-select mode takes the mouse back.** With the client's
+    /// `mouse-select` mode on, a drag begins a koshi selection even over a
+    /// mouse-aware program — the way to highlight and copy text out of a
+    /// full-screen `vim` or `htop`. It is a key-driven mode rather than a mouse
+    /// modifier because the outer terminal reserves `Shift`+drag for its own
+    /// selection and never forwards it to koshi.
     fn click_pane_content(
         &mut self,
         client_id: ClientId,
@@ -237,13 +236,21 @@ impl Runtime {
         if Some(pane_id) != self.typed_pane(client_id) {
             self.mouse_focus_pane(client_id, pane_id);
         } else if self.pane_reports_mouse(pane_id, mouse.kind)
-            && !mouse.mods.contains(ModFlags::SHIFT)
+            && !self.client_grabs_mouse(client_id)
         {
             self.forward_mouse_to_pane(client_id, mouse);
         } else {
             let clicks = self.record_click(client_id, MouseButton::Left, now);
             self.begin_selection_drag(client_id, pane_id, mouse.at, clicks, mouse.mods);
         }
+    }
+
+    /// Whether `client_id` has `mouse-select` mode on, so a drag is a koshi
+    /// selection even when the pane's program asked for the mouse.
+    fn client_grabs_mouse(&self, client_id: ClientId) -> bool {
+        self.session_for_client(client_id)
+            .and_then(|session| session.clients.get(client_id))
+            .is_some_and(koshi_session::client::Client::mouse_select)
     }
 
     /// Whether the program in `pane_id` asked to be told about `kind`.

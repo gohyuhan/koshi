@@ -50,6 +50,10 @@ pub enum Command {
     ToggleLockMode,
     /// Set the lock mode explicitly.
     SetLockMode(LockModeArgs),
+    /// Toggle whether the acting client grabs the mouse for text selection,
+    /// so a drag highlights in koshi even over a program that asked for the
+    /// mouse.
+    ToggleMouseSelect,
     /// Spawn a command in a new pane.
     RunCommandPane(RunCommandPaneArgs),
     /// Selection and copy — the commands of visual mode.
@@ -102,6 +106,8 @@ pub enum CommandKind {
     ToggleLockMode,
     /// Discriminant of [`Command::SetLockMode`].
     SetLockMode,
+    /// Discriminant of [`Command::ToggleMouseSelect`].
+    ToggleMouseSelect,
     /// Discriminant of [`Command::RunCommandPane`].
     RunCommandPane,
     /// Discriminant of [`Command::Visual`].
@@ -136,6 +142,7 @@ impl Command {
             Command::WriteToPane(_) => CommandKind::WriteToPane,
             Command::ToggleLockMode => CommandKind::ToggleLockMode,
             Command::SetLockMode(_) => CommandKind::SetLockMode,
+            Command::ToggleMouseSelect => CommandKind::ToggleMouseSelect,
             Command::RunCommandPane(_) => CommandKind::RunCommandPane,
             Command::Visual(_) => CommandKind::Visual,
             Command::Plugin(_) => CommandKind::Plugin,

@@ -207,7 +207,7 @@ pub struct ModeBindings {
 }
 
 /// The built-in default binding table: the `normal`-mode set plus the
-/// reserved unlock and quit in `locked` mode.
+/// reserved unlock, quit, and mouse-select in `locked` mode.
 ///
 /// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held) — with
 /// ONE owner-chosen exception, the bare `Tab`/`Shift+Tab` tab-switching pair
@@ -246,6 +246,11 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             bound("lock"),
         ),
         (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
+        // Mouse-select mode: grab the mouse so a drag highlights in koshi even
+        // over a program that asked for it. A key-driven mode because the outer
+        // terminal reserves `Shift`+drag for its own selection. Bound in locked
+        // mode too, so it toggles whether the client is locked or not.
+        (seq(ModFlags::CTRL, Key::Char('g')), bound("mouse-select")),
         // Pane lifecycle, under the pane prefix. `n` splits in the
         // configured default direction; the vim letters pick the side the
         // new pane opens on.
@@ -324,6 +329,7 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
             bound("unlock"),
         ),
         (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
+        (seq(ModFlags::CTRL, Key::Char('g')), bound("mouse-select")),
     ]
     .into_iter()
     .collect();

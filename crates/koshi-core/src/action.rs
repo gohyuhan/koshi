@@ -433,6 +433,16 @@ fn core_seed(
     (action, metadata)
 }
 
+/// The hint-bar label for `core:mouse-select` while the mode is **off** — its
+/// registry display name, so a press reads as "turn selection on".
+pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
+
+/// The hint-bar label for `core:mouse-select` while the mode is **on** — a
+/// press reads as "turn selection off". The snapshot swaps
+/// [`MOUSE_SELECT_HINT`] for this on the acting client's live state, the way
+/// `core:lock`/`core:unlock` flip across the lock modes.
+pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
+
 /// The built-in action table, loaded into the runtime registry at startup.
 ///
 /// Every entry is in the `core:` namespace. Actions sharing a [`CommandKind`]
@@ -754,6 +764,17 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
+            Available,
+        ),
+        // --- Mouse select ---
+        core_seed(
+            "mouse-select",
+            MOUSE_SELECT_HINT,
+            "Toggle grabbing the mouse for text selection, so a drag highlights \
+             in koshi even over a program that asked for the mouse",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::ToggleMouseSelect),
             Available,
         ),
         // --- Run ---

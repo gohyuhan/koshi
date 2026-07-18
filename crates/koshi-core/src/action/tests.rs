@@ -299,6 +299,7 @@ fn core_seed_snapshot_is_stable() {
         "core:focus-pane-up",
         "core:focus-tab",
         "core:lock",
+        "core:mouse-select",
         "core:move-tab",
         "core:new-pane",
         "core:new-pane-down",

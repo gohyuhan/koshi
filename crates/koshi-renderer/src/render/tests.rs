@@ -1,5 +1,6 @@
 //! Tests for stock frame composition: the three zones render into a ratatui
-//! buffer, tabs show their marker, the mode tag tracks the client lock mode,
+//! buffer, tabs show their marker, the mode tag tracks the client lock mode
+//! and mouse-select state,
 //! pane borders draw with focus highlighting, terminal cells paint into pane
 //! content rects with their styles and wide-glyph handling, collapsed stack
 //! members render as theme-filled title strips, the focused pane's cursor cell is
@@ -119,6 +120,7 @@ fn build(
             focused_pane: focused,
             hovered_pane: None,
             lock_mode,
+            mouse_select: false,
             pending_sequence: None,
             tabline_offset: None,
         },
@@ -1794,4 +1796,32 @@ fn a_highlight_span_wider_than_the_grid_draws_only_real_cells() {
     assert!(buf[(38, 2)].modifier.contains(Modifier::REVERSED));
     // The border column past it is untouched.
     assert!(!buf[(39, 2)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn mode_indicator_joins_active_mode_labels() {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, 20, 4), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 20, rows: 6 },
+    );
+
+    // Plain mode with the mouse ungrabbed reads BASE.
+    assert_eq!(mode_tags(&snap.client), "BASE");
+
+    // Mouse-select alone reads SELECT.
+    snap.client.mouse_select = true;
+    assert_eq!(mode_tags(&snap.client), "SELECT");
+
+    // Locked and grabbing reads both, joined by ` · `.
+    snap.client.lock_mode = LockMode::Locked;
+    assert_eq!(mode_tags(&snap.client), "LOCK · SELECT");
+
+    // Locked alone reads LOCK.
+    snap.client.mouse_select = false;
+    assert_eq!(mode_tags(&snap.client), "LOCK");
 }

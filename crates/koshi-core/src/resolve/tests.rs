@@ -265,6 +265,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::SetLockMode(LockModeArgs { locked: false }),
         ),
+        ("mouse-select", ActionArgs::None, Command::ToggleMouseSelect),
         (
             "run",
             ActionArgs::Run {

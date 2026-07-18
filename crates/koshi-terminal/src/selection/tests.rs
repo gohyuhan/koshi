@@ -570,6 +570,55 @@ fn selection_text_reads_a_wide_glyph_once_and_drops_trailing_blanks() {
 }
 
 #[test]
+fn selection_text_keeps_a_combining_mark_with_its_base() {
+    // `café` with the accent as its own code point: the `e` cell carries a
+    // combining acute (U+0301) layered over it. Copying must keep the mark
+    // riding its base, so the clipboard reads `cafe` + U+0301, not a bare `cafe`.
+    let mut e = Cell::new('e', 1, Style::default());
+    e.push_combining('\u{0301}');
+    let cells = vec![vec![
+        Cell::new('c', 1, Style::default()),
+        Cell::new('a', 1, Style::default()),
+        Cell::new('f', 1, Style::default()),
+        e,
+    ]];
+    let grid = Grid::from_rows(cells, 4, Style::default());
+    let scrollback = scrollback_of(&[], 100);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 3 },
+    };
+    assert_eq!(selection_text(&view, &selection, true), "cafe\u{0301}");
+}
+
+#[test]
+fn selection_text_keeps_a_multi_codepoint_emoji_whole() {
+    // A ZWJ family emoji 👨‍👩‍👧 is one wide glyph: the base cell holds the first
+    // person, its `combining` vec holds the ZWJ-joined rest, and a width-0
+    // spacer sits in its right half. Copying must emit the whole cluster once —
+    // base + every joined code point — and skip the spacer.
+    let mut family = Cell::new('\u{1F468}', 2, Style::default());
+    for cp in ['\u{200D}', '\u{1F469}', '\u{200D}', '\u{1F467}'] {
+        family.push_combining(cp);
+    }
+    let cells = vec![vec![family, Cell::new(' ', 0, Style::default())]];
+    let grid = Grid::from_rows(cells, 2, Style::default());
+    let scrollback = scrollback_of(&[], 100);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 1 },
+    };
+    assert_eq!(
+        selection_text(&view, &selection, true),
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+    );
+}
+
+#[test]
 fn selection_text_spans_history_and_screen() {
     let scrollback = scrollback_of(&["old line"], 100);
     let grid = grid_of(&["new line"], 8);

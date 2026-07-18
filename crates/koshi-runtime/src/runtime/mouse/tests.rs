@@ -926,38 +926,43 @@ fn a_press_drag_release_gesture_forwards_each_event() {
 }
 
 #[test]
-fn a_shift_gesture_over_a_mouse_aware_program_forwards_nothing() {
+fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let (mut runtime, fake, client) = runtime_with_fake();
     let pane = only_pane(&runtime);
     // Button-event tracking would report a bare drag; SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
+    // Grab the mouse for koshi selection.
+    runtime
+        .client_mut(client)
+        .expect("client")
+        .toggle_mouse_select();
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let shift = |kind| MouseInput {
+    let gesture = |kind| MouseInput {
         kind,
         at,
-        mods: ModFlags::SHIFT,
+        mods: ModFlags::NONE,
     };
 
     mouse(
         &mut runtime,
         client,
-        shift(MouseKind::Press(MouseButton::Left)),
+        gesture(MouseKind::Press(MouseButton::Left)),
     );
     mouse(
         &mut runtime,
         client,
-        shift(MouseKind::Drag(MouseButton::Left)),
+        gesture(MouseKind::Drag(MouseButton::Left)),
     );
     mouse(
         &mut runtime,
         client,
-        shift(MouseKind::Release(MouseButton::Left)),
+        gesture(MouseKind::Release(MouseButton::Left)),
     );
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
         Vec::<Vec<u8>>::new(),
-        "a Shift-held gesture is koshi's selection; the program is sent nothing"
+        "in mouse-select mode the gesture is koshi's selection; the program is sent nothing"
     );
 }
 

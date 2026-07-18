@@ -1435,6 +1435,45 @@ fn toggle_lock_mode_locks_an_unlocked_client() {
 }
 
 #[test]
+fn toggle_mouse_select_flips_the_client_flag() {
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+    let grabs = |rt: &Runtime| {
+        rt.sessions[&sid]
+            .clients
+            .get(client_id)
+            .expect("client")
+            .mouse_select()
+    };
+    assert!(!grabs(&rt), "a fresh client does not grab the mouse");
+
+    // First toggle turns mouse-select on; the command carries no bus event.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleMouseSelect,
+    );
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert!(emitted_events.is_empty());
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert!(grabs(&rt), "the toggle turned mouse-select on");
+
+    // A second toggle turns it back off.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleMouseSelect,
+    );
+    let _ = rt.dispatch(env);
+    assert!(!grabs(&rt), "the second toggle turned mouse-select off");
+}
+
+#[test]
 fn toggle_lock_mode_unlocks_a_locked_client() {
     let (mut rt, _tx, client_id, sid) = lock_fixture();
     rt.sessions
