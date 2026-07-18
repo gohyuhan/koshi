@@ -2,109 +2,214 @@
 
 use super::*;
 use crate::error::StorageError;
-use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::TempDir;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A unique, freshly-created temp dir for one test. Unique across parallel
-/// tests via pid + a per-process counter; removed at the end of the test.
-fn tmpdir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "koshi_atomic_{}_{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Names of every entry in `dir` (temp names are random, so tests assert the
+/// exact surviving set rather than matching a fixed temp path).
+fn dir_entries(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
 }
 
 #[test]
 fn write_atomic_creates_file_with_exact_bytes() {
-    let dir = tmpdir();
-    let dst = dir.join("cfg.kdl");
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
 
     write_atomic(&dst, b"a=2\n").unwrap();
 
     assert_eq!(std::fs::read(&dst).unwrap(), b"a=2\n");
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn write_atomic_replaces_existing_file_wholesale() {
-    let dir = tmpdir();
-    let dst = dir.join("cfg.kdl");
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
     std::fs::write(&dst, b"a=1\n").unwrap();
 
     write_atomic(&dst, b"a=2\n").unwrap();
 
     assert_eq!(std::fs::read(&dst).unwrap(), b"a=2\n");
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn write_atomic_removes_temp_on_success() {
-    let dir = tmpdir();
-    let dst = dir.join("cfg.kdl");
+fn write_atomic_leaves_no_temp_on_success() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
 
     write_atomic(&dst, b"x").unwrap();
 
-    assert!(!tmp_path(&dst).exists(), "temp file must not linger");
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
 }
 
 #[test]
 fn write_atomic_cleans_temp_and_keeps_target_when_rename_fails() {
-    let dir = tmpdir();
+    let dir = TempDir::new().unwrap();
     // dst is a directory: renaming the temp *file* over it must fail, which
     // exercises the cleanup path after the temp was already written + fsynced.
-    let dst = dir.join("target");
+    let dst = dir.path().join("target");
     std::fs::create_dir(&dst).unwrap();
 
     let err = write_atomic(&dst, b"x").unwrap_err();
 
     assert!(matches!(err, StorageError::Io { .. }));
-    assert!(!tmp_path(&dst).exists(), "temp file must be cleaned up");
+    assert_eq!(dir_entries(dir.path()), vec!["target".to_string()]);
     assert!(dst.is_dir(), "target must be left untouched");
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn write_atomic_reports_io_error_when_temp_cannot_be_created() {
-    let dir = tmpdir();
-    // Parent dir does not exist: creating the temp fails before it exists, so
-    // the cleanup branch is a no-op remove and the error surfaces cleanly.
-    let dst = dir.join("missing").join("cfg.kdl");
+fn write_atomic_reports_io_error_when_temp_dir_is_missing() {
+    let dir = TempDir::new().unwrap();
+    // Parent dir does not exist: staging the temp fails and nothing is created.
+    let dst = dir.path().join("missing").join("cfg.kdl");
 
     let err = write_atomic(&dst, b"x").unwrap_err();
 
     assert!(matches!(err, StorageError::Io { .. }));
-    assert!(!tmp_path(&dst).exists(), "no temp file must be left behind");
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        dir_entries(dir.path()).is_empty(),
+        "nothing must be created"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_preserves_existing_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    std::fs::write(&dst, b"old").unwrap();
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    write_atomic(&dst, b"new").unwrap();
+
+    let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644, "atomic overwrite must keep the file's mode");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_new_file_is_private_by_default() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("secret.kdl");
+
+    write_atomic(&dst, b"data").unwrap();
+
+    let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "a fresh file must be created user-private");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_replaces_symlink_with_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let referent = dir.path().join("shared.txt");
+    let link = dir.path().join("cfg.kdl");
+    std::fs::write(&referent, b"other").unwrap();
+    std::fs::set_permissions(&referent, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&referent, &link).unwrap();
+
+    write_atomic(&link, b"secret").unwrap();
+
+    // The link is gone, replaced by a private regular file with the new bytes;
+    // the file it pointed at must never inherit onto the replacement or change.
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "symlink must become a regular file"
+    );
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "replacement must not inherit the link target's mode"
+    );
+    assert_eq!(std::fs::read(&link).unwrap(), b"secret");
+    assert_eq!(std::fs::read(&referent).unwrap(), b"other");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_replaces_dangling_symlink_with_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    // The link points at a file that does not exist.
+    let link = dir.path().join("cfg.kdl");
+    std::os::unix::fs::symlink(dir.path().join("gone.txt"), &link).unwrap();
+
+    write_atomic(&link, b"data").unwrap();
+
+    // The dead link is replaced by a private regular file with the new bytes.
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "dangling symlink must become a regular file"
+    );
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&link).unwrap(), b"data");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_replaces_fifo_with_private_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    // A world-readable FIFO sits where the file should go.
+    let dst = dir.path().join("cfg.kdl");
+    let status = std::process::Command::new("mkfifo")
+        .arg("-m")
+        .arg("666")
+        .arg(&dst)
+        .status()
+        .unwrap();
+    assert!(status.success(), "mkfifo must succeed");
+
+    write_atomic(&dst, b"secret").unwrap();
+
+    // The FIFO is replaced by a private regular file; its loose mode must not
+    // carry over onto the new bytes.
+    let meta = std::fs::symlink_metadata(&dst).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "FIFO must become a regular file"
+    );
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "replacement must not inherit the FIFO's mode"
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), b"secret");
 }
 
 #[test]
-fn replace_moves_temp_over_destination() {
-    let dir = tmpdir();
-    let tmp = dir.join("cfg.kdl.tmp");
-    let dst = dir.join("cfg.kdl");
-    std::fs::write(&tmp, b"new\n").unwrap();
-    std::fs::write(&dst, b"old\n").unwrap();
+fn concurrent_writers_never_leave_partial_content() {
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    // Eight writers, each a distinct 4 KiB buffer. A partial/interleaved write
+    // would produce bytes matching none of them; the atomic replace must leave
+    // exactly one writer's complete buffer and no stray temp.
+    let contents: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'a' + i; 4096]).collect();
 
-    replace(&tmp, &dst).unwrap();
+    std::thread::scope(|s| {
+        for c in &contents {
+            let dst = &dst;
+            s.spawn(move || write_atomic(dst, c).unwrap());
+        }
+    });
 
-    assert_eq!(std::fs::read(&dst).unwrap(), b"new\n");
-    assert!(!tmp.exists(), "source temp must be gone after rename");
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn replace_reports_io_error_for_missing_source() {
-    let dir = tmpdir();
-    let missing = dir.join("nope.tmp");
-    let dst = dir.join("cfg.kdl");
-
-    let err = replace(&missing, &dst).unwrap_err();
-
-    assert!(matches!(err, StorageError::Io { .. }));
-    std::fs::remove_dir_all(&dir).unwrap();
+    let final_bytes = std::fs::read(&dst).unwrap();
+    assert!(
+        contents.contains(&final_bytes),
+        "final file must be exactly one writer's complete content"
+    );
+    assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
 }
