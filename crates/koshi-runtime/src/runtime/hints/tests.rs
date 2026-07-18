@@ -22,8 +22,8 @@ fn ctrl(key: char) -> KeyChord {
 fn normal_mode_joins_defaults_to_display_names() {
     let hints = catalog().hints_for(LockMode::Normal);
 
-    // All 24 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.entries.len(), 24);
+    // All 25 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.entries.len(), 25);
 
     let new_pane = KeySequence::new(
         ctrl('p'),
@@ -58,8 +58,8 @@ fn quit_binding_surfaces_in_both_modes() {
 fn locked_mode_pins_the_reserved_unlock() {
     let hints = catalog().hints_for(LockMode::Locked);
     // The reserved unlock (the same `<C-l>` that locks in normal mode) plus
-    // the quit chord.
-    assert_eq!(hints.entries.len(), 2);
+    // the quit and mouse-select chords, which fire in either mode.
+    assert_eq!(hints.entries.len(), 3);
     let entry = hints
         .entries
         .iter()

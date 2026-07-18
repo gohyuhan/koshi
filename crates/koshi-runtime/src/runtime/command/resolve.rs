@@ -128,9 +128,12 @@ impl Runtime {
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
-            // Lock mode is client-scoped: the acting client (confirmed attached
-            // by `acting_session`) is the whole target — no pane or tab to resolve.
-            Command::ToggleLockMode | Command::SetLockMode(_) => Ok(()),
+            // Lock mode and mouse-select are client-scoped: the acting client
+            // (confirmed attached by `acting_session`) is the whole target — no
+            // pane or tab to resolve.
+            Command::ToggleLockMode | Command::SetLockMode(_) | Command::ToggleMouseSelect => {
+                Ok(())
+            }
             // A highlight command names its own pane, so there is no default to
             // resolve: the pane it names is the pane it means, and its handler
             // confirms that one still exists. Falling back to the focused pane

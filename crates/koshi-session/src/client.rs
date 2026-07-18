@@ -42,6 +42,10 @@ pub struct Client {
     active_tab: TabId,
     focus_by_tab: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
+    /// Whether this client grabs the mouse for text selection: while on, a drag
+    /// highlights in koshi even over a program that asked for the mouse. Toggled
+    /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
+    mouse_select: bool,
     mouse_state: MouseState,
     /// This client's in-flight pane-border resize drag, held only between the
     /// mouse press on a border that begins it and the release that ends it.
@@ -135,6 +139,7 @@ impl Client {
             active_tab,
             focus_by_tab: HashMap::new(),
             lock_mode: LockMode::Normal,
+            mouse_select: false,
             mouse_state: MouseState::default(),
             pending_resize_drag: None,
             selection_drag: None,
@@ -405,6 +410,18 @@ impl Client {
     /// Update this client's lock mode.
     pub fn update_lock_mode(&mut self, lock_mode: LockMode) {
         self.lock_mode = lock_mode
+    }
+
+    /// Whether this client grabs the mouse for text selection.
+    #[must_use]
+    pub fn mouse_select(&self) -> bool {
+        self.mouse_select
+    }
+
+    /// Flip [`mouse_select`](Self::mouse_select) and return the new value.
+    pub fn toggle_mouse_select(&mut self) -> bool {
+        self.mouse_select = !self.mouse_select;
+        self.mouse_select
     }
 
     /// Set the pane this client has focused in `tab_id`, returning the prior pane if one was set.

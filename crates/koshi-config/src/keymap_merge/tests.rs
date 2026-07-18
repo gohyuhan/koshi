@@ -97,8 +97,8 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge(&[defaults()]);
     let normal = &merged.modes[&mode("normal")];
 
-    // All 24 shipped normal-mode defaults fire in this build.
-    assert_eq!(normal.defaults.len(), 24);
+    // All 25 shipped normal-mode defaults fire in this build.
+    assert_eq!(normal.defaults.len(), 25);
     assert_eq!(normal.defaults[&default_new_tab_key()], bound("new-tab"));
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.removed_keys, BTreeSet::new());
@@ -110,7 +110,11 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
         bound("unlock")
     );
     assert_eq!(locked.defaults[&seq(ModFlags::CTRL, 'q')], bound("quit"));
-    assert_eq!(locked.defaults.len(), 2);
+    assert_eq!(
+        locked.defaults[&seq(ModFlags::CTRL, 'g')],
+        bound("mouse-select")
+    );
+    assert_eq!(locked.defaults.len(), 3);
 }
 
 #[test]
@@ -153,7 +157,7 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             source: LayerOrigin::User,
         }
     );
-    assert_eq!(normal.defaults.len(), 24);
+    assert_eq!(normal.defaults.len(), 25);
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
@@ -180,7 +184,7 @@ fn user_binding_steals_a_defaulted_key() {
     assert_eq!(normal.defaults.get(&key), None);
     assert_eq!(normal.unbound_defaults[&key], bound("new-tab"));
     // Sibling defaults untouched.
-    assert_eq!(normal.defaults.len(), 23);
+    assert_eq!(normal.defaults.len(), 24);
     assert_eq!(normal.defaults[&seq(ModFlags::CTRL, 'l')], bound("lock"));
 }
 
@@ -295,7 +299,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.removed_keys, BTreeSet::from([key]));
-    assert_eq!(normal.defaults.len(), 24);
+    assert_eq!(normal.defaults.len(), 25);
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }

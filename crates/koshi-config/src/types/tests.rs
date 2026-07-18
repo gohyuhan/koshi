@@ -408,6 +408,20 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             ActionArgs::None,
             Ok(Command::Quit),
         ),
+        row(
+            "normal",
+            "<C-g>",
+            "mouse-select",
+            ActionArgs::None,
+            Ok(Command::ToggleMouseSelect),
+        ),
+        row(
+            "locked",
+            "<C-g>",
+            "mouse-select",
+            ActionArgs::None,
+            Ok(Command::ToggleMouseSelect),
+        ),
     ]
 }
 
@@ -501,8 +515,9 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 
     let locked = &config.keybindings.modes[&ModeName::new("locked")];
     // The reserved unlock — the same chord normal mode locks with, so one
-    // key flips both ways — plus the quit chord.
-    assert_eq!(locked.keys.len(), 2);
+    // key flips both ways — plus the quit and mouse-select chords, which fire
+    // whether or not the client is locked.
+    assert_eq!(locked.keys.len(), 3);
     let bound = locked
         .keys
         .get(&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK))

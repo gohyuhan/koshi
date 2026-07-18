@@ -15,8 +15,10 @@
 //! `session.name`/`tabs_metadata` are the true session-wide data.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use koshi_config::types::{RgbColor, ThemeConfig};
+use koshi_core::action::{MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
@@ -26,8 +28,9 @@ use koshi_layout::solver::{solve_with_mode, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, PaneSlot, PaneSnapshot, PluginUiSnapshot,
-    RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, HintBinding, KeymapHints, PaneSlot, PaneSnapshot,
+    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
+    TabSnapshot,
 };
 use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
@@ -175,13 +178,17 @@ impl Runtime {
                 focused_pane: client.focused_pane(active_tab_id),
                 hovered_pane: client.hovered_pane(),
                 lock_mode: client.lock_mode(),
+                mouse_select: client.mouse_select(),
                 pending_sequence: client
                     .pending_key_sequence()
                     .map(|pending| pending.sequence.clone()),
                 tabline_offset: client.tabline_offset(),
             },
             plugin_ui: PluginUiSnapshot::default(),
-            keymap_hints: self.keymap_hints.hints_for(client.lock_mode()),
+            keymap_hints: mouse_select_hints(
+                self.keymap_hints.hints_for(client.lock_mode()),
+                client.mouse_select(),
+            ),
             theme: self.theme,
         })
     }
@@ -300,6 +307,36 @@ impl Runtime {
         self.sessions
             .values_mut()
             .find(|session| session.panes.get(pane_id).is_some())
+    }
+}
+
+/// Flip the `core:mouse-select` hint to its "on" label when the acting client
+/// has mouse-select mode on, so the hint bar reads `Mouse Unselect` while it is
+/// active — the way `core:lock`/`core:unlock` flip across the lock modes. Off,
+/// the hints pass through untouched; on, only the mouse-select entry's label
+/// changes (a rebound or duplicated binding still matches, since the label is
+/// the action's, not the key's).
+fn mouse_select_hints(hints: KeymapHints, on: bool) -> KeymapHints {
+    if !on {
+        return hints;
+    }
+    let entries: Vec<HintBinding> = hints
+        .entries
+        .iter()
+        .map(|entry| {
+            if entry.label == MOUSE_SELECT_HINT {
+                HintBinding {
+                    label: MOUSE_UNSELECT_HINT.to_string(),
+                    ..entry.clone()
+                }
+            } else {
+                entry.clone()
+            }
+        })
+        .collect();
+    KeymapHints {
+        entries: Arc::new(entries),
+        ..hints
     }
 }
 

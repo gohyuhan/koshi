@@ -293,6 +293,10 @@ pub struct ClientSnapshot {
     pub hovered_pane: Option<PaneId>,
     /// The client's input mode (drives the mode tag and keybind resolution).
     pub lock_mode: LockMode,
+    /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
+    /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
+    /// so both can be on at once.
+    pub mouse_select: bool,
     /// The chords of a multi-chord binding pressed so far, or `None` when no
     /// sequence is pending. The hint bar switches from the mode's top-level
     /// hints to the continuations of this prefix while it is `Some`.

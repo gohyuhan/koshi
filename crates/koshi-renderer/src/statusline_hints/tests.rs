@@ -91,6 +91,7 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
             focused_pane: None,
             hovered_pane: None,
             lock_mode: LockMode::Normal,
+            mouse_select: false,
             pending_sequence: pending,
             tabline_offset: None,
         },

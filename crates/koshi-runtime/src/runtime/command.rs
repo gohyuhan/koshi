@@ -213,6 +213,9 @@ impl Runtime {
             Command::SetLockMode(args) => {
                 self.handle_set_lock_mode(command_id, &envelope.source, &args)
             }
+            Command::ToggleMouseSelect => {
+                self.handle_toggle_mouse_select(command_id, &envelope.source)
+            }
             Command::RunCommandPane(args) => {
                 let new_pane_args = Self::run_command_new_pane_args(&args);
                 self.handle_new_pane(
@@ -1957,6 +1960,41 @@ impl Runtime {
             }));
         }
         Ok(scope.commit(command_id))
+    }
+
+    /// Handle [`Command::ToggleMouseSelect`]: flip whether the acting client
+    /// grabs the mouse for text selection, and repaint so the mode indicator
+    /// tracks it.
+    ///
+    /// Client-scoped like the lock commands: the target is the acting client
+    /// alone, no pane is resolved. It changes only how the client's mouse
+    /// gestures route — koshi selection versus the program — never the layout,
+    /// focus, or any PTY, so it emits no bus event; the mode indicator is the
+    /// only thing that moves.
+    fn handle_toggle_mouse_select(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+    ) -> Result<CommandResult, Rejection> {
+        let session_id = Self::require_session(self.acting_session(source)?)?.id;
+        let client_id = source
+            .client_id()
+            .ok_or_else(|| Rejection::bare(RejectReason::Unauthorized))?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        session
+            .clients
+            .get_mut(client_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?
+            .toggle_mouse_select();
+        self.render_scheduler
+            .invalidate(InvalidationReason::StatusChanged);
+        Ok(CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        })
     }
 
     /// Map a [`LockMode`] to the wire-facing [`InputMode`] carried on

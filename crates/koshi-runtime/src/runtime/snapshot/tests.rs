@@ -154,7 +154,7 @@ fn build_snapshot_carries_the_hints_for_the_clients_mode() {
     // Normal mode: the shipped normal-mode bindings surface as hint data.
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     assert_eq!(snap.client.lock_mode, LockMode::Normal);
-    assert_eq!(snap.keymap_hints.entries.len(), 24);
+    assert_eq!(snap.keymap_hints.entries.len(), 25);
     assert!(!snap.keymap_hints.reverted);
 
     // Locked mode: the same frame path now carries only the pinned unlock.
@@ -167,8 +167,8 @@ fn build_snapshot_carries_the_hints_for_the_clients_mode() {
         .update_lock_mode(LockMode::Locked);
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     assert_eq!(snap.client.lock_mode, LockMode::Locked);
-    // The reserved unlock (pinned) plus the quit chord.
-    assert_eq!(snap.keymap_hints.entries.len(), 2);
+    // The reserved unlock (pinned) plus the quit and mouse-select chords.
+    assert_eq!(snap.keymap_hints.entries.len(), 3);
     assert!(snap
         .keymap_hints
         .entries
@@ -179,6 +179,39 @@ fn build_snapshot_carries_the_hints_for_the_clients_mode() {
         .entries
         .iter()
         .any(|entry| entry.label == "Quit" && !entry.pinned));
+}
+
+#[test]
+fn mouse_select_mode_flips_its_hint_label() {
+    let mut rt = new_runtime();
+    let (session, session_id, _tab_id, _pane_id, client_id) =
+        session_with_client(Size { cols: 80, rows: 24 });
+    rt.sessions.insert(session_id, session);
+
+    let has_label = |rt: &mut Runtime, label: &str| {
+        rt.build_snapshot(client_id)
+            .expect("snapshot")
+            .keymap_hints
+            .entries
+            .iter()
+            .any(|entry| entry.label == label)
+    };
+
+    // Off: the hint invites turning selection on.
+    assert!(has_label(&mut rt, "Mouse Select"));
+    assert!(!has_label(&mut rt, "Mouse Unselect"));
+
+    // On: the same binding's hint flips to the off action, the way lock flips
+    // to unlock.
+    rt.sessions
+        .get_mut(&session_id)
+        .expect("session")
+        .clients
+        .get_mut(client_id)
+        .expect("client")
+        .toggle_mouse_select();
+    assert!(has_label(&mut rt, "Mouse Unselect"));
+    assert!(!has_label(&mut rt, "Mouse Select"));
 }
 
 #[test]

@@ -319,6 +319,9 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: true }),
         ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: false }),
 
+        // --- Mouse select ---
+        ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
+
         // --- Run ---
         // The spawn spec is built here rather than accepted from the caller: a
         // pane's `cwd` and `env` belong to the boundary that issues the command,
