@@ -10,7 +10,7 @@ use super::*;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use koshi_core::command::{NewPaneArgs, NewTabArgs};
+use koshi_core::command::{GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::key::ModFlags;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -1096,5 +1096,358 @@ fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
         fake.writes(other).expect("writes"),
         Vec::<Vec<u8>>::new(),
         "the first click only focuses; it is not forwarded"
+    );
+}
+
+/// A wheel event at a screen cell.
+fn wheel(direction: ScrollDirection, at: Point) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Scroll(direction),
+        at,
+        mods: ModFlags::NONE,
+    }
+}
+
+/// The client's scrollback view offset for a pane.
+fn scroll_offset(runtime: &Runtime, client: ClientId, pane: PaneId) -> usize {
+    runtime
+        .sessions()
+        .values()
+        .next()
+        .unwrap()
+        .clients
+        .get(client)
+        .unwrap()
+        .scroll_offset(pane)
+}
+
+/// Whether the client has a highlight up in the pane.
+fn has_highlight(runtime: &Runtime, client: ClientId, pane: PaneId) -> bool {
+    runtime
+        .sessions()
+        .values()
+        .next()
+        .unwrap()
+        .clients
+        .get(client)
+        .unwrap()
+        .selection(pane)
+        .is_some()
+}
+
+/// The pane the client's pointer is marked as hovering over.
+fn hovered(runtime: &Runtime, client: ClientId) -> Option<PaneId> {
+    runtime
+        .build_snapshot(client)
+        .expect("snapshot")
+        .client
+        .hovered_pane
+}
+
+/// Fill a pane's scrollback with `lines` lines by printing that many newlines,
+/// so a scroll up has room to move.
+fn feed_scrollback(runtime: &mut Runtime, pane: PaneId, lines: usize) {
+    for _ in 0..lines {
+        runtime.handle_pty_output(pane, b"x\r\n");
+    }
+}
+
+/// Put a highlight in the pane, as a drag would, so the view is held.
+fn set_highlight(runtime: &mut Runtime, client: ClientId, pane: PaneId) {
+    runtime.client_mut(client).unwrap().set_selection(
+        pane,
+        Selection {
+            kind: SelectionKind::Character,
+            anchor: GridPos { row: 0, col: 0 },
+            cursor: GridPos { row: 0, col: 4 },
+        },
+    );
+}
+
+#[test]
+fn a_wheel_over_a_plain_pane_scrolls_its_scrollback() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    // scroll_lines defaults to 3, so one wheel up moves the view three lines.
+    assert_eq!(scroll_offset(&runtime, client, pane), 3, "wheel up scrolls");
+    assert_eq!(
+        offset(&runtime, client),
+        None,
+        "the pane wheel leaves the tab strip alone"
+    );
+}
+
+#[test]
+fn a_wheel_down_returns_the_view_toward_live() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        6,
+        "two ups, six lines"
+    );
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Down, at));
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        3,
+        "a wheel down walks the view back three lines"
+    );
+}
+
+#[test]
+fn a_wheel_with_a_highlight_up_scrolls_and_keeps_the_highlight() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    set_highlight(&mut runtime, client, pane);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        3,
+        "a highlighted view still scrolls on the wheel"
+    );
+    assert!(
+        has_highlight(&runtime, client, pane),
+        "the wheel holds the highlight; it does not clear it"
+    );
+}
+
+#[test]
+fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    // The program turns on normal tracking with SGR encoding.
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    // Wheel up is SGR button 64; the program gets it, and koshi does not scroll.
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![format!("\x1b[<64;{col};{row}M").into_bytes()],
+        "the wheel is forwarded as a mouse report"
+    );
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "a mouse-reporting pane keeps its own scrollback still"
+    );
+}
+
+#[test]
+fn a_wheel_on_the_alternate_screen_with_alt_scroll_sends_arrow_keys() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
+        "wheel up becomes three up-arrows under default cursor keys"
+    );
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Down, at));
+    assert_eq!(
+        fake.writes(pane).expect("writes").last().expect("a write"),
+        &b"\x1b[B\x1b[B\x1b[B".to_vec(),
+        "wheel down becomes three down-arrows"
+    );
+}
+
+#[test]
+fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // Alternate screen, alternate-scroll on, application cursor keys on.
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h\x1b[?1h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1bOA\x1bOA\x1bOA".to_vec()],
+        "application cursor keys send the SS3 form ESC O A"
+    );
+}
+
+#[test]
+fn the_ignore_wheel_config_does_nothing_over_a_plain_pane() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    runtime.config.mouse.wheel = WheelScroll::Ignore;
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "the ignore setting leaves the view where it is"
+    );
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "the ignore setting forwards nothing either"
+    );
+}
+
+#[test]
+fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Left, at));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        0,
+        "a horizontal wheel leaves the vertical scrollback view alone"
+    );
+}
+
+#[test]
+fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
+    let (mut runtime, client) = runtime();
+    let pane = only_pane(&runtime);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    mouse(
+        &mut runtime,
+        client,
+        MouseInput {
+            kind: MouseKind::Motion,
+            at,
+            mods: ModFlags::NONE,
+        },
+    );
+    assert_eq!(
+        hovered(&runtime, client),
+        Some(pane),
+        "a move over pane content marks it hovered"
+    );
+
+    // Row 0 is the tabline, not a pane.
+    mouse(
+        &mut runtime,
+        client,
+        MouseInput {
+            kind: MouseKind::Motion,
+            at: Point { x: 0, y: 0 },
+            mods: ModFlags::NONE,
+        },
+    );
+    assert_eq!(
+        hovered(&runtime, client),
+        None,
+        "a move onto chrome clears the hover"
+    );
+}
+
+#[test]
+fn a_wheel_scrolls_the_pane_under_the_pointer_not_the_focused_one() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+    let focused = runtime.typed_pane(client).expect("a focused pane");
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let other = snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .map(|slot| slot.pane_id)
+        .find(|&id| id != focused)
+        .expect("a second pane");
+
+    feed_scrollback(&mut runtime, other, 40);
+    let (at, _, _) = a_content_cell(&runtime, client, other);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, other),
+        3,
+        "the pane under the pointer scrolls"
+    );
+    assert_eq!(
+        scroll_offset(&runtime, client, focused),
+        0,
+        "the focused pane is left alone"
+    );
+}
+
+#[test]
+fn a_wheel_over_a_pane_border_scrolls_the_focused_pane() {
+    let (mut runtime, client) = runtime();
+    split_focused(&mut runtime, client);
+    let focused = runtime.typed_pane(client).expect("a focused pane");
+    feed_scrollback(&mut runtime, focused, 40);
+
+    // The divider between the two panes is chrome, not pane content: a wheel
+    // there has no pane under the pointer, so it falls to the focused pane.
+    let (cell, _, _) = find_vertical_border(&runtime, client);
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, cell));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, focused),
+        3,
+        "a wheel over chrome scrolls the focused pane"
+    );
+}
+
+#[test]
+fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    split_focused(&mut runtime, client);
+    let focused = runtime.typed_pane(client).expect("a focused pane");
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let other = snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .map(|slot| slot.pane_id)
+        .find(|&id| id != focused)
+        .expect("a second pane");
+
+    // The unfocused pane's program wants the mouse: normal tracking, SGR.
+    runtime.handle_pty_output(other, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, other);
+
+    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+
+    // Wheel up is SGR button 64; it reaches the pane under the pointer even
+    // though that pane is unfocused, and the focused pane gets nothing.
+    assert_eq!(
+        fake.writes(other).expect("writes"),
+        vec![format!("\x1b[<64;{col};{row}M").into_bytes()],
+        "the wheel forwards to the unfocused pane under the pointer"
+    );
+    assert_eq!(
+        fake.writes(focused).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "the focused pane receives nothing"
     );
 }

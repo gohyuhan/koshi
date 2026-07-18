@@ -56,6 +56,7 @@ pub fn resolve_theme(config: &ThemeConfig) -> Theme {
         on_accent: rgb_color(colors.on_accent),
         border_focused: rgb_color(colors.border_focused),
         border_unfocused: rgb_color(colors.border_unfocused),
+        border_hover: rgb_color(colors.border_hover),
         stack_header_fg: rgb_color(colors.stack_header_fg),
         stack_header_bg: rgb_color(colors.stack_header_bg),
         letterbox: rgb_color(colors.letterbox),
@@ -172,6 +173,7 @@ impl Runtime {
                 viewport: client.viewport(),
                 active_tab: active_tab_id,
                 focused_pane: client.focused_pane(active_tab_id),
+                hovered_pane: client.hovered_pane(),
                 lock_mode: client.lock_mode(),
                 pending_sequence: client
                     .pending_key_sequence()

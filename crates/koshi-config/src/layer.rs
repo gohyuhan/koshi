@@ -27,7 +27,7 @@ use crate::key::Leader;
 use crate::types::{
     ClipboardBackend, ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults,
     LoggingConfig, ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation,
-    PluginActivationConfig, RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig,
+    PluginActivationConfig, RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, WheelScroll,
 };
 
 /// Folds `layers` onto `base` in order and returns the effective config.
@@ -219,12 +219,15 @@ pub struct PartialMouseConfig {
     pub border_resize: Option<bool>,
     /// Lines scrolled per mouse wheel notch.
     pub scroll_lines: Option<u16>,
+    /// What the wheel does over a plain pane.
+    pub wheel: Option<WheelScroll>,
 }
 
 impl PartialMouseConfig {
     fn apply(self, target: &mut MouseConfig) {
         merge_field(&mut target.border_resize, self.border_resize);
         merge_field(&mut target.scroll_lines, self.scroll_lines);
+        merge_field(&mut target.wheel, self.wheel);
     }
 }
 
@@ -308,6 +311,8 @@ pub struct PartialColorPalette {
     pub border_focused: Option<RgbColor>,
     /// Border of unfocused panes.
     pub border_unfocused: Option<RgbColor>,
+    /// Border of the pane the pointer is hovering over.
+    pub border_hover: Option<RgbColor>,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: Option<RgbColor>,
     /// Background of a collapsed stack member's header strip.
@@ -339,6 +344,7 @@ impl PartialColorPalette {
         merge_field(&mut target.on_accent, self.on_accent);
         merge_field(&mut target.border_focused, self.border_focused);
         merge_field(&mut target.border_unfocused, self.border_unfocused);
+        merge_field(&mut target.border_hover, self.border_hover);
         merge_field(&mut target.stack_header_fg, self.stack_header_fg);
         merge_field(&mut target.stack_header_bg, self.stack_header_bg);
         merge_field(&mut target.letterbox, self.letterbox);

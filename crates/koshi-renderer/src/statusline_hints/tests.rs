@@ -89,6 +89,7 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
             viewport: Size { cols: 80, rows: 24 },
             active_tab: tab_id,
             focused_pane: None,
+            hovered_pane: None,
             lock_mode: LockMode::Normal,
             pending_sequence: pending,
             tabline_offset: None,

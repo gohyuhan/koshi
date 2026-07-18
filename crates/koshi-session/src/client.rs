@@ -70,6 +70,12 @@ pub struct Client {
     /// This client's in-flight tabline peek-drag, held only between the mouse
     /// press that begins it and the release that ends it.
     tabline_drag: Option<TablineDragState>,
+    /// The pane this client's pointer is currently hovering over, or `None` when
+    /// it is over chrome or off every pane. The wheel scrolls this pane, and the
+    /// renderer draws its border in the hover color so the target is visible
+    /// before the wheel turns. It lives on the client because each attached
+    /// client has its own pointer.
+    hovered_pane: Option<PaneId>,
     pending_key_sequence: Option<PendingKeySequence>,
     /// This client's scrollback view position per pane: lines scrolled up from
     /// the live bottom. A pane absent from the map (the default) sits at the live
@@ -135,6 +141,7 @@ impl Client {
             mouse_capture: None,
             tabline_offset: None,
             tabline_drag: None,
+            hovered_pane: None,
             pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
             selection_by_pane: HashMap::new(),
@@ -375,6 +382,18 @@ impl Client {
     #[must_use]
     pub fn tabline_drag(&self) -> Option<TablineDragState> {
         self.tabline_drag
+    }
+
+    /// The pane this client's pointer is hovering over, or `None` when it is
+    /// over chrome. See the field docs.
+    #[must_use]
+    pub fn hovered_pane(&self) -> Option<PaneId> {
+        self.hovered_pane
+    }
+
+    /// Set the pane this client's pointer is hovering over; `None` clears it.
+    pub fn set_hovered_pane(&mut self, pane_id: Option<PaneId>) {
+        self.hovered_pane = pane_id;
     }
 
     /// Begin or update (with `Some`) or end (with `None`) this client's tabline

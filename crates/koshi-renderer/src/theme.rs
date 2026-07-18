@@ -38,6 +38,9 @@ pub struct Theme {
     pub border_focused: Color,
     /// Border of unfocused panes.
     pub border_unfocused: Color,
+    /// Border of the pane the pointer is hovering over — the pane the wheel
+    /// scrolls.
+    pub border_hover: Color,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: Color,
     /// Background of a collapsed stack member's header strip.
@@ -61,6 +64,7 @@ impl Default for Theme {
             on_accent: Color::Rgb(0x1e, 0x10, 0x33),
             border_focused: Color::Rgb(0x00, 0xaf, 0xd7),
             border_unfocused: Color::Rgb(0x58, 0x58, 0x58),
+            border_hover: Color::Rgb(0xaf, 0x5f, 0xff),
             stack_header_fg: Color::Rgb(0xf4, 0xf1, 0xfa),
             stack_header_bg: Color::Rgb(0x30, 0x0f, 0x4a),
             letterbox: Color::Rgb(0x58, 0x58, 0x58),
