@@ -1,34 +1,35 @@
 //! [`vte::Perform`] implementation that drives [`TerminalState`] from parsed
-//! PTY output: printable glyphs land in the active grid at the cursor, and the
-//! basic C0 control bytes — the raw single-byte control codes below `0x20`,
-//! e.g. newline, tab, backspace — move the cursor and scroll.
-//!
-//! Implemented so far: `print` (printable glyphs, translated through the
-//! active GL charset — the character set currently selected for printing, one
-//! of the four `G0`–`G3` slots — DEC line-drawing, UK — then display-width
-//! aware: wide CJK/emoji span two cells; grapheme continuations — combining
-//! marks, ZWJ (zero-width joiner) emoji sequences, variation selectors,
-//! skin-tone modifiers, flags — fold onto the base cell, with
-//! variation-selector width promotion), `execute` (C0 control bytes, including
-//! the `SI`/`SO` charset shifts), `csi_dispatch` (CSI — Control Sequence
-//! Introducer, the `ESC [ …` escape form used for cursor moves, colors, and
-//! mode switches: relative + absolute cursor moves, line-relative moves,
-//! forward/back tab stops, erase in display/line and erase-char, SGR (Select
-//! Graphic Rendition — sets text color, bold, underline, and other display
-//! attributes), insert/delete char & line, scroll up/down, the DECSTBM scroll
-//! region, the DEC private modes for the alternate screen and cursor
-//! visibility, and the device queries — DA1/DA2/DA3, the DSR family, DECRQM —
-//! whose replies land on the state's reply queue),
-//! `esc_dispatch` (plain ESC sequences: cursor save/restore,
-//! reverse index, and `G0`–`G3` charset designation), and `osc_dispatch` (OSC
-//! — Operating System Command, the `ESC ] …` escape form that carries a text
-//! payload: the OSC 0/1/2 window title and the
-//! OSC 7 working-directory report). The
-//! device-control-string (DCS, `ESC P … ST`, an escape form whose payload
-//! arrives as a run of following bytes) callbacks `hook`/`unhook` clear the
-//! in-progress grapheme cluster (a DCS ends a text run, like any non-printing
-//! event); their payload handling, and `put`, are left to a later task. `vte`
+//! PTY output: printable glyphs land in the active grid at the cursor, and
+//! control sequences move the cursor, style text, and switch modes. `vte`
 //! decodes UTF-8 upstream, so `print` receives a ready `char`.
+//!
+//! What each callback handles today:
+//!
+//! - `print` — printable glyphs. Each is translated through the active GL
+//!   charset (whichever of the `G0`–`G3` slots is selected for printing: DEC
+//!   line-drawing, UK), then placed display-width aware: wide CJK and emoji
+//!   span two cells, and grapheme continuations — combining marks, ZWJ
+//!   (zero-width joiner) emoji sequences, variation selectors, skin tones,
+//!   flags — fold onto the base cell.
+//! - `execute` — the C0 control bytes (raw single-byte codes below `0x20`:
+//!   newline, tab, backspace, …), including the `SI`/`SO` charset shifts.
+//! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
+//!   cursor moves (relative, absolute, line-relative), tab stops, erase in
+//!   display/line and erase-char, SGR text attributes (Select Graphic
+//!   Rendition: color, bold, underline, …), insert/delete char and line,
+//!   scroll up/down, the DECSTBM scroll region, the DEC private modes
+//!   (alternate screen, cursor visibility, …), and the device queries
+//!   (DA1/DA2/DA3, the DSR family, DECRQM), whose replies land on the
+//!   state's reply queue.
+//! - `esc_dispatch` — plain ESC sequences: cursor save/restore, reverse
+//!   index, and `G0`–`G3` charset designation.
+//! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
+//!   carrying a text payload): the OSC 0/1/2 window title and the OSC 7
+//!   working-directory report.
+//! - `hook`/`unhook` — start/end of a DCS (device control string,
+//!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
+//!   ends a text run like any non-printing event); the payload handling, and
+//!   `put`, are left to a later task.
 //!
 //! The performer's helpers are split across submodules by concern — charset
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
@@ -871,12 +872,10 @@ impl TerminalState {
     /// "steady" would be a lie.
     ///
     /// `0` gives the cursor back: the pane returns to asking for no style, and
-    /// the user's own configured cursor stands again. This is what the programs
-    /// that send it mean by it — an editor writes `CSI 0 SP q` on exit to undo
-    /// its own cursor — and what the terminals koshi runs inside do with it.
-    /// (The xterm reference reads `0` as a second spelling of `1`, blinking
-    /// block; following that would make an editor's exit sequence *impose* a
-    /// blinking block on a user who never asked for one.)
+    /// the user's own configured cursor stands again — the meaning editors
+    /// rely on when they write `CSI 0 SP q` on exit to undo their own cursor.
+    /// (xterm's reference reads `0` as blinking block; koshi follows the
+    /// editors' meaning, as the mainstream terminals do.)
     ///
     /// An unknown value changes nothing: `CSI 9 SP q` names no style, so there
     /// is nothing to apply, and the style already set stands.

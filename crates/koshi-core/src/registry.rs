@@ -1,58 +1,31 @@
 //! The live action registry — the runtime's mutable table of every action koshi
 //! can perform right now.
 //!
-//! [`action`](crate::action) ships the *vocabulary*: what an action reference
-//! looks like and what the built-in ones are. This module ships the *table* that
-//! holds them at run time. The two differ in one way that matters:
-//! [`core_action_seeds`] is a static table, fixed at compile time, while the
-//! registry changes while koshi runs — a plugin load adds `plugin:<id>:*`
-//! entries, an unload takes them away.
+//! [`action`](crate::action) defines what an action reference looks like and
+//! ships the built-in set; this module holds the table at run time. The table
+//! changes while koshi runs: a plugin load adds its `plugin:<id>:*` entries, an
+//! unload removes them.
 //!
-//! # What lives here, and what does not
+//! The registry answers one question: given this [`ActionRef`], what do we
+//! know about it? Mapping keys to actions is the keymap's job; turning an
+//! action into a [`Command`](crate::command::Command) is the resolver's.
 //!
-//! The registry answers exactly one question: *"given this
-//! [`ActionRef`], what do we know about it?"* It does **not** map keys to actions
-//! (that is the keymap) and it does **not** turn an action into a
-//! [`Command`](crate::command::Command) (that is the resolver, which reads the
-//! [`ActionHandlerRef`] stored here and builds the command itself).
+//! One process holds one registry, mutated only by the dispatcher thread.
+//! Plugins never hold a reference — they ask the dispatcher to register or
+//! unregister for them.
 //!
-//! # Ownership
+//! [`register`](ActionRegistry::register) accepts `plugin:` references only
+//! (`core:` is seeded once and permanent, `user:` macros come later), and it
+//! trusts only the `caller` the host authenticated: the reference's namespace,
+//! the metadata's namespace, and the handler's target must all name that
+//! caller, and the handler must be the caller's own
+//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall) — the
+//! one door where per-command capability checks happen. So a plugin can never
+//! touch another plugin's namespace or a built-in action.
 //!
-//! One koshi process holds exactly one registry, as a field on the runtime's
-//! state container, mutated only by the single dispatcher thread. Plugins never
-//! hold a reference: they ask the dispatcher to register or unregister on their
-//! behalf.
-//!
-//! # Namespaces
-//!
-//! `core:` entries are seeded once by [`ActionRegistry::new`] and are permanent.
-//! [`register`](ActionRegistry::register) accepts `plugin:` references only —
-//! `core:` is built-in and `user:` macros are a later feature — so a plugin
-//! cannot shadow or replace a built-in action.
-//!
-//! # The caller is the only trusted input
-//!
-//! A registration request describes its own owner three times: the reference's
-//! namespace, the metadata's namespace, and the handler's target. All three
-//! arrive together, so agreeing with each other proves nothing. Both
-//! [`register`](ActionRegistry::register) and
-//! [`unregister`](ActionRegistry::unregister) therefore take the `caller` the
-//! host authenticated and check every one of those against it. A plugin cannot
-//! register into, or remove from, another plugin's namespace.
-//!
-//! A plugin action's handler must be that plugin's own
-//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall).
-//! [`CoreCommand`](crate::action::ActionHandlerRef::CoreCommand) is what the
-//! built-in seeds carry and [`Sequence`](crate::action::ActionHandlerRef::Sequence)
-//! belongs to `user:` macros; a plugin reaches the runtime through its host
-//! call, where the capability check for each command class happens.
-//!
-//! # Version
-//!
-//! [`version`](ActionRegistry::version) counts the successful adds and removes
-//! since startup. A consumer that caches a derived view of the table (the
-//! which-key hint bar recomputing its action list) compares the counter it last
-//! saw against the current one and rebuilds only when they differ.
+//! [`version`](ActionRegistry::version) counts successful adds and removes;
+//! a consumer caching a derived view (the which-key hint bar) rebuilds only
+//! when the counter moved.
 
 use std::collections::HashMap;
 use std::fmt;

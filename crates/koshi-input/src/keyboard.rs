@@ -101,8 +101,9 @@ fn decode_code(code: KeyCode) -> Option<Key> {
 }
 
 /// The host's modifier set, minus Shift: whether Shift belongs in the chord
-/// depends on the key it is held with, which [`normalize`] decides.
-fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
+/// depends on the key it is held with, which [`normalize`] decides. The mouse
+/// decoder builds on this, adding Shift back ([`crate::mouse`]).
+pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     let mut mods = ModFlags::NONE;
     if modifiers.contains(KeyModifiers::CONTROL) {
         mods = mods.union(ModFlags::CTRL);

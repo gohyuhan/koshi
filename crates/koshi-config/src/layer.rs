@@ -315,19 +315,6 @@ pub struct PartialColorPalette {
     pub letterbox: Option<RgbColor>,
 }
 
-/// Logging overrides.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PartialLoggingConfig {
-    /// Whether koshi writes a log file.
-    pub enabled: Option<bool>,
-}
-
-impl PartialLoggingConfig {
-    fn apply(self, target: &mut LoggingConfig) {
-        merge_field(&mut target.enabled, self.enabled);
-    }
-}
-
 impl PartialColorPalette {
     fn apply(self, target: &mut ColorPalette) {
         merge_field(&mut target.ramp_start, self.ramp_start);
@@ -342,6 +329,19 @@ impl PartialColorPalette {
         merge_field(&mut target.stack_header_fg, self.stack_header_fg);
         merge_field(&mut target.stack_header_bg, self.stack_header_bg);
         merge_field(&mut target.letterbox, self.letterbox);
+    }
+}
+
+/// Logging overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartialLoggingConfig {
+    /// Whether koshi writes a log file.
+    pub enabled: Option<bool>,
+}
+
+impl PartialLoggingConfig {
+    fn apply(self, target: &mut LoggingConfig) {
+        merge_field(&mut target.enabled, self.enabled);
     }
 }
 

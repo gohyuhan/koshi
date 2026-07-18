@@ -153,41 +153,20 @@ impl Rect {
 
     /// Returns the overlapping region between `self` and `other`.
     ///
-    /// Rectangles are treated as half-open cell regions:
-    ///
-    /// ```text
-    /// x range: [origin.x, right())
-    /// y range: [origin.y, bottom())
-    /// ```
-    ///
-    /// So the right and bottom edges are exclusive. Two rectangles that only touch
-    /// at an edge or corner do not overlap.
+    /// Rectangles are half-open cell regions — `x` spans `[origin.x, right())`,
+    /// `y` spans `[origin.y, bottom())` — so two rectangles that only touch at
+    /// an edge or corner do not overlap.
     ///
     /// ```text
     /// self:
-    ///      x0
     ///      *--------------------*
-    ///      |                    |
     ///      |        overlap     |
     ///      |        *-----------|----*
     ///      |        |###########|    |
     ///      *--------|-----------*    |
-    ///               |                |
     ///               *----------------*
     ///                        other
     /// ```
-    ///
-    /// The intersection is formed from:
-    ///
-    /// ```text
-    /// left   = max(self.left,   other.left)
-    /// top    = max(self.top,    other.top)
-    /// right  = min(self.right,  other.right)
-    /// bottom = min(self.bottom, other.bottom)
-    /// ```
-    ///
-    /// If `right > left` and `bottom > top`, the rectangles share cells.
-    /// Otherwise, they are disjoint or merely adjacent.
     #[must_use]
     pub fn intersection(&self, other: Rect) -> Option<Rect> {
         let x0 = self.origin.x.max(other.origin.x);
