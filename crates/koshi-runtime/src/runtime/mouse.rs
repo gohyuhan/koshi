@@ -53,6 +53,7 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
+use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneKind;
@@ -219,6 +220,13 @@ impl Runtime {
     /// one is theirs; a plain shell asks for nothing, so a drag there is a
     /// selection. Which one it is is read from the pane's live mouse mode at the
     /// moment of the press, so it follows a program turning reporting on and off.
+    ///
+    /// **Holding `Shift` takes the mouse back.** A `Shift`+press begins a koshi
+    /// selection even over a mouse-aware program — the only way to highlight and
+    /// copy text out of a full-screen `vim` or `htop`, and what every terminal
+    /// does — and that program never sees the gesture. Shift is read at the
+    /// press alone: once a `Shift`+press starts a selection, the drag and release
+    /// that finish it stay koshi's whether or not Shift is still held.
     fn click_pane_content(
         &mut self,
         client_id: ClientId,
@@ -228,7 +236,9 @@ impl Runtime {
     ) {
         if Some(pane_id) != self.typed_pane(client_id) {
             self.mouse_focus_pane(client_id, pane_id);
-        } else if self.pane_reports_mouse(pane_id, mouse.kind) {
+        } else if self.pane_reports_mouse(pane_id, mouse.kind)
+            && !mouse.mods.contains(ModFlags::SHIFT)
+        {
             self.forward_mouse_to_pane(client_id, mouse);
         } else {
             let clicks = self.record_click(client_id, MouseButton::Left, now);
