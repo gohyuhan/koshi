@@ -103,6 +103,22 @@ fn release_at(at: Point) -> MouseInput {
     }
 }
 
+fn shift_press_at(at: Point) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Press(MouseButton::Left),
+        at,
+        mods: ModFlags::SHIFT,
+    }
+}
+
+fn shift_drag_at(at: Point) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Drag(MouseButton::Left),
+        at,
+        mods: ModFlags::SHIFT,
+    }
+}
+
 fn select_hello(rt: &mut Runtime, client: ClientId, pane: PaneId) {
     let mut clock = Clock::new();
     let from = cell_at(rt, client, pane, 0, 0);
@@ -277,6 +293,114 @@ fn a_focus_click_on_another_pane_clears_no_highlight() {
         selection(&mut rt, client, second),
         Some(held),
         "focusing away leaves the highlight up"
+    );
+}
+
+#[test]
+fn shift_drag_selects_over_a_mouse_aware_program_a_bare_drag_does_not() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+    // The program turns on mouse tracking: bare gestures are now its own.
+    feed(&mut rt, pane, b"\x1b[?1000h\x1b[?1006h");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    let to = cell_at(&rt, client, pane, 4, 0);
+
+    // A bare press/drag is forwarded to the program: no koshi highlight.
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(client, drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "a bare drag over a mouse-aware program does not select"
+    );
+
+    // The same gesture with Shift held at the press highlights instead.
+    rt.handle_mouse_input(client, shift_press_at(from), clock.tick());
+    rt.handle_mouse_input(client, shift_drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    let selection = selection(&mut rt, client, pane).expect("shift+drag highlights");
+    assert_eq!(selection.kind, SelectionKind::Character);
+    assert_eq!(selection.anchor, GridPos { row: 0, col: 0 });
+    assert_eq!(selection.cursor, GridPos { row: 0, col: 4 });
+}
+
+#[test]
+fn shift_drag_on_a_normal_pane_selects_like_a_bare_drag() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+
+    // The pane's program wants no mouse, so Shift changes nothing here.
+    let from = cell_at(&rt, client, pane, 0, 0);
+    let to = cell_at(&rt, client, pane, 4, 0);
+    rt.handle_mouse_input(client, shift_press_at(from), clock.tick());
+    rt.handle_mouse_input(client, shift_drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+
+    let selection = selection(&mut rt, client, pane).expect("a highlight");
+    assert_eq!(selection.kind, SelectionKind::Character);
+    assert_eq!(selection.anchor, GridPos { row: 0, col: 0 });
+    assert_eq!(selection.cursor, GridPos { row: 0, col: 4 });
+}
+
+#[test]
+fn shift_is_read_at_the_press_not_mid_drag() {
+    let (mut rt, client, pane) = runtime();
+    let mut clock = Clock::new();
+    feed(&mut rt, pane, b"hello world");
+    feed(&mut rt, pane, b"\x1b[?1000h\x1b[?1006h");
+
+    let from = cell_at(&rt, client, pane, 0, 0);
+    let to = cell_at(&rt, client, pane, 4, 0);
+
+    // Bare press, Shift arriving only once the drag is underway: the program
+    // keeps the gesture, so nothing is selected.
+    rt.handle_mouse_input(client, press_at(from), clock.tick());
+    rt.handle_mouse_input(client, shift_drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    assert_eq!(
+        selection(&mut rt, client, pane),
+        None,
+        "Shift arriving mid-drag does not start a selection"
+    );
+
+    // Shift+press, then Shift let go mid-drag: the started selection stands.
+    rt.handle_mouse_input(client, shift_press_at(from), clock.tick());
+    rt.handle_mouse_input(client, drag_at(to), clock.tick());
+    rt.handle_mouse_input(client, release_at(to), clock.tick());
+    let selection = selection(&mut rt, client, pane).expect("the selection stands");
+    assert_eq!(selection.cursor, GridPos { row: 0, col: 4 });
+}
+
+#[test]
+fn a_shift_press_on_an_unfocused_pane_only_focuses() {
+    let (mut rt, client, first) = runtime();
+    let mut clock = Clock::new();
+    let second = split(&mut rt, client); // the split focuses `second`
+    feed(&mut rt, first, b"first pane");
+    feed(&mut rt, second, b"second pane");
+
+    let from = cell_at(&rt, client, first, 0, 0);
+    let to = cell_at(&rt, client, first, 4, 0);
+
+    // First Shift+press on the unfocused pane only focuses it: no highlight, the
+    // focus-first rule runs before Shift is even consulted.
+    rt.handle_mouse_input(client, shift_press_at(from), clock.tick());
+    assert_eq!(
+        selection(&mut rt, client, first),
+        None,
+        "the focusing press does not also select"
+    );
+
+    // Now focused, a second Shift+press then drag highlights.
+    rt.handle_mouse_input(client, shift_press_at(from), clock.tick());
+    rt.handle_mouse_input(client, shift_drag_at(to), clock.tick());
+    assert!(
+        selection(&mut rt, client, first).is_some(),
+        "the second Shift+drag selects in the now-focused pane"
     );
 }
 

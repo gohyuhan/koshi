@@ -926,6 +926,42 @@ fn a_press_drag_release_gesture_forwards_each_event() {
 }
 
 #[test]
+fn a_shift_gesture_over_a_mouse_aware_program_forwards_nothing() {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // Button-event tracking would report a bare drag; SGR encoding.
+    runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let shift = |kind| MouseInput {
+        kind,
+        at,
+        mods: ModFlags::SHIFT,
+    };
+
+    mouse(
+        &mut runtime,
+        client,
+        shift(MouseKind::Press(MouseButton::Left)),
+    );
+    mouse(
+        &mut runtime,
+        client,
+        shift(MouseKind::Drag(MouseButton::Left)),
+    );
+    mouse(
+        &mut runtime,
+        client,
+        shift(MouseKind::Release(MouseButton::Left)),
+    );
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "a Shift-held gesture is koshi's selection; the program is sent nothing"
+    );
+}
+
+#[test]
 fn a_bare_move_forwards_only_in_any_motion_mode() {
     let (mut runtime, fake, client) = runtime_with_fake();
     let pane = only_pane(&runtime);
