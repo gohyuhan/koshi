@@ -117,6 +117,7 @@ fn build(
             viewport,
             active_tab: tab_id,
             focused_pane: focused,
+            hovered_pane: None,
             lock_mode,
             pending_sequence: None,
             tabline_offset: None,
@@ -443,16 +444,53 @@ fn scroll_indicator_shown_only_when_scrolled_back() {
         Size { cols: 40, rows: 8 },
     );
 
-    // At the live tail (no grid view / offset 0): no scroll indicator.
+    // At the live tail (offset 0): no indicator in the pane's bottom border
+    // (row 6 — the box spans rows 1..=6), and none in the tabline either.
+    assert!(!row_text(&render(&snap, 40, 8), 6).contains('/'));
     assert!(!row_text(&render(&snap, 40, 8), 0).contains("SCROLL"));
 
-    // Scrolled back three lines with 100 retained: indicator appears.
+    // Scrolled back three lines with 100 retained: the count sits right-aligned
+    // in this pane's own bottom border, no longer in the global status line.
     snap.panes[0].grid_view = Some(GridView {
         grid: Arc::new(Grid::blank(6, 40, TermStyle::default())),
         view_offset: 3,
     });
     snap.panes[0].scrollback.retained_lines = 100;
-    assert!(row_text(&render(&snap, 40, 8), 0).contains("SCROLL 3/100"));
+    let buf = render(&snap, 40, 8);
+    let bottom = row_text(&buf, 6);
+    assert!(bottom.contains("3/100"), "bottom border: {bottom:?}");
+    assert_eq!(buf[(39, 6)].symbol(), "┘", "the corner glyph survives");
+    assert!(!row_text(&buf, 0).contains("SCROLL"), "no global indicator");
+}
+
+#[test]
+fn each_pane_shows_its_own_scroll_position() {
+    let a = PaneId::new();
+    let b = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[(a, rect(0, 1, 20, 6), true), (b, rect(20, 1, 20, 6), true)],
+        Some(a),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+    // A is scrolled 3 up of 100; B is scrolled 7 up of 50 — different views.
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(6, 20, TermStyle::default())),
+        view_offset: 3,
+    });
+    snap.panes[0].scrollback.retained_lines = 100;
+    snap.panes[1].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(6, 20, TermStyle::default())),
+        view_offset: 7,
+    });
+    snap.panes[1].scrollback.retained_lines = 50;
+
+    // Both bottom borders are row 6; each carries its own count.
+    let bottom = row_text(&render(&snap, 40, 8), 6);
+    assert!(bottom.contains("3/100"), "pane A's own count: {bottom:?}");
+    assert!(bottom.contains("7/50"), "pane B's own count: {bottom:?}");
 }
 
 #[test]
@@ -550,6 +588,47 @@ fn stack_headers_render_collapsed_strips() {
             "col {x} of strip"
         );
     }
+}
+
+#[test]
+fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
+    let focused = PaneId::new();
+    let other = PaneId::new();
+    let mut snap = build(
+        "sess",
+        &[("shell", true)],
+        &[
+            (focused, rect(0, 1, 20, 6), true),
+            (other, rect(20, 1, 20, 6), true),
+        ],
+        Some(focused),
+        LockMode::Normal,
+        Size { cols: 40, rows: 8 },
+    );
+
+    // Hovering the focused pane changes nothing: it keeps the focus color.
+    snap.client.hovered_pane = Some(focused);
+    let buf = render(&snap, 40, 8);
+    assert_eq!(
+        buf[(0, 1)].fg,
+        Theme::default().border_focused,
+        "the focused pane keeps its focus color even when hovered"
+    );
+
+    // Hovering the unfocused pane paints its border the hover color, and the
+    // focused pane is untouched.
+    snap.client.hovered_pane = Some(other);
+    let buf = render(&snap, 40, 8);
+    assert_eq!(
+        buf[(20, 1)].fg,
+        Theme::default().border_hover,
+        "an unfocused pane under the pointer takes the hover color"
+    );
+    assert_eq!(
+        buf[(0, 1)].fg,
+        Theme::default().border_focused,
+        "the focused pane's border is unaffected by hovering elsewhere"
+    );
 }
 
 #[test]

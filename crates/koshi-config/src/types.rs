@@ -450,6 +450,12 @@ pub struct MouseConfig {
     pub border_resize: bool,
     /// Lines scrolled per mouse wheel notch.
     pub scroll_lines: u16,
+    /// What the wheel does over a plain pane — one with no text highlighted, no
+    /// program asking for the mouse, and no alternate-scroll mode on. The other
+    /// cases are fixed: a highlight holds and scrolls koshi's own scrollback, a
+    /// mouse-aware program gets the wheel as a report, and an alternate-screen
+    /// program with `?1007` on gets arrow keys.
+    pub wheel: WheelScroll,
 }
 
 impl Default for MouseConfig {
@@ -457,8 +463,19 @@ impl Default for MouseConfig {
         Self {
             border_resize: true,
             scroll_lines: 3,
+            wheel: WheelScroll::default(),
         }
     }
+}
+
+/// What the mouse wheel does over a plain pane (see [`MouseConfig::wheel`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WheelScroll {
+    /// Scroll koshi's own scrollback view of the pane the pointer is over.
+    #[default]
+    ScrollScrollback,
+    /// Do nothing.
+    Ignore,
 }
 
 /// Selection and clipboard behavior.
@@ -565,6 +582,9 @@ pub struct ColorPalette {
     pub border_focused: RgbColor,
     /// Border of unfocused panes.
     pub border_unfocused: RgbColor,
+    /// Border of the pane the pointer is hovering over — the pane the wheel
+    /// scrolls, marked so the target is visible before the wheel is turned.
+    pub border_hover: RgbColor,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: RgbColor,
     /// Background of a collapsed stack member's header strip.
@@ -586,6 +606,7 @@ impl Default for ColorPalette {
             on_accent: RgbColor::new(0x1e, 0x10, 0x33),
             border_focused: RgbColor::new(0x00, 0xaf, 0xd7),
             border_unfocused: RgbColor::new(0x58, 0x58, 0x58),
+            border_hover: RgbColor::new(0xaf, 0x5f, 0xff),
             stack_header_fg: RgbColor::new(0xf4, 0xf1, 0xfa),
             stack_header_bg: RgbColor::new(0x30, 0x0f, 0x4a),
             letterbox: RgbColor::new(0x58, 0x58, 0x58),

@@ -89,6 +89,7 @@ fn snap(
             viewport,
             active_tab: tab_id,
             focused_pane: None,
+            hovered_pane: None,
             lock_mode: LockMode::Normal,
             pending_sequence: None,
             tabline_offset: None,

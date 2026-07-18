@@ -286,6 +286,11 @@ pub struct ClientSnapshot {
     /// no focusable pane. The renderer highlights the pane whose
     /// [`PaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane: Option<PaneId>,
+    /// The pane the client's pointer is hovering over, or `None` when it is over
+    /// chrome. The renderer draws an *unfocused* pane under the pointer in the
+    /// hover color so the wheel target is visible; the focused pane keeps its
+    /// focus color.
+    pub hovered_pane: Option<PaneId>,
     /// The client's input mode (drives the mode tag and keybind resolution).
     pub lock_mode: LockMode,
     /// The chords of a multi-chord binding pressed so far, or `None` when no

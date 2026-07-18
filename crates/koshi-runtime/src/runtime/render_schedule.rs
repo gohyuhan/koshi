@@ -57,9 +57,9 @@ pub enum InvalidationReason {
     TabChanged = 3,
     /// A client's outer terminal changed size.
     TerminalResize = 4,
-    /// A chrome status surface changed: the tabline status section (mode
-    /// tag, scroll indicator), the hint bar's bindings, or the theme after
-    /// a config reload.
+    /// A chrome status surface changed: the tabline's mode tag, a pane's
+    /// scroll position or hover marker, the hint bar's bindings, or the theme
+    /// after a config reload.
     StatusChanged = 5,
     /// A plugin updated one of its UI surfaces.
     PluginUiUpdated = 6,

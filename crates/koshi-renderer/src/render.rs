@@ -208,18 +208,24 @@ fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
     snapshot.panes.iter().find(|pane| pane.id == id)
 }
 
-/// Draw a bordered box for every visible pane in the active tab, highlighting
-/// the client's focused pane's border and writing the pane's resolved title
-/// into its top border line. `offset` shifts each pane into the centered
-/// content rect.
+/// Draw a bordered box for every visible pane in the active tab, coloring the
+/// focused pane's border (and an unfocused hovered pane's), writing the pane's
+/// resolved title into its top border line, and — when the pane is scrolled
+/// back — its scroll position into its bottom border. `offset` shifts each pane
+/// into the centered content rect.
 fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
     let focused = snapshot.client.focused_pane;
+    let hovered = snapshot.client.hovered_pane;
     for slot in &snapshot.session.active_tab.layout_solved {
         if !slot.visible {
             continue;
         }
+        // Focus keeps its own color; the hover color marks only an unfocused
+        // pane the wheel would scroll, so the focused pane never turns purple.
         let style = if Some(slot.pane_id) == focused {
             border_focused_style(&snapshot.theme)
+        } else if Some(slot.pane_id) == hovered {
+            border_hover_style(&snapshot.theme)
         } else {
             border_unfocused_style(&snapshot.theme)
         };
@@ -229,17 +235,29 @@ fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
             .border_style(style)
             .render(rect, buf);
 
+        let pane = find_pane(snapshot, slot.pane_id);
+
         // The pane's title sits in the top border, zellij-style: ` title `
         // over the line, clipped so the corner glyphs always survive.
-        let Some(title) = find_pane(snapshot, slot.pane_id).and_then(|pane| pane.title.as_deref())
-        else {
-            continue;
-        };
-        if title.is_empty() || rect.width <= 4 {
-            continue;
+        if let Some(title) = pane.and_then(|pane| pane.title.as_deref()) {
+            if !title.is_empty() && rect.width > 4 {
+                let line = Line::from(Span::styled(format!(" {title} "), style));
+                set_line_clipped(buf, rect.x + 2, rect.y, &line, rect.width - 4);
+            }
         }
-        let line = Line::from(Span::styled(format!(" {title} "), style));
-        set_line_clipped(buf, rect.x + 2, rect.y, &line, rect.width - 4);
+
+        // When this pane is scrolled back, its position sits in the bottom
+        // border, right-aligned: ` up/total `. A pane at the live tail shows
+        // nothing. Each pane carries its own offset, so several can show at once.
+        if let Some((up, total)) = pane.and_then(pane_scroll) {
+            let text = format!(" {up}/{total} ");
+            let width = text.len() as u16;
+            if rect.width >= width + 2 {
+                let line = Line::from(Span::styled(text, style));
+                let x = rect.right() - 1 - width;
+                set_line_clipped(buf, x, rect.bottom() - 1, &line, width);
+            }
+        }
     }
 }
 
@@ -632,18 +650,13 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
     start
 }
 
-/// The tabline's right-anchored block: the scroll indicator (only while the
-/// focused pane is scrolled back) followed by the mode tag.
+/// The tabline's right-anchored block: the mode tag. Each pane's scroll
+/// position lives in its own bottom border (see [`draw_panes`]), not here.
 fn right_block(snapshot: &RenderSnapshot) -> Line<'static> {
-    let mut spans = Vec::new();
-    if let Some((offset, total)) = focused_scroll(snapshot) {
-        spans.push(Span::raw(format!("SCROLL {offset}/{total} ")));
-    }
-    spans.push(Span::styled(
+    Line::from(Span::styled(
         format!(" {} ", mode_tag(snapshot.client.lock_mode)),
         mode_style(&snapshot.theme),
-    ));
-    Line::from(spans)
+    ))
 }
 
 /// The tabline's left-anchored block: the session name.
@@ -683,16 +696,11 @@ fn mode_tag(mode: LockMode) -> &'static str {
     }
 }
 
-/// The focused pane's scroll position as `(lines scrolled up, retained lines)`,
-/// or `None` when the pane is at the live tail (nothing to indicate).
-fn focused_scroll(snapshot: &RenderSnapshot) -> Option<(usize, usize)> {
-    let focused = snapshot.client.focused_pane?;
-    let pane = find_pane(snapshot, focused)?;
+/// A pane's scroll position as `(lines scrolled up, retained lines)`, or `None`
+/// when the pane is at the live tail (nothing to indicate).
+fn pane_scroll(pane: &PaneSnapshot) -> Option<(usize, usize)> {
     let offset = pane.grid_view.as_ref().map_or(0, |view| view.view_offset);
-    if offset == 0 {
-        return None;
-    }
-    Some((offset, pane.scrollback.retained_lines))
+    (offset > 0).then_some((offset, pane.scrollback.retained_lines))
 }
 
 /// Place an effective-space layout [`Rect`] onto the screen: convert its
@@ -865,6 +873,13 @@ fn border_focused_style(theme: &Theme) -> Style {
 /// Dim border style for unfocused panes.
 fn border_unfocused_style(theme: &Theme) -> Style {
     Style::default().fg(theme.border_unfocused)
+}
+
+/// Border style for the pane under the pointer — the wheel's target.
+fn border_hover_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.border_hover)
+        .add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

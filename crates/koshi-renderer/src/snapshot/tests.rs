@@ -83,6 +83,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         viewport: Size { cols: 80, rows: 24 },
         active_tab: tab_id,
         focused_pane: Some(pane_id),
+        hovered_pane: None,
         lock_mode: LockMode::Normal,
         pending_sequence: None,
         tabline_offset: None,
