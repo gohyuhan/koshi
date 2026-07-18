@@ -306,154 +306,7 @@ impl vte::Perform for TerminalState {
             let screen_at_start = self.active;
             for param in params.iter() {
                 let mode = param.first().copied().unwrap_or(0);
-                match (action, mode) {
-                    // DECSET `?47`/`?1047` — switch to the alternate buffer, leaving
-                    // its cells and cursor untouched. Clone the primary's render
-                    // state (pen, charsets, GL slot) into the alternate when
-                    // crossing from the primary, so the alternate inherits it.
-                    ('h', 47 | 1047) => {
-                        if self.active == Screen::Primary {
-                            self.alternate_render = self.primary_render;
-                        }
-                        self.active = Screen::Alternate;
-                    }
-                    // DECSET `?1049` — DECSC the primary cursor, reset the alternate
-                    // to a brand-new buffer, re-seed its cursor position from the
-                    // primary, then switch. Guarded on the *start* screen so an
-                    // earlier `?47` in the same list cannot suppress any of this;
-                    // the save targets the primary buffer explicitly so that
-                    // earlier switch cannot redirect it onto the alternate cursor.
-                    // `?1049` always starts a fresh session, so it inherits no
-                    // cells, cursor, wrap latch, saved cursor, or scroll region
-                    // from the previous one (unlike the preserving `?47`/`?1047`).
-                    ('h', 1049) => {
-                        if screen_at_start != Screen::Alternate {
-                            self.save_primary_cursor();
-                            // Clone the primary's render state into the alternate.
-                            self.alternate_render = self.primary_render;
-                            self.reset_alternate_buffer();
-                            self.seed_alternate_cursor();
-                            self.active = Screen::Alternate;
-                        }
-                    }
-                    // DECSET `?1048` — save the active screen's cursor only.
-                    ('h', 1048) => self.save_cursor(),
-                    // DECSET `?25` (DECTCEM) — show the cursor. Visibility is
-                    // tracked per screen (a deliberate deviation from xterm's
-                    // global DECTCEM), so this toggles only the active screen.
-                    ('h', 25) => self.active_cursor_mut().is_visible = true,
-                    // DECRST `?47` — switch back to the primary buffer.
-                    ('l', 47) => {
-                        if self.active == Screen::Alternate {
-                            self.active = Screen::Primary;
-                        }
-                    }
-                    // DECRST `?1047` — reset the alternate buffer (clear cells +
-                    // scroll region + cursor), then switch back to the primary.
-                    // Guarded on the **live** screen (whichBuf): once an earlier
-                    // exit in the same list already left the alternate, this is a
-                    // no-op — re-clearing on the primary would blank with the wrong
-                    // pen.
-                    ('l', 1047) => {
-                        if self.active == Screen::Alternate {
-                            self.reset_alternate_buffer();
-                            self.active = Screen::Primary;
-                        }
-                    }
-                    // DECRST `?1049` — xterm/alacritty define `?1049 l` as `?1047 l`
-                    // + `?1048 l`: the clear + switch-to-primary apply only while
-                    // still on the alternate (live whichBuf guard, so a second
-                    // clearing exit is a no-op), but the DECRC cursor restore (the
-                    // `?1048 l` part) runs unconditionally.
-                    ('l', 1049) => {
-                        if self.active == Screen::Alternate {
-                            self.reset_alternate_buffer();
-                            self.active = Screen::Primary;
-                        }
-                        self.restore_cursor();
-                    }
-                    // DECRST `?1048` — restore the active screen's cursor only.
-                    ('l', 1048) => self.restore_cursor(),
-                    // DECRST `?25` (DECTCEM) — hide the cursor.
-                    ('l', 25) => self.active_cursor_mut().is_visible = false,
-                    // `?2004` — bracketed paste: wrap pasted text in
-                    // `ESC[200~`…`ESC[201~` so the app distinguishes typing.
-                    ('h', 2004) => self.modes.bracketed_paste = true,
-                    ('l', 2004) => self.modes.bracketed_paste = false,
-                    // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`). The
-                    // four levels are mutually exclusive, so each enable replaces
-                    // the prior one (matching alacritty, whose set arm clears the
-                    // other mouse bits before setting its own). A reset disables
-                    // reporting only when it names the *active* level; resetting a
-                    // mode that is not active is a no-op (falls through to `_`),
-                    // since alacritty's unset clears only that mode's own bit.
-                    ('h', 9) => self.modes.mouse_tracking = MouseTracking::X10,
-                    ('h', 1000) => self.modes.mouse_tracking = MouseTracking::Normal,
-                    ('h', 1002) => self.modes.mouse_tracking = MouseTracking::ButtonMotion,
-                    ('h', 1003) => self.modes.mouse_tracking = MouseTracking::AnyMotion,
-                    ('l', 9) if self.modes.mouse_tracking == MouseTracking::X10 => {
-                        self.modes.mouse_tracking = MouseTracking::Off;
-                    }
-                    ('l', 1000) if self.modes.mouse_tracking == MouseTracking::Normal => {
-                        self.modes.mouse_tracking = MouseTracking::Off;
-                    }
-                    ('l', 1002) if self.modes.mouse_tracking == MouseTracking::ButtonMotion => {
-                        self.modes.mouse_tracking = MouseTracking::Off;
-                    }
-                    ('l', 1003) if self.modes.mouse_tracking == MouseTracking::AnyMotion => {
-                        self.modes.mouse_tracking = MouseTracking::Off;
-                    }
-                    // Mouse report encoding (`?1005`/`?1006`/`?1015`), orthogonal
-                    // to the tracking level and mutually exclusive among
-                    // themselves (each enable replaces the prior — matching
-                    // alacritty, whose set arm removes the other encoding bit
-                    // before setting its own). A reset returns to the default
-                    // encoding only when it names the *active* encoding; resetting
-                    // an encoding that is not active is a no-op (falls through to
-                    // `_`), since alacritty's unset clears only that bit.
-                    ('h', 1005) => self.modes.mouse_encoding = MouseEncoding::Utf8,
-                    ('h', 1006) => self.modes.mouse_encoding = MouseEncoding::Sgr,
-                    ('h', 1015) => self.modes.mouse_encoding = MouseEncoding::Urxvt,
-                    ('l', 1005) if self.modes.mouse_encoding == MouseEncoding::Utf8 => {
-                        self.modes.mouse_encoding = MouseEncoding::Default;
-                    }
-                    ('l', 1006) if self.modes.mouse_encoding == MouseEncoding::Sgr => {
-                        self.modes.mouse_encoding = MouseEncoding::Default;
-                    }
-                    ('l', 1015) if self.modes.mouse_encoding == MouseEncoding::Urxvt => {
-                        self.modes.mouse_encoding = MouseEncoding::Default;
-                    }
-                    // `?1007` — alternate-screen scroll: wheel motion becomes
-                    // cursor arrow keys on the alternate screen.
-                    ('h', 1007) => self.modes.alt_scroll = true,
-                    ('l', 1007) => self.modes.alt_scroll = false,
-                    // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
-                    // last column parks there and the next glyph wraps to a new
-                    // line. Off: the cursor stays pinned and further glyphs
-                    // overwrite the last column in place.
-                    ('h', 7) => self.modes.autowrap = true,
-                    ('l', 7) => self.modes.autowrap = false,
-                    // `?1` (DECCKM) — application cursor keys. The input layer reads
-                    // this to pick the arrow-key byte form (`ESC O A` vs `ESC [ A`).
-                    ('h', 1) => self.modes.app_cursor_keys = true,
-                    ('l', 1) => self.modes.app_cursor_keys = false,
-                    // `?5` (DECSCNM) — reverse video. The renderer reads this to
-                    // swap foreground and background across the whole screen.
-                    ('h', 5) => self.modes.reverse_video = true,
-                    ('l', 5) => self.modes.reverse_video = false,
-                    // `?12` (att610) — cursor blink. The renderer reads this to
-                    // blink the cursor cell.
-                    ('h', 12) => self.modes.cursor_blink = true,
-                    ('l', 12) => self.modes.cursor_blink = false,
-                    // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
-                    // keyboard auto-repeat): modes koshi does not implement. Trace
-                    // and ignore.
-                    ('h' | 'l', 2 | 3 | 8) => {
-                        tracing::trace!(mode, "unsupported DEC private mode; ignored");
-                    }
-                    // Any other DEC private mode is not handled yet.
-                    _ => {}
-                }
+                self.apply_dec_private_mode(action, mode, screen_at_start);
             }
             return;
         }
@@ -842,6 +695,168 @@ impl vte::Perform for TerminalState {
 }
 
 impl TerminalState {
+    /// Apply one DEC private mode from a DECSET (`h`) / DECRST (`l`) list — the
+    /// `25` in `CSI ? 25 h`, for instance. `screen_at_start` is the screen that
+    /// was active when the list began: `?1049` entry is guarded on it so an
+    /// earlier `?47` in the same list cannot suppress the save/reset, while
+    /// every other switch reads the live `self.active`. An unrecognized mode
+    /// changes nothing.
+    ///
+    /// `apply_dec_private_mode('h', 25, Primary)` shows the cursor on the active
+    /// screen; `apply_dec_private_mode('l', 1000, _)` turns Normal mouse
+    /// tracking off only when Normal is the level currently set, and is a no-op
+    /// otherwise.
+    fn apply_dec_private_mode(&mut self, action: char, mode: u16, screen_at_start: Screen) {
+        match (action, mode) {
+            // DECSET `?47`/`?1047` — switch to the alternate buffer, leaving
+            // its cells and cursor untouched. Clone the primary's render
+            // state (pen, charsets, GL slot) into the alternate when
+            // crossing from the primary, so the alternate inherits it.
+            ('h', 47 | 1047) => {
+                if self.active == Screen::Primary {
+                    self.alternate_render = self.primary_render;
+                }
+                self.active = Screen::Alternate;
+            }
+            // DECSET `?1049` — DECSC the primary cursor, reset the alternate
+            // to a brand-new buffer, re-seed its cursor position from the
+            // primary, then switch. Guarded on the *start* screen so an
+            // earlier `?47` in the same list cannot suppress any of this;
+            // the save targets the primary buffer explicitly so that
+            // earlier switch cannot redirect it onto the alternate cursor.
+            // `?1049` always starts a fresh session, so it inherits no
+            // cells, cursor, wrap latch, saved cursor, or scroll region
+            // from the previous one (unlike the preserving `?47`/`?1047`).
+            ('h', 1049) => {
+                if screen_at_start != Screen::Alternate {
+                    self.save_primary_cursor();
+                    // Clone the primary's render state into the alternate.
+                    self.alternate_render = self.primary_render;
+                    self.reset_alternate_buffer();
+                    self.seed_alternate_cursor();
+                    self.active = Screen::Alternate;
+                }
+            }
+            // DECSET `?1048` — save the active screen's cursor only.
+            ('h', 1048) => self.save_cursor(),
+            // DECSET `?25` (DECTCEM) — show the cursor. Visibility is
+            // tracked per screen (a deliberate deviation from xterm's
+            // global DECTCEM), so this toggles only the active screen.
+            ('h', 25) => self.active_cursor_mut().is_visible = true,
+            // DECRST `?47` — switch back to the primary buffer.
+            ('l', 47) => {
+                if self.active == Screen::Alternate {
+                    self.active = Screen::Primary;
+                }
+            }
+            // DECRST `?1047` — reset the alternate buffer (clear cells +
+            // scroll region + cursor), then switch back to the primary.
+            // Guarded on the **live** screen (whichBuf): once an earlier
+            // exit in the same list already left the alternate, this is a
+            // no-op — re-clearing on the primary would blank with the wrong
+            // pen.
+            ('l', 1047) => {
+                if self.active == Screen::Alternate {
+                    self.reset_alternate_buffer();
+                    self.active = Screen::Primary;
+                }
+            }
+            // DECRST `?1049` — xterm/alacritty define `?1049 l` as `?1047 l`
+            // + `?1048 l`: the clear + switch-to-primary apply only while
+            // still on the alternate (live whichBuf guard, so a second
+            // clearing exit is a no-op), but the DECRC cursor restore (the
+            // `?1048 l` part) runs unconditionally.
+            ('l', 1049) => {
+                if self.active == Screen::Alternate {
+                    self.reset_alternate_buffer();
+                    self.active = Screen::Primary;
+                }
+                self.restore_cursor();
+            }
+            // DECRST `?1048` — restore the active screen's cursor only.
+            ('l', 1048) => self.restore_cursor(),
+            // DECRST `?25` (DECTCEM) — hide the cursor.
+            ('l', 25) => self.active_cursor_mut().is_visible = false,
+            // `?2004` — bracketed paste: wrap pasted text in
+            // `ESC[200~`…`ESC[201~` so the app distinguishes typing.
+            ('h', 2004) => self.modes.bracketed_paste = true,
+            ('l', 2004) => self.modes.bracketed_paste = false,
+            // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`). The
+            // four levels are mutually exclusive, so each enable replaces
+            // the prior one (matching alacritty, whose set arm clears the
+            // other mouse bits before setting its own). A reset disables
+            // reporting only when it names the *active* level; resetting a
+            // mode that is not active is a no-op (falls through to `_`),
+            // since alacritty's unset clears only that mode's own bit.
+            ('h', 9) => self.modes.mouse_tracking = MouseTracking::X10,
+            ('h', 1000) => self.modes.mouse_tracking = MouseTracking::Normal,
+            ('h', 1002) => self.modes.mouse_tracking = MouseTracking::ButtonMotion,
+            ('h', 1003) => self.modes.mouse_tracking = MouseTracking::AnyMotion,
+            ('l', 9) if self.modes.mouse_tracking == MouseTracking::X10 => {
+                self.modes.mouse_tracking = MouseTracking::Off;
+            }
+            ('l', 1000) if self.modes.mouse_tracking == MouseTracking::Normal => {
+                self.modes.mouse_tracking = MouseTracking::Off;
+            }
+            ('l', 1002) if self.modes.mouse_tracking == MouseTracking::ButtonMotion => {
+                self.modes.mouse_tracking = MouseTracking::Off;
+            }
+            ('l', 1003) if self.modes.mouse_tracking == MouseTracking::AnyMotion => {
+                self.modes.mouse_tracking = MouseTracking::Off;
+            }
+            // Mouse report encoding (`?1005`/`?1006`/`?1015`), orthogonal
+            // to the tracking level and mutually exclusive among
+            // themselves (each enable replaces the prior — matching
+            // alacritty, whose set arm removes the other encoding bit
+            // before setting its own). A reset returns to the default
+            // encoding only when it names the *active* encoding; resetting
+            // an encoding that is not active is a no-op (falls through to
+            // `_`), since alacritty's unset clears only that bit.
+            ('h', 1005) => self.modes.mouse_encoding = MouseEncoding::Utf8,
+            ('h', 1006) => self.modes.mouse_encoding = MouseEncoding::Sgr,
+            ('h', 1015) => self.modes.mouse_encoding = MouseEncoding::Urxvt,
+            ('l', 1005) if self.modes.mouse_encoding == MouseEncoding::Utf8 => {
+                self.modes.mouse_encoding = MouseEncoding::Default;
+            }
+            ('l', 1006) if self.modes.mouse_encoding == MouseEncoding::Sgr => {
+                self.modes.mouse_encoding = MouseEncoding::Default;
+            }
+            ('l', 1015) if self.modes.mouse_encoding == MouseEncoding::Urxvt => {
+                self.modes.mouse_encoding = MouseEncoding::Default;
+            }
+            // `?1007` — alternate-screen scroll: wheel motion becomes
+            // cursor arrow keys on the alternate screen.
+            ('h', 1007) => self.modes.alt_scroll = true,
+            ('l', 1007) => self.modes.alt_scroll = false,
+            // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
+            // last column parks there and the next glyph wraps to a new
+            // line. Off: the cursor stays pinned and further glyphs
+            // overwrite the last column in place.
+            ('h', 7) => self.modes.autowrap = true,
+            ('l', 7) => self.modes.autowrap = false,
+            // `?1` (DECCKM) — application cursor keys. The input layer reads
+            // this to pick the arrow-key byte form (`ESC O A` vs `ESC [ A`).
+            ('h', 1) => self.modes.app_cursor_keys = true,
+            ('l', 1) => self.modes.app_cursor_keys = false,
+            // `?5` (DECSCNM) — reverse video. The renderer reads this to
+            // swap foreground and background across the whole screen.
+            ('h', 5) => self.modes.reverse_video = true,
+            ('l', 5) => self.modes.reverse_video = false,
+            // `?12` (att610) — cursor blink. The renderer reads this to
+            // blink the cursor cell.
+            ('h', 12) => self.modes.cursor_blink = true,
+            ('l', 12) => self.modes.cursor_blink = false,
+            // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
+            // keyboard auto-repeat): modes koshi does not implement. Trace
+            // and ignore.
+            ('h' | 'l', 2 | 3 | 8) => {
+                tracing::trace!(mode, "unsupported DEC private mode; ignored");
+            }
+            // Any other DEC private mode is not handled yet.
+            _ => {}
+        }
+    }
+
     /// Apply DECSCUSR (`CSI Ps SP q`) — the sequence an editor sends to change
     /// the cursor's look as it changes mode: vim sends `CSI 2 SP q` (steady
     /// block) for normal mode and `CSI 5 SP q` (blinking bar) for insert.
