@@ -35,7 +35,11 @@ ureq = "3.3.0"
 semver = "1.0.28"
 flate2 = "1.1.9"
 tar = "0.4.46"
-zip = "8.6.0"
+# koshi only reads a deflate-compressed release zip, so drop zip's default
+# codec backends (bzip2, ppmd, lzma, zstd, xz) — that also removes their
+# non-permissive transitive licenses. `deflate-flate2` reuses the flate2
+# already pulled for tar.gz.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }
