@@ -1,44 +1,90 @@
 //! Parser for `koshi.kdl`, the app-settings config file.
 //!
 //! Turns the top-level sections of `koshi.kdl` into a [`PartialKoshiConfig`]
-//! override layer that folds onto the built-in defaults. Today it understands
-//! the `update` section; any other top-level node is left alone, so a file
-//! carrying sections a later loader pass will own still parses here. Doing no
-//! file I/O: the caller reads the file and hands the text in, as the
-//! keybinding parser does.
+//! override layer that folds onto the built-in defaults. Does no file I/O: the
+//! caller reads the file and hands the text in, as the keybinding parser does.
+//!
+//! # Field-partial, except `update`
+//!
+//! Every section but `update` is **field-partial**: a field whose value is the
+//! wrong kind is skipped — its default stands — and every other field in the
+//! file still applies, so a single typo never reverts a whole file to defaults.
+//! Each skipped field is named in the returned warnings for the loader to log.
+//!
+//! The `update` section is **strict**: a bad field there fails the whole parse.
+//! `update.auto-check` gates a network call, and quietly dropping an unreadable
+//! `auto-check #false` would re-enable it — so the update loader must fail
+//! closed, which needs the parse to fail rather than skip the field.
 //!
 //! # Example
 //! A `koshi.kdl` of
 //! ```kdl
-//! update {
-//!     auto-check #false
-//!     check-interval-days 30
+//! scrollback {
+//!     max-lines 50000
+//! }
+//! layout {
+//!     new-pane-direction "down"
 //! }
 //! ```
-//! yields a layer whose `update` section sets `auto_check = false` and
-//! `check_interval_days = 30`, leaving every other section untouched.
+//! yields a layer setting `scrollback.max_lines = 50000` and the default
+//! new-pane direction to [`Direction::Down`], leaving every other field at its
+//! built-in default.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use kdl::{KdlNode, KdlValue};
+use kdl::KdlNode;
+use koshi_core::geometry::Direction;
 
 use crate::error::{check_version, ConfigError};
-use crate::layer::{PartialKoshiConfig, PartialUpdateConfig};
-use crate::parser::parse_kdl;
+use crate::layer::{
+    PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
+    PartialMouseConfig, PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig,
+    PartialUpdateConfig,
+};
+use crate::parser::{parse_kdl, value_bool, value_string, value_u16, value_u32, value_usize};
+use crate::types::WheelScroll;
 
-/// Parses `koshi.kdl` `source` into a [`PartialKoshiConfig`] override layer.
+/// The section names that may appear at most once, checked for duplicates.
+const SECTIONS: &[&str] = &[
+    "version",
+    "update",
+    "pane",
+    "scrollback",
+    "layout",
+    "mouse",
+    "copy",
+    "terminal",
+    "logging",
+];
+
+/// Parses `koshi.kdl` `source` into a [`PartialKoshiConfig`] override layer and
+/// the warning for every field-partial field that was skipped.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
-/// [`ConfigError::Validation`] when a recognized field carries a value of the
-/// wrong kind (e.g. `auto-check` set to a string).
-pub fn parse_app_config(path: &Path, source: &str) -> Result<PartialKoshiConfig, ConfigError> {
+/// [`ConfigError::Validation`] for a schema version newer than this build, a
+/// duplicate `update` section, or a bad value in the strict `update` section.
+pub fn parse_app_config(
+    path: &Path,
+    source: &str,
+) -> Result<(PartialKoshiConfig, Vec<String>), ConfigError> {
     let doc = parse_kdl(path, source)?;
     let mut partial = PartialKoshiConfig::default();
+    let mut warnings = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for node in doc.nodes() {
-        match node.name().value() {
-            // A file may declare its schema version; reject one newer than this
-            // build understands, matching the other config files.
+        let name = node.name().value();
+        // Each section may appear once. A repeated `update` is an error (it is
+        // strict); a repeated field-partial section warns and keeps the first.
+        if SECTIONS.contains(&name) && !seen.insert(name) {
+            if name == "update" {
+                return Err(validation("update", "duplicate `update` section"));
+            }
+            warnings.push(format!("ignored duplicate `{name}` section"));
+            continue;
+        }
+        match name {
             "version" => {
                 let found = read_u32(node, "version")?;
                 check_version(found).map_err(|diagnostic| ConfigError::Validation {
@@ -46,21 +92,24 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<PartialKoshiConfig,
                     detail: diagnostic.to_string(),
                 })?;
             }
-            "update" => {
-                if partial.update.is_some() {
-                    return Err(validation("update", "duplicate `update` section"));
-                }
-                partial.update = Some(parse_update(node)?);
-            }
-            // Unknown top-level sections are ignored, not rejected: later loader
-            // passes own them, and rejecting here would break a file that sets one.
+            "update" => partial.update = Some(parse_update(node)?),
+            "pane" => partial.pane = Some(parse_pane(node, &mut warnings)),
+            "scrollback" => partial.scrollback = Some(parse_scrollback(node, &mut warnings)),
+            "layout" => partial.layout = Some(parse_layout_defaults(node, &mut warnings)),
+            "mouse" => partial.mouse = Some(parse_mouse(node, &mut warnings)),
+            "copy" => partial.copy = Some(parse_copy(node, &mut warnings)),
+            "terminal" => partial.terminal = Some(parse_terminal(node, &mut warnings)),
+            "logging" => partial.logging = Some(parse_logging(node, &mut warnings)),
+            // Unknown top-level sections — a newer build's, or `plugins` until a
+            // plugin host exists to consume it — are ignored, not rejected.
             _ => {}
         }
     }
-    Ok(partial)
+    Ok((partial, warnings))
 }
 
-/// Reads the children of an `update { … }` block into a partial section.
+/// Reads the strict `update { … }` block: any bad field fails the whole parse
+/// so the update loader can fail closed. Unknown fields are ignored.
 fn parse_update(node: &KdlNode) -> Result<PartialUpdateConfig, ConfigError> {
     let mut update = PartialUpdateConfig::default();
     let Some(children) = node.children() else {
@@ -80,30 +129,233 @@ fn parse_update(node: &KdlNode) -> Result<PartialUpdateConfig, ConfigError> {
     Ok(update)
 }
 
-/// Returns the node's single unnamed argument, or a validation error.
-fn single_value<'a>(node: &'a KdlNode, key: &str) -> Result<&'a KdlValue, ConfigError> {
-    match node.entries() {
-        [entry] if entry.name().is_none() => Ok(entry.value()),
-        _ => Err(validation(key, "expected exactly one value")),
+/// Reads the `pane { … }` block.
+fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
+    let mut cfg = PartialPaneConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "min-cols" => set(&mut cfg.min_cols, value_u16(child), "pane", key, warnings),
+            "min-rows" => set(&mut cfg.min_rows, value_u16(child), "pane", key, warnings),
+            other => warnings.push(format!("ignored unknown `pane.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `scrollback { … }` block.
+fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScrollbackConfig {
+    let mut cfg = PartialScrollbackConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "max-lines" => set(
+                &mut cfg.max_lines,
+                value_usize(child),
+                "scrollback",
+                key,
+                warnings,
+            ),
+            "max-bytes" => set(
+                &mut cfg.max_bytes,
+                value_usize(child),
+                "scrollback",
+                key,
+                warnings,
+            ),
+            other => warnings.push(format!("ignored unknown `scrollback.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `layout { … }` block of default-layout settings.
+fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLayoutDefaults {
+    let mut cfg = PartialLayoutDefaults::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "new-pane-direction" => set(
+                &mut cfg.new_pane_direction,
+                value_direction(child),
+                "layout",
+                key,
+                warnings,
+            ),
+            other => warnings.push(format!("ignored unknown `layout.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `mouse { … }` block.
+fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig {
+    let mut cfg = PartialMouseConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "border-resize" => set(
+                &mut cfg.border_resize,
+                value_bool(child),
+                "mouse",
+                key,
+                warnings,
+            ),
+            "scroll-lines" => set(
+                &mut cfg.scroll_lines,
+                value_u16(child),
+                "mouse",
+                key,
+                warnings,
+            ),
+            "wheel" => set(&mut cfg.wheel, value_wheel(child), "mouse", key, warnings),
+            other => warnings.push(format!("ignored unknown `mouse.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `copy { … }` block.
+fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
+    let mut cfg = PartialCopyConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "trim-trailing-whitespace" => set(
+                &mut cfg.trim_trailing_whitespace,
+                value_bool(child),
+                "copy",
+                key,
+                warnings,
+            ),
+            other => warnings.push(format!("ignored unknown `copy.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `terminal { … }` block.
+fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminalConfig {
+    let mut cfg = PartialTerminalConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "term" => set(
+                &mut cfg.term,
+                value_string(child),
+                "terminal",
+                key,
+                warnings,
+            ),
+            "colorterm" => set(
+                &mut cfg.colorterm,
+                value_string(child),
+                "terminal",
+                key,
+                warnings,
+            ),
+            // `default-shell` is `Option<Option<String>>`: the outer layer marks
+            // it set, the inner is the shell (there is no "unset it to $SHELL"
+            // spelling in the file, only "name a shell").
+            "default-shell" => set(
+                &mut cfg.default_shell,
+                value_string(child).map(Some),
+                "terminal",
+                key,
+                warnings,
+            ),
+            other => warnings.push(format!("ignored unknown `terminal.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Reads the `logging { … }` block.
+fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingConfig {
+    let mut cfg = PartialLoggingConfig::default();
+    let Some(children) = node.children() else {
+        return cfg;
+    };
+    for child in children.nodes() {
+        let key = child.name().value();
+        match key {
+            "enabled" => set(
+                &mut cfg.enabled,
+                value_bool(child),
+                "logging",
+                key,
+                warnings,
+            ),
+            other => warnings.push(format!("ignored unknown `logging.{other}`")),
+        }
+    }
+    cfg
+}
+
+/// Stores a parsed field-partial value, or records a warning naming the field
+/// and the reason it was skipped.
+fn set<T>(
+    slot: &mut Option<T>,
+    parsed: Result<T, String>,
+    section: &str,
+    key: &str,
+    warnings: &mut Vec<String>,
+) {
+    match parsed {
+        Ok(value) => *slot = Some(value),
+        Err(detail) => warnings.push(format!("ignored `{section}.{key}`: {detail}")),
     }
 }
 
-/// Reads the node's single value as a boolean.
+/// Reads the node's single value as a split [`Direction`].
+fn value_direction(node: &KdlNode) -> Result<Direction, String> {
+    match value_string(node)?.as_str() {
+        "left" => Ok(Direction::Left),
+        "right" => Ok(Direction::Right),
+        "up" => Ok(Direction::Up),
+        "down" => Ok(Direction::Down),
+        _ => Err(r#"expected "left", "right", "up", or "down""#.to_string()),
+    }
+}
+
+/// Reads the node's single value as a [`WheelScroll`] behavior.
+fn value_wheel(node: &KdlNode) -> Result<WheelScroll, String> {
+    match value_string(node)?.as_str() {
+        "scroll-scrollback" => Ok(WheelScroll::ScrollScrollback),
+        "ignore" => Ok(WheelScroll::Ignore),
+        _ => Err(r#"expected "scroll-scrollback" or "ignore""#.to_string()),
+    }
+}
+
+/// Reads the node's single value as a boolean for the strict `update` section.
 fn read_bool(node: &KdlNode, key: &str) -> Result<bool, ConfigError> {
-    single_value(node, key)?
-        .as_bool()
-        .ok_or_else(|| validation(key, "expected a boolean (#true or #false)"))
+    value_bool(node).map_err(|detail| validation(key, &detail))
 }
 
-/// Reads the node's single value as a `u32`.
+/// Reads the node's single value as a `u32` for the strict `update` section.
 fn read_u32(node: &KdlNode, key: &str) -> Result<u32, ConfigError> {
-    let n = single_value(node, key)?
-        .as_integer()
-        .ok_or_else(|| validation(key, "expected an integer"))?;
-    u32::try_from(n).map_err(|_| validation(key, "must be between 0 and 4294967295"))
+    value_u32(node).map_err(|detail| validation(key, &detail))
 }
 
-/// Builds a [`ConfigError::Validation`] for a bad `update` field value.
+/// Builds a [`ConfigError::Validation`] for a bad strict-section field value.
 fn validation(key: &str, detail: &str) -> ConfigError {
     ConfigError::Validation {
         key: key.to_string(),

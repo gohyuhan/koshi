@@ -528,7 +528,7 @@ impl Runtime {
     /// resized. A tab no client views has no [`Session::tab_viewport`] and keeps
     /// its sizes. The shared shape behind every "a tab's viewer set changed"
     /// reflow — the full-tab solve with no freshly-spawned pane to skip.
-    fn reflow_tab_if_viewed(
+    pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,
         session_id: SessionId,

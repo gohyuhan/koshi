@@ -55,7 +55,6 @@ impl ConfigLayers {
             app: PartialKoshiConfig {
                 layout: Some(PartialLayoutDefaults {
                     new_pane_direction: Some(direction),
-                    default_layout: None,
                 }),
                 ..PartialKoshiConfig::default()
             },
@@ -145,7 +144,7 @@ impl Runtime {
             ..self.config_layers.clone()
         };
         let tentative = tentative_layers.effective();
-        let layers = keymap_layers(user_modes);
+        let layers = keymap_layers(user_modes, tentative.keybindings.leader);
         let report = detect_conflicts(
             &layers,
             tentative.keybindings.leader,
@@ -182,6 +181,29 @@ impl Runtime {
         }
     }
 
+    /// Apply the config files read at startup — app settings, theme, and
+    /// keybindings, in that order — before any session exists. Each layer is
+    /// `None` when its file is absent or failed to load; its defaults then
+    /// stand. Runs before genesis, so the reused reload transactions publish no
+    /// events (there is no session to notify). A keybinding file whose conflict
+    /// check fails leaves the built-in keymap in place; the returned report,
+    /// present only when a keybinding file was given, carries the reasons for
+    /// the caller to surface.
+    pub fn load_startup_config(
+        &mut self,
+        app: Option<PartialKoshiConfig>,
+        theme: Option<PartialThemeConfig>,
+        keybindings: Option<PartialKeybindingsConfig>,
+    ) -> Option<ConflictReport> {
+        if let Some(app) = app {
+            let _ = self.reload_app_config(app);
+        }
+        if let Some(theme) = theme {
+            let _ = self.reload_theme(theme);
+        }
+        keybindings.map(|candidate| self.reload_keybindings(candidate).report)
+    }
+
     /// Re-resolve the keymap against the live action registry: re-run
     /// conflict detection over the stored layers and rebuild the hint
     /// catalog, so a binding whose action just registered starts firing and
@@ -202,7 +224,7 @@ impl Runtime {
             .keybindings
             .as_ref()
             .and_then(|keybindings| keybindings.modes.clone());
-        let layers = keymap_layers(user_modes);
+        let layers = keymap_layers(user_modes, self.config.keybindings.leader);
         let report = detect_conflicts(
             &layers,
             self.config.keybindings.leader,

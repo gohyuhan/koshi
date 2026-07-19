@@ -7,6 +7,9 @@ pub mod app;
 /// Command-line grammar: root parser, attach/detach flags, subcommand tree.
 pub mod cli;
 
+/// Reading the config files at startup into override layers for the runtime.
+pub mod config;
+
 /// CLI domain errors: unknown commands and invalid arguments.
 pub mod error;
 

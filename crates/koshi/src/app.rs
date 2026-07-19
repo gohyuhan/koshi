@@ -57,8 +57,10 @@ impl Widget for SnapshotWidget<'_> {
 }
 
 /// Launch the interactive session: set up the terminal, run the loop until quit
-/// or the shell exits, then restore the terminal. Errors surface to `main`.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// or the shell exits, then restore the terminal. When `profile` names one, the
+/// session opens that profile's tabs and panes; otherwise it opens one shell.
+/// Errors surface to `main`.
+pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let _tracing = init_tracing(TracingOptions::from_env())?;
     ensure_koshi_dirs();
 
@@ -100,9 +102,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         inbox_rx,
         inbox_tx.clone(),
         cleanup,
-        // The stock default split direction; a loaded config supplies its own.
+        // The stock default; the loaded config below supplies the real one.
         Direction::Right,
     );
+
+    // Read the user's config files and apply them before genesis, so the first
+    // session already sees the configured split direction, theme, and keymap. A
+    // rejected keybinding file leaves the built-in keymap in place.
+    let loaded = crate::config::load();
+    if let Some(report) = runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings)
+    {
+        if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply {
+            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
+        }
+    }
 
     let (cols, rows) = size()?;
     let viewport = Size { cols, rows };
@@ -113,8 +126,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // kill guard.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    // Genesis: one session, one tab, one shell pane sized to the terminal.
-    let client_id = runtime.bootstrap_local(viewport, SystemTime::now())?;
+    // Genesis: a named profile's tabs and panes, or one shell sized to the
+    // terminal. A profile that cannot be loaded or launched falls back to the
+    // single shell, so the terminal always comes up.
+    let now = SystemTime::now();
+    let client_id = match profile.and_then(crate::config::load_profile) {
+        Some(template) => match runtime.bootstrap_profile(template, viewport, now) {
+            Ok(client_id) => client_id,
+            Err(err) => {
+                tracing::warn!(%err, "profile could not launch; starting a single shell");
+                runtime.bootstrap_local(viewport, now)?
+            }
+        },
+        None => runtime.bootstrap_local(viewport, now)?,
+    };
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);

@@ -42,10 +42,25 @@ fn bare_koshi_is_the_interactive_launch() {
         Cli {
             attach: None,
             detach: None,
+            profile: None,
             command: None,
         }
     );
     assert!(cli.is_interactive_launch());
+}
+
+#[test]
+fn profile_names_a_launch_profile_and_stays_an_interactive_launch() {
+    let cli = parse(&["koshi", "--profile", "dev"]);
+    assert_eq!(cli.profile, Some("dev".to_string()));
+    assert!(cli.is_interactive_launch());
+}
+
+#[test]
+fn profile_conflicts_with_attach() {
+    let err = parse_err(&["koshi", "--profile", "dev", "--attach", "3f2a"]);
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(err.exit_code(), 2);
 }
 
 #[test]
@@ -56,6 +71,7 @@ fn attach_takes_a_required_session_id() {
         Cli {
             attach: Some("3f2a".to_string()),
             detach: None,
+            profile: None,
             command: None,
         }
     );
@@ -77,6 +93,7 @@ fn detach_without_an_id_targets_the_current_session() {
         Cli {
             attach: None,
             detach: Some(None),
+            profile: None,
             command: None,
         }
     );
@@ -91,6 +108,7 @@ fn detach_with_an_id_targets_that_session() {
         Cli {
             attach: None,
             detach: Some(Some("3f2a".to_string())),
+            profile: None,
             command: None,
         }
     );
@@ -104,6 +122,7 @@ fn detach_binds_a_subcommand_looking_token_as_its_value() {
         Cli {
             attach: None,
             detach: Some(Some("list-sessions".to_string())),
+            profile: None,
             command: None,
         }
     );

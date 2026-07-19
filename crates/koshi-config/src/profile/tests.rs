@@ -1,4 +1,4 @@
-//! Tests for layout file parsing: the full schema on valid files, and one
+//! Tests for profile file parsing: the full schema on valid files, and one
 //! diagnostic per violation on invalid ones.
 
 use std::collections::BTreeMap;
@@ -7,24 +7,24 @@ use std::path::{Path, PathBuf};
 use koshi_core::geometry::SplitDirection;
 use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::template::{
-    CommandTemplate, LayoutTemplate, LeafTemplate, PluginTemplate, TabTemplate, TemplateChild,
+    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateChild,
     TemplateNode, TemplateSplit, TerminalTemplate,
 };
 
 use super::*;
 
-fn parse(source: &str) -> Result<LayoutTemplate, LayoutError> {
-    parse_layout(Path::new("layouts/dev.kdl"), source)
+fn parse(source: &str) -> Result<ProfileTemplate, ProfileError> {
+    parse_profile(Path::new("profile/dev.kdl"), source)
 }
 
 /// The diagnostics of an `Invalid` outcome, as their messages.
 fn messages(source: &str) -> Vec<String> {
     match parse(source) {
-        Err(LayoutError::Invalid { diagnostics, .. }) => diagnostics
+        Err(ProfileError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| diagnostic.message().to_string())
             .collect(),
-        Err(LayoutError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
+        Err(ProfileError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
         Ok(_) => panic!("expected schema diagnostics, got a template"),
     }
 }
@@ -33,14 +33,14 @@ fn messages(source: &str) -> Vec<String> {
 /// one's caret span covers.
 fn span_texts(source: &str) -> Vec<String> {
     match parse(source) {
-        Err(LayoutError::Invalid { diagnostics, .. }) => diagnostics
+        Err(ProfileError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| {
                 let span = diagnostic.span();
                 source[span.offset()..span.offset() + span.len()].to_string()
             })
             .collect(),
-        Err(LayoutError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
+        Err(ProfileError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
         Ok(_) => panic!("expected schema diagnostics, got a template"),
     }
 }
@@ -56,11 +56,11 @@ fn flex() -> SizeWeight {
 // ---------------------------------------------------------------- valid files
 
 #[test]
-fn minimal_layout_is_one_shell_tab() {
+fn minimal_profile_is_one_shell_tab() {
     let template = parse("version 1\ntab { pane }").unwrap();
     assert_eq!(
         template,
-        LayoutTemplate {
+        ProfileTemplate {
             tabs: vec![TabTemplate {
                 root: shell_leaf(),
                 focused_leaf: 0,
@@ -71,7 +71,7 @@ fn minimal_layout_is_one_shell_tab() {
 }
 
 #[test]
-fn nested_layout_parses_every_config_kind() {
+fn nested_profile_parses_every_config_kind() {
     let source = r#"
 version 1
 
@@ -164,7 +164,7 @@ tab {
         ],
         active: 0,
     });
-    let expected = LayoutTemplate {
+    let expected = ProfileTemplate {
         tabs: vec![TabTemplate {
             root: TemplateNode::Split(TemplateSplit {
                 direction: SplitDirection::Horizontal,
@@ -406,20 +406,20 @@ tab {
 #[test]
 fn syntax_error_is_the_syntax_variant() {
     let err = parse("tab {").unwrap_err();
-    assert!(matches!(err, LayoutError::Syntax(_)));
+    assert!(matches!(err, ProfileError::Syntax(_)));
 }
 
 #[test]
 fn invalid_report_names_the_file() {
     let err = parse("version 1").unwrap_err();
-    assert_eq!(err.to_string(), "invalid layout file layouts/dev.kdl");
+    assert_eq!(err.to_string(), "invalid profile file profile/dev.kdl");
 }
 
 #[test]
 fn missing_version_is_reported() {
     assert_eq!(
         messages("tab { pane }"),
-        ["layout file must declare `version`"]
+        ["profile file must declare `version`"]
     );
 }
 
@@ -475,7 +475,7 @@ fn version_as_property_is_reported() {
 fn missing_tabs_is_reported() {
     assert_eq!(
         messages("version 1"),
-        ["layout file must define at least one `tab`"]
+        ["profile file must define at least one `tab`"]
     );
 }
 
@@ -483,7 +483,7 @@ fn missing_tabs_is_reported() {
 fn unknown_top_level_node_is_reported() {
     assert_eq!(
         messages("version 1\npane\ntab { pane }"),
-        ["unknown node `pane`; a layout holds `version` and `tab` nodes"]
+        ["unknown node `pane`; a profile holds `version` and `tab` nodes"]
     );
 }
 

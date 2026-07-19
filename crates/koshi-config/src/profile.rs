@@ -1,7 +1,7 @@
-//! Layout file parsing: KDL text describing tabs, splits, and panes into a
-//! [`LayoutTemplate`].
+//! Profile file parsing: KDL text describing tabs, splits, and panes into a
+//! [`ProfileTemplate`].
 //!
-//! A layout file is structural nodes holding config nodes. Structural
+//! A profile file is structural nodes holding config nodes. Structural
 //! vocabulary: `tab`, `horizontal` (children side by side, left to right),
 //! `vertical` (children top to bottom), `stack` (children share one
 //! rectangle, one expanded), `pane` (terminal), `plugin "name"` (plugin
@@ -13,8 +13,8 @@
 //! direct `tab` child, the starting tab.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
-//! span-tagged [`LayoutDiagnostic`] and a file with any problem yields no
-//! template. A layout instantiates real processes, so a half-applied file
+//! span-tagged [`ProfileDiagnostic`] and a file with any problem yields no
+//! template. A profile instantiates real processes, so a half-applied file
 //! (the editor pane silently dropped, its neighbors spawned anyway) would
 //! be worse than a clean error and fallback.
 
@@ -25,7 +25,7 @@ use kdl::{KdlDocument, KdlNode};
 use koshi_core::geometry::SplitDirection;
 use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::template::{
-    CommandTemplate, LayoutTemplate, LeafTemplate, PluginTemplate, TabTemplate, TemplateChild,
+    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateChild,
     TemplateNode, TemplateSplit, TerminalTemplate,
 };
 use miette::{Diagnostic, NamedSource, SourceSpan};
@@ -37,35 +37,35 @@ use crate::parser::parse_kdl;
 #[cfg(test)]
 mod tests;
 
-/// A layout file that could not be used.
+/// A profile file that could not be used.
 #[derive(Debug, Error, Diagnostic)]
-pub enum LayoutError {
+pub enum ProfileError {
     /// The file is not valid KDL syntax.
     #[error(transparent)]
     #[diagnostic(transparent)]
     Syntax(#[from] ConfigParseDiagnostic),
-    /// The file is valid KDL but violates the layout schema. Carries every
+    /// The file is valid KDL but violates the profile schema. Carries every
     /// problem found, so one read of the report fixes the whole file.
-    #[error("invalid layout file {path}")]
-    #[diagnostic(code(koshi::config::layout))]
+    #[error("invalid profile file {path}")]
+    #[diagnostic(code(koshi::config::profile))]
     Invalid {
-        /// Path of the layout file, for the header line.
+        /// Path of the profile file, for the header line.
         path: String,
         /// Every schema violation, each pointing at its own span.
         #[related]
-        diagnostics: Vec<LayoutDiagnostic>,
+        diagnostics: Vec<ProfileDiagnostic>,
     },
 }
 
-/// One schema violation in a layout file, rendered with a caret at the
+/// One schema violation in a profile file, rendered with a caret at the
 /// offending node.
 #[derive(Debug, Error, Diagnostic)]
 #[error("{message}")]
-#[diagnostic(code(koshi::config::layout))]
-pub struct LayoutDiagnostic {
+#[diagnostic(code(koshi::config::profile))]
+pub struct ProfileDiagnostic {
     /// What is wrong, in plain words.
     message: String,
-    /// The layout file text, named by its path.
+    /// The profile file text, named by its path.
     #[source_code]
     src: NamedSource<String>,
     /// Where in the file the problem sits.
@@ -73,7 +73,7 @@ pub struct LayoutDiagnostic {
     span: SourceSpan,
 }
 
-impl LayoutDiagnostic {
+impl ProfileDiagnostic {
     /// The plain-words description of the violation.
     #[must_use]
     pub fn message(&self) -> &str {
@@ -87,14 +87,14 @@ impl LayoutDiagnostic {
     }
 }
 
-/// Parses `source` — the already-read contents of the layout file at `path`
-/// — into a [`LayoutTemplate`]. Does no file I/O: discovery and reading
+/// Parses `source` — the already-read contents of the profile file at `path`
+/// — into a [`ProfileTemplate`]. Does no file I/O: discovery and reading
 /// happen in the caller.
 ///
 /// # Errors
-/// [`LayoutError::Syntax`] when the text is not valid KDL;
-/// [`LayoutError::Invalid`] with every schema violation otherwise.
-pub fn parse_layout(path: &Path, source: &str) -> Result<LayoutTemplate, LayoutError> {
+/// [`ProfileError::Syntax`] when the text is not valid KDL;
+/// [`ProfileError::Invalid`] with every schema violation otherwise.
+pub fn parse_profile(path: &Path, source: &str) -> Result<ProfileTemplate, ProfileError> {
     let doc = parse_kdl(path, source)?;
     let mut walker = Walker {
         path,
@@ -106,7 +106,7 @@ pub fn parse_layout(path: &Path, source: &str) -> Result<LayoutTemplate, LayoutE
     let template = walker.document(&doc);
     match template {
         Some(template) if walker.diagnostics.is_empty() => Ok(template),
-        _ => Err(LayoutError::Invalid {
+        _ => Err(ProfileError::Invalid {
             path: path.display().to_string(),
             diagnostics: walker.diagnostics,
         }),
@@ -172,17 +172,17 @@ struct Slot {
     expanded: Option<SourceSpan>,
 }
 
-/// Recursive-descent walker over a layout document. Collects every
+/// Recursive-descent walker over a profile document. Collects every
 /// diagnostic instead of stopping at the first; every method that gives up
 /// on a value (`None`, or a placeholder slot) records at least one
 /// diagnostic explaining it first.
 struct Walker<'a> {
-    /// Layout file path, stamped onto every diagnostic.
+    /// Profile file path, stamped onto every diagnostic.
     path: &'a Path,
-    /// Layout file text, stamped onto every diagnostic for span rendering.
+    /// Profile file text, stamped onto every diagnostic for span rendering.
     source: &'a str,
     /// Every schema violation found so far.
-    diagnostics: Vec<LayoutDiagnostic>,
+    diagnostics: Vec<ProfileDiagnostic>,
     /// Leaves assigned so far in the current tab, in layout order; the next
     /// leaf parsed gets this index.
     tab_leaves: usize,
@@ -193,7 +193,7 @@ struct Walker<'a> {
 impl Walker<'_> {
     /// Records a schema violation at `span`.
     fn error(&mut self, span: SourceSpan, message: impl Into<String>) {
-        self.diagnostics.push(LayoutDiagnostic {
+        self.diagnostics.push(ProfileDiagnostic {
             message: message.into(),
             src: NamedSource::new(self.path.display().to_string(), self.source.to_string()),
             span,
@@ -202,7 +202,7 @@ impl Walker<'_> {
 
     /// Parses the whole document: a `version` node plus one or more `tab`
     /// nodes. Returns `None` when the file has no usable tab list.
-    fn document(&mut self, doc: &KdlDocument) -> Option<LayoutTemplate> {
+    fn document(&mut self, doc: &KdlDocument) -> Option<ProfileTemplate> {
         let mut version_seen = false;
         let mut tabs = Vec::new();
         let mut focused_tab: Option<(usize, SourceSpan)> = None;
@@ -232,18 +232,18 @@ impl Walker<'_> {
                 }
                 other => self.error(
                     node.span(),
-                    format!("unknown node `{other}`; a layout holds `version` and `tab` nodes"),
+                    format!("unknown node `{other}`; a profile holds `version` and `tab` nodes"),
                 ),
             }
         }
         if !version_seen {
-            self.error(doc.span(), "layout file must declare `version`");
+            self.error(doc.span(), "profile file must declare `version`");
         }
         if tabs.is_empty() {
-            self.error(doc.span(), "layout file must define at least one `tab`");
+            self.error(doc.span(), "profile file must define at least one `tab`");
             return None;
         }
-        Some(LayoutTemplate {
+        Some(ProfileTemplate {
             tabs,
             focused_tab: focused_tab.map_or(0, |(index, _)| index),
         })

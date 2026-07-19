@@ -8,7 +8,7 @@ use koshi_core::command::{
     NewTabArgs, ResizePaneArgs, TabTarget,
 };
 use koshi_core::geometry::Direction;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ActionArgs, DispatchPlan, ResolveError};
 
@@ -37,7 +37,6 @@ fn default_loads_with_expected_values() {
     );
 
     assert_eq!(config.layout.new_pane_direction, Direction::Right);
-    assert_eq!(config.layout.default_layout, None);
 
     assert!(config.plugins.entries.is_empty());
 
@@ -531,7 +530,7 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 
 #[test]
 fn prefix_labels_name_exactly_the_default_prefix_chords() {
-    let labels = default_prefix_labels();
+    let labels = default_prefix_labels(Leader::default());
     assert_eq!(labels.len(), 2);
     assert_eq!(
         labels
@@ -549,7 +548,7 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
     // Every labeled chord opens at least one multi-chord default sequence,
     // and every multi-chord default sequence's opening chord is labeled —
     // the label table and the binding table stay in lockstep.
-    let normal = &default_mode_bindings()[&ModeName::new("normal")];
+    let normal = &default_mode_bindings(Leader::default())[&ModeName::new("normal")];
     let openers: std::collections::BTreeSet<KeyChord> = normal
         .keys
         .keys()
@@ -557,4 +556,55 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
         .map(|sequence| sequence.chords()[0])
         .collect();
     assert_eq!(openers, labels.keys().copied().collect());
+}
+
+#[test]
+fn default_bindings_follow_the_leader() {
+    let normal = |leader| {
+        default_mode_bindings(leader)[&ModeName::new("normal")]
+            .keys
+            .clone()
+    };
+    let one = |mods, ch| KeySequence::from(KeyChord::new(mods, Key::Char(ch)));
+    let two = |mods, prefix, ch| {
+        KeySequence::new(
+            KeyChord::new(mods, Key::Char(prefix)),
+            vec![KeyChord::new(ModFlags::NONE, Key::Char(ch))],
+        )
+    };
+
+    // Default leader (the Ctrl modifier run): `<leader>p n` is `<C-p> n`.
+    let ctrl = normal(Leader::default());
+    assert!(ctrl.contains_key(&two(ModFlags::CTRL, 'p', 'n')));
+    assert!(ctrl.contains_key(&one(ModFlags::CTRL, 'g')));
+
+    // Rebind the leader to Alt: the same defaults become `<A-p> n` / `<A-g>`,
+    // and the Ctrl forms are gone.
+    let alt = normal(Leader::Mods(ModFlags::ALT));
+    assert!(alt.contains_key(&two(ModFlags::ALT, 'p', 'n')));
+    assert!(alt.contains_key(&one(ModFlags::ALT, 'g')));
+    assert!(!alt.contains_key(&two(ModFlags::CTRL, 'p', 'n')));
+
+    // A chord leader (Space) makes the leader a prefix: `<Space> p n`.
+    let space = normal(Leader::Chord(KeyChord::new(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Space),
+    )));
+    let space_p_n = KeySequence::new(
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Space)),
+        vec![
+            KeyChord::new(ModFlags::NONE, Key::Char('p')),
+            KeyChord::new(ModFlags::NONE, Key::Char('n')),
+        ],
+    );
+    assert!(space.contains_key(&space_p_n));
+
+    // Explicit bindings never move: `<A-t>` and the reserved `<C-l>` are the
+    // same under every leader.
+    let new_tab = one(ModFlags::ALT, 't');
+    let unlock = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    for map in [&ctrl, &alt, &space] {
+        assert!(map.contains_key(&new_tab), "explicit <A-t> never moves");
+        assert!(map.contains_key(&unlock), "reserved <C-l> never moves");
+    }
 }

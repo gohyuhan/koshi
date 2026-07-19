@@ -48,6 +48,11 @@ pub struct Cli {
     #[arg(long, value_name = "SESSION_ID", num_args = 0..=1)]
     pub detach: Option<Option<String>>,
 
+    /// Launch with a named profile: read `profile/<name>.kdl` from the config
+    /// directory and open its tabs and panes instead of a single shell.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["attach", "detach"])]
+    pub profile: Option<String>,
+
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
     pub command: Option<CliCommand>,

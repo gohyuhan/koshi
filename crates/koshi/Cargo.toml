@@ -20,6 +20,7 @@ thiserror = "2.0.18"
 koshi-config = { version = "0.1.0", path = "../koshi-config" }
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
 koshi-input = { version = "0.1.0", path = "../koshi-input" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
 koshi-observability = { version = "0.1.0", path = "../koshi-observability" }
 koshi-paths = { version = "0.1.0", path = "../koshi-paths" }
 koshi-pty = { version = "0.1.0", path = "../koshi-pty" }
