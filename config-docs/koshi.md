@@ -101,6 +101,7 @@ pane {
 scrollback {
     max-lines 10000
     max-bytes 33554432       // 32 MiB
+    scroll-on-input #true
 }
 
 layout {

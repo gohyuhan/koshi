@@ -373,6 +373,93 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
     assert_eq!(fake.writes(pane_a).unwrap(), vec![vec![b'l', b's']]);
 }
 
+/// The client's scroll offset for the pane — `0` follows live output.
+fn client_scroll_offset(rt: &Runtime, client: ClientId, pane: PaneId) -> usize {
+    rt.sessions()
+        .values()
+        .next()
+        .unwrap()
+        .clients
+        .get(client)
+        .unwrap()
+        .scroll_offset(pane)
+}
+
+/// A client-sourced write snaps that client's scrolled-up view back to live
+/// output, exactly as typing the same bytes into the pane would. The bytes are
+/// documented as arriving "as if typed there," so the view follows to the
+/// prompt. An `Internal`-sourced write (no client) has no view to move.
+#[test]
+fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    rt.handle_pty_output(pane_a, &b"\n".repeat(200)); // push lines into history
+    rt.scroll_up(client_id, pane_a, 3);
+    assert_eq!(client_scroll_offset(&rt, client_id, pane_a), 3);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane_a),
+            data: vec![b'l', b's', b'\n'],
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(client_scroll_offset(&rt, client_id, pane_a), 0);
+}
+
+/// A client-sourced write also drops that client's highlight in the target
+/// pane, the way typing over a selection does. Without the clear the leftover
+/// highlight would hold the view and the child's next output would re-anchor it
+/// away from live, so the snap could not stick.
+#[test]
+fn a_client_sourced_write_clears_the_clients_highlight_in_the_pane() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    rt.handle_pty_output(pane_a, &b"\n".repeat(200));
+    rt.scroll_up(client_id, pane_a, 3);
+    rt.client_mut(client_id)
+        .unwrap()
+        .set_selection(pane_a, a_selection());
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane_a),
+            data: vec![b'l', b's', b'\n'],
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert_eq!(client_scroll_offset(&rt, client_id, pane_a), 0);
+    let client = rt
+        .sessions()
+        .values()
+        .next()
+        .unwrap()
+        .clients
+        .get(client_id)
+        .unwrap();
+    assert_eq!(client.selection(pane_a), None);
+}
+
+/// An empty payload sends no bytes to the child, so it is not input: it leaves a
+/// parked scrollback view exactly where it was.
+#[test]
+fn an_empty_client_sourced_write_leaves_a_parked_view_alone() {
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    rt.handle_pty_output(pane_a, &b"\n".repeat(200));
+    rt.scroll_up(client_id, pane_a, 3);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane_a),
+            data: Vec::new(),
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(client_scroll_offset(&rt, client_id, pane_a), 3);
+}
+
 /// A plugin pane has no PTY, so there is nowhere for the bytes to land: the
 /// write is rejected rather than aimed at a child that does not exist. The
 /// pane's id still has a live PTY handle in the fake backend, so only its KIND
