@@ -10,5 +10,4 @@ thiserror = "2.0.18"
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
 koshi-paths = { version = "0.1.0", path = "../koshi-paths" }
 tracing = "0.1.44"
-tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["json"] }

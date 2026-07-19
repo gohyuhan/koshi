@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use koshi_config::profile::parse_profile;
 use koshi_core::geometry::{Direction, Size};
+use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -45,7 +46,7 @@ fn a_profile_opens_its_tab_and_panes() {
     let (mut rt, _fake) = runtime();
     let tmpl = template("version 1\ntab {\n    horizontal {\n        pane\n        pane\n    }\n}");
     let _client = rt
-        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
         .expect("profile launches");
 
     assert_eq!(rt.sessions.len(), 1);
@@ -63,7 +64,7 @@ fn a_profile_focuses_the_pane_it_marks() {
     let tmpl =
         template("version 1\ntab {\n    horizontal {\n        pane\n        pane {\n            focus\n        }\n    }\n}");
     let client = rt
-        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
         .expect("profile launches");
 
     let session = rt.sessions.values().next().expect("one session");
@@ -86,7 +87,7 @@ fn a_multi_tab_profile_opens_every_tab() {
     let (mut rt, _fake) = runtime();
     let tmpl = template("version 1\ntab {\n    pane\n}\ntab {\n    pane\n}");
     let _client = rt
-        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
         .expect("profile launches");
 
     let session = rt.sessions.values().next().expect("one session");
@@ -99,7 +100,7 @@ fn a_profile_with_a_plugin_pane_is_refused_and_commits_nothing() {
     let (mut rt, _fake) = runtime();
     let tmpl = template("version 1\ntab {\n    plugin \"sidebar\"\n}");
     let err = rt
-        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
         .expect_err("a plugin pane has no host");
 
     assert!(matches!(err, ProfileLaunchError::PluginPane));
@@ -116,6 +117,7 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
     let (mut single, _fake) = runtime();
     single
         .bootstrap_profile(
+            SessionId::new(),
             template("version 1\ntab {\n    pane\n}"),
             viewport(),
             SystemTime::UNIX_EPOCH,
@@ -126,6 +128,7 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
     let (mut split, _fake) = runtime();
     split
         .bootstrap_profile(
+            SessionId::new(),
             template("version 1\ntab {\n    horizontal {\n        pane\n        pane\n    }\n}"),
             viewport(),
             SystemTime::UNIX_EPOCH,
@@ -146,7 +149,7 @@ fn a_profile_records_focus_for_every_tab() {
     let (mut rt, _fake) = runtime();
     let tmpl = template("version 1\ntab {\n    pane\n}\ntab {\n    pane\n}");
     let client = rt
-        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
         .expect("profile launches");
 
     let session = rt.sessions.values().next().expect("one session");

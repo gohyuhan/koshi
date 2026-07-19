@@ -13,7 +13,7 @@ use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName
 use koshi_core::action::ActionRef;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::PluginId;
+use koshi_core::ids::{PluginId, SessionId};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -39,7 +39,11 @@ fn runtime() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
         Direction::Right,
     );
     let client = runtime
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::UNIX_EPOCH)
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
         .expect("bootstrap");
     (runtime, fake, client)
 }

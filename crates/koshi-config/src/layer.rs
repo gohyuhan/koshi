@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use koshi_core::geometry::Direction;
 use koshi_core::key::KeyChord;
+use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::key::Leader;
 use crate::types::{
@@ -117,6 +118,18 @@ impl PartialKoshiConfig {
         if let Some(update) = self.update {
             update.apply(&mut config.update);
         }
+    }
+
+    /// The effective logging settings from this layer over the built-in
+    /// defaults. Startup resolves logging on its own, before the full config
+    /// merge, so tracing can decide whether — and how — to open the log file.
+    #[must_use]
+    pub fn logging_config(&self) -> LoggingConfig {
+        let mut config = LoggingConfig::default();
+        if let Some(logging) = self.logging {
+            logging.apply(&mut config);
+        }
+        config
     }
 }
 
@@ -356,11 +369,17 @@ impl PartialColorPalette {
 pub struct PartialLoggingConfig {
     /// Whether koshi writes a log file.
     pub enabled: Option<bool>,
+    /// The lowest severity written to the log file.
+    pub level: Option<LogLevel>,
+    /// How each written log line is rendered.
+    pub format: Option<LogFormat>,
 }
 
 impl PartialLoggingConfig {
     fn apply(self, target: &mut LoggingConfig) {
         merge_field(&mut target.enabled, self.enabled);
+        merge_field(&mut target.level, self.level);
+        merge_field(&mut target.format, self.format);
     }
 }
 

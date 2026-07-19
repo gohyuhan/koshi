@@ -59,9 +59,16 @@ it is one node with one value.
 
 ## `logging`
 
+koshi writes a per-session log file, `logs/koshi-log-<session-id>.log`, under
+the state directory. Disabled, no file and no `logs/` directory are ever
+created; enabled, the file is created on the first log line at or above `level`
+and appended thereafter.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `enabled` | boolean — write a log file to the state directory | `#false` | ≥ 0.1.0 |
+| `enabled` | boolean — write a log file at all | `#false` | ≥ 0.1.0 |
+| `level` | `"info"` \| `"warning"` \| `"error"` — lowest severity written: `info` writes everything, `warning` writes warnings and errors, `error` writes only errors | `"warning"` | ≥ 0.1.0 |
+| `format` | `"pretty"` \| `"json"` — `pretty` is human-readable, `json` is one JSON object per line for a machine to parse | `"pretty"` | ≥ 0.1.0 |
 
 ## `update`
 
@@ -117,6 +124,8 @@ terminal {
 
 logging {
     enabled #false
+    level "warning"
+    format "pretty"
 }
 
 update {

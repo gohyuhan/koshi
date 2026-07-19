@@ -30,10 +30,10 @@ use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::ClientId;
+use koshi_core::ids::{ClientId, SessionId};
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
-use koshi_observability::logging::{init_tracing, TracingOptions};
+use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::portable::PortablePtyBackend;
 use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
@@ -61,24 +61,25 @@ impl Widget for SnapshotWidget<'_> {
 /// session opens that profile's tabs and panes; otherwise it opens one shell.
 /// Errors surface to `main`.
 pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    // Read the config before tracing starts, so `logging.enabled` can decide
-    // whether a log file is opened at all. `load` collects its own warnings
-    // instead of logging, since there is no subscriber yet; they are replayed
-    // below once one is installed.
+    // Read the config before tracing starts, so the `logging` section can
+    // decide whether a log file is opened at all, and at what level and format.
+    // `load` collects its own warnings instead of logging, since there is no
+    // subscriber yet; they are replayed below once one is installed.
     let (loaded, config_warnings) = crate::config::load();
-    let logging_enabled = loaded
+    // Mint the session id up front: it names the per-session log file and is
+    // the same id genesis registers below, so the filename matches the session.
+    let session_id = SessionId::new();
+    let logging = loaded
         .app
         .as_ref()
-        .and_then(|app| app.logging.as_ref())
-        .and_then(|logging| logging.enabled)
-        .unwrap_or(false);
-    // `KOSHI_LOG` wins when set (it also names the filter); otherwise
-    // `logging.enabled` turns the standard `info` log file on or off.
-    let filter = std::env::var("KOSHI_LOG")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| logging_enabled.then(|| "info".to_string()));
-    let _tracing = init_tracing(TracingOptions::from_filter(filter))?;
+        .map(|app| app.logging_config())
+        .unwrap_or_default();
+    init_tracing(LoggingParams {
+        enabled: logging.enabled,
+        level: logging.level,
+        format: logging.format,
+        session_id,
+    })?;
     for warning in &config_warnings {
         tracing::warn!("{warning}");
     }
@@ -150,14 +151,14 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // single shell, so the terminal always comes up.
     let now = SystemTime::now();
     let client_id = match profile.and_then(crate::config::load_profile) {
-        Some(template) => match runtime.bootstrap_profile(template, viewport, now) {
+        Some(template) => match runtime.bootstrap_profile(session_id, template, viewport, now) {
             Ok(client_id) => client_id,
             Err(err) => {
                 tracing::warn!(%err, "profile could not launch; starting a single shell");
-                runtime.bootstrap_local(viewport, now)?
+                runtime.bootstrap_local(session_id, viewport, now)?
             }
         },
-        None => runtime.bootstrap_local(viewport, now)?,
+        None => runtime.bootstrap_local(session_id, viewport, now)?,
     };
 
     // Input thread: crossterm reads block here, feeding the inbox.
@@ -171,30 +172,18 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Create koshi's on-disk homes for this run: the config directory with its
-/// `plugins/` tree, and the private runtime directory sockets live in
-/// (owner-only on Unix). Every path resolves through `koshi-paths`, so a
-/// `KOSHI_CONFIG_DIR`/`KOSHI_RUNTIME_DIR` override relocates what gets
-/// created. Failures are logged and the session still starts: a terminal
-/// works without a config directory.
+/// Create koshi's on-disk home for this run: the config directory, at its
+/// fixed per-platform location (resolved through `koshi-paths`). Failures are
+/// logged and the session still starts: a terminal works without a config
+/// directory.
 fn ensure_koshi_dirs() {
     match koshi_paths::config_dir() {
         Some(config) => {
-            for dir in [config.clone(), config.join("plugins")] {
-                if let Err(error) = koshi_paths::ensure_dir(&dir) {
-                    tracing::warn!(path = %dir.display(), %error, "could not create config directory");
-                }
+            if let Err(error) = koshi_paths::ensure_dir(&config) {
+                tracing::warn!(path = %config.display(), %error, "could not create config directory");
             }
         }
         None => tracing::warn!("no home directory found; skipping config directory setup"),
-    }
-    match koshi_paths::runtime_dir() {
-        Some(runtime) => {
-            if let Err(error) = koshi_paths::ensure_private_dir(&runtime) {
-                tracing::warn!(path = %runtime.display(), %error, "could not create runtime directory");
-            }
-        }
-        None => tracing::warn!("no home directory found; skipping runtime directory setup"),
     }
 }
 

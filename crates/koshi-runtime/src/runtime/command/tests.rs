@@ -9086,7 +9086,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };
     let small = Size { cols: 40, rows: 24 };
-    rt.bootstrap_local(big, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, pane) = only_slot(&rt);
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
@@ -9116,7 +9116,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         rows: 30,
     };
     let client = rt
-        .bootstrap_local(initial, SystemTime::now())
+        .bootstrap_local(SessionId::new(), initial, SystemTime::now())
         .expect("bootstrap");
     let (_sid, _tab, pane) = only_slot(&rt);
 
@@ -9147,7 +9147,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let small = Size { cols: 40, rows: 24 };
     let big = Size { cols: 80, rows: 24 };
-    rt.bootstrap_local(small, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), small, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, pane) = only_slot(&rt);
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
@@ -9165,7 +9165,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };
     let small = Size { cols: 40, rows: 24 };
-    rt.bootstrap_local(big, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, pane) = only_slot(&rt);
 
@@ -9195,7 +9195,7 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };
     let client = rt
-        .bootstrap_local(big, SystemTime::now())
+        .bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, _tab_id, pane) = only_slot(&rt);
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
@@ -9234,7 +9234,7 @@ fn client_detach_of_an_unknown_client_is_dropped() {
 fn client_attach_to_an_unknown_tab_is_dropped() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };
-    rt.bootstrap_local(big, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, _tab_id, pane) = only_slot(&rt);
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
@@ -9255,7 +9255,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     let big = Size { cols: 80, rows: 24 };
     let small = Size { cols: 40, rows: 24 };
     let client_a = rt
-        .bootstrap_local(big, SystemTime::now())
+        .bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_1, pane_1) = only_slot(&rt);
 
@@ -9313,8 +9313,12 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 #[test]
 fn client_attach_schedules_a_render() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    rt.bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    rt.bootstrap_local(
+        SessionId::new(),
+        Size { cols: 80, rows: 24 },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (sid, tab_id, _pane) = only_slot(&rt);
 
     // Drain the render the bootstrap scheduled, so a fresh render is due only if
@@ -9343,7 +9347,11 @@ fn client_attach_schedules_a_render() {
 fn client_detach_schedules_a_render() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let client = rt
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
         .expect("bootstrap the genesis client");
 
     // Drain the render the bootstrap scheduled.
@@ -9443,8 +9451,12 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
 #[test]
 fn dispatched_command_schedules_a_render() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    rt.bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    rt.bootstrap_local(
+        SessionId::new(),
+        Size { cols: 80, rows: 24 },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (sid, _tab, pane) = only_slot(&rt);
 
     // Drain the render the bootstrap scheduled.
@@ -9471,7 +9483,7 @@ fn same_session_reattach_preserves_client_view_state() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let big = Size { cols: 80, rows: 24 };
     let client = rt
-        .bootstrap_local(big, SystemTime::now())
+        .bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, pane) = only_slot(&rt);
 
@@ -9508,12 +9520,12 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
     let small = Size { cols: 40, rows: 24 };
 
     let client = rt
-        .bootstrap_local(big, SystemTime::now())
+        .bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("first session");
     let (sid_1, _tab_1, pane_1) = only_slot(&rt);
 
     // A second, independent session with its own live pane.
-    rt.bootstrap_local(big, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), big, SystemTime::now())
         .expect("second session");
     let sid_2 = *rt
         .sessions
@@ -9622,7 +9634,11 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
 fn bootstrap_root_pane_rewraps_on_first_split() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
     let client = rt
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::now())
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
         .expect("bootstrap");
     let sid = *rt.sessions.keys().next().unwrap();
     let root = rt.sessions[&sid]

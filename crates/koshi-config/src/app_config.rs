@@ -35,6 +35,7 @@ use std::path::Path;
 
 use kdl::KdlNode;
 use koshi_core::geometry::Direction;
+use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::{check_version, ConfigError};
 use crate::layer::{
@@ -312,6 +313,20 @@ fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingCo
                 key,
                 warnings,
             ),
+            "level" => set(
+                &mut cfg.level,
+                value_log_level(child),
+                "logging",
+                key,
+                warnings,
+            ),
+            "format" => set(
+                &mut cfg.format,
+                value_log_format(child),
+                "logging",
+                key,
+                warnings,
+            ),
             other => warnings.push(format!("ignored unknown `logging.{other}`")),
         }
     }
@@ -348,6 +363,27 @@ fn value_direction(node: &KdlNode) -> Result<Direction, String> {
         "up" => Ok(Direction::Up),
         "down" => Ok(Direction::Down),
         _ => Err(r#"expected "left", "right", "up", or "down""#.to_string()),
+    }
+}
+
+/// Reads the node's single value as a [`LogLevel`] — the lowest severity that
+/// gets written to the log file.
+fn value_log_level(node: &KdlNode) -> Result<LogLevel, String> {
+    match value_string(node)?.as_str() {
+        "info" => Ok(LogLevel::Info),
+        "warning" => Ok(LogLevel::Warning),
+        "error" => Ok(LogLevel::Error),
+        _ => Err(r#"expected "info", "warning", or "error""#.to_string()),
+    }
+}
+
+/// Reads the node's single value as a [`LogFormat`] — how each written line is
+/// rendered.
+fn value_log_format(node: &KdlNode) -> Result<LogFormat, String> {
+    match value_string(node)?.as_str() {
+        "pretty" => Ok(LogFormat::Pretty),
+        "json" => Ok(LogFormat::Json),
+        _ => Err(r#"expected "pretty" or "json""#.to_string()),
     }
 }
 

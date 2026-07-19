@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use koshi_core::geometry::Direction;
+use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::ConfigError;
 use crate::layer::PartialKoshiConfig;
@@ -266,10 +267,54 @@ fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment(
 
 #[test]
 fn logging_section_parses() {
-    let logging = parse("logging {\n    enabled #true\n}")
-        .logging
-        .expect("logging section present");
+    let logging =
+        parse("logging {\n    enabled #true\n    level \"error\"\n    format \"json\"\n}")
+            .logging
+            .expect("logging section present");
     assert_eq!(logging.enabled, Some(true));
+    assert_eq!(logging.level, Some(LogLevel::Error));
+    assert_eq!(logging.format, Some(LogFormat::Json));
+}
+
+#[test]
+fn logging_level_and_format_accept_each_variant() {
+    for (text, level) in [
+        ("info", LogLevel::Info),
+        ("warning", LogLevel::Warning),
+        ("error", LogLevel::Error),
+    ] {
+        let logging = parse(&format!("logging {{\n    level \"{text}\"\n}}"))
+            .logging
+            .expect("logging section present");
+        assert_eq!(logging.level, Some(level), "level {text}");
+    }
+    for (text, format) in [("pretty", LogFormat::Pretty), ("json", LogFormat::Json)] {
+        let logging = parse(&format!("logging {{\n    format \"{text}\"\n}}"))
+            .logging
+            .expect("logging section present");
+        assert_eq!(logging.format, Some(format), "format {text}");
+    }
+}
+
+#[test]
+fn a_bad_logging_level_is_skipped_with_a_warning() {
+    // `verbose` is not a level: it is dropped with a warning, and `enabled`
+    // beside it still applies.
+    let (layer, warnings) =
+        parse_with_warnings("logging {\n    level \"verbose\"\n    enabled #true\n}");
+    let logging = layer.logging.expect("logging section present");
+    assert_eq!(logging.level, None, "the bad level is dropped");
+    assert_eq!(
+        logging.enabled,
+        Some(true),
+        "the sibling field still applies"
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("logging.level"),
+        "warning names the field: {}",
+        warnings[0]
+    );
 }
 
 #[test]
