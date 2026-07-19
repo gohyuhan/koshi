@@ -19,3 +19,11 @@ fn a_path_traversing_or_absolute_profile_name_is_rejected() {
     assert!(!is_plain_profile_name("."));
     assert!(!is_plain_profile_name(""));
 }
+
+#[test]
+fn a_nested_or_trailing_separator_profile_name_is_rejected() {
+    // `foo/` would read `profile/foo/.kdl` — a nested file, not the flat
+    // `profile/<name>.kdl` the rule requires; `foo/..` walks back out.
+    assert!(!is_plain_profile_name("foo/"));
+    assert!(!is_plain_profile_name("foo/.."));
+}
