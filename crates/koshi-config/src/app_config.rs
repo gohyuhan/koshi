@@ -174,6 +174,13 @@ fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScroll
                 key,
                 warnings,
             ),
+            "scroll-on-input" => set(
+                &mut cfg.scroll_on_input,
+                value_bool(child),
+                "scrollback",
+                key,
+                warnings,
+            ),
             other => warnings.push(format!("ignored unknown `scrollback.{other}`")),
         }
     }

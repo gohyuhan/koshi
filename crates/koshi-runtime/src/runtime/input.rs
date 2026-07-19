@@ -191,6 +191,24 @@ impl Runtime {
         let bytes = encode(chord, app_cursor_keys);
         let _ = self.pty_backend().write(pane_id, &bytes);
         self.clear_selection_on_pane_input(client_id, pane_id);
+        self.snap_view_to_bottom_on_input(client_id, pane_id);
+    }
+
+    /// Return this client's scrollback view of `pane_id` to the newest line
+    /// after input reached the pane's child, when the `scroll-on-input` setting
+    /// is on. A no-op when the view already follows live output. The alternate
+    /// screen keeps no scrollback of Koshi's, so its scroll position is left to
+    /// the full-screen program that owns it — the snap only fires on the primary
+    /// screen. Both keystrokes and pasted input count as input here.
+    fn snap_view_to_bottom_on_input(&mut self, client_id: ClientId, pane_id: PaneId) {
+        if self.config.scrollback.scroll_on_input
+            && self
+                .terminal_engines
+                .get(&pane_id)
+                .is_some_and(|engine| engine.state().on_primary_screen())
+        {
+            self.scroll_to_bottom(client_id, pane_id);
+        }
     }
 
     /// Write text the client's outer terminal pasted into the pane the client
@@ -225,6 +243,7 @@ impl Runtime {
         let bytes = crate::runtime::clipboard::paste_bytes(text, bracketed);
         let _ = self.pty_backend().write(pane_id, &bytes);
         self.clear_selection_on_pane_input(client_id, pane_id);
+        self.snap_view_to_bottom_on_input(client_id, pane_id);
     }
 
     /// The pane a keystroke from `client_id` types into: the pane it has focused

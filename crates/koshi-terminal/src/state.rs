@@ -205,6 +205,13 @@ impl TerminalState {
         self.active
     }
 
+    /// Whether the primary screen — the one that keeps scrollback history — is
+    /// the active one. `false` while a full-screen program holds the alternate
+    /// screen, which keeps no history.
+    pub fn on_primary_screen(&self) -> bool {
+        matches!(self.active, Screen::Primary)
+    }
+
     /// The screen buffer currently displayed and written to — `primary` or
     /// `alternate`, per the active screen.
     pub fn active_grid(&self) -> &Grid {
