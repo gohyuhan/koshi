@@ -25,6 +25,7 @@ use koshi_core::naming;
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutChild, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
@@ -2766,12 +2767,15 @@ fn run_command_pane_spawns_and_records_the_command() {
         other => panic!("expected Ok, got {other:?}"),
     }
 
-    // The command is spawned verbatim and recorded on the pane, which takes the
+    // The command is spawned verbatim — save for koshi's terminal identity
+    // added to its environment — and recorded on the pane, which takes the
     // default close-on-exit policy.
     let new_pane = other_pane(&rt, sid, root);
-    assert_eq!(fake.spawn_spec(new_pane).unwrap(), spawn_spec());
+    let mut expected = spawn_spec();
+    expected.env = rt.terminal_identity_env(BTreeMap::new());
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
     let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
-    assert_eq!(record.command, Some(spawn_spec()));
+    assert_eq!(record.command, Some(expected));
     assert_eq!(record.exit_policy, PaneExitPolicy::CloseOnExit);
     // The new command pane is focused for the issuing client.
     assert_eq!(
@@ -3095,11 +3099,12 @@ fn new_pane_without_command_spawns_the_default_shell() {
         Command::NewPane(NewPaneArgs::default()),
     ));
 
-    // command: None resolves to the platform default shell, cwd/env inherited.
+    // command: None resolves to the platform default shell carrying koshi's
+    // terminal identity in its environment.
     let new_pane = other_pane(&rt, sid, root);
     assert_eq!(
         fake.spawn_spec(new_pane).unwrap(),
-        SpawnSpec::default_shell(None, BTreeMap::new())
+        rt.default_shell_spec(None, BTreeMap::new())
     );
 }
 
@@ -3124,9 +3129,12 @@ fn new_pane_with_command_spawns_that_command() {
         }),
     ));
 
-    // An explicit command is spawned verbatim.
+    // An explicit command is spawned verbatim, save for koshi's terminal
+    // identity added to its environment.
     let new_pane = other_pane(&rt, sid, root);
-    assert_eq!(fake.spawn_spec(new_pane).unwrap(), spawn_spec());
+    let mut expected = spawn_spec();
+    expected.env = rt.terminal_identity_env(BTreeMap::new());
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
 }
 
 #[test]
@@ -4264,10 +4272,11 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         let probe = PaneId::new();
         let candidate =
             split_leaf(&LayoutNode::Pane(pane_b), pane_b, probe, Direction::Right).unwrap();
-        let rects = content_rects(&solve_with_mode(
+        let rects = content_rects(&solve_with_mode_min(
             &candidate,
             LayoutMode::Tiled,
             Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 8 }),
+            MIN_PANE_SIZE,
         ));
         let rect = rects
             .iter()
@@ -5795,6 +5804,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
+        MIN_PANE_SIZE,
     );
     let resizes_before = fake.resizes(pane_a).unwrap().len();
 
@@ -5824,6 +5834,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
+        MIN_PANE_SIZE,
     );
     assert_eq!(rects_after, rects_before);
     assert_eq!(fake.resizes(pane_a).unwrap().len(), resizes_before);
@@ -5944,7 +5955,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport);
+    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE);
 
     // No client is attached anywhere, so no tab is viewed and no terminal
     // displays the result.
@@ -5963,7 +5974,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
         }
     );
     assert_eq!(
-        Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport),
+        Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE),
         rects_before
     );
 }
@@ -5992,7 +6003,8 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport);
+    let rects_before =
+        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE);
 
     // A client is attached, but none views the back tab — no terminal
     // displays the result, so the resize rejects and mutates nothing.
@@ -6014,7 +6026,7 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
         }
     );
     assert_eq!(
-        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport),
+        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE),
         rects_before
     );
 }
@@ -9083,7 +9095,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // to the per-axis minimum, so the live pane's PTY reflows down.
     let events = rt.handle_client_attach(sid, ClientId::new(), small, tab_id, SystemTime::now());
 
-    let expected = size_root_pane(pane, pane_viewport(small));
+    let expected = size_root_pane(pane, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -9109,7 +9121,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
     let (_sid, _tab, pane) = only_slot(&rt);
 
     let events = rt.handle_client_resize(client, resized);
-    let expected = size_root_pane(pane, pane_viewport(resized));
+    let expected = size_root_pane(pane, pane_viewport(resized), MIN_PANE_SIZE);
 
     assert_eq!(
         rt.session_for_client(client)
@@ -9166,7 +9178,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
     // back and the pane's PTY reflows up.
     let events = rt.handle_client_detach(small_client);
 
-    let expected = size_root_pane(pane, pane_viewport(big));
+    let expected = size_root_pane(pane, pane_viewport(big), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -9270,7 +9282,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now());
     assert_eq!(
         *fake.resizes(pane_1).unwrap().last().unwrap(),
-        size_root_pane(pane_1, pane_viewport(small))
+        size_root_pane(pane_1, pane_viewport(small), MIN_PANE_SIZE)
     );
     let resizes_before = fake.resizes(pane_1).unwrap().len();
 
@@ -9278,7 +9290,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
     let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now());
 
-    let expected = size_root_pane(pane_1, pane_viewport(big));
+    let expected = size_root_pane(pane_1, pane_viewport(big), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane_1).unwrap().last().unwrap(), expected);
     assert_eq!(
@@ -9534,7 +9546,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
 
     // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
     // size (its tab lost its only viewer).
-    let expected = size_root_pane(pane_2, pane_viewport(small));
+    let expected = size_root_pane(pane_2, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(*fake.resizes(pane_2).unwrap().last().unwrap(), expected);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), pane_1_resizes_before);
     assert_eq!(
@@ -9640,4 +9652,83 @@ fn bootstrap_root_pane_rewraps_on_first_split() {
         .map(koshi_terminal::grid::state::Cell::ch)
         .collect();
     assert_eq!(row0, "A".repeat(narrow.cols as usize));
+}
+
+#[test]
+fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(a)),
+            LayoutChild::new(LayoutNode::Pane(b)),
+        ],
+    ));
+    let viewport = Size { cols: 80, rows: 24 };
+
+    // Each pane is sized to its 40-column half minus its one-cell border on
+    // each side (38 content columns, 22 rows), not the whole 80-column tab.
+    let sizes = pane_spawn_sizes(&tree, viewport, MIN_PANE_SIZE);
+    assert_eq!(
+        sizes,
+        vec![
+            (a, PtySize { cols: 38, rows: 22 }),
+            (b, PtySize { cols: 38, rows: 22 }),
+        ]
+    );
+
+    // A single pane over the same viewport keeps the full inner width, so the
+    // two-pane tiles really are narrower.
+    assert_eq!(
+        size_root_pane(a, viewport, MIN_PANE_SIZE),
+        PtySize { cols: 78, rows: 22 }
+    );
+}
+
+#[test]
+fn default_shell_spec_uses_the_configured_shell_and_terminal_identity() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.config.terminal.default_shell = Some("/opt/homebrew/bin/fish".to_string());
+    rt.config.terminal.term = "xterm-kitty".to_string();
+    rt.config.terminal.colorterm = "24bit".to_string();
+
+    let spec = rt.default_shell_spec(None, BTreeMap::new());
+    assert_eq!(spec.program, PathBuf::from("/opt/homebrew/bin/fish"));
+    assert_eq!(spec.shell_kind, ShellKind::Fish);
+    assert_eq!(
+        spec.env.get("TERM").map(String::as_str),
+        Some("xterm-kitty")
+    );
+    assert_eq!(spec.env.get("COLORTERM").map(String::as_str), Some("24bit"));
+}
+
+#[test]
+fn terminal_identity_env_keeps_a_panes_own_value_over_the_config() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.config.terminal.term = "xterm-kitty".to_string();
+    rt.config.terminal.colorterm = "24bit".to_string();
+
+    // A pane that sets its own TERM keeps it; COLORTERM it left unset is filled
+    // from the config.
+    let mut base = BTreeMap::new();
+    base.insert("TERM".to_string(), "screen-256color".to_string());
+    let env = rt.terminal_identity_env(base);
+    assert_eq!(env.get("TERM").map(String::as_str), Some("screen-256color"));
+    assert_eq!(env.get("COLORTERM").map(String::as_str), Some("24bit"));
+}
+
+#[test]
+fn effective_pane_min_floors_a_below_minimum_config_to_the_hard_minimum() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+
+    // A configured minimum below the hard floor is raised to it, so a pane can
+    // never be driven below the size a PTY can run at.
+    rt.config.pane.min_cols = 0;
+    rt.config.pane.min_rows = 0;
+    assert_eq!(rt.effective_pane_min(), Size { cols: 2, rows: 1 });
+
+    // A configured minimum above the floor is honored as written.
+    rt.config.pane.min_cols = 10;
+    rt.config.pane.min_rows = 5;
+    assert_eq!(rt.effective_pane_min(), Size { cols: 10, rows: 5 });
 }

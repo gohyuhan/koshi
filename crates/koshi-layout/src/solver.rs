@@ -84,14 +84,25 @@ pub struct StackHeader {
 }
 
 /// Accumulators threaded through the solve recursion.
-#[derive(Default)]
 struct SolveState {
+    /// Effective minimum content size for a leaf pane: the configured pane
+    /// minimum, floored at [`MIN_PANE_SIZE`] by the caller.
+    min: Size,
     panes: Vec<(PaneId, Rect)>,
     suppressed: Vec<PaneId>,
     headers: Vec<StackHeader>,
 }
 
 impl SolveState {
+    fn new(min: Size) -> Self {
+        SolveState {
+            min,
+            panes: Vec::new(),
+            suppressed: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
     fn into_result(self) -> SolveResult {
         // The overlay condition: space ran out (something was suppressed)
         // and no pane kept a visible rect. Panes that are zero-area for
@@ -120,7 +131,15 @@ impl SolveState {
 /// panes drop out and return as the rect shrinks and regrows.
 #[must_use]
 pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
-    let mut state = SolveState::default();
+    solve_with_min(tree, tab_rect, MIN_PANE_SIZE)
+}
+
+/// Like [`solve`] but with an explicit per-pane content minimum — the
+/// configured pane minimum, floored at [`MIN_PANE_SIZE`] by the caller — so a
+/// larger configured minimum reflows and admits panes at that size.
+#[must_use]
+pub fn solve_with_min(tree: &LayoutNode, tab_rect: Rect, min: Size) -> SolveResult {
+    let mut state = SolveState::new(min);
     solve_node(tree, tab_rect, &mut state);
     state.into_result()
 }
@@ -136,19 +155,31 @@ pub fn solve(tree: &LayoutNode, tab_rect: Rect) -> SolveResult {
 /// empty screen, and the user can simply toggle fullscreen again.
 #[must_use]
 pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
+    solve_with_mode_min(tree, mode, tab_rect, MIN_PANE_SIZE)
+}
+
+/// Like [`solve_with_mode`] but with an explicit per-pane content minimum —
+/// the configured pane minimum, floored at [`MIN_PANE_SIZE`] by the caller.
+#[must_use]
+pub fn solve_with_mode_min(
+    tree: &LayoutNode,
+    mode: LayoutMode,
+    tab_rect: Rect,
+    min: Size,
+) -> SolveResult {
     let LayoutMode::Fullscreen { focused } = mode else {
-        return solve(tree, tab_rect);
+        return solve_with_min(tree, tab_rect, min);
     };
     if !tree.contains_pane(focused) {
-        return solve(tree, tab_rect);
+        return solve_with_min(tree, tab_rect, min);
     }
 
-    let mut state = SolveState::default();
+    let mut state = SolveState::new(min);
     // Same border-inclusive floor the tiled backstop uses: a tab too small to
     // inset the focused pane to its content minimum suppresses it instead of
     // drawing it under an overlapping border, so fullscreen and tiled agree on
     // when the too-small overlay shows.
-    let floor = border_inclusive_min(MIN_PANE_SIZE, true);
+    let floor = border_inclusive_min(min, true);
     for pane in tree.leaf_panes() {
         if pane != focused {
             state.panes.push((pane, Rect::zero()));
@@ -258,12 +289,12 @@ fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
 
 /// The floor of one child slot along the split axis, for callers that only
 /// know the slot index (resize uses this to bound what a donor can give).
-pub(crate) fn slot_floor(split: &SplitNode, index: usize, horizontal: bool) -> u16 {
+pub(crate) fn slot_floor(split: &SplitNode, index: usize, horizontal: bool, min: Size) -> u16 {
     let child_min = split
         .children
         .get(index)
         .map_or(Size { cols: 0, rows: 0 }, |child| {
-            min_size(&child.node, MIN_PANE_SIZE)
+            min_size(&child.node, min)
         });
     let axis_min = if horizontal {
         child_min.cols
@@ -294,7 +325,7 @@ fn solve_node(node: &LayoutNode, rect: Rect, state: &mut SolveState) {
             // under an overlapping border. Mirrors the border-inclusive floor
             // `min_size` feeds the distribution path, so this only fires when an
             // upstream rect slips below it.
-            let floor = border_inclusive_min(MIN_PANE_SIZE, true);
+            let floor = border_inclusive_min(state.min, true);
             if rect.size.cols < floor.cols || rect.size.rows < floor.rows {
                 state.panes.push((*id, Rect::zero()));
                 state.suppressed.push(*id);
@@ -327,7 +358,7 @@ fn suppress_subtree(node: &LayoutNode, state: &mut SolveState) {
 /// everything after it drop too (trailing suppression). The children that
 /// remain always fit at floor, so the recursion below never overlaps.
 fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
-    let rects = directional_child_rects(split, rect);
+    let rects = directional_child_rects(split, rect, state.min);
     for (child, child_rect) in split.children.iter().zip(rects) {
         if child_rect.is_empty() {
             suppress_subtree(&child.node, state);
@@ -343,7 +374,7 @@ fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
 /// This is the one place a directional split's geometry is decided; both
 /// solving and resize preflighting read it. A kept child's rect always meets
 /// the child's floor, so an empty rect here always means "suppressed".
-pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect) -> Vec<Rect> {
+pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect, min: Size) -> Vec<Rect> {
     let horizontal = split.direction == SplitDirection::Horizontal;
     let (available, available_cross) = if horizontal {
         (rect.size.cols, rect.size.rows)
@@ -358,7 +389,7 @@ pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect) -> Vec<Rect
     let mut claimed: u32 = 0;
     let mut floors = vec![0u16; split.children.len()];
     for (index, child) in split.children.iter().enumerate() {
-        let child_min = min_size(&child.node, MIN_PANE_SIZE);
+        let child_min = min_size(&child.node, min);
         let (axis_min, cross_min) = if horizontal {
             (child_min.cols, child_min.rows)
         } else {
@@ -457,7 +488,7 @@ fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
     let total = split.children.len();
     let header_count = (total - 1) as u16;
 
-    let needed = stack_min_size(split, MIN_PANE_SIZE);
+    let needed = stack_min_size(split, state.min);
     if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
         for child in &split.children {
             suppress_subtree(&child.node, state);

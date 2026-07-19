@@ -109,6 +109,12 @@ impl TerminalState {
     /// Create per-pane state for a terminal of `size`: both screen buffers
     /// blank, the cursor at the top-left and visible, default pen, no title.
     pub fn new(size: PtySize) -> Self {
+        Self::with_scrollback(size, ScrollbackLimit::default())
+    }
+
+    /// Like [`new`](Self::new), but with an explicit scrollback limit so a
+    /// caller can honor the user's configured `scrollback` caps.
+    pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
         let terminal_size = Grid::blank(size.rows, size.cols, Style::default());
         let terminal_cursor = Cursor {
             row: 0,
@@ -128,7 +134,7 @@ impl TerminalState {
             modes: TerminalModes::default(),
             title: None,
             reported_cwd: None,
-            scrollback: Scrollback::new(ScrollbackLimit::default()),
+            scrollback: Scrollback::new(limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
             cluster: String::new(),

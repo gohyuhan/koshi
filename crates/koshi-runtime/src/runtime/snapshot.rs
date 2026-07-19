@@ -24,7 +24,7 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_layout::content::content_rects;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::{solve_with_mode, SolveResult};
+use koshi_layout::solver::{solve_with_mode_min, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
@@ -101,7 +101,7 @@ impl Runtime {
             .tab_viewport(active_tab_id)
             .expect("the requesting client views its own active tab, so tab_viewport is Some");
         let layout_mode = client.layout_mode(active_tab_id);
-        let solve = solve_tab(tab, layout_mode, effective_size);
+        let solve = solve_tab(tab, layout_mode, effective_size, self.effective_pane_min());
         let content = content_rects(&solve);
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
@@ -371,11 +371,12 @@ fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 /// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
 /// and whether a pane is zoomed is a fact about one client's view. Two clients
 /// on this tab can pass different modes for the same tree in the same frame.
-pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size) -> SolveResult {
-    solve_with_mode(
+pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size, min: Size) -> SolveResult {
+    solve_with_mode_min(
         tab.layout(),
         mode,
         Rect::new(Point { x: 0, y: 0 }, viewport),
+        min,
     )
 }
 

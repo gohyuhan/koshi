@@ -61,7 +61,27 @@ impl Widget for SnapshotWidget<'_> {
 /// session opens that profile's tabs and panes; otherwise it opens one shell.
 /// Errors surface to `main`.
 pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let _tracing = init_tracing(TracingOptions::from_env())?;
+    // Read the config before tracing starts, so `logging.enabled` can decide
+    // whether a log file is opened at all. `load` collects its own warnings
+    // instead of logging, since there is no subscriber yet; they are replayed
+    // below once one is installed.
+    let (loaded, config_warnings) = crate::config::load();
+    let logging_enabled = loaded
+        .app
+        .as_ref()
+        .and_then(|app| app.logging.as_ref())
+        .and_then(|logging| logging.enabled)
+        .unwrap_or(false);
+    // `KOSHI_LOG` wins when set (it also names the filter); otherwise
+    // `logging.enabled` turns the standard `info` log file on or off.
+    let filter = std::env::var("KOSHI_LOG")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| logging_enabled.then(|| "info".to_string()));
+    let _tracing = init_tracing(TracingOptions::from_filter(filter))?;
+    for warning in &config_warnings {
+        tracing::warn!("{warning}");
+    }
     ensure_koshi_dirs();
 
     // Restore the terminal on any exit — normal, error, or panic.
@@ -106,10 +126,9 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         Direction::Right,
     );
 
-    // Read the user's config files and apply them before genesis, so the first
-    // session already sees the configured split direction, theme, and keymap. A
-    // rejected keybinding file leaves the built-in keymap in place.
-    let loaded = crate::config::load();
+    // Apply the config (loaded before tracing above) before genesis, so the
+    // first session already sees the configured split direction, theme, and
+    // keymap. A rejected keybinding file leaves the built-in keymap in place.
     if let Some(report) = runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings)
     {
         if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply {

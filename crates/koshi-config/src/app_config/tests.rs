@@ -161,6 +161,19 @@ fn a_newer_schema_version_is_a_validation_error() {
 }
 
 #[test]
+fn a_duplicate_version_is_a_hard_error() {
+    // A second `version` must not be treated as a skippable duplicate section:
+    // that would `continue` before the newer-schema check runs and let a config
+    // declared for a newer build apply. It fails closed instead.
+    let error = parse_app_config(
+        Path::new("koshi.kdl"),
+        "version 1\nversion 999\npane {\n    min-cols 5\n}",
+    )
+    .expect_err("duplicate version rejected");
+    assert!(matches!(error, ConfigError::Validation { key, .. } if key == "version"));
+}
+
+#[test]
 fn syntax_error_is_a_parse_error() {
     let error = parse_app_config(Path::new("koshi.kdl"), "update { auto-check #true")
         .expect_err("unclosed block");
@@ -217,6 +230,41 @@ fn terminal_section_parses_including_default_shell() {
 }
 
 #[test]
+fn a_blank_term_or_colorterm_is_skipped_so_the_built_in_identity_stands() {
+    // An empty `TERM` disables terminfo and an empty `COLORTERM` is meaningless;
+    // both (including whitespace-only) are dropped like any bad field, so the
+    // built-in `xterm-256color`/`truecolor` identity applies.
+    let (layer, warnings) =
+        parse_with_warnings("terminal {\n    term \"\"\n    colorterm \"  \"\n}");
+    let terminal = layer.terminal.expect("terminal section present");
+    assert_eq!(terminal.term, None);
+    assert_eq!(terminal.colorterm, None);
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `terminal.term`: must not be empty".to_string(),
+            "ignored `terminal.colorterm`: must not be empty".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment() {
+    // An empty (or whitespace-only) `default-shell` would spawn an empty
+    // program; it is dropped like any bad field, so `default_shell` stays unset
+    // and the spawn path falls back to `$SHELL`/`%COMSPEC%`.
+    let (layer, warnings) = parse_with_warnings("terminal {\n    default-shell \"\"\n}");
+    assert_eq!(
+        layer.terminal.and_then(|terminal| terminal.default_shell),
+        None
+    );
+    assert_eq!(
+        warnings,
+        vec!["ignored `terminal.default-shell`: must not be empty".to_string()]
+    );
+}
+
+#[test]
 fn logging_section_parses() {
     let logging = parse("logging {\n    enabled #true\n}")
         .logging
@@ -237,6 +285,17 @@ fn a_bad_field_is_skipped_and_the_rest_of_the_section_applies() {
         warnings,
         vec!["ignored `scrollback.max-lines`: expected an integer".to_string()]
     );
+}
+
+#[test]
+fn a_negative_scrollback_cap_becomes_zero() {
+    // A negative cap is clamped to 0 ("no scrollback"), not rejected.
+    let (layer, warnings) = parse_with_warnings("scrollback {\n    max-lines -5\n}");
+    assert_eq!(
+        layer.scrollback.expect("scrollback present").max_lines,
+        Some(0)
+    );
+    assert!(warnings.is_empty(), "a negative cap is clamped, not warned");
 }
 
 #[test]

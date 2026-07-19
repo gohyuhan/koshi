@@ -173,6 +173,7 @@ pub fn commit_profile_tab(
     tab: ProfileTab,
     name: String,
     focus_client: Option<ClientId>,
+    active: bool,
     created_at: SystemTime,
 ) -> Vec<Event> {
     let ProfileTab {
@@ -216,24 +217,29 @@ pub fn commit_profile_tab(
 
     if let Some(client_id) = focus {
         let focus_pane = pane_ids.get(focus_leaf).copied().unwrap_or(root_pane);
+        // Record this tab's starting pane on the client whether or not the tab
+        // starts active, so keyboard input and focused-pane commands resolve the
+        // moment the client later switches to it.
+        if let Some(tab) = session.tabs.get_mut(&tab_id) {
+            tab.record_focus_mru(focus_pane);
+        }
         if let Some(client) = session.clients.get_mut(client_id) {
-            let prior_tab = client.active_tab();
-            client.update_active_tab(tab_id);
-            events.push(Event::TabFocused(TabFocused {
-                client_id,
-                tab_id,
-                prior_tab,
-            }));
             let prior_pane = client.update_focused_pane(tab_id, focus_pane);
-            if let Some(tab) = session.tabs.get_mut(&tab_id) {
-                tab.record_focus_mru(focus_pane);
+            if active {
+                let prior_tab = client.active_tab();
+                client.update_active_tab(tab_id);
+                events.push(Event::TabFocused(TabFocused {
+                    client_id,
+                    tab_id,
+                    prior_tab,
+                }));
+                events.push(Event::PaneFocused(PaneFocused {
+                    client_id,
+                    tab_id,
+                    pane_id: focus_pane,
+                    prior_pane,
+                }));
             }
-            events.push(Event::PaneFocused(PaneFocused {
-                client_id,
-                tab_id,
-                pane_id: focus_pane,
-                prior_pane,
-            }));
         }
     }
 

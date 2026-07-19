@@ -138,3 +138,23 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
         "split panes {widths:?} should each be narrower than one full pane ({full})"
     );
 }
+
+#[test]
+fn a_profile_records_focus_for_every_tab() {
+    // Every tab — not just the starting one — records a focused pane on the
+    // client, so keyboard input resolves after switching to a non-starting tab.
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\ntab {\n    pane\n}\ntab {\n    pane\n}");
+    let client = rt
+        .bootstrap_profile(tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let client_ref = session.clients.get(client).expect("client attached");
+    for tab_id in session.tabs.keys() {
+        assert!(
+            client_ref.focused_pane(*tab_id).is_some(),
+            "tab {tab_id:?} has no focused pane recorded"
+        );
+    }
+}

@@ -152,7 +152,7 @@ fn apply(op: &Op, tree: &mut LayoutNode, tab: Rect, live: &mut HashSet<PaneId>) 
         }
         Op::Remove { target } => {
             let victim = pick(target);
-            if let Ok((next, _)) = remove_pane(tree, tab, victim) {
+            if let Ok((next, _)) = remove_pane(tree, tab, victim, MIN_PANE_SIZE) {
                 *tree = next;
                 live.remove(&victim);
             }

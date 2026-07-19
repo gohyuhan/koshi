@@ -20,7 +20,7 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{directional_child_rects, slot_floor};
+use crate::solver::{directional_child_rects, slot_floor, MIN_PANE_SIZE};
 use crate::tree::LayoutNode;
 
 /// A rejected resize. The caller's tree is unchanged in every case.
@@ -78,6 +78,20 @@ pub fn resize(
     direction: Direction,
     size: i16,
 ) -> Result<LayoutNode, ResizeError> {
+    resize_with_min(tree, tab_rect, pane, direction, size, MIN_PANE_SIZE)
+}
+
+/// Like [`resize`] but with an explicit per-pane content minimum — the
+/// configured pane minimum, floored at [`MIN_PANE_SIZE`] by the caller — so
+/// the donating side's spare is measured against that floor.
+pub fn resize_with_min(
+    tree: &LayoutNode,
+    tab_rect: Rect,
+    pane: PaneId,
+    direction: Direction,
+    size: i16,
+    min: Size,
+) -> Result<LayoutNode, ResizeError> {
     let Some(path) = tree.path_to(pane) else {
         return Err(ResizeError::PaneNotFound { pane });
     };
@@ -107,14 +121,14 @@ pub fn resize(
 
     // The donor can give only what its solved size holds above its floor.
     let split = tree.split_at(&path[..depth]);
-    let split_rect = rect_at(tree, tab_rect, &path[..depth]);
-    let donor_rect = directional_child_rects(split, split_rect)[donor];
+    let split_rect = rect_at(tree, tab_rect, &path[..depth], min);
+    let donor_rect = directional_child_rects(split, split_rect, min)[donor];
     let donor_cells = if horizontal {
         donor_rect.size.cols
     } else {
         donor_rect.size.rows
     };
-    let spare = donor_cells.saturating_sub(slot_floor(split, donor, horizontal));
+    let spare = donor_cells.saturating_sub(slot_floor(split, donor, horizontal, min));
     if amount > spare {
         return Err(ResizeError::MinSize {
             requested: amount,
@@ -218,7 +232,7 @@ fn find_border(
 /// with the shared child-rect computation; a stacked level carves one
 /// header row per collapsed member out of the active child's rect, shifted
 /// below the headers above it, and passes zero to collapsed ones.
-fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize]) -> Rect {
+fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect {
     let mut node = tree;
     let mut rect = tab_rect;
     for &index in path {
@@ -227,7 +241,7 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize]) -> Rect {
         };
         rect = match split.direction {
             SplitDirection::Horizontal | SplitDirection::Vertical => {
-                directional_child_rects(split, rect)[index]
+                directional_child_rects(split, rect, min)[index]
             }
             SplitDirection::Stacked => {
                 // Mirror `solve_stacked`: same clamp on the active index,

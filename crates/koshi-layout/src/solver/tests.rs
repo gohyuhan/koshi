@@ -510,6 +510,26 @@ fn shrink_suppresses_trailing_panes_deterministically() {
 }
 
 #[test]
+fn a_larger_min_suppresses_a_pane_that_fits_at_the_default_floor() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Horizontal, &[a, b]);
+    // Twelve columns hold two bordered panes at the 2-column default floor
+    // (four each), so nothing suppresses.
+    let tab = rect(0, 0, 12, 24);
+    let default = solve_with_min(&tree, tab, MIN_PANE_SIZE);
+    assert!(default.suppressed.is_empty());
+    assert!(default.panes.iter().all(|(_, r)| !r.is_empty()));
+
+    // Raising the content floor to eight columns needs ten per bordered pane —
+    // twenty in all — so the same twelve columns now fit only the first, and the
+    // second suppresses. This fails if the configured minimum stops reaching the
+    // solver.
+    let raised = solve_with_min(&tree, tab, Size { cols: 8, rows: 1 });
+    assert_eq!(raised.suppressed, [b]);
+    assert_eq!(raised.panes, [(a, rect(0, 0, 12, 24)), (b, Rect::zero())]);
+}
+
+#[test]
 fn regrow_restores_suppressed_panes() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b, c]);

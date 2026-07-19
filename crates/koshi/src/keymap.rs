@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 use koshi_config::conflict::{
     detect_conflicts, ConflictReport, KeyMapLayer, KeymapVerdict, LayerOrigin,
 };
+use koshi_config::key::Leader;
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap};
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{KeybindingsConfig, ModeName};
+use koshi_config::types::{default_mode_bindings, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
 
@@ -108,7 +109,7 @@ pub fn view_from_partial(
         }
     }
 
-    let layers = keymap_layers(user_modes, &defaults);
+    let layers = keymap_layers(user_modes, config.leader);
     let report = detect_conflicts(
         &layers,
         config.leader,
@@ -124,7 +125,7 @@ pub fn view_from_partial(
     let (config, layers) = if admitted {
         (config, layers)
     } else {
-        (defaults.clone(), keymap_layers(None, &defaults))
+        (defaults.clone(), keymap_layers(None, defaults.leader))
     };
 
     let merged = merge_keymaps(
@@ -147,13 +148,18 @@ pub fn view_from_partial(
 
 /// The ordered offline keymap layers: the built-in default binding table,
 /// plus the user file's modes when present, arguments stripped.
+///
+/// The default table is built against `leader` — the effective leader, the
+/// user's when their file set one — so `koshi keys list/validate/conflicts`
+/// resolve the same `<leader>`-relative defaults a running koshi does, instead
+/// of the built-in `C-` table.
 fn keymap_layers(
-    user_modes: Option<std::collections::BTreeMap<ModeName, koshi_config::types::ModeBindings>>,
-    defaults: &KeybindingsConfig,
+    user_modes: Option<std::collections::BTreeMap<ModeName, ModeBindings>>,
+    leader: Leader,
 ) -> Vec<KeyMapLayer> {
     let mut layers = vec![KeyMapLayer {
         origin: LayerOrigin::Defaults,
-        modes: defaults.modes.clone(),
+        modes: default_mode_bindings(leader),
     }];
     if let Some(modes) = user_modes {
         layers.push(

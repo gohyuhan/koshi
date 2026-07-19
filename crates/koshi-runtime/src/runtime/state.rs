@@ -10,10 +10,11 @@ use std::{
 };
 
 use koshi_config::types::KoshiConfig;
-use koshi_core::geometry::Direction;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
+use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_renderer::theme::Theme;
@@ -182,6 +183,17 @@ impl Runtime {
     /// Borrow the session map.
     pub fn sessions(&self) -> &HashMap<SessionId, Session> {
         &self.sessions
+    }
+
+    /// The effective per-pane minimum content size the layout solver enforces:
+    /// the configured `pane.min-cols`/`min-rows`, each raised to the hard
+    /// [`MIN_PANE_SIZE`] floor so a smaller (or zero) configured value can never
+    /// drive a pane below the size a PTY can run at.
+    pub(crate) fn effective_pane_min(&self) -> Size {
+        Size {
+            cols: self.config.pane.min_cols.max(MIN_PANE_SIZE.cols),
+            rows: self.config.pane.min_rows.max(MIN_PANE_SIZE.rows),
+        }
     }
     /// Borrow the shared PTY backend.
     pub fn pty_backend(&self) -> &Arc<dyn PtyBackend> {

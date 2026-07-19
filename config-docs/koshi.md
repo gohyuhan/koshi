@@ -26,8 +26,8 @@ it is one node with one value.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `max-lines` | integer — lines of history kept per pane | `10000` | ≥ 0.1.0 |
-| `max-bytes` | integer — byte ceiling on that history | `33554432` (32 MiB) | ≥ 0.1.0 |
+| `max-lines` | integer — lines of history kept per pane (a negative value means `0`: no scrollback) | `10000` | ≥ 0.1.0 |
+| `max-bytes` | integer — byte ceiling on that history (negative means `0`) | `33554432` (32 MiB) | ≥ 0.1.0 |
 
 ## `layout`
 

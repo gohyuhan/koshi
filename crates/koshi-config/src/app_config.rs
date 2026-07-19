@@ -42,7 +42,9 @@ use crate::layer::{
     PartialMouseConfig, PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig,
     PartialUpdateConfig,
 };
-use crate::parser::{parse_kdl, value_bool, value_string, value_u16, value_u32, value_usize};
+use crate::parser::{
+    parse_kdl, value_bool, value_integer, value_nonempty_string, value_string, value_u16, value_u32,
+};
 use crate::types::WheelScroll;
 
 /// The section names that may appear at most once, checked for duplicates.
@@ -75,11 +77,13 @@ pub fn parse_app_config(
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for node in doc.nodes() {
         let name = node.name().value();
-        // Each section may appear once. A repeated `update` is an error (it is
-        // strict); a repeated field-partial section warns and keeps the first.
+        // Each section may appear once. A repeated `version` or `update` is an
+        // error (both are strict — a duplicate must never bypass version's
+        // newer-schema check or update's fail-closed parse); a repeated
+        // field-partial section warns and keeps the first.
         if SECTIONS.contains(&name) && !seen.insert(name) {
-            if name == "update" {
-                return Err(validation("update", "duplicate `update` section"));
+            if name == "version" || name == "update" {
+                return Err(validation(name, &format!("duplicate `{name}` section")));
             }
             warnings.push(format!("ignored duplicate `{name}` section"));
             continue;
@@ -157,14 +161,14 @@ fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScroll
         match key {
             "max-lines" => set(
                 &mut cfg.max_lines,
-                value_usize(child),
+                value_scrollback(child),
                 "scrollback",
                 key,
                 warnings,
             ),
             "max-bytes" => set(
                 &mut cfg.max_bytes,
-                value_usize(child),
+                value_scrollback(child),
                 "scrollback",
                 key,
                 warnings,
@@ -258,26 +262,30 @@ fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminal
     for child in children.nodes() {
         let key = child.name().value();
         match key {
+            // `term`/`colorterm` are exported to child programs; a blank value
+            // (`term ""`) would export an empty `TERM`, which disables terminfo,
+            // so it is rejected like any bad field and the default stands.
             "term" => set(
                 &mut cfg.term,
-                value_string(child),
+                value_nonempty_string(child),
                 "terminal",
                 key,
                 warnings,
             ),
             "colorterm" => set(
                 &mut cfg.colorterm,
-                value_string(child),
+                value_nonempty_string(child),
                 "terminal",
                 key,
                 warnings,
             ),
             // `default-shell` is `Option<Option<String>>`: the outer layer marks
             // it set, the inner is the shell (there is no "unset it to $SHELL"
-            // spelling in the file, only "name a shell").
+            // spelling in the file, only "name a shell"). A blank value would
+            // spawn an empty program, so it is rejected and `$SHELL` stands.
             "default-shell" => set(
                 &mut cfg.default_shell,
-                value_string(child).map(Some),
+                value_nonempty_string(child).map(Some),
                 "terminal",
                 key,
                 warnings,
@@ -323,6 +331,13 @@ fn set<T>(
         Ok(value) => *slot = Some(value),
         Err(detail) => warnings.push(format!("ignored `{section}.{key}`: {detail}")),
     }
+}
+
+/// Reads a scrollback cap. A negative value is clamped to `0` — "no
+/// scrollback": the buffer keeps nothing and lines drop as they scroll off,
+/// rather than being rejected as a bad field.
+fn value_scrollback(node: &KdlNode) -> Result<usize, String> {
+    Ok(value_integer(node)?.clamp(0, usize::MAX as i128) as usize)
 }
 
 /// Reads the node's single value as a split [`Direction`].

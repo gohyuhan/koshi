@@ -51,6 +51,19 @@ pub(crate) fn value_string(node: &KdlNode) -> Result<String, String> {
         .ok_or_else(|| "expected a string".to_string())
 }
 
+/// Reads the node's single value as a non-empty string, rejecting an empty or
+/// whitespace-only value. Used for fields that are exported to child programs
+/// or spawned as a program path, where a blank value would break the child
+/// (an empty `TERM` disables terminfo, an empty shell path spawns nothing).
+pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
+    let value = value_string(node)?;
+    if value.trim().is_empty() {
+        Err("must not be empty".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
 /// Reads the node's single value as an integer.
 pub(crate) fn value_integer(node: &KdlNode) -> Result<i128, String> {
     single_value(node)?
@@ -66,10 +79,4 @@ pub(crate) fn value_u16(node: &KdlNode) -> Result<u16, String> {
 /// Reads the node's single value as a `u32`.
 pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
     u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
-}
-
-/// Reads the node's single value as a `usize`.
-pub(crate) fn value_usize(node: &KdlNode) -> Result<usize, String> {
-    usize::try_from(value_integer(node)?)
-        .map_err(|_| "must be a non-negative whole number".to_string())
 }

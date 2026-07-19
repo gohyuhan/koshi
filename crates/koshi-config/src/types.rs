@@ -365,10 +365,16 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
             .first()
             .expect("a prefix sequence has an opening chord")
     };
-    BTreeMap::from([
-        (opening("<leader>p"), "PANE".to_string()),
-        (opening("<leader>s"), "RESIZE".to_string()),
-    ])
+    let pane = opening("<leader>p");
+    let resize = opening("<leader>s");
+    // A modifier-run leader opens these at distinct chords (`<C-p>`, `<C-s>`),
+    // each naming its own group. A chord leader (e.g. `<Space>`) makes both open
+    // the SAME leader chord, so no single group label fits it — leave it
+    // unlabeled and let the hint bar show its derived `+N` count instead.
+    if pane == resize {
+        return BTreeMap::new();
+    }
+    BTreeMap::from([(pane, "PANE".to_string()), (resize, "RESIZE".to_string())])
 }
 
 /// Defaults applied when creating panes and layouts.

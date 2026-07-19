@@ -52,6 +52,10 @@ impl Runtime {
         // Clone the shared backend before borrowing a session: spawn then
         // needs no `&self` borrow, so it coexists with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
+        let pane_min = self.effective_pane_min();
+        // The root pane runs the default shell carrying `--cwd`. Built before the
+        // session is borrowed so it can read the terminal config off `self`.
+        let spawn_spec = self.default_shell_spec(args.cwd.clone(), BTreeMap::new());
 
         let session = self
             .sessions
@@ -68,13 +72,13 @@ impl Runtime {
         let new_tab_id = TabId::new();
         let candidate = LayoutNode::Pane(new_pane_id);
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        if !fits(&candidate, tab_rect, MIN_PANE_SIZE) {
+        if !fits(&candidate, tab_rect, pane_min) {
             return Err(Rejection::new(
                 RejectReason::MinSize,
                 "not enough space for a new tab",
             ));
         }
-        let spawn_size = size_root_pane(new_pane_id, viewport);
+        let spawn_size = size_root_pane(new_pane_id, viewport, pane_min);
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
@@ -82,9 +86,6 @@ impl Runtime {
             session.tabs.values().any(|tab| tab.name() == candidate)
         });
 
-        // The root pane runs the default shell carrying `--cwd`. A new pane's
-        // env starts empty, matching the record `commit_new_tab` writes.
-        let spawn_spec = SpawnSpec::default_shell(args.cwd.clone(), BTreeMap::new());
         let launch_cwd = spawn_spec.cwd.clone();
 
         // Launch the child BEFORE committing any state. On failure nothing

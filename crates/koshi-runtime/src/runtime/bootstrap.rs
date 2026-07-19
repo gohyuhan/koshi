@@ -23,7 +23,7 @@ use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
 
-use crate::runtime::command::size_root_pane;
+use crate::runtime::command::{pane_spawn_sizes, size_root_pane};
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::state::Runtime;
 
@@ -50,10 +50,11 @@ impl Runtime {
         let client_id = ClientId::new();
 
         // Chrome owns one row above and below the pane region.
-        let spawn_size = size_root_pane(pane_id, pane_viewport(viewport));
+        let spawn_size =
+            size_root_pane(pane_id, pane_viewport(viewport), self.effective_pane_min());
 
         // Launch the shell first: on failure nothing is registered.
-        let spawn_spec = SpawnSpec::default_shell(None, BTreeMap::new());
+        let spawn_spec = self.default_shell_spec(None, BTreeMap::new());
         let handle = backend.spawn(pane_id, spawn_spec, spawn_size)?;
 
         // Assemble the session with one client viewing the tab we are about to
@@ -120,7 +121,7 @@ impl Runtime {
                     LeafTemplate::Terminal(terminal) => terminal,
                     LeafTemplate::Plugin(_) => return Err(ProfileLaunchError::PluginPane),
                 };
-                let (spawn, record) = pane_specs(terminal);
+                let (spawn, record) = self.profile_pane_specs(terminal);
                 pane_ids.push(PaneId::new());
                 spawns.push(spawn);
                 records.push(record);
@@ -142,14 +143,25 @@ impl Runtime {
         // Spawn every pane before committing anything. On any failure, kill
         // what was already spawned so no orphan child outlives the launch.
         let mut handles: Vec<(PaneId, PtyHandle, PtySize)> = Vec::new();
+        let pane_min = self.effective_pane_min();
         for plan in &plans {
+            // Size every pane against the tab's whole tree, so a multi-pane tab
+            // spawns each child at its tiled slice rather than the full tab.
+            let sizes = pane_spawn_sizes(&plan.layout, region, pane_min);
             for (pane_id, spawn) in plan.pane_ids.iter().zip(&plan.spawns) {
-                let spawn_size = size_root_pane(*pane_id, region);
+                let spawn_size = sizes
+                    .iter()
+                    .find(|(id, _)| id == pane_id)
+                    .map(|(_, size)| *size)
+                    .expect("every planned pane id is a leaf of its own tab tree");
                 match backend.spawn(*pane_id, spawn.clone(), spawn_size) {
                     Ok(handle) => handles.push((*pane_id, handle, spawn_size)),
                     Err(err) => {
+                        // Group-kill each already-spawned pane so a profile
+                        // command that forked or backgrounded a child leaves no
+                        // orphaned grandchild behind when the launch aborts.
                         for (spawned, _, _) in &handles {
-                            let _ = backend.kill(*spawned, KillPolicy::Force);
+                            let _ = backend.kill(*spawned, KillPolicy::Tree);
                         }
                         return Err(ProfileLaunchError::Spawn(err));
                     }
@@ -173,7 +185,6 @@ impl Runtime {
             let tab_name = generate_name(NameKind::Tab, |candidate| {
                 session.tabs.values().any(|tab| tab.name() == candidate)
             });
-            let focus = (index == focused_tab).then_some(client_id);
             let _ = tab_ops::commit_profile_tab(
                 &mut session,
                 plan.tab_id,
@@ -184,7 +195,8 @@ impl Runtime {
                     focus_leaf: plan.focus_leaf,
                 },
                 tab_name,
-                focus,
+                Some(client_id),
+                index == focused_tab,
                 now,
             );
         }
@@ -221,30 +233,34 @@ struct TabPlan {
     focus_leaf: usize,
 }
 
-/// The spawn spec (what to launch) and record spec (what to remember) for one
-/// terminal leaf. A leaf with no command runs the default shell.
-fn pane_specs(terminal: &TerminalTemplate) -> (SpawnSpec, NewPaneSpec) {
-    let cwd = terminal.cwd.clone();
-    let env = terminal.env.clone();
-    match &terminal.command {
-        Some(command) => {
-            let spawn = SpawnSpec {
-                program: command.program.clone(),
-                args: command.args.clone(),
-                cwd: cwd.clone(),
-                env,
-                shell_kind: ShellKind::from_program(&command.program),
-            };
-            let record = NewPaneSpec {
-                cwd,
-                command: Some(spawn.clone()),
-            };
-            (spawn, record)
-        }
-        None => {
-            let spawn = SpawnSpec::default_shell(cwd.clone(), env);
-            let record = NewPaneSpec { cwd, command: None };
-            (spawn, record)
+impl Runtime {
+    /// The spawn spec (what to launch) and record spec (what to remember) for
+    /// one terminal leaf of a profile. A leaf with no command runs the default
+    /// shell (honoring `terminal.default_shell`); either way the spec carries
+    /// koshi's configured terminal identity, with the leaf's own `env` winning.
+    fn profile_pane_specs(&self, terminal: &TerminalTemplate) -> (SpawnSpec, NewPaneSpec) {
+        let cwd = terminal.cwd.clone();
+        let env = self.terminal_identity_env(terminal.env.clone());
+        match &terminal.command {
+            Some(command) => {
+                let spawn = SpawnSpec {
+                    program: command.program.clone(),
+                    args: command.args.clone(),
+                    cwd: cwd.clone(),
+                    env,
+                    shell_kind: ShellKind::from_program(&command.program),
+                };
+                let record = NewPaneSpec {
+                    cwd,
+                    command: Some(spawn.clone()),
+                };
+                (spawn, record)
+            }
+            None => {
+                let spawn = self.default_shell_spec(cwd.clone(), env);
+                let record = NewPaneSpec { cwd, command: None };
+                (spawn, record)
+            }
         }
     }
 }

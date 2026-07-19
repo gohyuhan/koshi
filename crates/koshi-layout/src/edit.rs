@@ -7,12 +7,12 @@
 //! half-edited tree to roll back.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::geometry::{Direction, Rect, SplitDirection};
+use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::solve;
+use crate::solver::solve_with_min;
 use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 
 /// A rejected split.
@@ -185,7 +185,10 @@ pub struct RemovalInfo {
 /// member with a selectable header until something closes it explicitly.
 ///
 /// `tab_rect` is the rect the tree currently solves into; it anchors the
-/// returned [`RemovalInfo`] geometry.
+/// returned [`RemovalInfo`] geometry. `min` is the effective per-pane minimum
+/// content size, so the before/after solves here agree with the caller's own
+/// solve on which panes are suppressed — the removed pane's `old_rect` and the
+/// absorbers are measured against the same floor the tab is displayed at.
 ///
 /// # Errors
 ///
@@ -197,9 +200,10 @@ pub fn remove_pane(
     tree: &LayoutNode,
     tab_rect: Rect,
     pane: PaneId,
+    min: Size,
 ) -> Result<(LayoutNode, RemovalInfo), RemoveError> {
     // Solve once before the edit so the rect being freed is known exactly.
-    let before = solve(tree, tab_rect);
+    let before = solve_with_min(tree, tab_rect, min);
     let Some(&(_, old_rect)) = before.panes.iter().find(|&&(id, _)| id == pane) else {
         return Err(RemoveError::PaneNotFound { pane });
     };
@@ -215,7 +219,7 @@ pub fn remove_pane(
 
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
-    let after = solve(&result, tab_rect);
+    let after = solve_with_min(&result, tab_rect, min);
     let mut absorbers: Vec<(PaneId, u64)> = after
         .panes
         .iter()

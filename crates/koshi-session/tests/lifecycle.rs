@@ -18,6 +18,7 @@ use koshi_core::event::Event;
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
+use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
@@ -167,6 +168,7 @@ fn pump_exit(
                 exit_code,
                 EPOCH,
                 tab_rect,
+                MIN_PANE_SIZE,
                 empty_tab_policy,
             )
         }

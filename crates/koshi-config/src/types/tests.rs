@@ -608,3 +608,20 @@ fn default_bindings_follow_the_leader() {
         assert!(map.contains_key(&unlock), "reserved <C-l> never moves");
     }
 }
+
+#[test]
+fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
+    // A chord leader opens every leader binding with the leader chord, so
+    // `<leader>p` and `<leader>s` share an opening — no single group label fits,
+    // and the hint bar shows the derived `+N` instead.
+    let space = default_prefix_labels(Leader::Chord(KeyChord::new(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Space),
+    )));
+    assert!(space.is_empty());
+
+    // A modifier-run leader keeps `<leader>p` and `<leader>s` at distinct
+    // openings, so both labels stand.
+    let alt = default_prefix_labels(Leader::Mods(ModFlags::ALT));
+    assert_eq!(alt.len(), 2);
+}

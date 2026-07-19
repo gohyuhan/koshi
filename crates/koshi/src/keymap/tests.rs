@@ -1,13 +1,14 @@
 //! Offline keymap view tests: defaults-only and user-layer folding, the
 //! all-or-nothing revert, steal visibility, and the file dry-run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use koshi_config::key::Leader;
 use koshi_config::key_sequence::parse_sequence;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
-use koshi_core::key::KeySequence;
+use koshi_core::key::{KeySequence, ModFlags};
 use koshi_core::resolve::ActionArgs;
 
 use super::*;
@@ -39,6 +40,43 @@ fn partial_binding(key: &str, action: &str) -> PartialKeybindingsConfig {
         modes: Some(modes),
         ..PartialKeybindingsConfig::default()
     }
+}
+
+#[test]
+fn the_offline_default_layer_follows_the_configured_leader() {
+    let alt = Leader::Mods(ModFlags::ALT);
+    let layers = keymap_layers(None, alt);
+    assert_eq!(layers.len(), 1);
+    // The default table is built against the passed leader — the same one a
+    // running koshi uses — not the built-in Ctrl table.
+    assert_eq!(layers[0].modes, default_mode_bindings(alt));
+    assert_ne!(layers[0].modes, default_mode_bindings(Leader::default()));
+}
+
+#[test]
+fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
+    // The whole offline view path: a file that only sets `leader "A-"` admits,
+    // and its default bindings resolve against Alt, so they differ from the
+    // built-in Ctrl defaults. Fails if `view_from_partial` stops threading the
+    // effective leader into the default layer.
+    let alt_view = view_from_partial(
+        Some(PartialKeybindingsConfig {
+            leader: Some(Leader::Mods(ModFlags::ALT)),
+            ..PartialKeybindingsConfig::default()
+        }),
+        None,
+        None,
+    );
+    assert!(
+        !alt_view.reverted,
+        "a leader-only file has no conflicts to revert"
+    );
+
+    let default_view = view_from_partial(None, None, None);
+    let mode = ModeName::new("normal");
+    let alt_keys: BTreeSet<_> = alt_view.merged.modes[&mode].defaults.keys().collect();
+    let default_keys: BTreeSet<_> = default_view.merged.modes[&mode].defaults.keys().collect();
+    assert_ne!(alt_keys, default_keys);
 }
 
 #[test]
