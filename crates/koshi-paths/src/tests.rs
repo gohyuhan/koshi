@@ -1,8 +1,8 @@
-//! Tests for the path resolvers: override precedence, empty-override
-//! handling, per-platform defaults, the runtime fallback chain, and the
-//! ensure helpers. Every test that touches the process environment holds
-//! `ENV_LOCK` and restores the prior values on drop, so tests stay correct
-//! under the parallel test runner.
+//! Tests for the path resolvers: each resolver routes to its own per-platform
+//! location, the runtime fallback chain, that `KOSHI_*` environment variables
+//! are ignored, and the ensure helpers. Every test that touches the process
+//! environment holds `ENV_LOCK` and restores the prior values on drop, so tests
+//! stay correct under the parallel test runner.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -13,17 +13,6 @@ use super::*;
 /// Serializes environment mutation across tests; the process environment is
 /// global state.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// An absolute override fixture on every platform: `/o/<leaf>` on Unix,
-/// `C:\o\<leaf>` on Windows — a Unix-style `/o/...` has no drive prefix on
-/// Windows and would be rejected as relative.
-fn abs(leaf: &str) -> PathBuf {
-    #[cfg(windows)]
-    let root = PathBuf::from("C:\\o");
-    #[cfg(not(windows))]
-    let root = PathBuf::from("/o");
-    root.join(leaf)
-}
 
 /// Holds `ENV_LOCK` and a set of saved variables, restoring every one of
 /// them (to its prior value or to unset) on drop.
@@ -47,6 +36,7 @@ impl EnvGuard {
         std::env::set_var(var, value);
     }
 
+    #[allow(dead_code)] // used only on Linux (XDG), where the runtime test unsets it
     fn unset(&mut self, var: &'static str) {
         self.save(var);
         std::env::remove_var(var);
@@ -71,84 +61,13 @@ impl Drop for EnvGuard {
 }
 
 #[test]
-fn env_override_wins_for_every_dir() {
-    let mut env = EnvGuard::new();
-    env.set("KOSHI_CONFIG_DIR", abs("config"));
-    env.set("KOSHI_DATA_DIR", abs("data"));
-    env.set("KOSHI_CACHE_DIR", abs("cache"));
-    env.set("KOSHI_STATE_DIR", abs("state"));
-    env.set("KOSHI_RUNTIME_DIR", abs("runtime"));
+fn each_resolver_routes_to_its_own_platform_dir() {
+    // Serialize against the tests that mutate the environment, even though
+    // these resolvers read none of it.
+    let _env = EnvGuard::new();
 
-    assert_eq!(config_dir(), Some(abs("config")));
-    assert_eq!(data_dir(), Some(abs("data")));
-    assert_eq!(cache_dir(), Some(abs("cache")));
-    assert_eq!(state_dir(), Some(abs("state")));
-    assert_eq!(runtime_dir(), Some(abs("runtime")));
-}
-
-#[test]
-fn empty_override_is_ignored() {
-    let mut env = EnvGuard::new();
-    env.set("KOSHI_CONFIG_DIR", "");
-
-    assert_eq!(
-        config_dir(),
-        project_dirs().map(|d| d.config_dir().to_path_buf())
-    );
-}
-
-#[test]
-fn relative_override_is_ignored() {
-    // The XDG base-directory rule: a non-absolute base is invalid and treated
-    // as unset — `KOSHI_CONFIG_DIR=rel/path` must not create dirs that move
-    // with the process's working directory.
-    let mut env = EnvGuard::new();
-    env.set("KOSHI_CONFIG_DIR", "rel/path");
-
-    assert_eq!(
-        config_dir(),
-        project_dirs().map(|d| d.config_dir().to_path_buf())
-    );
-}
-
-#[test]
-fn whitespace_only_override_is_ignored() {
-    // `" "` is a distinct code path from `""`: `OsString::is_empty` is false
-    // for it (length 1), so it falls through to the `is_absolute()` check
-    // instead — that check must also reject it, exactly as an empty value
-    // does. `KOSHI_CONFIG_DIR=" "` must not create a directory literally
-    // named a single space next to the working directory.
-    let mut env = EnvGuard::new();
-    env.set("KOSHI_CONFIG_DIR", " ");
-
-    assert_eq!(
-        config_dir(),
-        project_dirs().map(|d| d.config_dir().to_path_buf())
-    );
-}
-
-#[test]
-fn unicode_override_is_used_verbatim() {
-    // An absolute override is passed straight through with no normalization:
-    // `KOSHI_CONFIG_DIR=/o/café/設定` must resolve to exactly that path, not a
-    // mangled or truncated one.
-    let mut env = EnvGuard::new();
-    let unicode = abs("café/設定");
-    env.set("KOSHI_CONFIG_DIR", &unicode);
-
-    assert_eq!(config_dir(), Some(unicode));
-}
-
-#[test]
-fn defaults_use_the_platform_config_location() {
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_CONFIG_DIR");
-    env.unset("KOSHI_DATA_DIR");
-    env.unset("KOSHI_CACHE_DIR");
-    env.unset("KOSHI_STATE_DIR");
-
-    // Each resolver must route to its own directories method — a config
-    // query answered from the data location is exactly the bug this guards.
+    // A config query answered from the data location is exactly the bug this
+    // guards.
     let dirs = project_dirs().expect("test machine has a home directory");
     assert_eq!(config_dir(), Some(dirs.config_dir().to_path_buf()));
     assert_eq!(data_dir(), Some(dirs.data_dir().to_path_buf()));
@@ -163,13 +82,29 @@ fn defaults_use_the_platform_config_location() {
     );
 }
 
+#[test]
+fn koshi_dir_env_vars_are_ignored() {
+    // koshi reads no `KOSHI_*` path override: setting one must not move any
+    // resolved directory off its platform default.
+    let mut env = EnvGuard::new();
+    env.set("KOSHI_CONFIG_DIR", "/override/config");
+    env.set("KOSHI_DATA_DIR", "/override/data");
+    env.set("KOSHI_CACHE_DIR", "/override/cache");
+    env.set("KOSHI_STATE_DIR", "/override/state");
+    env.set("KOSHI_RUNTIME_DIR", "/override/runtime");
+
+    let dirs = project_dirs().expect("test machine has a home directory");
+    assert_eq!(config_dir(), Some(dirs.config_dir().to_path_buf()));
+    assert_eq!(data_dir(), Some(dirs.data_dir().to_path_buf()));
+    assert_eq!(cache_dir(), Some(dirs.cache_dir().to_path_buf()));
+    assert_ne!(config_dir(), Some(PathBuf::from("/override/config")));
+    assert_ne!(runtime_dir(), Some(PathBuf::from("/override/runtime")));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_paths_land_under_library() {
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_CONFIG_DIR");
-    env.unset("KOSHI_CACHE_DIR");
-    env.unset("KOSHI_STATE_DIR");
+    let _env = EnvGuard::new();
 
     let config = config_dir().expect("home directory");
     assert!(
@@ -188,21 +123,10 @@ fn macos_paths_land_under_library() {
     );
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_runtime_dir_follows_xdg_runtime_dir() {
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_RUNTIME_DIR");
-    env.set("XDG_RUNTIME_DIR", "/run/user/1000");
-
-    assert_eq!(runtime_dir(), Some(PathBuf::from("/run/user/1000/koshi")));
-}
-
 #[cfg(windows)]
 #[test]
 fn windows_config_dir_lands_under_appdata_config() {
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_CONFIG_DIR");
+    let _env = EnvGuard::new();
 
     let config = config_dir().expect("home directory");
     assert!(
@@ -211,55 +135,33 @@ fn windows_config_dir_lands_under_appdata_config() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_runtime_dir_follows_xdg_runtime_dir() {
+    // `$XDG_RUNTIME_DIR` is the OS's own base-directory rule, read by the
+    // `directories` crate — not a koshi override.
+    let mut env = EnvGuard::new();
+    env.set("XDG_RUNTIME_DIR", "/run/user/1000");
+
+    assert_eq!(runtime_dir(), Some(PathBuf::from("/run/user/1000/koshi")));
+}
+
+// On macOS and Windows there is no per-boot runtime base, so `runtime_dir`
+// always falls through to `<data_dir>/run`. On Linux the same fallback fires
+// only when `$XDG_RUNTIME_DIR` is unset.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn runtime_dir_falls_back_to_data_dir_run() {
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_RUNTIME_DIR");
-    env.set("KOSHI_DATA_DIR", abs("data"));
-    // Without the XDG runtime base, every platform falls through to the
-    // data-dir leg; unsetting it makes the assertion exact on Linux too.
-    #[cfg(target_os = "linux")]
-    env.unset("XDG_RUNTIME_DIR");
-
-    assert_eq!(runtime_dir(), Some(abs("data").join("run")));
+    let _env = EnvGuard::new();
+    assert_eq!(runtime_dir(), data_dir().map(|d| d.join("run")));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn empty_runtime_dir_override_is_ignored_not_just_unset_ones() {
-    // `runtime_dir_falls_back_to_data_dir_run` above only ever tests an
-    // *unset* `KOSHI_RUNTIME_DIR`. An explicitly *empty* override
-    // (`KOSHI_RUNTIME_DIR=""`) is a different code path — it must be rejected
-    // by `env_dir`'s `is_empty()` check, not merely absent from the
-    // environment — before falling through to the same XDG/data-dir chain.
+fn linux_runtime_dir_falls_back_to_data_dir_run_without_xdg() {
     let mut env = EnvGuard::new();
-    env.set("KOSHI_RUNTIME_DIR", "");
-    env.set("KOSHI_DATA_DIR", abs("data"));
-    #[cfg(target_os = "linux")]
     env.unset("XDG_RUNTIME_DIR");
-
-    assert_eq!(runtime_dir(), Some(abs("data").join("run")));
-}
-
-#[test]
-fn runtime_dir_with_zero_overrides_falls_back_to_platform_data_dir_run() {
-    // No test above exercises `runtime_dir()` with every `KOSHI_*` override
-    // unset: `runtime_dir_falls_back_to_data_dir_run` always pins
-    // `KOSHI_DATA_DIR` to a fixture path. This drives the full un-overridden
-    // chain end to end — env override (absent) -> `ProjectDirs::runtime_dir()`
-    // (Linux XDG only; unset here so it also misses) -> the platform default
-    // `data_dir` + `"run"` — so a break in any link show up here, not just in
-    // the fixture-pinned path.
-    let mut env = EnvGuard::new();
-    env.unset("KOSHI_RUNTIME_DIR");
-    env.unset("KOSHI_DATA_DIR");
-    #[cfg(target_os = "linux")]
-    env.unset("XDG_RUNTIME_DIR");
-
-    let dirs = project_dirs().expect("test machine has a home directory");
-    assert_eq!(
-        runtime_dir(),
-        Some(dirs.data_dir().to_path_buf().join("run"))
-    );
+    assert_eq!(runtime_dir(), data_dir().map(|d| d.join("run")));
 }
 
 #[test]

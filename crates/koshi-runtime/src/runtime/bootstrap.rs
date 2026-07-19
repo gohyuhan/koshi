@@ -32,19 +32,21 @@ mod tests;
 
 impl Runtime {
     /// Seed the first session/tab/root-pane/client for a local single-process
-    /// start and return the client's id. The root pane runs the default shell,
-    /// sized to the middle pane region of `viewport`; `now` stamps attach/create.
+    /// start and return the client's id. The session is registered under
+    /// `session_id` (the caller mints it so the log file can be named for the
+    /// session before genesis). The root pane runs the default shell, sized to
+    /// the middle pane region of `viewport`; `now` stamps attach/create.
     ///
     /// The child is spawned before any state is committed, so a failed launch
     /// leaves no session behind and surfaces as `Err`.
     pub fn bootstrap_local(
         &mut self,
+        session_id: SessionId,
         viewport: Size,
         now: SystemTime,
     ) -> Result<ClientId, PtyError> {
         let backend = Arc::clone(self.pty_backend());
 
-        let session_id = SessionId::new();
         let tab_id = TabId::new();
         let pane_id = PaneId::new();
         let client_id = ClientId::new();
@@ -92,7 +94,9 @@ impl Runtime {
 
     /// Seed the first session from a `--profile` template: one session holding
     /// every tab the profile defines, each with its own tree of panes, viewed
-    /// by one client focused on the profile's starting tab and pane.
+    /// by one client focused on the profile's starting tab and pane. The session
+    /// is registered under the caller-supplied `session_id`, as in
+    /// [`bootstrap_local`](Self::bootstrap_local).
     ///
     /// Every child is spawned before any state is committed, so a failed launch
     /// commits nothing and kills whatever it already spawned — the caller then
@@ -100,6 +104,7 @@ impl Runtime {
     /// pane cannot launch: there is no plugin host to fill it yet.
     pub fn bootstrap_profile(
         &mut self,
+        session_id: SessionId,
         template: ProfileTemplate,
         viewport: Size,
         now: SystemTime,
@@ -171,7 +176,6 @@ impl Runtime {
 
         // Assemble the session and its one client, viewing the tab the profile
         // starts focused on.
-        let session_id = SessionId::new();
         let focused_tab = template.focused_tab.min(plans.len().saturating_sub(1));
         let focused_tab_id = plans[focused_tab].tab_id;
         let client_id = ClientId::new();

@@ -15,6 +15,7 @@ use std::str::FromStr;
 use koshi_core::action::ActionRef;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::resolve::ActionArgs;
 
 use crate::error::ColorParseError;
@@ -673,15 +674,26 @@ impl FromStr for RgbColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoggingConfig {
     /// Whether koshi writes a log file. Disabled, nothing is logged and no
-    /// log file or directory is created; enabled, log lines are written to a
-    /// daily-rotated file under the platform state directory.
+    /// log file or `logs/` directory is created; enabled, log lines at or
+    /// above [`level`](Self::level) are written to a per-session file under
+    /// the platform state directory, created on the first line written.
     pub enabled: bool,
+    /// The lowest severity that gets written. A line below this is dropped —
+    /// e.g. [`LogLevel::Warning`] drops `info` lines.
+    pub level: LogLevel,
+    /// How each written line is rendered.
+    pub format: LogFormat,
 }
 
 impl Default for LoggingConfig {
-    /// Logging is off unless the user turns it on.
+    /// Logging is off, and when turned on writes warnings and errors in the
+    /// human-readable format.
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            level: LogLevel::Warning,
+            format: LogFormat::Pretty,
+        }
     }
 }
 

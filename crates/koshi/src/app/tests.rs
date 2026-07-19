@@ -14,7 +14,7 @@ use ratatui::backend::TestBackend;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Point;
-use koshi_core::ids::{CommandId, PaneId};
+use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
@@ -47,7 +47,7 @@ fn test_runtime(fake: Arc<FakePtyBackend>) -> (Runtime, mpsc::Sender<RuntimeEven
 fn boot(fake: &Arc<FakePtyBackend>) -> (Runtime, mpsc::Sender<RuntimeEvent>, ClientId, PaneId) {
     let (mut runtime, tx) = test_runtime(fake.clone());
     let client_id = runtime
-        .bootstrap_local(VIEWPORT, SystemTime::now())
+        .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
     (runtime, tx, client_id, pane_id)

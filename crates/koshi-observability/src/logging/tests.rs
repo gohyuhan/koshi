@@ -1,10 +1,12 @@
 //! Tests for the tracing subscriber bootstrap and redaction machinery.
 //!
-//! Coverage includes format parsing, environment-variable option mapping, filter validation,
-//! subscriber installation (global and thread-local), log file creation and
-//! rotation, and environment variable redaction.
+//! Coverage: the session log path, per-session lazy file creation, the level
+//! cutoff, single global install, the disabled no-op, and environment-map
+//! redaction.
 
 use super::*;
+
+use koshi_core::ids::SessionId;
 
 // A sample event must carry the canonical join fields, and any env-derived value
 // must arrive already scrubbed — the token must never appear in raw output.
@@ -60,56 +62,62 @@ fn redacted_env_field_hides_sensitive_keys_only() {
 }
 
 #[test]
-fn log_format_parses_value() {
-    // Test the pure mapping directly so the suite never reads or writes the
-    // process-global `KOSHI_LOG_FORMAT`, which would be race-prone under parallel
-    // tests.
-    assert_eq!(LogFormat::parse(Some("json")), LogFormat::Json);
-    assert_eq!(LogFormat::parse(Some("pretty")), LogFormat::Pretty);
-    assert_eq!(LogFormat::parse(Some("anything-else")), LogFormat::Pretty);
-    assert_eq!(LogFormat::parse(None), LogFormat::Pretty);
+fn redacted_env_field_of_empty_map_is_empty_string() {
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    assert_eq!(redacted_env_field(&env), "");
 }
 
 #[test]
-fn init_tracing_writes_to_file_and_installs_once() {
-    // This is the only test that completes a global install, so its calls are
-    // deterministic regardless of parallelism: no other test races the global
-    // slot. `init_tracing_rejects_bad_filter` returns before `try_init`, and the
-    // `with_test_writer` tests use a thread-local subscriber.
+fn session_log_path_is_the_named_file_in_the_logs_folder() {
+    let session = SessionId::new();
+    let path = session_log_path(session);
+    let file = format!("koshi-log-{}.log", session.as_uuid());
+
+    // The state dir's own tail differs per OS, so pin the `logs/<file>` tail
+    // plus the state-dir prefix instead of a full literal path.
+    assert!(
+        path.ends_with(format!("logs/{file}")),
+        "unexpected log path: {}",
+        path.display()
+    );
+    if let Some(state) = koshi_paths::state_dir() {
+        assert_eq!(path, state.join("logs").join(&file));
+    }
+}
+
+#[test]
+fn two_sessions_get_two_distinct_log_files() {
+    let a = session_log_path(SessionId::new());
+    let b = session_log_path(SessionId::new());
+    assert_ne!(a, b, "each session must name its own log file");
+}
+
+// Enabled + a line at the configured level: the file (and its `logs/` parent)
+// is created lazily on that first write, and a second install fails since a
+// process has one global subscriber. This is the only test that claims the
+// global slot, so it is deterministic regardless of test order.
+#[test]
+fn init_to_path_creates_the_file_lazily_and_installs_once() {
     let dir = std::env::temp_dir().join(format!("koshi-log-test-{}", std::process::id()));
-    let path = dir.join("koshi.log");
+    let path = dir.join("logs").join("koshi-log-test.log");
     let _ = std::fs::remove_dir_all(&dir);
 
-    let guard = init_tracing(TracingOptions {
-        format: LogFormat::Json,
-        filter: "info".to_string(),
-        destination: LogDestination::File(path.clone()),
-        max_log_files: 7,
-    })
-    .expect("first install succeeds");
+    init_to_path(&path, LogLevel::Warning, LogFormat::Json).expect("first install succeeds");
 
-    tracing::info!(session_id = "sess-file", "file sink event");
+    // Nothing written yet: no subscriber event has fired, so the file must not
+    // exist — creation is on the first line, not at install.
+    assert!(
+        !path.exists(),
+        "the file must not exist before the first log line"
+    );
+
+    tracing::warn!(session_id = "sess-file", "file sink event");
 
     // A second install fails: a process has a single global subscriber.
-    let second = init_tracing(TracingOptions {
-        format: LogFormat::Json,
-        filter: "info".to_string(),
-        destination: LogDestination::Stderr,
-        max_log_files: 7,
-    });
+    let second = init_to_path(&path, LogLevel::Warning, LogFormat::Json);
     assert!(matches!(second, Err(TracingError::AlreadyInitialized)));
 
-    // Dropping the guard flushes the non-blocking writer to disk.
-    drop(guard);
-
-    // Daily rotation appends a date suffix to the prefix, so read whichever
-    // `koshi.log*` file the appender created.
-    let contents = std::fs::read_dir(&dir)
-        .expect("log dir exists")
-        .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("koshi.log"))
-        .map(|entry| std::fs::read_to_string(entry.path()).expect("log file readable"))
-        .expect("a rotated log file was written");
+    let contents = std::fs::read_to_string(&path).expect("log file was created on first write");
     assert!(contents.contains("session_id"), "missing canonical field");
     assert!(contents.contains("file sink event"), "missing log message");
 
@@ -117,120 +125,45 @@ fn init_tracing_writes_to_file_and_installs_once() {
 }
 
 #[test]
-fn init_tracing_rejects_bad_filter() {
-    let err = init_tracing(TracingOptions {
-        format: LogFormat::Json,
-        filter: "this is not a valid==filter".to_string(),
-        destination: LogDestination::Stderr,
-        max_log_files: 7,
-    });
-    assert!(matches!(err, Err(TracingError::Filter(_))));
-}
-
-#[test]
-fn init_tracing_disabled_is_noop() {
-    // Disabled installs no global subscriber, so it never conflicts with the one
-    // global install and is safely idempotent — both calls succeed regardless of
-    // test order.
-    let opts = || TracingOptions {
-        format: LogFormat::Json,
-        filter: "info".to_string(),
-        destination: LogDestination::Disabled,
-        max_log_files: 7,
+fn init_tracing_disabled_writes_no_file_and_is_a_noop() {
+    // Disabled installs no global subscriber, so it never conflicts with the
+    // one global install and is safely idempotent — both calls succeed
+    // regardless of test order, and neither touches disk.
+    let params = || LoggingParams {
+        enabled: false,
+        level: LogLevel::Warning,
+        format: LogFormat::Pretty,
+        session_id: SessionId::new(),
     };
-    assert!(init_tracing(opts()).is_ok());
-    assert!(init_tracing(opts()).is_ok());
+    let path = session_log_path(params().session_id);
+    assert!(init_tracing(params()).is_ok());
+    assert!(init_tracing(params()).is_ok());
+    assert!(!path.exists(), "disabled logging must create no file");
 }
 
+// The level cutoff drops a line below it before it reaches the writer: with
+// `error`, a warning must not be written. Uses the thread-local test writer so
+// it never races the one global install above.
 #[test]
-fn default_log_path_is_the_logs_folder_of_the_state_dir() {
-    let path = default_log_path();
-    // The state dir's own tail differs per OS (`koshi` on Linux/macOS,
-    // `koshi\data` on Windows), so pin the `logs/koshi.log` tail plus the
-    // state-dir prefix instead of a full literal path.
+fn a_line_below_the_configured_level_is_dropped() {
+    let logs = CapturedLogs::default();
+    let subscriber = fmt()
+        .with_max_level(max_level(LogLevel::Error))
+        .json()
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    tracing::warn!("a warning below the error cutoff");
+    tracing::error!("an error at the cutoff");
+
+    let out = logs.contents();
     assert!(
-        path.ends_with("logs/koshi.log"),
-        "unexpected default path: {}",
-        path.display()
+        !out.contains("below the error cutoff"),
+        "warning must be dropped at level error"
     );
-    if let Some(state) = koshi_paths::state_dir() {
-        assert_eq!(path, state.join("logs").join("koshi.log"));
-    }
-}
-
-#[test]
-fn no_filter_disables_logging() {
-    let opts = TracingOptions::from_filter(None);
-    assert_eq!(opts.destination, LogDestination::Disabled);
-    assert_eq!(opts.filter, "info");
-    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
-}
-
-#[test]
-fn a_filter_enables_the_standard_log_file() {
-    let opts = TracingOptions::from_filter(Some("koshi=debug".to_string()));
-    assert_eq!(opts.destination, LogDestination::File(default_log_path()));
-    assert_eq!(opts.filter, "koshi=debug");
-    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
-}
-
-// `from_env` pre-filters an empty `KOSHI_LOG` to `None` before calling this,
-// but `from_filter` is a public, directly-callable mapping in its own right:
-// called with `Some(String::new())` it must NOT fall back to `Disabled`
-// (only `None` does), and must keep the empty string rather than substituting
-// the "info" default (only a missing filter substitutes that).
-#[test]
-fn from_filter_with_empty_string_keeps_empty_filter_and_enables_file_destination() {
-    let opts = TracingOptions::from_filter(Some(String::new()));
-    assert_eq!(opts.destination, LogDestination::File(default_log_path()));
-    assert_eq!(opts.filter, "");
-    assert_eq!(opts.max_log_files, DEFAULT_MAX_LOG_FILES);
-}
-
-#[test]
-fn log_format_parse_is_case_sensitive_and_rejects_empty_string() {
-    assert_eq!(LogFormat::parse(Some("JSON")), LogFormat::Pretty);
-    assert_eq!(LogFormat::parse(Some("")), LogFormat::Pretty);
-}
-
-#[test]
-fn redacted_env_field_of_empty_map_is_empty_string() {
-    let env: BTreeMap<String, String> = BTreeMap::new();
-    assert_eq!(redacted_env_field(&env), "");
-}
-
-// Boundary: a zero retention count is a legal `usize` input. Called directly
-// (bypassing `init_tracing`'s single-shot global subscriber, which only one
-// test in this file may claim), this proves sink construction still succeeds
-// at that boundary.
-#[test]
-fn file_writer_accepts_zero_max_log_files_without_erroring() {
-    let dir = std::env::temp_dir().join(format!("koshi-log-clamp-test-{}", std::process::id()));
-    let path = dir.join("koshi.log");
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let result = file_writer(&path, 0);
     assert!(
-        result.is_ok(),
-        "max_log_files=0 must clamp to 1, not fail sink construction"
+        out.contains("at the cutoff"),
+        "error must be written at level error"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn file_writer_with_no_file_name_returns_sink_error() {
-    // `Path::file_name()` returns `None` when a path terminates in `..`,
-    // regardless of platform; this exercises the `ok_or_else` error arm
-    // before any directory is created.
-    let path = PathBuf::from("..");
-    match file_writer(&path, 7) {
-        Err(TracingError::Sink(msg)) => {
-            assert_eq!(
-                msg,
-                format!("log path has no file name: {}", path.display())
-            );
-        }
-        other => panic!("expected Sink error, got {other:?}"),
-    }
 }

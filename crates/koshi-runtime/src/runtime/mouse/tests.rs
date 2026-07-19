@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use koshi_core::command::{GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
+use koshi_core::ids::SessionId;
 use koshi_core::key::ModFlags;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::hit_test;
@@ -58,7 +59,11 @@ fn runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
         Direction::Right,
     );
     let client = runtime
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::UNIX_EPOCH)
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
         .expect("bootstrap");
     (runtime, fake, client)
 }

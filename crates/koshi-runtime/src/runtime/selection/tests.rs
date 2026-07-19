@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPaneArgs, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{CommandId, TabId};
+use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -30,7 +30,11 @@ fn runtime() -> (Runtime, ClientId, PaneId) {
         Direction::Right,
     );
     let client = rt
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::UNIX_EPOCH)
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
         .expect("bootstrap");
     let pane = *rt.pty_handles.keys().next().expect("one pane");
     (rt, client, pane)

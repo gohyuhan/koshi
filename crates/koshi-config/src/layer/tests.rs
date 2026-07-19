@@ -183,19 +183,51 @@ fn deep_theme_color_override_keeps_other_roles() {
 }
 
 #[test]
-fn logging_override_enables_the_log_file() {
+fn logging_override_sets_enabled_level_and_format() {
     let layer = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             enabled: Some(true),
+            level: Some(LogLevel::Error),
+            format: Some(LogFormat::Json),
         }),
         ..Default::default()
     };
     let merged = merge(KoshiConfig::default(), vec![layer]);
 
     assert!(merged.logging.enabled);
-    // An absent logging section leaves the default (disabled) in place.
+    assert_eq!(merged.logging.level, LogLevel::Error);
+    assert_eq!(merged.logging.format, LogFormat::Json);
+
+    // An absent logging section leaves the defaults (disabled, warning, pretty).
     let untouched = merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()]);
     assert!(!untouched.logging.enabled);
+    assert_eq!(untouched.logging.level, LogLevel::Warning);
+    assert_eq!(untouched.logging.format, LogFormat::Pretty);
+}
+
+#[test]
+fn logging_config_resolves_partial_over_defaults() {
+    // The startup accessor: an absent section yields the built-in defaults, a
+    // present one applies only its set fields and keeps the defaults for the rest.
+    let empty = PartialKoshiConfig::default();
+    assert_eq!(empty.logging_config(), LoggingConfig::default());
+
+    let partial = PartialKoshiConfig {
+        logging: Some(PartialLoggingConfig {
+            enabled: Some(true),
+            level: Some(LogLevel::Info),
+            format: None,
+        }),
+        ..Default::default()
+    };
+    let resolved = partial.logging_config();
+    assert!(resolved.enabled);
+    assert_eq!(resolved.level, LogLevel::Info);
+    assert_eq!(
+        resolved.format,
+        LogFormat::Pretty,
+        "unset field keeps the default"
+    );
 }
 
 #[test]

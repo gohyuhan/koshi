@@ -16,7 +16,7 @@ use koshi_core::action::{
     TargetKind,
 };
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PluginId};
+use koshi_core::ids::{ClientId, PluginId, SessionId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
@@ -38,7 +38,11 @@ fn runtime() -> (Runtime, ClientId) {
         Direction::Right,
     );
     let client = runtime
-        .bootstrap_local(Size { cols: 80, rows: 24 }, SystemTime::UNIX_EPOCH)
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
         .expect("bootstrap");
     (runtime, client)
 }

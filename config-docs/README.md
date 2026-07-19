@@ -21,8 +21,9 @@ it; profiles sit in a `profile/` subdirectory.
 | macOS | `~/Library/Application Support/koshi` |
 | Windows | `%APPDATA%\koshi\config` |
 
-Set `KOSHI_CONFIG_DIR` to an absolute path to override the location on any
-platform. On Linux the usual `XDG_CONFIG_HOME` also moves the base.
+The location is fixed per platform — koshi reads no environment variable to
+relocate its config. On Linux the usual `XDG_CONFIG_HOME` moves the base, since
+that is the OS's own base-directory rule.
 
 So a full config directory looks like:
 

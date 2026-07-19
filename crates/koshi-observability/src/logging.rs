@@ -1,9 +1,19 @@
-//! `logging` domain — structured logging bootstrap.
+//! `logging` domain — the tracing subscriber that writes koshi's log file.
 //!
-//! [`logging::init_tracing`] installs a process-wide subscriber that emits structured
-//! logs, formatted as JSON or human-readable text per [`logging::TracingOptions`]. Logs
-//! carry a fixed set of [canonical fields](self#canonical-fields) so a session
-//! can be followed across panes, commands, and plugins.
+//! Every `tracing::info!` / `warn!` / `error!` call anywhere in the workspace
+//! routes to the one process-wide subscriber [`logging::init_tracing`] installs. That
+//! subscriber is the single place three questions are answered, all from the
+//! `logging` section of `koshi.kdl` — nothing is read from the environment:
+//!
+//! - **Should this line be written?** [`logging::LoggingParams::enabled`] — disabled
+//!   installs no subscriber at all, so no line is written and no file or
+//!   `logs/` directory is ever created.
+//! - **Where does it go?** A per-session file `logs/koshi-log-<id>.log` under
+//!   the user's state directory (see [`logging::session_log_path`]). The file is
+//!   created on the *first* line written and re-created if it is removed while
+//!   koshi runs.
+//! - **What passes the bar?** [`logging::LoggingParams::level`] — the lowest severity
+//!   that gets written; a line below it is dropped before it reaches the file.
 //!
 //! # Logging policy
 //!
@@ -14,35 +24,17 @@
 //! error kind. No payloads, no command arguments, no terminal/PTY output, no
 //! per-frame or per-keystroke activity. Anything high-frequency or content-like
 //! belongs in the in-memory event ring (`koshi debug events`), not the log file.
-//! This keeps the file small over a long session and free of user data.
-//!
-//! Logging is **off by default**: [`logging::TracingOptions::from_env`] yields
-//! [`Disabled`](logging::LogDestination::Disabled) unless `KOSHI_LOG` is set,
-//! and disabled means no log file and no directory is ever created. The
-//! `logging` config section turns it on (`enabled true`) once the config
-//! loader wires it through.
+//! This keeps the file small over a session and free of user data — and keeps
+//! the per-line file open cheap, since the volume stays low.
 //!
 //! When enabled, logs never go to stdout: that is Koshi's render surface, and
-//! writing to it would corrupt the terminal UI. The file destination is
-//! `logs/koshi.log` under the user's state directory (the sink behind
-//! `koshi debug tail-log`); [stderr] is offered for non-UI contexts such as
-//! early startup or a foreground daemon.
-//!
-//! [stderr]: logging::LogDestination::Stderr
+//! writing to it would corrupt the terminal UI.
 //!
 //! Redaction is not optional: anything derived from the environment must pass
 //! through [`logging::redacted_env_field`] before it becomes a log value, so a secret
 //! such as `KOSHI_CONTEXT_TOKEN` can never reach the output even if it is handed
 //! to the logger by mistake. The scrubbing itself lives in [`koshi_core::redact`];
 //! this module only routes env maps through it on the way to a log line.
-//!
-//! Environment variables read by [`logging::TracingOptions::from_env`]:
-//! - `KOSHI_LOG_FORMAT` — `json` or `pretty` (default: `pretty`).
-//! - `KOSHI_LOG` — enables file logging and sets the tracing filter
-//!   directive, e.g. `info` or `koshi=debug`; unset or empty leaves logging
-//!   disabled.
-//! - `KOSHI_STATE_DIR` — moves the state directory the log file lives under
-//!   (resolved by [`koshi_paths::state_dir`]).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -50,12 +42,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
-use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
-use tracing_appender::rolling::{Builder, Rotation};
+use tracing::Level;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::EnvFilter;
 
+use koshi_core::ids::SessionId;
+use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::redact::redact_env_map;
 
 /// The canonical field names every cross-cutting log line should carry. They are
@@ -72,246 +64,137 @@ pub const CANONICAL_FIELDS: [&str; 8] = [
     "subscriber_id",
 ];
 
-/// How log lines are rendered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogFormat {
-    /// One JSON object per line, for machine ingestion.
-    Json,
-    /// Human-readable multi-line records, for a developer at a terminal.
-    Pretty,
-}
-
-impl LogFormat {
-    /// Read the format from `KOSHI_LOG_FORMAT` (`json` or `pretty`). Anything else,
-    /// including an unset variable, falls back to [`LogFormat::Pretty`].
-    pub fn from_env() -> Self {
-        LogFormat::parse(std::env::var("KOSHI_LOG_FORMAT").ok().as_deref())
-    }
-
-    /// The pure mapping behind [`Self::from_env`]: `Some("json")` is JSON, anything else
-    /// (including `None`) is pretty. Kept separate so it can be tested without
-    /// touching the process-global environment.
-    pub fn parse(value: Option<&str>) -> Self {
-        match value {
-            Some("json") => LogFormat::Json,
-            _ => LogFormat::Pretty,
-        }
-    }
-}
-
-/// Where log lines are written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LogDestination {
-    /// A file. The destination for a running session with logging enabled,
-    /// since stdout is the render surface and even stderr smears a
-    /// full-screen terminal UI.
-    File(PathBuf),
-    /// The standard error stream, for contexts with no terminal UI (early
-    /// startup, a foreground daemon, one-shot commands).
-    Stderr,
-    /// No logging at all — the default. `init_tracing` installs nothing and
-    /// touches no disk: no directory, no file. Distinct from a filter of
-    /// `off`, which still opens a (then-empty) log file.
-    Disabled,
-}
-
-impl LogDestination {
-    /// The standard file destination: a `koshi.log` file under the user's
-    /// state directory's `logs/` folder (see [`default_log_path`]). A file
-    /// destination rotates daily and keeps a bounded number of days (see
-    /// [`TracingOptions::max_log_files`]).
-    pub fn default_file() -> Self {
-        LogDestination::File(default_log_path())
-    }
-}
-
-/// How many rotated log files to keep before the oldest is deleted.
-pub const DEFAULT_MAX_LOG_FILES: usize = 7;
-
-/// The standard log file is `koshi.log` in the `logs/` folder of the user's
-/// state directory, resolved by [`koshi_paths::state_dir`] —
-/// `~/.local/state/koshi/logs` on Linux, `~/Library/Application
-/// Support/koshi/logs` on macOS, `%LOCALAPPDATA%\koshi\data\logs` on Windows,
-/// with `KOSHI_STATE_DIR` moving the state directory on every platform. If no
-/// home directory can be found at all, the file lands in the current
-/// directory as a last resort.
-pub fn default_log_path() -> PathBuf {
-    match koshi_paths::state_dir() {
-        Some(dir) => dir.join("logs").join("koshi.log"),
-        None => PathBuf::from("koshi.log"),
-    }
-}
-
-/// Knobs for [`init_tracing`].
+/// Everything the subscriber needs, resolved from the `logging` config section.
 #[derive(Debug, Clone)]
-pub struct TracingOptions {
-    /// How log lines are rendered.
+pub struct LoggingParams {
+    /// Whether to install a subscriber and write a file at all.
+    pub enabled: bool,
+    /// The lowest severity that gets written.
+    pub level: LogLevel,
+    /// How each written line is rendered.
     pub format: LogFormat,
-    /// A `tracing_subscriber` env-filter directive (e.g. `info`, `koshi=debug`).
-    pub filter: String,
-    /// Where log lines are written.
-    pub destination: LogDestination,
-    /// For a file destination, how many daily-rotated files to retain before the
-    /// oldest is deleted. Ignored for [`LogDestination::Stderr`].
-    pub max_log_files: usize,
+    /// The session this run logs under; names the per-session log file.
+    pub session_id: SessionId,
 }
 
-impl TracingOptions {
-    /// Build options from the environment: [`LogFormat::from_env`] for the
-    /// format, `KOSHI_LOG` for the filter, and [`DEFAULT_MAX_LOG_FILES`] for
-    /// retention. Logging is off by default: with `KOSHI_LOG` unset (or
-    /// empty) the destination is [`LogDestination::Disabled`] and no log
-    /// file is created; setting it — e.g. `KOSHI_LOG=info` — turns on the
-    /// standard log file with that filter. The config loader flips the same
-    /// switch from the `logging` config section once it consumes these
-    /// options.
-    pub fn from_env() -> Self {
-        Self::from_filter(std::env::var("KOSHI_LOG").ok().filter(|v| !v.is_empty()))
-    }
-
-    /// The mapping behind [`Self::from_env`]: `Some(filter)` — e.g.
-    /// `Some("koshi=debug")` — enables the standard log file with that
-    /// filter, `None` disables logging entirely. Kept separate so the
-    /// filter → destination mapping can be tested without setting
-    /// `KOSHI_LOG` in the process-global environment (the format still
-    /// reads [`LogFormat::from_env`]).
-    pub fn from_filter(filter: Option<String>) -> Self {
-        let destination = if filter.is_some() {
-            LogDestination::default_file()
-        } else {
-            LogDestination::Disabled
-        };
-        TracingOptions {
-            format: LogFormat::from_env(),
-            destination,
-            filter: filter.unwrap_or_else(|| "info".to_string()),
-            max_log_files: DEFAULT_MAX_LOG_FILES,
-        }
-    }
-}
-
-impl Default for TracingOptions {
-    fn default() -> Self {
-        TracingOptions::from_env()
+/// The log file for `session_id`: `logs/koshi-log-<uuid>.log` under the user's
+/// state directory (resolved by [`koshi_paths::state_dir`]) —
+/// `~/.local/state/koshi/logs` on Linux, `~/Library/Application
+/// Support/koshi/logs` on macOS, `%LOCALAPPDATA%\koshi\data\logs` on Windows.
+/// If no home directory can be found at all, the file lands in the current
+/// directory as a last resort.
+///
+/// Example: session `…446655440000` resolves on Linux to
+/// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
+#[must_use]
+pub fn session_log_path(session_id: SessionId) -> PathBuf {
+    let name = format!("koshi-log-{}.log", session_id.as_uuid());
+    match koshi_paths::state_dir() {
+        Some(dir) => dir.join("logs").join(name),
+        None => PathBuf::from(name),
     }
 }
 
 /// Why [`init_tracing`] could not install a subscriber.
 #[derive(Debug, Error)]
 pub enum TracingError {
-    /// The filter directive failed to parse.
-    #[error("invalid log filter: {0}")]
-    Filter(String),
-    /// The log file or its directory could not be opened.
-    #[error("could not open log sink: {0}")]
-    Sink(String),
     /// A global subscriber was already installed for this process.
     #[error("tracing is already initialized for this process")]
     AlreadyInitialized,
 }
 
-/// Holds resources tied to the active subscriber. Keep it alive for as long as
-/// logging is needed.
+/// Install the process-wide tracing subscriber from resolved config.
 ///
-/// For a file destination it owns the non-blocking writer's worker guard, which
-/// flushes buffered log lines to disk on drop; dropping it early can therefore
-/// lose tail-end logs. For [`LogDestination::Stderr`] there is nothing to flush
-/// and dropping it is a no-op.
-pub struct TracingGuard {
-    _worker: Option<WorkerGuard>,
+/// Disabled installs nothing and touches no disk: with no global subscriber,
+/// every event is dropped and no file or directory is created. Enabled installs
+/// a subscriber that writes the per-session file lazily on the first line.
+///
+/// Returns [`TracingError::AlreadyInitialized`] if a subscriber is already
+/// installed, since a process has a single global subscriber.
+pub fn init_tracing(params: LoggingParams) -> Result<(), TracingError> {
+    if !params.enabled {
+        return Ok(());
+    }
+    init_to_path(
+        &session_log_path(params.session_id),
+        params.level,
+        params.format,
+    )
 }
 
-/// Install the process-wide tracing subscriber.
-///
-/// Returns [`TracingError::AlreadyInitialized`] if called more than once, since a
-/// process has a single global subscriber.
-pub fn init_tracing(opts: TracingOptions) -> Result<TracingGuard, TracingError> {
-    // Disabled means do nothing: with no global subscriber installed, every
-    // tracing event is dropped, and no sink is opened. Return before parsing the
-    // filter or touching the filesystem.
-    if opts.destination == LogDestination::Disabled {
-        return Ok(TracingGuard { _worker: None });
+/// Install a subscriber writing to `path`. Separated from [`init_tracing`] so a
+/// test can point it at a temp directory without going through the
+/// state-directory resolver.
+pub fn init_to_path(path: &Path, level: LogLevel, format: LogFormat) -> Result<(), TracingError> {
+    let writer = SessionLogMaker {
+        path: path.to_path_buf(),
+    };
+    // `with_ansi(false)`: the file is plain text, never a color terminal. The
+    // format method (`pretty`/`json`) is the only thing that differs per arm.
+    let builder = fmt()
+        .with_max_level(max_level(level))
+        .with_ansi(false)
+        .with_writer(writer);
+    let result = match format {
+        LogFormat::Pretty => builder.pretty().try_init(),
+        LogFormat::Json => builder.json().try_init(),
+    };
+    result.map_err(|_| TracingError::AlreadyInitialized)
+}
+
+/// The most verbose severity that still gets written for a configured level:
+/// `warning` admits warnings and errors, `error` admits only errors.
+fn max_level(level: LogLevel) -> Level {
+    match level {
+        LogLevel::Info => Level::INFO,
+        LogLevel::Warning => Level::WARN,
+        LogLevel::Error => Level::ERROR,
+    }
+}
+
+/// A [`MakeWriter`] that appends each formatted event to a per-session log
+/// file, creating the file — and its `logs/` parent — on the first write and
+/// re-creating it if it is removed while koshi runs. The [logging
+/// policy](self#logging-policy) keeps the volume low (errors and domain events
+/// only), so opening the file per event is not a hot path.
+// ponytail: reopen-per-event is fine at these volumes; cache the handle if logging ever gets chatty.
+struct SessionLogMaker {
+    path: PathBuf,
+}
+
+impl<'a> MakeWriter<'a> for SessionLogMaker {
+    type Writer = SessionLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SessionLogWriter {
+            path: self.path.clone(),
+        }
+    }
+}
+
+/// The `io::Write` half of [`SessionLogMaker`]: opens the file in
+/// create-and-append mode for one event's bytes, then drops it (which flushes
+/// and closes it), so every written line is on disk before the next event.
+struct SessionLogWriter {
+    path: PathBuf,
+}
+
+impl io::Write for SessionLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?
+            .write_all(buf)?;
+        Ok(buf.len())
     }
 
-    let filter =
-        EnvFilter::try_new(&opts.filter).map_err(|err| TracingError::Filter(err.to_string()))?;
-    let max_log_files = opts.max_log_files;
-
-    // Each (format, destination) pair builds a differently typed subscriber, so
-    // the arms install their own and report back whether init succeeded plus the
-    // worker guard to keep alive.
-    let (result, worker) = match (opts.format, opts.destination) {
-        (LogFormat::Json, LogDestination::Stderr) => (
-            fmt()
-                .with_env_filter(filter)
-                .json()
-                .with_writer(io::stderr)
-                .try_init(),
-            None,
-        ),
-        (LogFormat::Pretty, LogDestination::Stderr) => (
-            fmt()
-                .with_env_filter(filter)
-                .pretty()
-                .with_writer(io::stderr)
-                .try_init(),
-            None,
-        ),
-        (LogFormat::Json, LogDestination::File(path)) => {
-            let (writer, worker) = file_writer(&path, max_log_files)?;
-            (
-                fmt()
-                    .with_env_filter(filter)
-                    .json()
-                    .with_writer(writer)
-                    .try_init(),
-                Some(worker),
-            )
-        }
-        (LogFormat::Pretty, LogDestination::File(path)) => {
-            let (writer, worker) = file_writer(&path, max_log_files)?;
-            (
-                fmt()
-                    .with_env_filter(filter)
-                    .pretty()
-                    .with_writer(writer)
-                    .try_init(),
-                Some(worker),
-            )
-        }
-        // Handled by the early return above.
-        (_, LogDestination::Disabled) => unreachable!("disabled destination returns early"),
-    };
-    result.map_err(|_| TracingError::AlreadyInitialized)?;
-
-    Ok(TracingGuard { _worker: worker })
-}
-
-/// Open `path` as a non-blocking, daily-rotated log sink, creating its parent
-/// directory. `path`'s file name is the rotation prefix, so files land as
-/// `<name>.YYYY-MM-DD`; at most `max_log_files` are kept before the oldest is
-/// deleted. Returns the writer plus the worker guard that flushes it on drop.
-fn file_writer(
-    path: &Path,
-    max_log_files: usize,
-) -> Result<(NonBlocking, WorkerGuard), TracingError> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    let prefix = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            TracingError::Sink(format!("log path has no file name: {}", path.display()))
-        })?;
-    std::fs::create_dir_all(directory).map_err(|err| TracingError::Sink(err.to_string()))?;
-    // Clamped to one: the appender treats a zero limit as "no pruning at all"
-    // (unbounded retention), so the smallest honored retention is one file.
-    let appender = Builder::new()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(prefix)
-        .max_log_files(max_log_files.max(1))
-        .build(directory)
-        .map_err(|err| TracingError::Sink(err.to_string()))?;
-    Ok(tracing_appender::non_blocking(appender))
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A thread-local capture of log output. Returned by [`with_test_writer`] so a
@@ -377,7 +260,7 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
 pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
     let logs = CapturedLogs::default();
     let subscriber = fmt()
-        .with_env_filter(EnvFilter::new("trace"))
+        .with_max_level(Level::TRACE)
         .json()
         .with_writer(logs.clone())
         .finish();

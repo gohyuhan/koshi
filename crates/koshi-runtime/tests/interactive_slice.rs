@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, Size};
+use koshi_core::ids::SessionId;
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -63,7 +64,7 @@ fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
     let mut rt = runtime_with(fake.clone());
 
     let client_id = rt
-        .bootstrap_local(VIEWPORT, SystemTime::now())
+        .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
 
     assert_eq!(rt.sessions().len(), 1);
@@ -83,7 +84,7 @@ fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
 fn pty_output_is_forwarded_into_the_inbox() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
-    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -104,7 +105,7 @@ fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
     let client_id = rt
-        .bootstrap_local(VIEWPORT, SystemTime::now())
+        .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -138,7 +139,7 @@ fn typed_keys_write_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
     let client_id = rt
-        .bootstrap_local(VIEWPORT, SystemTime::now())
+        .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -162,7 +163,7 @@ fn typed_keys_write_to_the_focused_pane() {
 fn child_exit_is_forwarded_and_ends_the_last_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
-    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -193,7 +194,7 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
 fn trailing_output_is_forwarded_before_the_exit() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
-    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -227,7 +228,7 @@ fn trailing_output_is_forwarded_before_the_exit() {
 fn kill_all_panes_group_kills_the_shell() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
-    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
@@ -241,7 +242,7 @@ fn kill_all_panes_group_kills_the_shell() {
 fn shutdown_drains_and_graceful_group_kills_each_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let mut rt = runtime_with(fake.clone());
-    rt.bootstrap_local(VIEWPORT, SystemTime::now())
+    rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
