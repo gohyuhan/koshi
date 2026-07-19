@@ -7,6 +7,7 @@ use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand};
 use koshi::error::CliError;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::updater;
 use koshi_core::command::CliExitCode;
 
 fn main() -> ExitCode {
@@ -44,7 +45,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return run_keys_query(command);
     }
 
+    // The self-update verbs run locally: they talk to GitHub and the local
+    // filesystem, not the session daemon.
+    match &cli.command {
+        Some(CliCommand::Update) => return updater::run_update_command(),
+        Some(CliCommand::AllowPrereleaseUpdate { disable }) => {
+            return updater::set_allow_prerelease(!disable);
+        }
+        _ => {}
+    }
+
     if cli.is_interactive_launch() {
+        // Offer a newer release before entering raw mode, so the prompt is a
+        // plain stdin read; failures never block the launch.
+        updater::maybe_prompt_startup_update();
         return koshi::app::run().map_err(|err| CliError::Runtime {
             detail: err.to_string(),
         });

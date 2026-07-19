@@ -21,3 +21,6 @@ pub mod keymap;
 /// Table and JSON rendering for discovery query answers, action-registry
 /// introspection, and keymap introspection.
 pub mod output;
+
+/// Self-update: check GitHub for a newer koshi release and install it.
+pub mod updater;

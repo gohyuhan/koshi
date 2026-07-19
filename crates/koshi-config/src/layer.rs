@@ -27,7 +27,7 @@ use crate::key::Leader;
 use crate::types::{
     ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults, LoggingConfig,
     ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation, PluginActivationConfig,
-    RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, WheelScroll,
+    RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, UpdateConfig, WheelScroll,
 };
 
 /// Folds `layers` onto `base` in order and returns the effective config.
@@ -77,6 +77,8 @@ pub struct PartialKoshiConfig {
     pub theme: Option<PartialThemeConfig>,
     /// Logging overrides.
     pub logging: Option<PartialLoggingConfig>,
+    /// Self-update overrides.
+    pub update: Option<PartialUpdateConfig>,
 }
 
 impl PartialKoshiConfig {
@@ -112,6 +114,25 @@ impl PartialKoshiConfig {
         if let Some(logging) = self.logging {
             logging.apply(&mut config.logging);
         }
+        if let Some(update) = self.update {
+            update.apply(&mut config.update);
+        }
+    }
+}
+
+/// Self-update overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartialUpdateConfig {
+    /// Whether an interactive launch checks for a newer release when due.
+    pub auto_check: Option<bool>,
+    /// Days between startup update checks.
+    pub check_interval_days: Option<u32>,
+}
+
+impl PartialUpdateConfig {
+    fn apply(self, target: &mut UpdateConfig) {
+        merge_field(&mut target.auto_check, self.auto_check);
+        merge_field(&mut target.check_interval_days, self.check_interval_days);
     }
 }
 
