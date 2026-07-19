@@ -87,6 +87,12 @@ TARGET_PATH="${INSTALL_DIR}/koshi"
 
 log_info "Installing to ${TARGET_PATH}..."
 
+# Ensure the install directory exists (sudo if we cannot create it ourselves),
+# so a fresh machine without /usr/local/bin does not fail the move below.
+if [ ! -d "${INSTALL_DIR}" ]; then
+  mkdir -p "${INSTALL_DIR}" 2>/dev/null || sudo mkdir -p "${INSTALL_DIR}"
+fi
+
 if [ -w "${INSTALL_DIR}" ]; then
   mv "${BINARY_PATH}" "${TARGET_PATH}"
   chmod +x "${TARGET_PATH}"

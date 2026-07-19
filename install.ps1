@@ -46,26 +46,27 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
 
-# Extract
+# Extract to a scratch directory, so the binary is placed at the install root
+# regardless of how the archive nests it — and an upgrade never leaves an old
+# root binary shadowing a newly-extracted nested one.
+$ExtractDir = Join-Path $TempDir "koshi-extract-$PID"
+if (Test-Path $ExtractDir) { Remove-Item $ExtractDir -Recurse -Force }
 Write-Host "Extracting..." -ForegroundColor Cyan
-Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
+Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
-# Cleanup
+# Cleanup the archive
 Remove-Item $ZipPath -ErrorAction SilentlyContinue
 
-# Verify Binary
-$BinaryPath = Join-Path $InstallDir "koshi.exe"
-if (-not (Test-Path $BinaryPath)) {
-    # Check if it landed in a subfolder
-    $Found = Get-ChildItem -Path $InstallDir -Filter "koshi.exe" -Recurse | Select-Object -First 1
-    if ($Found) {
-        Move-Item $Found.FullName $InstallDir -Force
-        $BinaryPath = Join-Path $InstallDir "koshi.exe"
-    } else {
-        Write-Error "Binary 'koshi.exe' not found in extracted files."
-        exit 1
-    }
+# Place the binary at the install root, wherever it landed in the archive.
+$Found = Get-ChildItem -Path $ExtractDir -Filter "koshi.exe" -Recurse | Select-Object -First 1
+if (-not $Found) {
+    Write-Error "Binary 'koshi.exe' not found in extracted files."
+    Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+    exit 1
 }
+$BinaryPath = Join-Path $InstallDir "koshi.exe"
+Move-Item $Found.FullName $BinaryPath -Force
+Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "Installed to: $BinaryPath" -ForegroundColor Green
 

@@ -40,6 +40,7 @@ tar = "0.4.46"
 # non-permissive transitive licenses. `deflate-flate2` reuses the flate2
 # already pulled for tar.gz.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+tempfile = "3.27.0"
 
 [dev-dependencies]
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

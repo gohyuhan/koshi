@@ -28,6 +28,7 @@ use koshi_config::layer::merge;
 use koshi_config::types::{KoshiConfig, UpdateConfig};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use tempfile::{Builder, TempPath};
 use ureq::Agent;
 
 use crate::error::CliError;
@@ -98,6 +99,7 @@ pub fn set_allow_prerelease(allow: bool) -> Result<(), CliError> {
 /// launch. Runs before the terminal enters raw mode, so the prompt is a plain
 /// stdin read.
 pub fn maybe_prompt_startup_update() {
+    remove_stale_backup();
     let config = load_update_config();
     if !config.auto_check {
         return;
@@ -106,19 +108,15 @@ pub fn maybe_prompt_startup_update() {
     if !is_due(&state, config.check_interval_days) {
         return;
     }
-    let tag = match check_for_update(state.allow_prerelease) {
-        Ok(Some(tag)) => tag,
-        // Up to date: record the check so the next one waits a full interval.
-        Ok(None) => {
-            state.last_check = Some(now_secs());
-            let _ = save_state(&state);
-            return;
-        }
-        // Network trouble: retry next launch, so the check is not recorded.
-        Err(_) => return,
-    };
+    // Record this attempt before the network call, for every outcome, so a
+    // failing or slow check waits a full interval instead of repeating — and
+    // stalling on the timeout — on every launch while offline or firewalled.
     state.last_check = Some(now_secs());
     let _ = save_state(&state);
+    let tag = match check_for_update(state.allow_prerelease) {
+        Ok(Some(tag)) => tag,
+        Ok(None) | Err(_) => return,
+    };
 
     let prompt = format!(
         "koshi {} is available (you have {APP_VERSION}). Update now? [y/N] ",
@@ -161,7 +159,7 @@ fn check_for_update(allow_prerelease: bool) -> Result<Option<String>, String> {
 /// to stable releases.
 fn latest_release(allow_prerelease: bool) -> Result<String, String> {
     if allow_prerelease {
-        let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=10");
+        let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=25");
         let releases: Vec<Release> = get_json(&url)?;
         releases
             .into_iter()
@@ -198,8 +196,9 @@ fn is_newer(tag: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Checks for a newer release, downloads its archive, unpacks the binary, and
-/// swaps it for the running executable. Cleans up both temp files whichever
-/// way it ends.
+/// swaps it for the running executable. Both temp files are securely created
+/// and auto-removed when their [`TempPath`] drops at the end of this function,
+/// whichever way it ends.
 fn install_release(tag: &str) -> Result<(), String> {
     let url = binary_url(tag).ok_or_else(|| {
         format!(
@@ -210,14 +209,8 @@ fn install_release(tag: &str) -> Result<(), String> {
     })?;
     println!("downloading koshi {} …", strip_v(tag));
     let archive = download(&url)?;
-    let result = (|| {
-        let binary = extract(&archive, &url)?;
-        let installed = install_binary(&binary);
-        let _ = fs::remove_file(&binary);
-        installed
-    })();
-    let _ = fs::remove_file(&archive);
-    result
+    let binary = extract(archive.as_ref(), &url)?;
+    install_binary(binary.as_ref())
 }
 
 /// The download URL for this platform's release archive at `tag`, or `None`
@@ -242,23 +235,27 @@ fn binary_url(tag: &str) -> Option<String> {
     ))
 }
 
-/// Downloads `url` into a fresh temp file and returns its path.
-fn download(url: &str) -> Result<PathBuf, String> {
+/// Downloads `url` into a securely-created temp file and returns its path. The
+/// file has a random name and is created exclusively, so it never follows or
+/// truncates a pre-existing file or symlink of a guessable name.
+fn download(url: &str) -> Result<TempPath, String> {
     let mut response = agent(DOWNLOAD_TIMEOUT)
         .get(url)
         .header("User-Agent", "koshi")
         .call()
         .map_err(|err| err.to_string())?;
-    let path = temp_path("archive");
-    let mut file = fs::File::create(&path).map_err(|err| err.to_string())?;
+    let mut file = Builder::new()
+        .prefix("koshi-update-")
+        .tempfile()
+        .map_err(|err| err.to_string())?;
     let mut reader = response.body_mut().as_reader();
-    io::copy(&mut reader, &mut file).map_err(|err| err.to_string())?;
-    Ok(path)
+    io::copy(&mut reader, file.as_file_mut()).map_err(|err| err.to_string())?;
+    Ok(file.into_temp_path())
 }
 
 /// Unpacks the koshi binary out of the downloaded archive to a temp file,
 /// choosing the tar.gz or zip reader from the URL suffix.
-fn extract(archive: &Path, url: &str) -> Result<PathBuf, String> {
+fn extract(archive: &Path, url: &str) -> Result<TempPath, String> {
     if url.ends_with(".zip") {
         extract_zip(archive)
     } else {
@@ -267,7 +264,7 @@ fn extract(archive: &Path, url: &str) -> Result<PathBuf, String> {
 }
 
 /// Unpacks the binary from a gzip-compressed tar archive.
-fn extract_tar_gz(archive: &Path) -> Result<PathBuf, String> {
+fn extract_tar_gz(archive: &Path) -> Result<TempPath, String> {
     let file = fs::File::open(archive).map_err(|err| err.to_string())?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
     for entry in tar.entries().map_err(|err| err.to_string())? {
@@ -290,7 +287,7 @@ fn extract_tar_gz(archive: &Path) -> Result<PathBuf, String> {
 }
 
 /// Unpacks the binary from a zip archive.
-fn extract_zip(archive: &Path) -> Result<PathBuf, String> {
+fn extract_zip(archive: &Path) -> Result<TempPath, String> {
     let file = fs::File::open(archive).map_err(|err| err.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|err| err.to_string())?;
     for index in 0..zip.len() {
@@ -306,15 +303,18 @@ fn extract_zip(archive: &Path) -> Result<PathBuf, String> {
     Err("binary not found in archive".to_string())
 }
 
-/// Copies an extracted binary stream to a temp file, made executable on Unix.
-fn save_binary(source: &mut impl Read) -> Result<PathBuf, String> {
-    let path = temp_path("bin");
-    let mut out = fs::File::create(&path).map_err(|err| err.to_string())?;
-    io::copy(source, &mut out).map_err(|err| err.to_string())?;
-    drop(out);
+/// Copies an extracted binary stream to a securely-created temp file, made
+/// executable on Unix. The random-named, exclusively-created temp file never
+/// follows or truncates an existing file or symlink of a guessable name.
+fn save_binary(source: &mut impl Read) -> Result<TempPath, String> {
+    let mut file = Builder::new()
+        .prefix("koshi-update-")
+        .tempfile()
+        .map_err(|err| err.to_string())?;
+    io::copy(source, file.as_file_mut()).map_err(|err| err.to_string())?;
     #[cfg(unix)]
-    make_executable(&path)?;
-    Ok(path)
+    make_executable(file.path())?;
+    Ok(file.into_temp_path())
 }
 
 /// The binary's file name inside a release archive on this platform.
@@ -323,6 +323,17 @@ fn binary_name() -> &'static str {
         "koshi.exe"
     } else {
         "koshi"
+    }
+}
+
+/// Removes a `<exe>.old` left by a prior Windows self-update. The old image is
+/// locked against deletion while it is the running process, so the rename-aside
+/// swap cannot delete it then; the next launch runs the new binary and clears
+/// it. A no-op on other platforms, where the swap deletes nothing behind.
+fn remove_stale_backup() {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = fs::remove_file(exe.with_extension("old"));
     }
 }
 
@@ -373,16 +384,27 @@ fn swap_exe(new_binary: &Path, exe: &Path) -> Result<(), String> {
 }
 
 /// Replaces the executable on Windows: a running binary cannot be overwritten,
-/// so rename it aside, move the new one into place, and restore the old one if
-/// that fails.
+/// so stage the new one beside the exe (a copy crosses drives, so both later
+/// renames stay on the exe's own volume), rename the running exe aside, move the
+/// staged one into place, and restore the old one if that final move fails.
 #[cfg(windows)]
 fn swap_exe(new_binary: &Path, exe: &Path) -> Result<(), String> {
+    // Stage on the exe's own volume so the final rename can't fail cross-drive
+    // (the download temp dir may be on a different drive than a portable exe).
+    let staged = exe.with_file_name(format!("koshi-update-{}.exe", std::process::id()));
+    fs::copy(new_binary, &staged).map_err(|err| err.to_string())?;
     let backup = exe.with_extension("old");
-    fs::rename(exe, &backup).map_err(|err| err.to_string())?;
-    if let Err(err) = fs::rename(new_binary, exe) {
-        let _ = fs::rename(&backup, exe);
+    if let Err(err) = fs::rename(exe, &backup) {
+        let _ = fs::remove_file(&staged);
         return Err(err.to_string());
     }
+    if let Err(err) = fs::rename(&staged, exe) {
+        let _ = fs::rename(&backup, exe);
+        let _ = fs::remove_file(&staged);
+        return Err(err.to_string());
+    }
+    // The old image is locked against deletion while it runs; `remove_stale_backup`
+    // clears it on the next launch.
     let _ = fs::remove_file(&backup);
     Ok(())
 }
@@ -483,8 +505,11 @@ fn is_due(state: &UpdateState, interval_days: u32) -> bool {
 // Config (user-owned): koshi.kdl `update` section
 // ---------------------------------------------------------------------------
 
-/// Reads the `update` section of `koshi.kdl`, falling back to defaults on any
-/// problem (missing file, parse error) so a launch never fails over config.
+/// Reads the `update` section of `koshi.kdl`. A missing or unreadable file
+/// falls back to defaults (auto-check on), since no opt-out was expressed. A
+/// file that is present but fails to parse fails **closed** — auto-check off —
+/// because it may carry an `auto-check #false` we could not read, and a network
+/// check should never be silently re-enabled by an unrelated typo.
 fn load_update_config() -> UpdateConfig {
     let Some(path) = koshi_paths::config_dir().map(|dir| dir.join("koshi.kdl")) else {
         return UpdateConfig::default();
@@ -495,8 +520,11 @@ fn load_update_config() -> UpdateConfig {
     match parse_app_config(&path, &source) {
         Ok(layer) => merge(KoshiConfig::default(), vec![layer]).update,
         Err(err) => {
-            tracing::warn!(%err, "ignoring koshi.kdl for update settings; using defaults");
-            UpdateConfig::default()
+            tracing::warn!(%err, "koshi.kdl did not parse; disabling auto update check");
+            UpdateConfig {
+                auto_check: false,
+                ..UpdateConfig::default()
+            }
         }
     }
 }
@@ -530,11 +558,6 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
         .read_to_string()
         .map_err(|err| err.to_string())?;
     serde_json::from_str(&body).map_err(|err| err.to_string())
-}
-
-/// A unique temp-file path for this process, tagged with `kind`.
-fn temp_path(kind: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("koshi-update-{}.{kind}", std::process::id()))
 }
 
 /// Drops a leading `v` from a tag or version string.
