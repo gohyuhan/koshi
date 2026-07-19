@@ -515,6 +515,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
     names.sort();
     let mut expected: Vec<String> = [
         "actions",
+        "allow-prerelease-update",
         "close-pane",
         "close-tab",
         "config",
@@ -545,6 +546,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",
+        "update",
     ]
     .map(String::from)
     .to_vec();

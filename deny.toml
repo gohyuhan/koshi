@@ -32,6 +32,9 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unlicense",
+    # Permissive data license (no redistribution conditions in 2.0), covering
+    # the Mozilla CA root bundle in `webpki-roots` pulled by `ureq`'s TLS.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # Allow-list entries not matched by the current tree are intentional

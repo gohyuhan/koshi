@@ -10,6 +10,7 @@
 //! Discovering config files on disk, full validation, and migrating older
 //! files forward belong to this system too.
 
+pub mod app_config;
 pub mod conflict;
 pub mod error;
 pub mod key;

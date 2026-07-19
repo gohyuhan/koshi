@@ -37,6 +37,9 @@ pub enum CliError {
     /// A runtime or action error surfaced while executing.
     #[error("{detail}")]
     Runtime { detail: String },
+    /// A self-update check or install failed.
+    #[error("update failed: {detail}")]
+    Update { detail: String },
 }
 
 impl DomainError for CliError {
@@ -48,7 +51,7 @@ impl DomainError for CliError {
             | CliError::UnboundKey { .. }
             | CliError::InvalidKeymapFile { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
-            CliError::Runtime { .. } => DomainCategory::Session,
+            CliError::Runtime { .. } | CliError::Update { .. } => DomainCategory::Session,
         }
     }
 
@@ -70,7 +73,7 @@ impl From<&CliError> for CliExitCode {
             | CliError::UnboundKey { .. }
             | CliError::InvalidKeymapFile { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
-            CliError::Runtime { .. } => CliExitCode::RuntimeAction,
+            CliError::Runtime { .. } | CliError::Update { .. } => CliExitCode::RuntimeAction,
         }
     }
 }

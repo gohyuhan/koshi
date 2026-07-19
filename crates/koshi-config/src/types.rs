@@ -52,6 +52,8 @@ pub struct KoshiConfig {
     pub theme: ThemeConfig,
     /// Log-file behavior.
     pub logging: LoggingConfig,
+    /// Self-update checking behavior.
+    pub update: UpdateConfig,
 }
 
 impl Default for KoshiConfig {
@@ -68,6 +70,27 @@ impl Default for KoshiConfig {
             terminal: TerminalConfig::default(),
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
+            update: UpdateConfig::default(),
+        }
+    }
+}
+
+/// Self-update checking behavior. `koshi update` reads these to decide whether
+/// to look for a newer release on startup and how often.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateConfig {
+    /// Whether an interactive launch checks GitHub for a newer release when a
+    /// check is due.
+    pub auto_check: bool,
+    /// Days to wait between startup update checks.
+    pub check_interval_days: u32,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            check_interval_days: 14,
         }
     }
 }
