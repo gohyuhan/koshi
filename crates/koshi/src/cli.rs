@@ -265,13 +265,6 @@ pub enum CliCommand {
     Plugin,
     /// Download and install the latest koshi release.
     Update,
-    /// Set whether updates may come from pre-release builds. Running it enables
-    /// pre-release updates; `--false` disables them.
-    AllowPrereleaseUpdate {
-        /// Disable pre-release updates instead of enabling them.
-        #[arg(long = "false")]
-        disable: bool,
-    },
     /// Re-roll a session's generated name.
     RenameSession {
         /// Session to rename; defaults to the current session.
@@ -631,7 +624,6 @@ impl CliCommand {
             | CliCommand::Config
             | CliCommand::Plugin
             | CliCommand::Update
-            | CliCommand::AllowPrereleaseUpdate { .. }
             | CliCommand::Actions { .. }
             | CliCommand::Inspect { .. }
             | CliCommand::ListTabs { .. }

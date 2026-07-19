@@ -76,7 +76,8 @@ impl Default for KoshiConfig {
 }
 
 /// Self-update checking behavior. `koshi update` reads these to decide whether
-/// to look for a newer release on startup and how often.
+/// to look for a newer release on startup, how often, and whether pre-releases
+/// count as updates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateConfig {
     /// Whether an interactive launch checks GitHub for a newer release when a
@@ -84,6 +85,8 @@ pub struct UpdateConfig {
     pub auto_check: bool,
     /// Days to wait between startup update checks.
     pub check_interval_days: u32,
+    /// Whether a pre-release build counts as a newer version to update to.
+    pub allow_prerelease: bool,
 }
 
 impl Default for UpdateConfig {
@@ -91,6 +94,7 @@ impl Default for UpdateConfig {
         Self {
             auto_check: true,
             check_interval_days: 14,
+            allow_prerelease: false,
         }
     }
 }

@@ -73,6 +73,7 @@ fn parse_update(node: &KdlNode) -> Result<PartialUpdateConfig, ConfigError> {
             "check-interval-days" => {
                 update.check_interval_days = Some(read_u32(child, key)?);
             }
+            "allow-prerelease" => update.allow_prerelease = Some(read_bool(child, key)?),
             _ => {}
         }
     }
