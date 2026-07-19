@@ -208,16 +208,11 @@ impl PartialKeybindingsConfig {
 pub struct PartialLayoutDefaults {
     /// Direction a new pane spawns when the command omits one.
     pub new_pane_direction: Option<Direction>,
-    /// The named layout to load at startup. The outer `Option` is whether this
-    /// layer sets the field; the inner `Option` is the value (`None` = no
-    /// startup layout).
-    pub default_layout: Option<Option<String>>,
 }
 
 impl PartialLayoutDefaults {
     fn apply(self, target: &mut LayoutDefaults) {
         merge_field(&mut target.new_pane_direction, self.new_pane_direction);
-        merge_field(&mut target.default_layout, self.default_layout);
     }
 }
 

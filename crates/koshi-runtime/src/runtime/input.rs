@@ -263,10 +263,15 @@ impl Runtime {
 
         let tab = session.tabs.get(&tab_id)?;
         let viewport = session.tab_viewport(tab_id)?;
-        content_rects(&solve_tab(tab, client.layout_mode(tab_id), viewport))
-            .into_iter()
-            .any(|(pane, content)| pane == pane_id && content.is_some())
-            .then_some(pane_id)
+        content_rects(&solve_tab(
+            tab,
+            client.layout_mode(tab_id),
+            viewport,
+            self.effective_pane_min(),
+        ))
+        .into_iter()
+        .any(|(pane, content)| pane == pane_id && content.is_some())
+        .then_some(pane_id)
     }
 
     /// Re-arm a continuous binding's prefix after it fires: the sequence minus

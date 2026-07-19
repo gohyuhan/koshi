@@ -18,9 +18,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
+use koshi_config::key::Leader;
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
 use koshi_config::types::{
-    default_prefix_labels, BoundAction, KeybindingsConfig, ModeBindings, ModeName,
+    default_mode_bindings, default_prefix_labels, BoundAction, KeybindingsConfig, ModeBindings,
+    ModeName,
 };
 use koshi_core::action::ActionRef;
 use koshi_core::key::{KeyChord, KeySequence};
@@ -55,7 +57,7 @@ impl KeymapHintCatalog {
     /// live action table.
     pub(crate) fn from_registry(registry: &ActionRegistry) -> Self {
         Self::from_parts(
-            &keymap_layers(None),
+            &keymap_layers(None, Leader::default()),
             &KeybindingsConfig::default(),
             registry,
         )
@@ -108,7 +110,7 @@ impl KeymapHintCatalog {
             unlock_chord,
             entries,
             removed,
-            prefix_labels: Arc::new(default_prefix_labels()),
+            prefix_labels: Arc::new(default_prefix_labels(config.leader)),
             reverted: false,
         }
     }
@@ -166,10 +168,13 @@ impl KeymapHintCatalog {
 /// file are dropped rather than honored.
 pub(crate) fn keymap_layers(
     user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
+    leader: Leader,
 ) -> Vec<KeyMapLayer> {
     let mut layers = vec![KeyMapLayer {
         origin: LayerOrigin::Defaults,
-        modes: KeybindingsConfig::default().modes,
+        // Built against the effective leader, so rebinding the leader moves the
+        // leader-relative defaults.
+        modes: default_mode_bindings(leader),
     }];
     if let Some(modes) = user_modes {
         layers.push(

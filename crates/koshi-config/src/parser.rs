@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use kdl::KdlDocument;
+use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::error::ConfigParseDiagnostic;
 
@@ -21,4 +21,62 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
     source
         .parse::<KdlDocument>()
         .map_err(|err| ConfigParseDiagnostic::new(path, err))
+}
+
+// Field-value readers shared by the `koshi.kdl` and `theme.kdl` parsers. Each
+// takes one field node (`key value`) and returns the value or a plain-words
+// reason it could not be read, so a field-partial parser can turn that reason
+// into a warning and skip the field.
+
+/// The node's single unnamed argument, or a plain-words reason it is missing.
+pub(crate) fn single_value(node: &KdlNode) -> Result<&KdlValue, String> {
+    match node.entries() {
+        [entry] if entry.name().is_none() => Ok(entry.value()),
+        _ => Err("expected exactly one value".to_string()),
+    }
+}
+
+/// Reads the node's single value as a boolean.
+pub(crate) fn value_bool(node: &KdlNode) -> Result<bool, String> {
+    single_value(node)?
+        .as_bool()
+        .ok_or_else(|| "expected a boolean (#true or #false)".to_string())
+}
+
+/// Reads the node's single value as a string.
+pub(crate) fn value_string(node: &KdlNode) -> Result<String, String> {
+    single_value(node)?
+        .as_string()
+        .map(str::to_string)
+        .ok_or_else(|| "expected a string".to_string())
+}
+
+/// Reads the node's single value as a non-empty string, rejecting an empty or
+/// whitespace-only value. Used for fields that are exported to child programs
+/// or spawned as a program path, where a blank value would break the child
+/// (an empty `TERM` disables terminfo, an empty shell path spawns nothing).
+pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
+    let value = value_string(node)?;
+    if value.trim().is_empty() {
+        Err("must not be empty".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+/// Reads the node's single value as an integer.
+pub(crate) fn value_integer(node: &KdlNode) -> Result<i128, String> {
+    single_value(node)?
+        .as_integer()
+        .ok_or_else(|| "expected an integer".to_string())
+}
+
+/// Reads the node's single value as a `u16`.
+pub(crate) fn value_u16(node: &KdlNode) -> Result<u16, String> {
+    u16::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 65535".to_string())
+}
+
+/// Reads the node's single value as a `u32`.
+pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
+    u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
 }

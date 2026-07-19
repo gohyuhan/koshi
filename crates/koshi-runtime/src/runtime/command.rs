@@ -16,6 +16,7 @@
 //! resolution in `resolve`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
@@ -39,15 +40,15 @@ use koshi_core::{
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
-    process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
+    process::{ExitStatus, KillPolicy, PtySize, ShellKind, SpawnSpec},
 };
 use koshi_layout::{
     content::content_rects,
     edit::{add_to_stack, split_leaf},
     focus::stack_activate,
     mode::LayoutMode,
-    resize::{resize, ResizeError},
-    solver::{fits, solve, solve_with_mode, MIN_PANE_SIZE},
+    resize::{resize_with_min, ResizeError},
+    solver::{fits, solve_with_min, solve_with_mode_min},
     tree::LayoutNode,
 };
 use koshi_pane::pane::{
@@ -76,16 +77,34 @@ use koshi_session::session::{
 /// [`fits`] first; genesis has no gate, and the
 /// solver always places a single leaf, so the `unwrap_or` fallback is a floor,
 /// not a real path.
-pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size) -> PtySize {
+pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, min: Size) -> PtySize {
     let candidate = LayoutNode::Pane(pane_id);
     let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-    let rects = content_rects(&solve(&candidate, tab_rect));
+    let rects = content_rects(&solve_with_min(&candidate, tab_rect, min));
     let rect = rects
         .iter()
         .find(|(id, _)| *id == pane_id)
         .and_then(|(_, content)| *content)
         .unwrap_or(tab_rect);
     compute_pty_size(rect)
+}
+
+/// The PTY size for every pane in `layout` filling `viewport`: solve the whole
+/// tree once, then clamp each pane's content rect to a PTY size, in layout
+/// order. A multi-pane tab's panes each spawn at their tiled slice this way,
+/// not the whole tab. A pane the solve suppressed for lack of space has no
+/// content rect and falls back to the full tab rect — the same floor
+/// [`size_root_pane`] uses — so its child still starts at a usable size.
+pub(crate) fn pane_spawn_sizes(
+    layout: &LayoutNode,
+    viewport: Size,
+    min: Size,
+) -> Vec<(PaneId, PtySize)> {
+    let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+    content_rects(&solve_with_min(layout, tab_rect, min))
+        .into_iter()
+        .map(|(pane, content)| (pane, compute_pty_size(content.unwrap_or(tab_rect))))
+        .collect()
 }
 
 /// The overlap length of the spans `[a_start, a_start + a_len)` and
@@ -319,6 +338,47 @@ impl Runtime {
         })
     }
 
+    /// Add koshi's configured terminal identity — `TERM` and `COLORTERM` from
+    /// the `terminal` config section — to a spawned child's environment overlay,
+    /// filling each only when the pane's own env has not already set it, so an
+    /// explicit per-pane value (a profile pane's `env`) still wins.
+    pub(crate) fn terminal_identity_env(
+        &self,
+        mut env: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        env.entry("TERM".to_string())
+            .or_insert_with(|| self.config.terminal.term.clone());
+        env.entry("COLORTERM".to_string())
+            .or_insert_with(|| self.config.terminal.colorterm.clone());
+        env
+    }
+
+    /// The spawn spec for a default-shell pane: the configured
+    /// `terminal.default_shell` when set, otherwise the platform default from
+    /// `$SHELL` / `%COMSPEC%`. Either way it carries koshi's terminal identity
+    /// in its environment.
+    pub(crate) fn default_shell_spec(
+        &self,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> SpawnSpec {
+        let env = self.terminal_identity_env(env);
+        match &self.config.terminal.default_shell {
+            Some(program) => {
+                let program = PathBuf::from(program);
+                let shell_kind = ShellKind::from_program(&program);
+                SpawnSpec {
+                    program,
+                    args: Vec::new(),
+                    cwd,
+                    env,
+                    shell_kind,
+                }
+            }
+            None => SpawnSpec::default_shell(cwd, env),
+        }
+    }
+
     /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
     /// its command is required (never the default shell), and its source
     /// pane, placement — split direction or stacking — and working directory
@@ -438,6 +498,7 @@ impl Runtime {
         session: &Session,
         tab_id: TabId,
         viewport: Size,
+        min: Size,
     ) -> Vec<(PaneId, Option<Rect>)> {
         let Some(tab) = session.tabs.get(&tab_id) else {
             return Vec::new();
@@ -450,10 +511,11 @@ impl Runtime {
             .list_attached()
             .filter(|client| client.active_tab() == tab_id)
             .map(|client| {
-                content_rects(&solve_with_mode(
+                content_rects(&solve_with_mode_min(
                     tab.layout(),
                     client.layout_mode(tab_id),
                     tab_rect,
+                    min,
                 ))
             })
             .collect();
@@ -528,7 +590,7 @@ impl Runtime {
     /// resized. A tab no client views has no [`Session::tab_viewport`] and keeps
     /// its sizes. The shared shape behind every "a tab's viewer set changed"
     /// reflow — the full-tab solve with no freshly-spawned pane to skip.
-    fn reflow_tab_if_viewed(
+    pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,
         session_id: SessionId,
@@ -541,7 +603,7 @@ impl Runtime {
         let Some(viewport) = session.tab_viewport(tab_id) else {
             return;
         };
-        let rects = Self::tab_content_rects(session, tab_id, viewport);
+        let rects = Self::tab_content_rects(session, tab_id, viewport, self.effective_pane_min());
         self.reflow_changed(backend, rects, None, events);
     }
 

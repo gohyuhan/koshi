@@ -12,6 +12,7 @@ use koshi_core::event::{Event, LayoutChanged, PaneClosing, PaneProcessExited, Pa
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
@@ -176,7 +177,14 @@ fn removing_a_focused_pane_focuses_a_survivor() {
     let client_id = client.id();
     session.attach_client(client);
 
-    let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     // The survivor inherits focus, on the client and in the event stream.
     assert_eq!(
@@ -213,7 +221,14 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
     let client_id = client.id();
     session.attach_client(client);
 
-    let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     assert_eq!(
         session.clients.get(client_id).unwrap().focused_pane(tab_id),
@@ -234,7 +249,14 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
         ],
     );
 
-    let events = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     // The survivor's geometry changed when the leaf collapsed, so the cascade
     // announces it — a subscriber re-solves on LayoutChanged.
@@ -260,7 +282,14 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
     session.attach_client(first);
     session.attach_client(second);
 
-    let _ = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     assert_eq!(
         session.clients.get(first_id).unwrap().focused_pane(tab_id),
@@ -290,7 +319,14 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
     // A rect narrower than `MIN_PANE_SIZE` suppresses the survivor, so focus
     // recovery finds no focusable pane though the tab still holds one.
     let tiny = Rect::new(Point { x: 0, y: 0 }, Size { cols: 1, rows: 1 });
-    let events = remove_pane_cascade(&mut session, tab_id, a, tiny, EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        tiny,
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     // The overlay is reported and the client's stale focus on the gone pane is
     // cleared rather than left dangling.
@@ -321,7 +357,14 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
         ],
     );
 
-    let _ = remove_pane_cascade(&mut session, tab_id, a, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     let history = session.tabs[&tab_id].focus_mru();
     assert!(!history.contains(&a));
@@ -341,7 +384,14 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
         )],
     );
 
-    let events = remove_pane_cascade(&mut session, tab_id, only, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        only,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     assert!(session.tabs.is_empty());
     assert!(events
@@ -381,6 +431,7 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
         tab_one,
         pane_one,
         rect(),
+        MIN_PANE_SIZE,
         EmptyTabPolicy::CloseTab,
     );
 
@@ -415,6 +466,7 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
         Some(1),
         SystemTime::UNIX_EPOCH,
         rect(),
+        MIN_PANE_SIZE,
         EmptyTabPolicy::CloseTab,
     );
 
@@ -448,6 +500,7 @@ fn removing_an_unknown_pane_emits_nothing() {
         tab_id,
         PaneId::new(),
         rect(),
+        MIN_PANE_SIZE,
         EmptyTabPolicy::CloseTab,
     );
 
@@ -476,6 +529,7 @@ fn a_respawn_shell_pane_returns_to_spawning() {
         Some(1),
         SystemTime::UNIX_EPOCH,
         rect(),
+        MIN_PANE_SIZE,
         EmptyTabPolicy::CloseTab,
     );
 
@@ -507,6 +561,7 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
         Some(0),
         SystemTime::UNIX_EPOCH,
         rect(),
+        MIN_PANE_SIZE,
         EmptyTabPolicy::CloseTab,
     );
 
@@ -540,7 +595,14 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
     client.update_focused_pane(left, a); // also has a focus recorded on the left tab
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(&mut session, middle, b, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        middle,
+        b,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     let client = session.clients.get(client_id).unwrap();
     // The previous tab (largest index below the closed one) inherits the client.
@@ -566,7 +628,14 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
     let client_id = client.id();
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(&mut session, first, a, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        first,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     // No previous tab, so the next one inherits the client.
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), second);
@@ -588,7 +657,14 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
     client.update_focused_pane(other, a); // but holds a stale focus on `other`
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(&mut session, other, a, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        other,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     let client = session.clients.get(client_id).unwrap();
     // The client was not viewing the closed tab, so its active tab is unchanged.
@@ -613,7 +689,14 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
     let client_id = client.id();
     session.attach_client(client);
 
-    let events = remove_pane_cascade(&mut session, tab_id, pane, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        pane,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     assert!(events.iter().any(|e| matches!(e, Event::Quit)));
     // The focus entry for the closed tab is pruned even as the session quits.
@@ -643,7 +726,14 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
     session.attach_client(client);
 
     // The focus was on the survivor, so no repair events follow.
-    let events = remove_pane_cascade(&mut session, tab_id, b, rect(), EmptyTabPolicy::CloseTab);
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        b,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     assert_eq!(
         events,
@@ -684,7 +774,14 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
     client.zoom_pane(tab_id, b);
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(&mut session, tab_id, b, rect(), EmptyTabPolicy::CloseTab);
+    let _ = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        b,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
 
     let client = session.clients.get(client_id).expect("client");
     assert_eq!(

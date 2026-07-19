@@ -120,7 +120,10 @@ impl Runtime {
         session: Option<&Session>,
     ) -> Result<(), Rejection> {
         match command {
-            Command::FocusPane(args) => Self::resolve_focus_target(args, source, session).map(drop),
+            Command::FocusPane(args) => {
+                Self::resolve_focus_target(args, source, session, self.effective_pane_min())
+                    .map(drop)
+            }
             Command::ClosePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::ResizePane(args) => self.resolve_pane_or_focused(args.pane, source, session),
             Command::WriteToPane(args) => self.resolve_pane_or_focused(args.pane, source, session),
@@ -430,6 +433,7 @@ impl Runtime {
         args: &FocusPaneArgs,
         source: &CommandSource,
         session: Option<&Session>,
+        min: Size,
     ) -> Result<FocusPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = match args.client.or_else(|| source.client_id()) {
@@ -450,7 +454,7 @@ impl Runtime {
             FocusTarget::Pane(pane_id) => pane_id,
             FocusTarget::Direction(direction) => {
                 let from = Self::resolve_focused_pane(session, client_id)?;
-                Self::directional_neighbor(session, client_id, from, direction)?
+                Self::directional_neighbor(session, client_id, from, direction, min)?
             }
         };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
@@ -482,6 +486,7 @@ impl Runtime {
         client_id: ClientId,
         from: PaneId,
         direction: Direction,
+        min: Size,
     ) -> Result<PaneId, Rejection> {
         let client = session
             .clients
@@ -498,7 +503,7 @@ impl Runtime {
         // Directional focus moves within what THIS client sees, so the tab is
         // solved in this client's own mode: a zoomed client draws one pane and
         // has no neighbour to move to.
-        let solve = solve_tab(tab, client.layout_mode(tab_id), viewport);
+        let solve = solve_tab(tab, client.layout_mode(tab_id), viewport, min);
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let from_rect = solve
             .panes

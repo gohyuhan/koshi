@@ -28,13 +28,13 @@ use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 #[cfg(test)]
 mod tests;
 
-/// A whole layout file: the tabs it defines and which one starts focused.
+/// A whole profile file: the tabs it defines and which one starts focused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LayoutTemplate {
-    /// The tabs in file order. Never empty: a layout without tabs is a
+pub struct ProfileTemplate {
+    /// The tabs in file order. Never empty: a profile without tabs is a
     /// parse error, not a representable template.
     pub tabs: Vec<TabTemplate>,
-    /// Index into `tabs` of the tab selected when the layout opens.
+    /// Index into `tabs` of the tab selected when the profile opens.
     pub focused_tab: usize,
 }
 

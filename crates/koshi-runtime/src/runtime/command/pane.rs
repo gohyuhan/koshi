@@ -37,6 +37,23 @@ impl Runtime {
         // Clone the shared backend before borrowing a session: spawn and resize
         // then need no `&self` borrow, so they coexist with `&mut Session`.
         let backend = Arc::clone(self.pty_backend());
+        let pane_min = self.effective_pane_min();
+        // Resolve the spawn spec before the session is borrowed, so it can read
+        // the terminal config off `self`: an explicit command keeps its own
+        // program, a bare new pane runs the configured default shell. Either way
+        // it carries koshi's terminal identity, with an explicit command's own
+        // env winning over it.
+        let spawn_spec = match &args.command {
+            Some(command) => {
+                let mut spec = command.clone();
+                if spec.cwd.is_none() {
+                    spec.cwd = args.cwd.clone();
+                }
+                spec.env = self.terminal_identity_env(spec.env);
+                spec
+            }
+            None => self.default_shell_spec(args.cwd.clone(), BTreeMap::new()),
+        };
 
         let session = self
             .sessions
@@ -76,6 +93,7 @@ impl Runtime {
             &candidate,
             target.focus_client,
             args.client,
+            pane_min,
         )?;
 
         // Solve the candidate against that viewport to size the new pane and
@@ -83,7 +101,12 @@ impl Runtime {
         // rect; a solve that still gives it no area rejects defensively,
         // before any mutation.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        let rects = content_rects(&solve_with_mode(&candidate, LayoutMode::Tiled, tab_rect));
+        let rects = content_rects(&solve_with_mode_min(
+            &candidate,
+            LayoutMode::Tiled,
+            tab_rect,
+            pane_min,
+        ));
         let new_rect = rects
             .iter()
             .find(|(pane_id, _)| *pane_id == new_pane_id)
@@ -91,20 +114,6 @@ impl Runtime {
             .ok_or_else(|| Rejection::bare(RejectReason::InvalidState))?;
         let spawn_size = compute_pty_size(new_rect);
 
-        // The spawn request: the requested command (its cwd falling back to
-        // `--cwd` when unset, so `--cwd` reaches an explicit command), else the
-        // default shell carrying `--cwd`. A new pane's env starts empty, matching
-        // the record `commit_new_pane` writes.
-        let spawn_spec = match &args.command {
-            Some(command) => {
-                let mut spec = command.clone();
-                if spec.cwd.is_none() {
-                    spec.cwd = args.cwd.clone();
-                }
-                spec
-            }
-            None => SpawnSpec::default_shell(args.cwd.clone(), BTreeMap::new()),
-        };
         // What the pane records: the directory it actually launches in (an
         // explicit command's own cwd wins over `--cwd`), and the resolved spawn
         // request itself when a command was given, so the record can't disagree
@@ -192,6 +201,7 @@ impl Runtime {
         // Clone the shared backend before borrowing a session: the kill thread
         // takes its own handle, so no `&self` borrow crosses the commit.
         let backend = Arc::clone(self.pty_backend());
+        let pane_min = self.effective_pane_min();
 
         let session = self
             .sessions
@@ -235,6 +245,7 @@ impl Runtime {
             target.tab_id,
             target.pane_id,
             tab_rect,
+            pane_min,
             EmptyTabPolicy::default(),
         );
 
@@ -399,6 +410,7 @@ impl Runtime {
         // Clone the shared backend before borrowing the session: releasing the
         // pane's PTY entry then needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
+        let pane_min = self.effective_pane_min();
 
         let session = self
             .sessions
@@ -425,6 +437,7 @@ impl Runtime {
             exit_code,
             exited_at,
             tab_rect,
+            pane_min,
             EmptyTabPolicy::default(),
         );
 
@@ -484,6 +497,7 @@ impl Runtime {
 
         let backend = Arc::clone(self.pty_backend());
 
+        let pane_min = self.effective_pane_min();
         let (session, viewport) = self.session_and_viewport(target.session_id, target.tab_id)?;
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
         let tab = session
@@ -496,20 +510,22 @@ impl Runtime {
         // pane touches the tab edge on the named side, the opposite border
         // moves in the same visual direction instead — the pane shrinks where
         // it would have grown, and grows where it would have shrunk.
-        let resized = resize(
+        let resized = resize_with_min(
             tab.layout(),
             tab_rect,
             target.pane_id,
             args.direction,
             args.size,
+            pane_min,
         )
         .or_else(|error| match error {
-            ResizeError::NoAdjacentBorder { .. } => resize(
+            ResizeError::NoAdjacentBorder { .. } => resize_with_min(
                 tab.layout(),
                 tab_rect,
                 target.pane_id,
                 args.direction.opposite(),
                 args.size.saturating_neg(),
+                pane_min,
             ),
             other => Err(other),
         })
@@ -532,7 +548,7 @@ impl Runtime {
         let mut events = vec![Event::LayoutChanged(LayoutChanged {
             tab_id: target.tab_id,
         })];
-        let rects = Self::tab_content_rects(session, target.tab_id, viewport);
+        let rects = Self::tab_content_rects(session, target.tab_id, viewport, pane_min);
         self.reflow_changed(backend.as_ref(), rects, None, &mut events);
 
         Ok(Self::commit_events(command_id, events))
@@ -581,7 +597,8 @@ impl Runtime {
         args: &FocusPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
-        let target = Self::resolve_focus_target(args, source, acting)?;
+        let pane_min = self.effective_pane_min();
+        let target = Self::resolve_focus_target(args, source, acting, pane_min)?;
 
         let backend = Arc::clone(self.pty_backend());
 
@@ -614,7 +631,7 @@ impl Runtime {
         // Solve the tab as this client will display it: a pane suppressed for
         // lack of space cannot take focus.
         let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-        let solved = solve_with_mode(tab.layout(), effective_mode, tab_rect);
+        let solved = solve_with_mode_min(tab.layout(), effective_mode, tab_rect, pane_min);
         if solved.suppressed.contains(&target.pane_id) {
             return Err(Rejection::new(
                 RejectReason::InvalidState,
@@ -656,7 +673,7 @@ impl Runtime {
             events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: target.tab_id,
             }));
-            let rects = Self::tab_content_rects(session, target.tab_id, viewport);
+            let rects = Self::tab_content_rects(session, target.tab_id, viewport, pane_min);
             self.reflow_changed(backend.as_ref(), rects, None, &mut events);
         }
 
@@ -697,6 +714,7 @@ impl Runtime {
         source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
         let acting = self.acting_session(source)?;
+        let pane_min = self.effective_pane_min();
         let target = self.resolve_default_pane(source, acting)?;
 
         let backend = Arc::clone(self.pty_backend());
@@ -734,7 +752,7 @@ impl Runtime {
                     focused: target.pane_id,
                 };
                 let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
-                let solved = solve_with_mode(tab.layout(), mode, tab_rect);
+                let solved = solve_with_mode_min(tab.layout(), mode, tab_rect, pane_min);
                 if solved.suppressed.contains(&target.pane_id) {
                     return Err(Rejection::new(
                         RejectReason::InvalidState,
@@ -772,7 +790,7 @@ impl Runtime {
         // This client's view changed: re-solve the tab and resize each live PTY
         // whose size changed.
         let mut events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
-        let rects = Self::tab_content_rects(session, tab_id, viewport);
+        let rects = Self::tab_content_rects(session, tab_id, viewport, pane_min);
         self.reflow_changed(backend.as_ref(), rects, None, &mut events);
 
         if focus_moved {
@@ -920,14 +938,10 @@ impl Runtime {
         candidate: &LayoutNode,
         focus_client: Option<ClientId>,
         target_client: Option<ClientId>,
+        min: Size,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
-        let fits_viewport = |viewport: Size| {
-            fits(
-                candidate,
-                Rect::new(Point { x: 0, y: 0 }, viewport),
-                MIN_PANE_SIZE,
-            )
-        };
+        let fits_viewport =
+            |viewport: Size| fits(candidate, Rect::new(Point { x: 0, y: 0 }, viewport), min);
         let wont_fit = || Rejection::new(RejectReason::MinSize, "not enough space for a new pane");
         let existing = session.tab_viewport(tab_id);
 

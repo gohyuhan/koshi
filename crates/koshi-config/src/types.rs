@@ -14,11 +14,12 @@ use std::str::FromStr;
 
 use koshi_core::action::ActionRef;
 use koshi_core::geometry::Direction;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::resolve::ActionArgs;
 
 use crate::error::ColorParseError;
 use crate::key::Leader;
+use crate::key_sequence::parse_sequence;
 
 /// The config schema version written to and read from disk. Bumped when the
 /// on-disk shape changes, so an older file can be recognized by its version
@@ -175,7 +176,7 @@ impl Default for KeybindingsConfig {
             which_key_delay_ms: 300,
             max_chord_depth: 4,
             leader: Leader::default(),
-            modes: default_mode_bindings(),
+            modes: default_mode_bindings(Leader::default()),
             unlock_alternative: None,
         }
     }
@@ -251,14 +252,14 @@ pub struct ModeBindings {
 /// Action names here are compile-time constants known to satisfy the
 /// action-name grammar; an invalid one is a bug in this table and is caught
 /// by its tests.
-fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
-    let seq = |mods: ModFlags, key: Key| KeySequence::from(KeyChord::new(mods, key));
-    let ctrl_then = |prefix: char, key: Key| {
-        KeySequence::new(
-            KeyChord::new(ModFlags::CTRL, Key::Char(prefix)),
-            vec![KeyChord::new(ModFlags::NONE, key)],
-        )
+pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
+    // Leader-relative bindings are written with `<leader>` and resolved against
+    // `leader`, so rebinding the leader moves them; explicit chords (the Alt
+    // alternatives, the reserved unlock) are written literally and never move.
+    let seq = |text: &str| {
+        parse_sequence(text, leader, u8::MAX).expect("a built-in default binding must parse")
     };
+    let reserved = || KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     let bound = |name: &str| BoundAction {
         action: ActionRef::core(name)
             .expect("default binding action name must satisfy the action-name grammar"),
@@ -266,82 +267,50 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     };
 
     let normal: BTreeMap<KeySequence, BoundAction> = [
-        // Lock and quit. The lock chord IS the reserved unlock chord: it
-        // locks here and unlocks in locked mode, so one key flips both ways.
-        (
-            KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-            bound("lock"),
-        ),
-        (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
-        // Mouse-select mode: grab the mouse so a drag highlights in koshi even
-        // over a program that asked for it. A key-driven mode because the outer
-        // terminal reserves `Shift`+drag for its own selection. Bound in locked
-        // mode too, so it toggles whether the client is locked or not.
-        (seq(ModFlags::CTRL, Key::Char('g')), bound("mouse-select")),
-        // Pane lifecycle, under the pane prefix. `n` splits in the
-        // configured default direction; the vim letters pick the side the
-        // new pane opens on.
-        (ctrl_then('p', Key::Char('n')), bound("new-pane")),
-        (ctrl_then('p', Key::Char('h')), bound("new-pane-left")),
-        (ctrl_then('p', Key::Char('j')), bound("new-pane-down")),
-        (ctrl_then('p', Key::Char('k')), bound("new-pane-up")),
-        (ctrl_then('p', Key::Char('l')), bound("new-pane-right")),
-        // The close key kills the pane's whole process group — nothing the
-        // pane spawned survives it. The CLI close keeps the leader-only
-        // scope.
-        (ctrl_then('p', Key::Char('x')), bound("close-pane-tree")),
-        (
-            seq(ModFlags::ALT, Key::Char('f')),
-            bound("toggle-pane-fullscreen"),
-        ),
-        // Directional focus: arrows under the pane prefix, and Alt+vim
+        // Lock — the reserved chord, explicit. It locks here and unlocks in
+        // locked mode, one key both ways, and never moves with the leader so
+        // the escape stays where a locked pane expects it.
+        (reserved(), bound("lock")),
+        // Quit and mouse-select — leader-relative. Mouse-select grabs the
+        // mouse so a drag highlights in koshi even over a program that asked
+        // for it; it is bound in locked mode too.
+        (seq("<leader>q"), bound("quit")),
+        (seq("<leader>g"), bound("mouse-select")),
+        // Pane lifecycle, under the leader then `p`. `n` splits in the
+        // configured default direction; the vim letters pick the side.
+        (seq("<leader>p n"), bound("new-pane")),
+        (seq("<leader>p h"), bound("new-pane-left")),
+        (seq("<leader>p j"), bound("new-pane-down")),
+        (seq("<leader>p k"), bound("new-pane-up")),
+        (seq("<leader>p l"), bound("new-pane-right")),
+        // The close key kills the pane's whole process group.
+        (seq("<leader>p x"), bound("close-pane-tree")),
+        // Fullscreen — an explicit Alt alternative.
+        (seq("<A-f>"), bound("toggle-pane-fullscreen")),
+        // Directional focus: arrows under the pane prefix, and explicit Alt+vim
         // letters. Both fire continuous actions, so the prefix stays armed
-        // after each press — `<C-p> ← ← ←` walks focus left three panes.
-        (
-            ctrl_then('p', Key::Named(NamedKey::Left)),
-            bound("focus-pane-left"),
-        ),
-        (
-            ctrl_then('p', Key::Named(NamedKey::Down)),
-            bound("focus-pane-down"),
-        ),
-        (
-            ctrl_then('p', Key::Named(NamedKey::Up)),
-            bound("focus-pane-up"),
-        ),
-        (
-            ctrl_then('p', Key::Named(NamedKey::Right)),
-            bound("focus-pane-right"),
-        ),
-        (seq(ModFlags::ALT, Key::Char('h')), bound("focus-pane-left")),
-        (seq(ModFlags::ALT, Key::Char('j')), bound("focus-pane-down")),
-        (seq(ModFlags::ALT, Key::Char('k')), bound("focus-pane-up")),
-        (
-            seq(ModFlags::ALT, Key::Char('l')),
-            bound("focus-pane-right"),
-        ),
-        // Resize: one cell per press, under the resize prefix.
-        (ctrl_then('s', Key::Char('h')), bound("resize-pane-left")),
-        (ctrl_then('s', Key::Char('j')), bound("resize-pane-down")),
-        (ctrl_then('s', Key::Char('k')), bound("resize-pane-up")),
-        (ctrl_then('s', Key::Char('l')), bound("resize-pane-right")),
-        // Copy and paste have NO bindings — they follow the OS. Releasing a
-        // selection puts its text on the clipboard (through the outer
-        // terminal), and the OS paste key feeds the clipboard back in as
-        // input.
-        // Tabs. Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
-        // exception to the non-typeable-opening rule (2026-07-12): outside
-        // locked mode the keymap owns Tab, so a shell only sees a literal Tab
-        // while the client is locked.
-        (seq(ModFlags::ALT, Key::Char('t')), bound("new-tab")),
-        (
-            seq(ModFlags::NONE, Key::Named(NamedKey::Tab)),
-            bound("next-tab"),
-        ),
-        (
-            seq(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
-            bound("previous-tab"),
-        ),
+        // after each press.
+        (seq("<leader>p <Left>"), bound("focus-pane-left")),
+        (seq("<leader>p <Down>"), bound("focus-pane-down")),
+        (seq("<leader>p <Up>"), bound("focus-pane-up")),
+        (seq("<leader>p <Right>"), bound("focus-pane-right")),
+        (seq("<A-h>"), bound("focus-pane-left")),
+        (seq("<A-j>"), bound("focus-pane-down")),
+        (seq("<A-k>"), bound("focus-pane-up")),
+        (seq("<A-l>"), bound("focus-pane-right")),
+        // Resize: one cell per press, under the leader then `s`.
+        (seq("<leader>s h"), bound("resize-pane-left")),
+        (seq("<leader>s j"), bound("resize-pane-down")),
+        (seq("<leader>s k"), bound("resize-pane-up")),
+        (seq("<leader>s l"), bound("resize-pane-right")),
+        // Copy and paste have NO bindings — they follow the OS.
+        // Tabs. New tab is an explicit Alt binding; switching is the bare
+        // Tab / Shift+Tab pair — an OWNER-CHOSEN exception, never
+        // leader-relative: outside locked mode the keymap owns Tab, so a shell
+        // sees a literal Tab only while the client is locked.
+        (seq("<A-t>"), bound("new-tab")),
+        (seq("<Tab>"), bound("next-tab")),
+        (seq("<S-Tab>"), bound("previous-tab")),
     ]
     .into_iter()
     .collect();
@@ -351,12 +320,9 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
     // normal mode) as the guaranteed escape, plus the quit chord so quitting
     // works from either side of the lock.
     let locked: BTreeMap<KeySequence, BoundAction> = [
-        (
-            KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
-            bound("unlock"),
-        ),
-        (seq(ModFlags::CTRL, Key::Char('q')), bound("quit")),
-        (seq(ModFlags::CTRL, Key::Char('g')), bound("mouse-select")),
+        (reserved(), bound("unlock")),
+        (seq("<leader>q"), bound("quit")),
+        (seq("<leader>g"), bound("mouse-select")),
     ]
     .into_iter()
     .collect();
@@ -389,17 +355,26 @@ fn default_mode_bindings() -> BTreeMap<ModeName, ModeBindings> {
 /// the set. Lives beside the default binding table so the labels and the
 /// sequences they describe change together.
 #[must_use]
-pub fn default_prefix_labels() -> BTreeMap<KeyChord, String> {
-    BTreeMap::from([
-        (
-            KeyChord::new(ModFlags::CTRL, Key::Char('p')),
-            "PANE".to_string(),
-        ),
-        (
-            KeyChord::new(ModFlags::CTRL, Key::Char('s')),
-            "RESIZE".to_string(),
-        ),
-    ])
+pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
+    // Key by the opening chord of each prefix, resolved against the leader, so
+    // the label follows the prefix when the leader is rebound.
+    let opening = |text: &str| {
+        *parse_sequence(text, leader, u8::MAX)
+            .expect("a built-in prefix must parse")
+            .chords()
+            .first()
+            .expect("a prefix sequence has an opening chord")
+    };
+    let pane = opening("<leader>p");
+    let resize = opening("<leader>s");
+    // A modifier-run leader opens these at distinct chords (`<C-p>`, `<C-s>`),
+    // each naming its own group. A chord leader (e.g. `<Space>`) makes both open
+    // the SAME leader chord, so no single group label fits it — leave it
+    // unlabeled and let the hint bar show its derived `+N` count instead.
+    if pane == resize {
+        return BTreeMap::new();
+    }
+    BTreeMap::from([(pane, "PANE".to_string()), (resize, "RESIZE".to_string())])
 }
 
 /// Defaults applied when creating panes and layouts.
@@ -409,15 +384,12 @@ pub struct LayoutDefaults {
     /// omits one. The CLI new-pane command and the `new-pane-<direction>`
     /// actions name their own direction and bypass it.
     pub new_pane_direction: Direction,
-    /// A named layout to load at startup, if any.
-    pub default_layout: Option<String>,
 }
 
 impl Default for LayoutDefaults {
     fn default() -> Self {
         Self {
             new_pane_direction: Direction::Right,
-            default_layout: None,
         }
     }
 }

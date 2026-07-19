@@ -24,6 +24,7 @@ use koshi_core::event::{
     TabMoved, TabRenamed,
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 
@@ -138,6 +139,111 @@ pub fn commit_new_tab(
     }
 
     (previous_tab, events)
+}
+
+/// The panes and tree of one profile tab, bundled for [`commit_profile_tab`].
+pub struct ProfileTab {
+    /// One pane id per leaf, in layout order.
+    pub pane_ids: Vec<PaneId>,
+    /// The live tree the ids fill.
+    pub layout: LayoutNode,
+    /// The record spec for each pane, parallel to `pane_ids`.
+    pub specs: Vec<NewPaneSpec>,
+    /// Index into `pane_ids` of the pane that starts focused.
+    pub focus_leaf: usize,
+}
+
+/// Commit a whole multi-pane tab from a profile in one shot: register every
+/// pane in `tab.pane_ids` (each already spawned under its id), create the tab
+/// with `tab.layout` as its tree, and — when `focus_client` is given and still
+/// attached — switch that client onto the tab and focus the pane at
+/// `tab.focus_leaf`.
+///
+/// `pane_ids` and `specs` are parallel and in layout order — the order
+/// [`koshi_layout::template::TemplateNode::leaves`] and the tree's leaves agree
+/// on — so `pane_ids[i]` fills leaf `i`. `focus_leaf` indexes that same order;
+/// an out-of-range value focuses the root. Genesis only, so it never moves a
+/// client off a prior tab. Returns the events to emit: [`Event::TabCreated`],
+/// one [`Event::PaneCreated`] per pane, then — when a client was focused —
+/// [`Event::TabFocused`] and [`Event::PaneFocused`].
+#[must_use]
+pub fn commit_profile_tab(
+    session: &mut Session,
+    tab_id: TabId,
+    tab: ProfileTab,
+    name: String,
+    focus_client: Option<ClientId>,
+    active: bool,
+    created_at: SystemTime,
+) -> Vec<Event> {
+    let ProfileTab {
+        pane_ids,
+        layout,
+        specs,
+        focus_leaf,
+    } = tab;
+    let focus = focus_client.filter(|client_id| session.clients.get(*client_id).is_some());
+    let mut events = Vec::new();
+
+    // Register every pane. Each child is already live, so it enters `Running`
+    // straight away; its spawn request is recorded for a later restore.
+    for (pane_id, spec) in pane_ids.iter().zip(specs) {
+        let mut record = PaneRecord::new(*pane_id, created_at);
+        record.cwd = spec.cwd;
+        record.command = spec.command;
+        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+        let _ = session.panes.insert(record);
+    }
+
+    let root_pane = pane_ids[0];
+    let new_tab = Tab::new(tab_id, name, session.tabs.len(), root_pane);
+    // The first tab transitions the session from Starting to Running.
+    if session.tabs.is_empty() {
+        let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
+    }
+    session.tabs.insert(tab_id, new_tab);
+    // Swap the single-root layout for the profile's full tree.
+    if let Some(tab) = session.tabs.get_mut(&tab_id) {
+        tab.update_layout(layout);
+    }
+
+    events.push(Event::TabCreated(TabCreated { tab_id }));
+    for pane_id in &pane_ids {
+        events.push(Event::PaneCreated(PaneCreated {
+            pane_id: *pane_id,
+            tab_id,
+        }));
+    }
+
+    if let Some(client_id) = focus {
+        let focus_pane = pane_ids.get(focus_leaf).copied().unwrap_or(root_pane);
+        // Record this tab's starting pane on the client whether or not the tab
+        // starts active, so keyboard input and focused-pane commands resolve the
+        // moment the client later switches to it.
+        if let Some(tab) = session.tabs.get_mut(&tab_id) {
+            tab.record_focus_mru(focus_pane);
+        }
+        if let Some(client) = session.clients.get_mut(client_id) {
+            let prior_pane = client.update_focused_pane(tab_id, focus_pane);
+            if active {
+                let prior_tab = client.active_tab();
+                client.update_active_tab(tab_id);
+                events.push(Event::TabFocused(TabFocused {
+                    client_id,
+                    tab_id,
+                    prior_tab,
+                }));
+                events.push(Event::PaneFocused(PaneFocused {
+                    client_id,
+                    tab_id,
+                    pane_id: focus_pane,
+                    prior_pane,
+                }));
+            }
+        }
+    }
+
+    events
 }
 
 /// Close `tab_id` and everything in it.

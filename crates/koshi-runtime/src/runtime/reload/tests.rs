@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Instant, SystemTime};
 
 use koshi_config::conflict::{ConflictDiagnostic, LayerOrigin};
+use koshi_config::key::Leader;
 use koshi_config::layer::PartialColorPalette;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::{
@@ -44,6 +45,82 @@ fn runtime() -> (Runtime, ClientId) {
 
 fn only_session_id(runtime: &Runtime) -> SessionId {
     *runtime.sessions.keys().next().expect("one session")
+}
+
+#[test]
+fn load_startup_config_applies_the_app_and_theme_layers_before_genesis() {
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = Runtime::new(
+        Arc::new(FakePtyBackend::new()),
+        Arc::new(NullSnapshotProvider),
+        Arc::new(NullStorage),
+        rx,
+        tx,
+        TerminalCleanupGuard::new(),
+        Direction::Right,
+    );
+    let app = PartialKoshiConfig {
+        layout: Some(PartialLayoutDefaults {
+            new_pane_direction: Some(Direction::Down),
+        }),
+        ..PartialKoshiConfig::default()
+    };
+    let theme = PartialThemeConfig {
+        colors: Some(PartialColorPalette {
+            accent: Some(RgbColor::new(1, 2, 3)),
+            ..PartialColorPalette::default()
+        }),
+        ..PartialThemeConfig::default()
+    };
+
+    let report = runtime.load_startup_config(Some(app), Some(theme), None);
+
+    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(runtime.config.layout.new_pane_direction, Direction::Down);
+    assert_eq!(runtime.config.theme.colors.accent, RgbColor::new(1, 2, 3));
+}
+
+#[test]
+fn reloading_a_new_leader_moves_the_default_keymap() {
+    let (mut runtime, _client) = runtime();
+    let cp = sequence(ModFlags::CTRL, 'p');
+    let ap = sequence(ModFlags::ALT, 'p');
+    // Default Ctrl leader: `<C-p>` is the pane prefix; `<A-p>` opens nothing.
+    assert!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &cp)
+            .prefix
+    );
+    assert!(
+        !runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &ap)
+            .prefix
+    );
+
+    // Reload with the leader rebound to Alt and no user bindings of its own:
+    // the leader-relative defaults rebuild against Alt.
+    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
+        leader: Some(Leader::Mods(ModFlags::ALT)),
+        ..PartialKeybindingsConfig::default()
+    });
+    assert_eq!(outcome.report.verdict(), KeymapVerdict::Apply);
+
+    // The pane prefix moved with the leader: `<A-p>` is now the prefix, `<C-p>`
+    // is gone.
+    assert!(
+        runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &ap)
+            .prefix
+    );
+    assert!(
+        !runtime
+            .keymap_hints
+            .match_sequence(LockMode::Normal, &cp)
+            .prefix
+    );
 }
 
 fn sequence(mods: ModFlags, key: char) -> KeySequence {
@@ -112,7 +189,6 @@ fn app_config_reload_replaces_the_startup_split_direction() {
     let events = runtime.reload_app_config(PartialKoshiConfig {
         layout: Some(PartialLayoutDefaults {
             new_pane_direction: Some(Direction::Down),
-            default_layout: None,
         }),
         ..PartialKoshiConfig::default()
     });

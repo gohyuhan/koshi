@@ -17,6 +17,7 @@ use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_pty::backend::state::PtyHandle;
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::scrollback::ScrollbackLimit;
 
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::state::Runtime;
@@ -32,8 +33,12 @@ impl Runtime {
         }
         self.pty_handles.insert(pane_id, handle);
         self.pty_sizes.insert(pane_id, size);
+        // Honor the user's configured scrollback caps for every pane created
+        // after the config loaded (genesis, new panes, profile panes).
+        let scrollback = &self.config.scrollback;
+        let limit = ScrollbackLimit::new(scrollback.max_lines, scrollback.max_bytes);
         self.terminal_engines
-            .insert(pane_id, TerminalEngine::new(size));
+            .insert(pane_id, TerminalEngine::with_scrollback(size, limit));
     }
 
     /// Spawn the single relay thread for one pane. It forwards every output

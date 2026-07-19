@@ -39,7 +39,7 @@ use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
 use crate::parser::parse_kdl;
-use crate::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
+use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
 mod tests;
@@ -178,9 +178,7 @@ impl Walker<'_> {
 
         // `<leader>` in a bind resolves against this file's own leader when
         // set, the built-in leader otherwise.
-        let leader = partial
-            .leader
-            .unwrap_or_else(|| KeybindingsConfig::default().leader);
+        let leader = partial.leader.unwrap_or_default();
 
         let mut modes: BTreeMap<ModeName, ModeBindings> = BTreeMap::new();
         let mut seen_modes: BTreeSet<String> = BTreeSet::new();

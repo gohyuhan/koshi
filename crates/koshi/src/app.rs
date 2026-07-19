@@ -57,9 +57,31 @@ impl Widget for SnapshotWidget<'_> {
 }
 
 /// Launch the interactive session: set up the terminal, run the loop until quit
-/// or the shell exits, then restore the terminal. Errors surface to `main`.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let _tracing = init_tracing(TracingOptions::from_env())?;
+/// or the shell exits, then restore the terminal. When `profile` names one, the
+/// session opens that profile's tabs and panes; otherwise it opens one shell.
+/// Errors surface to `main`.
+pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    // Read the config before tracing starts, so `logging.enabled` can decide
+    // whether a log file is opened at all. `load` collects its own warnings
+    // instead of logging, since there is no subscriber yet; they are replayed
+    // below once one is installed.
+    let (loaded, config_warnings) = crate::config::load();
+    let logging_enabled = loaded
+        .app
+        .as_ref()
+        .and_then(|app| app.logging.as_ref())
+        .and_then(|logging| logging.enabled)
+        .unwrap_or(false);
+    // `KOSHI_LOG` wins when set (it also names the filter); otherwise
+    // `logging.enabled` turns the standard `info` log file on or off.
+    let filter = std::env::var("KOSHI_LOG")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| logging_enabled.then(|| "info".to_string()));
+    let _tracing = init_tracing(TracingOptions::from_filter(filter))?;
+    for warning in &config_warnings {
+        tracing::warn!("{warning}");
+    }
     ensure_koshi_dirs();
 
     // Restore the terminal on any exit — normal, error, or panic.
@@ -100,9 +122,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         inbox_rx,
         inbox_tx.clone(),
         cleanup,
-        // The stock default split direction; a loaded config supplies its own.
+        // The stock default; the loaded config below supplies the real one.
         Direction::Right,
     );
+
+    // Apply the config (loaded before tracing above) before genesis, so the
+    // first session already sees the configured split direction, theme, and
+    // keymap. A rejected keybinding file leaves the built-in keymap in place.
+    if let Some(report) = runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings)
+    {
+        if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply {
+            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
+        }
+    }
 
     let (cols, rows) = size()?;
     let viewport = Size { cols, rows };
@@ -113,8 +145,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // kill guard.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    // Genesis: one session, one tab, one shell pane sized to the terminal.
-    let client_id = runtime.bootstrap_local(viewport, SystemTime::now())?;
+    // Genesis: a named profile's tabs and panes, or one shell sized to the
+    // terminal. A profile that cannot be loaded or launched falls back to the
+    // single shell, so the terminal always comes up.
+    let now = SystemTime::now();
+    let client_id = match profile.and_then(crate::config::load_profile) {
+        Some(template) => match runtime.bootstrap_profile(template, viewport, now) {
+            Ok(client_id) => client_id,
+            Err(err) => {
+                tracing::warn!(%err, "profile could not launch; starting a single shell");
+                runtime.bootstrap_local(viewport, now)?
+            }
+        },
+        None => runtime.bootstrap_local(viewport, now)?,
+    };
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);

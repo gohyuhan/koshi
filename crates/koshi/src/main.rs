@@ -55,7 +55,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // Offer a newer release before entering raw mode, so the prompt is a
         // plain stdin read; failures never block the launch.
         updater::maybe_prompt_startup_update();
-        return koshi::app::run().map_err(|err| CliError::Runtime {
+        return koshi::app::run(cli.profile.as_deref()).map_err(|err| CliError::Runtime {
             detail: err.to_string(),
         });
     }

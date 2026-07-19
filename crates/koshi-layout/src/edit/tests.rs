@@ -11,7 +11,7 @@ use koshi_test_support::layout_assert::{
 
 use super::*;
 use crate::size::SizeWeight;
-use crate::solver::solve;
+use crate::solver::{solve, MIN_PANE_SIZE};
 
 /// Wraps a single pane ID as a leaf node ready to insert into a tree.
 fn leaf(pane: PaneId) -> LayoutChild {
@@ -154,7 +154,7 @@ fn removing_a_middle_pane_reflows_with_no_dead_region() {
         vec![leaf(a), leaf(b), leaf(c)],
     ));
 
-    let (removed, info) = remove_pane(&tree, tab(), b).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a, c]);
     assert_tiles(&removed, tab());
 
@@ -181,7 +181,7 @@ fn removing_a_siblingless_leaf_prunes_the_emptied_split() {
         vec![leaf(a), LayoutChild::new(column)],
     ));
 
-    let (removed, info) = remove_pane(&tree, tab(), b).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a]);
     assert_tiles(&removed, tab());
     assert_eq!(info.absorbed_by, [a]);
@@ -199,7 +199,7 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
         vec![leaf(a), LayoutChild::new(column)],
     ));
 
-    let (removed, _) = remove_pane(&tree, tab(), c).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), c, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a, b]);
     assert_tiles(&removed, tab());
     // The column still exists with one child; normalization collapses it.
@@ -225,7 +225,7 @@ fn absorbed_by_skips_collapsed_stack_members() {
         vec![leaf(x), LayoutChild::new(stack)],
     ));
 
-    let (removed, info) = remove_pane(&tree, tab(), x).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), x, MIN_PANE_SIZE).unwrap();
     let solved = solve(&removed, tab());
     assert_eq!(solved.stack_headers.len(), 1);
     assert_eq!(solved.stack_headers[0].pane, c);
@@ -245,7 +245,7 @@ fn absorbed_by_lists_the_regrown_active_member_of_a_shrunk_stack() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 0));
 
-    let (removed, info) = remove_pane(&tree, tab(), c).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), c, MIN_PANE_SIZE).unwrap();
     let solved = solve(&removed, tab());
     let a_rect = solved.panes.iter().find(|&&(id, _)| id == a).unwrap().1;
     assert!(a_rect.intersection(info.old_rect).is_none());
@@ -263,7 +263,7 @@ fn absorbed_by_includes_resized_panes_beyond_the_freed_rect() {
         vec![leaf(a), leaf(b), leaf(x), leaf(c)],
     ));
 
-    let (removed, info) = remove_pane(&tree, tab(), x).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), x, MIN_PANE_SIZE).unwrap();
     let solved = solve(&removed, tab());
     let a_rect = solved.panes.iter().find(|&&(id, _)| id == a).unwrap().1;
     assert!(a_rect.intersection(info.old_rect).is_none());
@@ -282,9 +282,32 @@ fn absorbed_by_keeps_layout_order_on_an_exact_tie() {
     // Three even 30-column panes; removing the middle one leaves a 50/50
     // split where both survivors absorb exactly 15 of its freed columns —
     // an exact tie, broken by layout order.
-    let (removed, info) = remove_pane(&tree, wide, x).unwrap();
+    let (removed, info) = remove_pane(&tree, wide, x, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a, b]);
     assert_eq!(info.absorbed_by, [a, b]);
+}
+
+#[test]
+fn remove_pane_measures_the_freed_rect_against_the_given_min() {
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 12, rows: 24 });
+
+    // Under the default floor both panes fit, so `a` freed only its half.
+    let (_, small) = remove_pane(&tree, tab, a, MIN_PANE_SIZE).unwrap();
+    assert_eq!(
+        small.old_rect,
+        Rect::new(Point { x: 0, y: 0 }, Size { cols: 6, rows: 24 })
+    );
+
+    // An 8-column floor needs ten bordered columns per pane, so `b` is
+    // suppressed and `a` owned the whole tab — its freed rect is the full width.
+    // Fails if remove_pane ignores `min`.
+    let (_, large) = remove_pane(&tree, tab, a, Size { cols: 8, rows: 1 }).unwrap();
+    assert_eq!(
+        large.old_rect,
+        Rect::new(Point { x: 0, y: 0 }, Size { cols: 12, rows: 24 })
+    );
 }
 
 #[test]
@@ -298,7 +321,7 @@ fn removing_a_suppressed_pane_reports_a_zero_area_old_rect() {
     // c solves to a zero-area suppressed rect before removal.
     let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 9, rows: 24 });
 
-    let (removed, info) = remove_pane(&tree, narrow, c).unwrap();
+    let (removed, info) = remove_pane(&tree, narrow, c, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a, b]);
     assert_eq!(info.old_rect, Rect::zero());
     // a and b were already at their final floor-clamped sizes; losing the
@@ -311,7 +334,7 @@ fn removing_the_active_stack_child_activates_the_next_one() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
 
-    let (removed, _) = remove_pane(&tree, tab(), b).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
     let LayoutNode::Split(stack) = &removed else {
         panic!("stack must survive");
     };
@@ -326,7 +349,7 @@ fn removing_the_last_active_stack_child_steps_back() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b], 1));
 
-    let (removed, _) = remove_pane(&tree, tab(), b).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
     let LayoutNode::Split(stack) = &removed else {
         panic!("stack must survive");
     };
@@ -339,7 +362,7 @@ fn removing_before_the_active_stack_child_keeps_it_active() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 2));
 
-    let (removed, _) = remove_pane(&tree, tab(), a).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap();
     let LayoutNode::Split(stack) = &removed else {
         panic!("stack must survive");
     };
@@ -354,7 +377,7 @@ fn removing_after_the_active_stack_child_keeps_it_active() {
     let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
     let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 1));
 
-    let (removed, _) = remove_pane(&tree, tab(), c).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), c, MIN_PANE_SIZE).unwrap();
     let LayoutNode::Split(stack) = &removed else {
         panic!("stack must survive");
     };
@@ -376,7 +399,7 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
         vec![leaf(x), LayoutChild::new(stack)],
     ));
 
-    let (removed, _) = remove_pane(&tree, tab(), a).unwrap();
+    let (removed, _) = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap();
     let live: HashSet<PaneId> = [x, b].into_iter().collect();
     let normalized = normalize(&removed, &live).unwrap();
 
@@ -424,7 +447,7 @@ fn removing_the_last_stack_member_prunes_the_stack() {
         vec![leaf(x), LayoutChild::new(stack)],
     ));
 
-    let (removed, info) = remove_pane(&tree, tab(), a).unwrap();
+    let (removed, info) = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [x]);
     assert_eq!(info.absorbed_by, [x]);
     assert_tiles(&removed, tab());
@@ -434,7 +457,7 @@ fn removing_the_last_stack_member_prunes_the_stack() {
 fn removing_the_only_pane_is_rejected() {
     let a = PaneId::new();
     let tree = LayoutNode::Pane(a);
-    let err = remove_pane(&tree, tab(), a).unwrap_err();
+    let err = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap_err();
     assert_eq!(err, RemoveError::LastPane { pane: a });
 }
 
@@ -445,7 +468,7 @@ fn removing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
     let snapshot = tree.clone();
 
     let missing = PaneId::new();
-    let err = remove_pane(&tree, tab(), missing).unwrap_err();
+    let err = remove_pane(&tree, tab(), missing, MIN_PANE_SIZE).unwrap_err();
     assert_eq!(err, RemoveError::PaneNotFound { pane: missing });
     assert_eq!(tree, snapshot);
 }

@@ -147,18 +147,16 @@ fn terminal_default_shell_sets_inner_value() {
 }
 
 #[test]
-fn layout_direction_and_default_layout_override() {
+fn layout_direction_override() {
     let layer = PartialKoshiConfig {
         layout: Some(PartialLayoutDefaults {
             new_pane_direction: Some(Direction::Down),
-            default_layout: Some(Some("dev".to_string())),
         }),
         ..Default::default()
     };
     let merged = merge(KoshiConfig::default(), vec![layer]);
 
     assert_eq!(merged.layout.new_pane_direction, Direction::Down);
-    assert_eq!(merged.layout.default_layout, Some("dev".to_string()));
 }
 
 #[test]

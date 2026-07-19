@@ -13,6 +13,7 @@
 
 use koshi_core::process::PtySize;
 
+use crate::scrollback::ScrollbackLimit;
 use crate::state::TerminalState;
 
 /// One pane's emulation engine: the byte decoder and the screen model it
@@ -29,9 +30,15 @@ impl TerminalEngine {
     /// An engine for a fresh pane of `size`: an idle parser and a blank
     /// [`TerminalState`].
     pub fn new(size: PtySize) -> Self {
+        Self::with_scrollback(size, ScrollbackLimit::default())
+    }
+
+    /// Like [`new`](Self::new), but with an explicit scrollback limit so a
+    /// caller can honor the user's configured `scrollback` caps.
+    pub fn with_scrollback(size: PtySize, limit: ScrollbackLimit) -> Self {
         TerminalEngine {
             parser: vte::Parser::new(),
-            state: TerminalState::new(size),
+            state: TerminalState::with_scrollback(size, limit),
         }
     }
 
