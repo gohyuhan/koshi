@@ -42,7 +42,6 @@ fn a_first_ever_check_is_due() {
 fn a_check_within_the_interval_is_not_due() {
     let state = UpdateState {
         last_check: Some(now_secs()),
-        allow_prerelease: false,
     };
     assert!(!is_due(&state, 14));
 }
@@ -52,7 +51,6 @@ fn a_check_older_than_the_interval_is_due() {
     let fifteen_days_ago = now_secs().saturating_sub(15 * SECONDS_PER_DAY);
     let state = UpdateState {
         last_check: Some(fifteen_days_ago),
-        allow_prerelease: false,
     };
     assert!(is_due(&state, 14));
 }
@@ -61,7 +59,6 @@ fn a_check_older_than_the_interval_is_due() {
 fn a_zero_interval_is_always_due() {
     let state = UpdateState {
         last_check: Some(now_secs()),
-        allow_prerelease: false,
     };
     assert!(is_due(&state, 0));
 }
@@ -92,17 +89,14 @@ fn binary_name_is_platform_specific() {
 fn state_defaults_when_deserialized_from_empty_object() {
     let state: UpdateState = serde_json::from_str("{}").expect("empty object is valid state");
     assert_eq!(state.last_check, None);
-    assert!(!state.allow_prerelease);
 }
 
 #[test]
 fn state_survives_a_serialize_deserialize_round_trip() {
     let original = UpdateState {
         last_check: Some(1_700_000_000),
-        allow_prerelease: true,
     };
     let text = serde_json::to_string(&original).expect("serializable");
     let restored: UpdateState = serde_json::from_str(&text).expect("deserializable");
     assert_eq!(restored.last_check, original.last_check);
-    assert_eq!(restored.allow_prerelease, original.allow_prerelease);
 }

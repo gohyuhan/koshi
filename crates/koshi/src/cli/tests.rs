@@ -515,7 +515,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
     names.sort();
     let mut expected: Vec<String> = [
         "actions",
-        "allow-prerelease-update",
         "close-pane",
         "close-tab",
         "config",

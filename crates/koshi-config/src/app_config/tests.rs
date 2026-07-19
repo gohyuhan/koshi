@@ -18,12 +18,27 @@ fn empty_source_sets_no_layer() {
 }
 
 #[test]
-fn reads_both_update_fields() {
-    let update = parse("update {\n    auto-check #false\n    check-interval-days 30\n}")
-        .update
-        .expect("update section present");
+fn reads_all_update_fields() {
+    let update =
+        parse("update {\n    auto-check #false\n    check-interval-days 30\n    allow-prerelease #true\n}")
+            .update
+            .expect("update section present");
     assert_eq!(update.auto_check, Some(false));
     assert_eq!(update.check_interval_days, Some(30));
+    assert_eq!(update.allow_prerelease, Some(true));
+}
+
+#[test]
+fn a_non_boolean_allow_prerelease_is_a_validation_error() {
+    let error = parse_app_config(
+        Path::new("koshi.kdl"),
+        "update {\n    allow-prerelease 1\n}",
+    )
+    .expect_err("integer is not a boolean");
+    assert!(matches!(
+        error,
+        ConfigError::Validation { key, .. } if key == "allow-prerelease"
+    ));
 }
 
 #[test]

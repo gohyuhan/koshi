@@ -127,12 +127,15 @@ pub struct PartialUpdateConfig {
     pub auto_check: Option<bool>,
     /// Days between startup update checks.
     pub check_interval_days: Option<u32>,
+    /// Whether a pre-release build counts as a newer version.
+    pub allow_prerelease: Option<bool>,
 }
 
 impl PartialUpdateConfig {
     fn apply(self, target: &mut UpdateConfig) {
         merge_field(&mut target.auto_check, self.auto_check);
         merge_field(&mut target.check_interval_days, self.check_interval_days);
+        merge_field(&mut target.allow_prerelease, self.allow_prerelease);
     }
 }
 

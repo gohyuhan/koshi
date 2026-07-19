@@ -640,6 +640,21 @@ fn a_block_dragged_leftward_still_covers_the_columns_between() {
 }
 
 #[test]
+fn a_highlight_ending_on_a_wide_glyph_covers_its_whole_cell() {
+    // `a世b`: the wide glyph is at column 1 and its blank half at column 2. A
+    // selection ending on the glyph reaches its left column, and the renderer
+    // paints the 2-wide glyph from there while skipping the width-0 half — so
+    // the highlight covers the whole glyph and can never land on half of one.
+    let (mut rt, pane, client) = runtime_with_text("a世b".as_bytes());
+    rt.client_mut(client).expect("client").set_selection(
+        pane,
+        character(GridPos { row: 0, col: 0 }, GridPos { row: 0, col: 1 }),
+    );
+
+    assert_eq!(spans(&rt, client), Some(vec![(0, 0, 1)]));
+}
+
+#[test]
 fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
     // 30 lines through a 24-row screen: rows 0..=6 are in history, and the view
     // follows live output, so a highlight back at row 1 is off screen.

@@ -619,6 +619,59 @@ fn selection_text_keeps_a_multi_codepoint_emoji_whole() {
 }
 
 #[test]
+fn a_block_takes_a_wide_glyph_whole_on_every_row() {
+    // A column block spanning a wide glyph and its blank half takes the glyph
+    // once per row, never the width-0 spacer on its own. `a世b` over `c界d`,
+    // block columns 0..=3: the wide glyph is at column 1, its spacer at 2.
+    let cells = vec![
+        vec![
+            Cell::new('a', 1, Style::default()),
+            Cell::new('世', 2, Style::default()),
+            Cell::new(' ', 0, Style::default()),
+            Cell::new('b', 1, Style::default()),
+        ],
+        vec![
+            Cell::new('c', 1, Style::default()),
+            Cell::new('界', 2, Style::default()),
+            Cell::new(' ', 0, Style::default()),
+            Cell::new('d', 1, Style::default()),
+        ],
+    ];
+    let grid = Grid::from_rows(cells, 4, Style::default());
+    let scrollback = scrollback_of(&[], 100);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 1, col: 3 },
+    };
+    assert_eq!(selection_text(&view, &selection, true), "a世b\nc界d");
+}
+
+#[test]
+fn selection_text_keeps_a_combining_mark_on_a_wide_base() {
+    // A wide CJK base carries a combining mark just as a narrow one does: the
+    // base cell holds the mark and its width-0 right half is skipped. Copying
+    // must keep the mark riding the wide base — `漢` + U+0301, then `x`.
+    let mut base = Cell::new('漢', 2, Style::default());
+    base.push_combining('\u{0301}');
+    let cells = vec![vec![
+        base,
+        Cell::new(' ', 0, Style::default()),
+        Cell::new('x', 1, Style::default()),
+    ]];
+    let grid = Grid::from_rows(cells, 3, Style::default());
+    let scrollback = scrollback_of(&[], 100);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 2 },
+    };
+    assert_eq!(selection_text(&view, &selection, true), "漢\u{0301}x");
+}
+
+#[test]
 fn selection_text_spans_history_and_screen() {
     let scrollback = scrollback_of(&["old line"], 100);
     let grid = grid_of(&["new line"], 8);

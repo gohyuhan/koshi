@@ -1,18 +1,16 @@
 //! Self-update: check GitHub for a newer koshi release and install it.
 //!
-//! Two verbs drive this module. `koshi update` (`run_update_command`) checks
-//! the project's GitHub releases and, when a newer one exists, downloads the
-//! prebuilt archive for this OS/arch, unpacks the `koshi` binary, and swaps it
-//! for the running executable in place. `koshi allow-prerelease-update`
-//! (`set_allow_prerelease`) records whether pre-release builds count as
-//! updates. An interactive launch also calls `maybe_prompt_startup_update`,
+//! `koshi update` (`run_update_command`) checks the project's GitHub releases
+//! and, when a newer one exists, downloads the prebuilt archive for this
+//! OS/arch, unpacks the `koshi` binary, and swaps it for the running executable
+//! in place. An interactive launch also calls `maybe_prompt_startup_update`,
 //! which does the same check on a timer and offers to install.
 //!
-//! Two small files back this. The user's hand-authored `koshi.kdl` holds the
-//! preferences koshi only reads — `update.auto-check` and
-//! `update.check-interval-days`. A koshi-owned `update.json` in the state
-//! directory holds what koshi writes — the last-check time and the
-//! pre-release opt-in — so koshi never rewrites the user's config file.
+//! Two small files back this. The user's hand-authored `koshi.kdl` holds every
+//! preference koshi only reads — `update.auto-check`,
+//! `update.check-interval-days`, and `update.allow-prerelease`. A koshi-owned
+//! `update.json` in the state directory holds the one thing koshi writes — the
+//! last-check time — so koshi never rewrites the user's config file.
 //!
 //! Nothing here is used by the daemon or the running session: it is a
 //! CLI-side, one-shot flow, so it reads the clock and the network directly
@@ -63,8 +61,8 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Returns [`CliError::Update`] when the network check fails, no release
 /// binary exists for this platform, or the download/install step fails.
 pub fn run_update_command() -> Result<(), CliError> {
-    let state = load_state();
-    let newer = check_for_update(state.allow_prerelease).map_err(update_err)?;
+    let allow_prerelease = load_update_config().allow_prerelease;
+    let newer = check_for_update(allow_prerelease).map_err(update_err)?;
     // A completed check counts toward the interval whether or not it found a
     // newer release, so the next startup check waits the full interval.
     persist_last_check();
@@ -74,22 +72,6 @@ pub fn run_update_command() -> Result<(), CliError> {
     };
     install_release(&tag).map_err(update_err)?;
     println!("updated to koshi {}", strip_v(&tag));
-    Ok(())
-}
-
-/// Runs `koshi allow-prerelease-update [--false]`: record whether pre-release
-/// builds are eligible for updates.
-///
-/// # Errors
-/// Returns [`CliError::Update`] when the state file cannot be written.
-pub fn set_allow_prerelease(allow: bool) -> Result<(), CliError> {
-    let mut state = load_state();
-    state.allow_prerelease = allow;
-    save_state(&state).map_err(|err| update_err(err.to_string()))?;
-    println!(
-        "pre-release updates {}",
-        if allow { "enabled" } else { "disabled" }
-    );
     Ok(())
 }
 
@@ -113,7 +95,7 @@ pub fn maybe_prompt_startup_update() {
     // stalling on the timeout — on every launch while offline or firewalled.
     state.last_check = Some(now_secs());
     let _ = save_state(&state);
-    let tag = match check_for_update(state.allow_prerelease) {
+    let tag = match check_for_update(config.allow_prerelease) {
         Ok(Some(tag)) => tag,
         Ok(None) | Err(_) => return,
     };
@@ -444,16 +426,14 @@ fn make_executable(path: &Path) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// The update state koshi owns and rewrites, stored as `update.json` in the
-/// state directory. Kept out of `koshi.kdl` because koshi writes it, and koshi
-/// never rewrites the user's hand-authored config.
+/// state directory. Holds only the last-check time — the one update fact koshi
+/// writes; every user preference lives in `koshi.kdl`, which koshi never
+/// rewrites.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct UpdateState {
     /// Unix seconds of the last completed check, or `None` if never checked.
     #[serde(default)]
     last_check: Option<u64>,
-    /// Whether a pre-release may be offered as an update.
-    #[serde(default)]
-    allow_prerelease: bool,
 }
 
 /// The path of the koshi-owned update state file, if a state directory exists.

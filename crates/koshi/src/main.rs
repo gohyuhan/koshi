@@ -45,14 +45,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return run_keys_query(command);
     }
 
-    // The self-update verbs run locally: they talk to GitHub and the local
-    // filesystem, not the session daemon.
-    match &cli.command {
-        Some(CliCommand::Update) => return updater::run_update_command(),
-        Some(CliCommand::AllowPrereleaseUpdate { disable }) => {
-            return updater::set_allow_prerelease(!disable);
-        }
-        _ => {}
+    if let Some(CliCommand::Update) = &cli.command {
+        // `update` runs locally: it talks to GitHub and the local filesystem,
+        // not the session daemon.
+        return updater::run_update_command();
     }
 
     if cli.is_interactive_launch() {
