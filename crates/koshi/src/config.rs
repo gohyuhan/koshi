@@ -19,7 +19,7 @@
 //! string for the caller to replay once tracing is up.
 
 use std::fs;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use koshi_config::app_config::parse_app_config;
 use koshi_config::keybinding::parse_keybindings;
@@ -183,13 +183,11 @@ pub fn load_profile(name: &str) -> Option<ProfileTemplate> {
     }
 }
 
-/// Whether `name` is a single plain path component — no separators, no root or
-/// prefix, no `.`/`..` — so joining it under `profile/` cannot escape that
-/// directory.
+/// Whether `name` is exactly its own file name — no separators, no root or
+/// prefix, no `.`/`..`, not empty — so `profile/<name>.kdl` stays a flat file
+/// directly under `profile/`, never a nested path or one that escapes it. A
+/// name whose final component differs from the whole string (`../x`, `a/b`,
+/// `/etc/x`, `foo/`) is not a plain name.
 fn is_plain_profile_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(Component::Normal(_)), None)
-    )
+    Path::new(name).file_name().and_then(|file| file.to_str()) == Some(name)
 }
