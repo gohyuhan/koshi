@@ -193,6 +193,14 @@ fn scrollback_section_parses_both_fields() {
 }
 
 #[test]
+fn scrollback_scroll_on_input_parses() {
+    let scrollback = parse("scrollback {\n    scroll-on-input #false\n}")
+        .scrollback
+        .expect("scrollback section present");
+    assert_eq!(scrollback.scroll_on_input, Some(false));
+}
+
+#[test]
 fn layout_new_pane_direction_parses() {
     let layout = parse("layout {\n    new-pane-direction \"down\"\n}")
         .layout

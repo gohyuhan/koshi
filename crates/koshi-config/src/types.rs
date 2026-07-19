@@ -126,6 +126,12 @@ pub struct ScrollbackConfig {
     pub max_lines: usize,
     /// Maximum retained bytes of scrollback text per pane.
     pub max_bytes: usize,
+    /// Whether input you send to a pane snaps its view back to the newest line
+    /// when you had scrolled up into history. On for a live feel: type or paste
+    /// and the view jumps to the prompt. Off to stay parked in history while the
+    /// input still goes through. Only the primary screen follows; the alternate
+    /// screen's scroll position belongs to the full-screen program on it.
+    pub scroll_on_input: bool,
 }
 
 impl Default for ScrollbackConfig {
@@ -133,6 +139,7 @@ impl Default for ScrollbackConfig {
         Self {
             max_lines: 10_000,
             max_bytes: 32 * 1024 * 1024,
+            scroll_on_input: true,
         }
     }
 }

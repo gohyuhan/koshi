@@ -29,6 +29,7 @@ fn single_field_override_keeps_sibling() {
         scrollback: Some(PartialScrollbackConfig {
             max_lines: Some(5_000),
             max_bytes: None,
+            scroll_on_input: None,
         }),
         ..Default::default()
     };
@@ -45,6 +46,7 @@ fn later_layer_wins_on_same_field() {
         scrollback: Some(PartialScrollbackConfig {
             max_lines: Some(5_000),
             max_bytes: None,
+            scroll_on_input: None,
         }),
         ..Default::default()
     };
@@ -52,6 +54,7 @@ fn later_layer_wins_on_same_field() {
         scrollback: Some(PartialScrollbackConfig {
             max_lines: Some(20_000),
             max_bytes: None,
+            scroll_on_input: None,
         }),
         ..Default::default()
     };
@@ -71,6 +74,7 @@ fn a_field_a_later_layer_leaves_unset_keeps_the_middle_layers_override() {
         scrollback: Some(PartialScrollbackConfig {
             max_lines: Some(7_000),
             max_bytes: None,
+            scroll_on_input: None,
         }),
         ..Default::default()
     };

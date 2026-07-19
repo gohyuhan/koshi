@@ -56,6 +56,29 @@ fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
 
+/// The client's scroll offset for the pane — `0` means the view follows live output.
+fn scroll_offset(runtime: &Runtime, client: ClientId, pane: koshi_core::ids::PaneId) -> usize {
+    runtime
+        .sessions()
+        .values()
+        .next()
+        .expect("one session")
+        .clients
+        .get(client)
+        .expect("client present")
+        .scroll_offset(pane)
+}
+
+/// A bootstrapped runtime whose one client has scrolled its view 3 lines up into a
+/// pane's history — the parked-view starting point the `scroll-on-input` tests share.
+fn runtime_scrolled_up() -> (Runtime, koshi_core::ids::PaneId, ClientId) {
+    let (mut runtime, _fake, client) = runtime();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, &b"\n".repeat(40)); // push lines into history
+    runtime.scroll_up(client, pane, 3);
+    (runtime, pane, client)
+}
+
 /// Run `command` as if `client` had issued it from a keybinding, asserting it
 /// was applied — a test that silently dispatched a rejected command would be
 /// asserting against a state it never reached.
@@ -1479,4 +1502,39 @@ fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline()
             .pending_sequence,
         None
     );
+}
+
+#[test]
+fn typing_snaps_a_scrolled_up_view_back_to_live_output() {
+    let (mut runtime, pane, client) = runtime_scrolled_up();
+    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'a'), Instant::now());
+    assert_eq!(scroll_offset(&runtime, client, pane), 0);
+}
+
+#[test]
+fn typing_leaves_the_view_parked_when_scroll_on_input_is_off() {
+    let (mut runtime, pane, client) = runtime_scrolled_up();
+    runtime.config.scrollback.scroll_on_input = false;
+
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'a'), Instant::now());
+    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+}
+
+#[test]
+fn typing_on_the_alternate_screen_leaves_the_view_to_the_program() {
+    let (mut runtime, pane, client) = runtime_scrolled_up();
+    runtime.handle_pty_output(pane, b"\x1b[?1049h"); // enter the alternate screen
+
+    runtime.handle_key_input(client, chord(ModFlags::NONE, 'a'), Instant::now());
+    assert_eq!(scroll_offset(&runtime, client, pane), 3);
+}
+
+#[test]
+fn pasting_snaps_a_scrolled_up_view_back_to_live_output() {
+    let (mut runtime, pane, client) = runtime_scrolled_up();
+
+    runtime.handle_host_paste(client, "ls\n");
+    assert_eq!(scroll_offset(&runtime, client, pane), 0);
 }

@@ -175,12 +175,15 @@ pub struct PartialScrollbackConfig {
     pub max_lines: Option<usize>,
     /// Maximum retained bytes of scrollback text per pane.
     pub max_bytes: Option<usize>,
+    /// Whether input to a pane snaps its scrolled-up view back to live output.
+    pub scroll_on_input: Option<bool>,
 }
 
 impl PartialScrollbackConfig {
     fn apply(self, target: &mut ScrollbackConfig) {
         merge_field(&mut target.max_lines, self.max_lines);
         merge_field(&mut target.max_bytes, self.max_bytes);
+        merge_field(&mut target.scroll_on_input, self.scroll_on_input);
     }
 }
 

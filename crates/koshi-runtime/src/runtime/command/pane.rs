@@ -904,6 +904,15 @@ impl Runtime {
                 "pane is not accepting input",
             ));
         }
+        // Bytes that reach the child count as input from the acting client, the
+        // same as if typed there: the client's highlight drops and its view
+        // follows back to live output. An empty payload sent nothing, so it is
+        // not input and leaves both alone.
+        if !args.data.is_empty() {
+            if let Some(client_id) = source.client_id() {
+                self.on_input_reached_pane(client_id, target.pane_id);
+            }
+        }
         Ok(TransactionScope::new().commit(command_id))
     }
 
