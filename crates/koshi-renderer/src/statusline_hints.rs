@@ -6,9 +6,11 @@
 //! style itself rather than a block inside a neighboring group.
 //! Pending view paints the pressed prefix as an accent breadcrumb, then shows
 //! only its next chords. Internal config spellings such as `C-` and `A-` never
-//! leak into user-facing text. Each modifier group takes one stop on the
-//! theme's chrome ramp (dark-purple → blue by default), matching the tab list
-//! above; hints that don't fit are dropped whole with a trailing `…` marker.
+//! leak into user-facing text. The row is filled with the theme's bar
+//! background (black by default) before anything is painted, and each modifier
+//! group takes one stop on the theme's chrome ramp (light-purple → light-blue
+//! by default), matching the tab list above; hints that don't fit are dropped
+//! whole with a trailing `…` marker.
 
 use std::collections::BTreeMap;
 
@@ -19,6 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
+use crate::render::bar_style;
 use crate::snapshot::{KeymapHints, RenderSnapshot};
 use crate::theme::Theme;
 
@@ -29,10 +32,14 @@ pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buf
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let theme = &snapshot.theme;
+    // Clear drops stale cells, then the bar background fills the row whole.
+    // Ribbons painted after this set their own background; plain text such as
+    // a `Ctrl +` header sets only a foreground and keeps this fill.
     Clear.render(area, buf);
+    buf.set_style(area, bar_style(theme));
 
     let hints = &snapshot.keymap_hints;
-    let theme = &snapshot.theme;
     let pending = snapshot
         .client
         .pending_sequence

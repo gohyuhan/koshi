@@ -234,22 +234,39 @@ fn tabline_lists_tabs_with_active_marker() {
     let snap = build(
         "sess",
         &[("code", true), ("logs", false)],
-        &[(pane, rect(0, 1, 40, 6), true)],
+        &[(pane, rect(0, 1, 60, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 40, rows: 8 },
+        Size { cols: 60, rows: 8 },
     );
-    let buf = render(&snap, 40, 8);
+    let buf = render(&snap, 60, 8);
 
-    // The session block ` sess ` (6 cols) then a gap, then each padded tab.
+    // The session block ` sess `, then the version badge, a gap, and each
+    // padded tab.
     assert!(row_text(&buf, 0).contains(" #1  code "));
     assert!(row_text(&buf, 0).contains(" #2  logs "));
+
+    // Where each tab landed, read from the same solve the paint used, so the
+    // badge's width never has to be spelled out here.
+    let tabs = tabline_layout(
+        &snap,
+        RatatuiRect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 1,
+        },
+    )
+    .tabs;
+    let (active, inactive) = (tabs[0].1 + 1, tabs[1].1 + 1);
+
     // The active tab is inverted: its ramp stop as the TEXT color over the
-    // terminal's own background; an inactive tab's blocks sit on its dimmed
-    // stop. Two tabs → the stops are the ramp's purple and blue ends.
-    assert_eq!(buf[(8, 0)].fg, Color::Rgb(0x58, 0x1c, 0x87));
-    assert_eq!(buf[(8, 0)].bg, Color::Reset);
-    assert_eq!(buf[(19, 0)].bg, Color::Rgb(0x20, 0x47, 0x87));
+    // bar background the row is filled with; an inactive tab's blocks sit on
+    // its dimmed stop. Two tabs → the stops are the ramp's purple and blue
+    // ends.
+    assert_eq!(buf[(active, 0)].fg, Color::Rgb(0xd0, 0xa5, 0xff));
+    assert_eq!(buf[(active, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
+    assert_eq!(buf[(inactive, 0)].bg, Color::Rgb(0x44, 0x67, 0x8c));
 }
 
 #[test]
@@ -274,15 +291,15 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
 
     // The session block and the mode tag always render whole. The active tab
     // (alpha, index 0) fits from the left, so the window starts there and the
-    // tabs hidden off the right sit behind a `>` scroll arrow.
+    // tabs hidden off the right sit behind a `▶` scroll arrow.
     assert!(tabline.starts_with(" sess "), "tabline: {tabline:?}");
     assert!(
         tabline.trim_end().ends_with(" BASE"),
         "tabline: {tabline:?}"
     );
     assert!(tabline.contains(" #1  alpha "), "tabline: {tabline:?}");
-    assert!(tabline.contains('>'), "tabline: {tabline:?}");
-    assert!(!tabline.contains('<'), "no tabs hidden left: {tabline:?}");
+    assert!(tabline.contains('▶'), "tabline: {tabline:?}");
+    assert!(!tabline.contains('◀'), "no tabs hidden left: {tabline:?}");
     assert!(!tabline.contains("#5  echo"), "tabline: {tabline:?}");
 }
 
@@ -312,11 +329,11 @@ fn tabline_follows_focus_into_the_overflow() {
 
     assert!(tabline.contains("t5"), "active tab revealed: {tabline:?}");
     assert!(
-        tabline.contains('<'),
+        tabline.contains('◀'),
         "tabs hidden off the left: {tabline:?}"
     );
     assert!(
-        tabline.contains('>'),
+        tabline.contains('▶'),
         "tabs hidden off the right: {tabline:?}"
     );
     assert!(
@@ -360,11 +377,11 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         "active tab not forced visible: {tabline:?}"
     );
     assert!(
-        tabline.contains('>'),
+        tabline.contains('▶'),
         "tabs hidden off the right: {tabline:?}"
     );
     assert!(
-        !tabline.contains('<'),
+        !tabline.contains('◀'),
         "nothing hidden left at offset 0: {tabline:?}"
     );
 }

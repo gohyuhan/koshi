@@ -7,8 +7,12 @@
 //! gives a run element its stop; [`Theme::ramp_dim`] is the same stop pulled
 //! toward black, used as the quiet half of a two-block ribbon (label next to
 //! key, for example). The single accent for in-progress state (the
-//! pending-sequence breadcrumb) is [`Theme::accent`]. [`Theme::default`] is
-//! the stock koshi look — a dark-purple → blue ramp with a violet accent;
+//! pending-sequence breadcrumb) is [`Theme::accent`]. Both koshi-owned rows —
+//! the tab bar and the key-hint bar — are filled with [`Theme::bar_bg`] before
+//! anything is painted over them, so chrome text reads against a known
+//! background rather than whatever the terminal's own is. [`Theme::default`] is
+//! the stock koshi look — a light-purple → light-blue ramp with a pink accent
+//! over black bars;
 //! the runtime builds a non-default `Theme` from the config theme's palette,
 //! so `ramp_start "#ff0000"` in a theme turns the first tab's ribbon red.
 
@@ -47,20 +51,23 @@ pub struct Theme {
     pub stack_header_bg: Color,
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: Color,
+    /// Background filling koshi's own two rows whole: the tab bar on top and
+    /// the key-hint bar on the bottom.
+    pub bar_bg: Color,
 }
 
 impl Default for Theme {
-    /// The stock koshi chrome: a dark-purple → blue ramp with a violet
-    /// accent. Field-for-field the same colors as the config crate's default
-    /// palette, so an unthemed frame and a default-config frame paint
-    /// identically.
+    /// The stock koshi chrome: a light-purple → light-blue ramp with a pink
+    /// accent over black bars. Field-for-field the same colors as the config
+    /// crate's default palette, so an unthemed frame and a default-config
+    /// frame paint identically.
     fn default() -> Self {
         Self {
-            ramp_start: (0x58, 0x1c, 0x87),
-            ramp_end: (0x3b, 0x82, 0xf6),
-            on_ramp: Color::Rgb(0xf4, 0xf1, 0xfa),
-            on_ramp_dim: Color::Rgb(0xc9, 0xc4, 0xd4),
-            accent: Color::Rgb(0xa7, 0x8b, 0xfa),
+            ramp_start: (0xd0, 0xa5, 0xff),
+            ramp_end: (0x7d, 0xbc, 0xff),
+            on_ramp: Color::Rgb(0x12, 0x09, 0x1f),
+            on_ramp_dim: Color::Rgb(0xf0, 0xec, 0xfa),
+            accent: Color::Rgb(0xf5, 0xc2, 0xff),
             on_accent: Color::Rgb(0x1e, 0x10, 0x33),
             border_focused: Color::Rgb(0x00, 0xaf, 0xd7),
             border_unfocused: Color::Rgb(0x58, 0x58, 0x58),
@@ -68,6 +75,7 @@ impl Default for Theme {
             stack_header_fg: Color::Rgb(0xf4, 0xf1, 0xfa),
             stack_header_bg: Color::Rgb(0x30, 0x0f, 0x4a),
             letterbox: Color::Rgb(0x58, 0x58, 0x58),
+            bar_bg: Color::Rgb(0x00, 0x00, 0x00),
         }
     }
 }

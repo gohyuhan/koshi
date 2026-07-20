@@ -6,20 +6,25 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-/// Draw the tabline: the session name on the left and the scroll indicator
-/// plus mode tag on the right are always shown whole, as colored text on the
-/// terminal's own background; only the tab list between them carries
+/// Draw the tabline: the whole row is filled with the theme's bar background
+/// (black by default), then the session name plus the `[v…]` version badge on
+/// the left and the scroll indicator plus mode tag on the right are shown
+/// whole as colored text over that fill; only the tab list between them
+/// carries its own block
 /// backgrounds — each tab a hint-bar-style ribbon on its own stop of the
-/// theme's chrome ramp (dark-purple → blue by default). Tabs that don't fit
-/// are dropped whole with a trailing `…`.
+/// theme's chrome ramp (light-purple → light-blue by default). Tabs that
+/// don't fit are dropped whole with a trailing `…`.
 ///
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
 /// same solve [`crate::hit_test`] reads, so the tab a click lands on is the tab
 /// that was drawn there.
 pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
-    // The row is koshi-owned chrome: reset it first so its unused space keeps
-    // the terminal's own background — never letterbox fill or stale cells.
+    // The row is koshi-owned chrome: reset it first so no letterbox fill or
+    // stale cell survives, then fill it with the theme's bar background. Text
+    // painted after this sets only its foreground, so the fill shows through
+    // as the row's background.
     Clear.render(area, buf);
+    buf.set_style(area, bar_style(&snapshot.theme));
 
     let layout = tabline_layout(snapshot, area);
 
@@ -33,8 +38,9 @@ pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &m
         area.right() - layout.right_x,
     );
 
-    // Left block: the session name, always whole (clipped only by the row).
-    let session = session_line(snapshot);
+    // Left block: the session name and version badge. The same `room` the
+    // solve used, so draw and layout agree on whether the badge is there.
+    let session = session_line(snapshot, layout.right_x.saturating_sub(area.x));
     set_line_clipped(buf, area.x, area.y, &session, layout.session_width);
 
     // Tab ribbons in the windowed middle, each on its own ramp stop.
@@ -42,14 +48,14 @@ pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &m
         let tab = tab_line(snapshot, meta_index);
         set_line_clipped(buf, x, area.y, &tab, width);
     }
-    // Clickable scroll arrows mark tabs hidden off each side; they replace the
-    // old `…` and scroll the strip when clicked.
+    // Clickable scroll arrows mark tabs hidden off each side, and scroll the
+    // strip one tab that way when clicked.
     if let Some((x, _)) = layout.left_arrow {
-        let arrow = Line::from(Span::styled("<", scroll_arrow_style(&snapshot.theme)));
+        let arrow = Line::from(Span::styled("◀", scroll_arrow_style(&snapshot.theme)));
         set_line_clipped(buf, x, area.y, &arrow, TABLINE_ARROW_WIDTH);
     }
     if let Some((x, _)) = layout.right_arrow {
-        let arrow = Line::from(Span::styled(">", scroll_arrow_style(&snapshot.theme)));
+        let arrow = Line::from(Span::styled("▶", scroll_arrow_style(&snapshot.theme)));
         set_line_clipped(buf, x, area.y, &arrow, TABLINE_ARROW_WIDTH);
     }
 }
@@ -94,7 +100,8 @@ pub(crate) struct TablineLayout {
 pub(crate) fn tabline_layout(snapshot: &RenderSnapshot, area: RatatuiRect) -> TablineLayout {
     let right_width = right_block(snapshot).width() as u16;
     let right_x = area.right().saturating_sub(right_width).max(area.x);
-    let session_width = (session_line(snapshot).width() as u16).min(right_x.saturating_sub(area.x));
+    let room = right_x.saturating_sub(area.x);
+    let session_width = (session_line(snapshot, room).width() as u16).min(room);
     let strip_start = area.x.saturating_add(session_width).saturating_add(1);
 
     let count = snapshot.session.tabs_metadata.len();
@@ -206,12 +213,32 @@ fn right_block(snapshot: &RenderSnapshot) -> Line<'static> {
     ))
 }
 
-/// The tabline's left-anchored block: the session name.
-fn session_line(snapshot: &RenderSnapshot) -> Line<'static> {
-    Line::from(Span::styled(
+/// koshi's own version, shown as the `[v…]` badge beside the session name.
+/// Every workspace crate inherits the one workspace version, so the renderer's
+/// own `CARGO_PKG_VERSION` is the running binary's version.
+const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The tabline's left-anchored block: the session name, then the `[v…]` badge
+/// naming the koshi version that is running — ` my-session [v0.1.0] `.
+///
+/// `room` is the space the block has before the right-anchored mode tag. When
+/// both parts do not fit in it the badge is dropped whole, the way a tab that
+/// does not fit is dropped rather than clipped — a 16-cell row shows ` s `,
+/// never the half-written ` s [v0.1.0`.
+fn session_line(snapshot: &RenderSnapshot, room: u16) -> Line<'static> {
+    let name = Span::styled(
         format!(" {} ", snapshot.session.name),
         session_style(&snapshot.theme),
-    ))
+    );
+    let badge = Span::styled(
+        format!("[v{KOSHI_VERSION}] "),
+        version_style(&snapshot.theme),
+    );
+    if name.width() + badge.width() <= usize::from(room) {
+        Line::from(vec![name, badge])
+    } else {
+        Line::from(name)
+    }
 }
 
 /// One tab's two-block ribbon (`#N` block + name block) at metadata index

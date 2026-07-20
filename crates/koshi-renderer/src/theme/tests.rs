@@ -6,13 +6,13 @@ use super::*;
 #[test]
 fn ramp_endpoints_are_the_palette_ends() {
     let theme = Theme::default();
-    assert_eq!(theme.ramp(0, 5), Color::Rgb(0x58, 0x1c, 0x87));
-    assert_eq!(theme.ramp(4, 5), Color::Rgb(0x3b, 0x82, 0xf6));
+    assert_eq!(theme.ramp(0, 5), Color::Rgb(0xd0, 0xa5, 0xff));
+    assert_eq!(theme.ramp(4, 5), Color::Rgb(0x7d, 0xbc, 0xff));
 }
 
 #[test]
 fn a_single_element_run_takes_the_start_end() {
-    assert_eq!(Theme::default().ramp(0, 1), Color::Rgb(0x58, 0x1c, 0x87));
+    assert_eq!(Theme::default().ramp(0, 1), Color::Rgb(0xd0, 0xa5, 0xff));
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn middle_stops_sit_between_the_ends() {
     let Color::Rgb(r, g, b) = Theme::default().ramp(1, 3) else {
         panic!("ramp yields Rgb");
     };
-    assert_eq!((r, g, b), (0x4a, 0x4f, 0xbe));
+    assert_eq!((r, g, b), (0xa7, 0xb0, 0xff));
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn the_dim_variant_darkens_every_channel() {
     let Color::Rgb(r, g, b) = Theme::default().ramp_dim(0, 1) else {
         panic!("ramp_dim yields Rgb");
     };
-    assert_eq!((r, g, b), (0x30, 0x0f, 0x4a));
+    assert_eq!((r, g, b), (0x72, 0x5a, 0x8c));
 }
 
 #[test]
@@ -42,15 +42,15 @@ fn a_zero_count_run_returns_the_start_end_without_dividing_by_zero() {
     // `count == 0` drives `den == 0` inside `lerp`; the explicit guard there
     // must return the start channel rather than dividing by zero.
     let theme = Theme::default();
-    assert_eq!(theme.ramp(0, 0), Color::Rgb(0x58, 0x1c, 0x87));
-    assert_eq!(theme.ramp(7, 0), Color::Rgb(0x58, 0x1c, 0x87));
+    assert_eq!(theme.ramp(0, 0), Color::Rgb(0xd0, 0xa5, 0xff));
+    assert_eq!(theme.ramp(7, 0), Color::Rgb(0xd0, 0xa5, 0xff));
 }
 
 #[test]
 fn the_dim_variant_tracks_the_ramp_stop_it_darkens() {
     // The dim of the far ramp end is that end pulled to 55% of each channel.
     let theme = Theme::default();
-    assert_eq!(theme.ramp_dim(1, 2), Color::Rgb(0x20, 0x47, 0x87));
+    assert_eq!(theme.ramp_dim(1, 2), Color::Rgb(0x44, 0x67, 0x8c));
 }
 
 #[test]

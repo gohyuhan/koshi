@@ -348,6 +348,8 @@ pub struct PartialColorPalette {
     pub stack_header_bg: Option<RgbColor>,
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: Option<RgbColor>,
+    /// Background filling the tab bar and the key-hint bar.
+    pub bar_bg: Option<RgbColor>,
 }
 
 impl PartialColorPalette {
@@ -364,6 +366,7 @@ impl PartialColorPalette {
         merge_field(&mut target.stack_header_fg, self.stack_header_fg);
         merge_field(&mut target.stack_header_bg, self.stack_header_bg);
         merge_field(&mut target.letterbox, self.letterbox);
+        merge_field(&mut target.bar_bg, self.bar_bg);
     }
 }
 

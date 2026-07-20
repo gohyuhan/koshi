@@ -60,11 +60,11 @@ fn default_loads_with_expected_values() {
 #[test]
 fn default_palette_has_expected_roles() {
     let palette = ColorPalette::default();
-    assert_eq!(palette.ramp_start, RgbColor::new(0x58, 0x1c, 0x87));
-    assert_eq!(palette.ramp_end, RgbColor::new(0x3b, 0x82, 0xf6));
-    assert_eq!(palette.on_ramp, RgbColor::new(0xf4, 0xf1, 0xfa));
-    assert_eq!(palette.on_ramp_dim, RgbColor::new(0xc9, 0xc4, 0xd4));
-    assert_eq!(palette.accent, RgbColor::new(0xa7, 0x8b, 0xfa));
+    assert_eq!(palette.ramp_start, RgbColor::new(0xd0, 0xa5, 0xff));
+    assert_eq!(palette.ramp_end, RgbColor::new(0x7d, 0xbc, 0xff));
+    assert_eq!(palette.on_ramp, RgbColor::new(0x12, 0x09, 0x1f));
+    assert_eq!(palette.on_ramp_dim, RgbColor::new(0xf0, 0xec, 0xfa));
+    assert_eq!(palette.accent, RgbColor::new(0xf5, 0xc2, 0xff));
     assert_eq!(palette.on_accent, RgbColor::new(0x1e, 0x10, 0x33));
     assert_eq!(palette.border_focused, RgbColor::new(0x00, 0xaf, 0xd7));
     assert_eq!(palette.border_unfocused, RgbColor::new(0x58, 0x58, 0x58));
@@ -72,6 +72,7 @@ fn default_palette_has_expected_roles() {
     assert_eq!(palette.stack_header_fg, RgbColor::new(0xf4, 0xf1, 0xfa));
     assert_eq!(palette.stack_header_bg, RgbColor::new(0x30, 0x0f, 0x4a));
     assert_eq!(palette.letterbox, RgbColor::new(0x58, 0x58, 0x58));
+    assert_eq!(palette.bar_bg, RgbColor::new(0x00, 0x00, 0x00));
 }
 
 #[test]
