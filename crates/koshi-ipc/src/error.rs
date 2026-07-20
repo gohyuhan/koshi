@@ -24,3 +24,6 @@ impl DomainError for IpcError {
         Severity::ClientFatal
     }
 }
+
+#[cfg(test)]
+mod tests;

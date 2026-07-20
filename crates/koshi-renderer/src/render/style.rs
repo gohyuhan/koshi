@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// A tab's `#N` block. The active tab is inverted — its ramp stop as the
 /// TEXT color on the terminal's own background; an inactive tab paints the
 /// dimmed stop as the block background with quiet text.

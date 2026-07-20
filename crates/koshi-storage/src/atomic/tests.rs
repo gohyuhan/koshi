@@ -191,6 +191,48 @@ fn write_atomic_replaces_fifo_with_private_file() {
 }
 
 #[test]
+fn write_atomic_resolves_a_relative_path_against_the_current_dir() {
+    // A relative `dst` is anchored against the current directory on entry. Use a
+    // unique name in the current directory so parallel tests never collide, and
+    // clean it up whether or not the assertion passes.
+    let name = format!("koshi-atomic-relative-{}.tmp", std::process::id());
+    let rel = Path::new(&name);
+    let _ = std::fs::remove_file(rel);
+
+    write_atomic(rel, b"relative\n").unwrap();
+
+    let abs = std::env::current_dir().unwrap().join(&name);
+    let bytes = std::fs::read(&abs).unwrap();
+    std::fs::remove_file(&abs).unwrap();
+    assert_eq!(bytes, b"relative\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_reports_io_error_when_a_path_component_is_a_file() {
+    let dir = TempDir::new().unwrap();
+    // A regular file sits where a directory component is needed, so reading the
+    // target's mode fails with a not-a-directory error (not NotFound), which the
+    // stat-error arm surfaces as an I/O error before any temp is created.
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let dst = blocker.join("cfg.kdl");
+
+    let err = write_atomic(&dst, b"data").unwrap_err();
+
+    let StorageError::Io { detail } = err else {
+        panic!("expected an Io error, got {err:?}");
+    };
+    assert!(
+        detail.starts_with("stat "),
+        "unexpected error detail: {detail}"
+    );
+    // The blocker file is untouched and no temp was staged beside it.
+    assert_eq!(std::fs::read(&blocker).unwrap(), b"x");
+    assert_eq!(dir_entries(dir.path()), vec!["not-a-dir".to_string()]);
+}
+
+#[test]
 fn concurrent_writers_never_leave_partial_content() {
     let dir = TempDir::new().unwrap();
     let dst = dir.path().join("cfg.kdl");

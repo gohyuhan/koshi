@@ -9835,3 +9835,188 @@ fn effective_pane_min_floors_a_below_minimum_config_to_the_hard_minimum() {
     rt.config.pane.min_rows = 5;
     assert_eq!(rt.effective_pane_min(), Size { cols: 10, rows: 5 });
 }
+
+#[test]
+fn a_second_child_exit_for_the_same_pane_is_dropped_and_the_survivor_is_untouched() {
+    // A `CloseOnExit` pane exits and is removed. If a duplicate exit for the now
+    // gone pane arrives — two exit notices raced into the inbox — the second finds
+    // no session owning the pane and drops it: no events, no panic, and the
+    // surviving sibling keeps every runtime map entry it had.
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    // Two split panes, each with a live child and terminal engine.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let pane_a = other_pane(&rt, sid, root);
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    // The pane that is neither the root nor the first split.
+    let pane_b = rt.sessions[&sid]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|id| *id != root && *id != pane_a)
+        .expect("a third pane exists");
+
+    // First exit removes pane_a.
+    let first = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    assert!(matches!(first.first(), Some(Event::PaneProcessExited(_))));
+    assert!(rt.sessions[&sid].panes.get(pane_a).is_none());
+    let survivor_resizes = fake.resizes(pane_b).expect("pane_b spawned").len();
+
+    // Second exit for the same gone pane: dropped whole.
+    let second = rt.handle_child_exit(pane_a, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    assert!(second.is_empty(), "a duplicate exit emits nothing");
+
+    // The survivor is untouched: still present, still holding all its bookkeeping,
+    // and not re-resized by the dropped duplicate.
+    assert!(rt.sessions[&sid].panes.get(pane_b).is_some());
+    assert!(rt.pty_handles.contains_key(&pane_b));
+    assert!(rt.pty_sizes.contains_key(&pane_b));
+    assert!(rt.terminal_engines.contains_key(&pane_b));
+    assert_eq!(
+        fake.resizes(pane_b).expect("pane_b spawned").len(),
+        survivor_resizes,
+        "the dropped duplicate reflowed nothing"
+    );
+}
+
+#[test]
+fn output_arriving_after_a_child_exit_is_dropped_and_a_live_pane_still_updates() {
+    // Output bytes and the exit for one pane can both be waiting in the inbox. If
+    // the exit is drained first the pane's engine is gone, so its trailing output
+    // must be dropped without touching any state — while a still-live sibling's
+    // output keeps flowing into its own engine.
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    for _ in 0..2 {
+        let env = envelope_from(
+            CommandSource::key_binding(client_id),
+            Command::NewPane(NewPaneArgs::default()),
+        );
+        assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    }
+    // The two spawned panes are exactly the ones with an engine; the root has none.
+    let engine_panes: Vec<PaneId> = rt.terminal_engines().keys().copied().collect();
+    assert_eq!(engine_panes.len(), 2, "two spawned panes hold engines");
+    let (exited, live) = (engine_panes[0], engine_panes[1]);
+
+    // The exit removes the pane and its engine.
+    let _ = rt.handle_child_exit(exited, ExitStatus::ExitCode(0), SystemTime::UNIX_EPOCH);
+    assert!(!rt.terminal_engines().contains_key(&exited));
+
+    // Late output for the now-engineless pane is a no-op.
+    rt.handle_pty_output(exited, b"late");
+    assert!(!rt.terminal_engines().contains_key(&exited));
+
+    // The live sibling still parses its output: two printable bytes advance its
+    // cursor to column 2.
+    rt.handle_pty_output(live, b"hi");
+    let (row, col) = rt
+        .terminal_engines()
+        .get(&live)
+        .expect("the live pane keeps its engine")
+        .state()
+        .active_cursor_position();
+    assert_eq!((row, col), (0, 2));
+}
+
+#[test]
+fn commands_still_dispatch_while_draining() {
+    // `draining` is set the moment teardown begins, but no dispatch path consults
+    // it yet — the field only records that shutdown started. Pin that documented
+    // state: a valid command applied while draining still mutates and reports Ok.
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+    rt.draining = true;
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
+    assert!(
+        rt.is_draining(),
+        "dispatch does not clear the draining flag"
+    );
+}
+
+#[test]
+fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
+    // A rejection must not be a dead end: after one command bounces off validation
+    // the runtime keeps every bit of state and accepts the next command normally.
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+
+    // Close a pane that does not exist: rejected, nothing changed.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(PaneId::new()),
+            force: false,
+            tree: false,
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: None,
+        }
+    );
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Normal);
+
+    // The very next command lands.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
+}
+
+#[test]
+fn a_command_after_quit_still_dispatches() {
+    // `Quit` sets the loop's exit flags but does not itself gate dispatch — the
+    // loop exits by polling `quit_requested`, not by dispatch refusing commands.
+    // Pin that: a command issued after Quit, before the loop notices, still runs.
+    let (mut rt, _tx, client_id, sid) = lock_fixture();
+
+    assert!(matches!(
+        rt.dispatch(envelope(Command::Quit)),
+        CommandResult::Ok { .. }
+    ));
+    assert!(rt.quit_requested());
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
+}

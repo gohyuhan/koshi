@@ -36,6 +36,28 @@ fn split_with(direction: SplitDirection, children: Vec<(PaneId, SizeWeight)>) ->
     LayoutNode::Split(node)
 }
 
+/// A left-leaning tree of `panes.len() - 1` splits whose direction alternates
+/// horizontal/vertical by depth: `split(h, [p0, split(v, [p1, split(h, …)])])`.
+/// Used to stress deeply nested solving and close ordering.
+fn deep_alternating(panes: &[PaneId]) -> LayoutNode {
+    let (&last, rest) = panes
+        .split_last()
+        .expect("deep_alternating needs at least one pane");
+    let mut node = LayoutNode::Pane(last);
+    for (index, &pane) in rest.iter().enumerate().rev() {
+        let direction = if index % 2 == 0 {
+            SplitDirection::Horizontal
+        } else {
+            SplitDirection::Vertical
+        };
+        node = LayoutNode::Split(SplitNode::with_equal_weights(
+            direction,
+            vec![leaf(pane), LayoutChild::new(node)],
+        ));
+    }
+    node
+}
+
 /// Verify that the solved panes fill the tab completely with no gaps, overlaps, or spillage.
 fn assert_tiles_exactly(result: &SolveResult, tab: Rect) {
     assert_all_space_occupied(&result.panes, tab).unwrap();
@@ -544,6 +566,50 @@ fn regrow_restores_suppressed_panes() {
 }
 
 #[test]
+fn a_tab_grown_shrunk_to_nothing_then_regrown_returns_the_exact_first_solve() {
+    // Solving is stateless: a full big -> tiny -> big terminal-resize cycle
+    // lands back on byte-identical geometry. The tiny step suppresses every
+    // pane, yet regrowing to the original rect reproduces the first solve
+    // exactly, deltas and remainders included.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    // A resize delta on the outer border makes the shape asymmetric, so the
+    // exact-return check is meaningful and not just an even split.
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: vec![leaf(a), LayoutChild::new(inner)],
+        weights: vec![
+            SizeWeight {
+                resize_delta: 7,
+                ..SizeWeight::default()
+            },
+            SizeWeight {
+                resize_delta: -7,
+                ..SizeWeight::default()
+            },
+        ],
+        active: 0,
+    });
+    let big = rect(0, 0, 80, 24);
+
+    let first = solve(&tree, big);
+    assert_eq!(first.panes[0].1, rect(0, 0, 47, 24));
+
+    // Shrink to a single cell: nothing fits, everything suppresses.
+    let tiny = solve(&tree, rect(0, 0, 1, 1));
+    assert!(tiny.all_suppressed);
+    assert_eq!(tiny.suppressed, [a, b, c]);
+
+    // Grow back to the original rect: identical placement.
+    let regrown = solve(&tree, big);
+    assert_eq!(regrown, first);
+    assert_tiles_exactly(&regrown, big);
+}
+
+#[test]
 fn all_panes_suppressed_is_flagged_for_the_overlay() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = split(SplitDirection::Horizontal, &[a, b]);
@@ -942,6 +1008,215 @@ fn border_inclusive_min_saturates_at_u16_max() {
             rows: u16::MAX,
         }
     );
+}
+
+#[test]
+fn a_single_pane_needs_three_rows_for_its_border() {
+    // Wave 2 — starvation geometry. One cell of height is not enough: a bare
+    // leaf still reserves a one-cell border on every side, so its floor is
+    // (4, 3). One or two rows suppress it; three rows and four columns is the
+    // exact smallest tab that keeps it visible.
+    let a = PaneId::new();
+    let tree = LayoutNode::Pane(a);
+
+    let one_row = solve(&tree, rect(0, 0, 80, 1));
+    assert_eq!(one_row.suppressed, [a]);
+    assert!(one_row.all_suppressed);
+    assert_eq!(one_row.panes, [(a, Rect::zero())]);
+
+    let two_rows = solve(&tree, rect(0, 0, 80, 2));
+    assert_eq!(two_rows.suppressed, [a]);
+    assert!(two_rows.all_suppressed);
+
+    let three_cols = solve(&tree, rect(0, 0, 3, 24));
+    assert_eq!(three_cols.suppressed, [a]);
+    assert!(three_cols.all_suppressed);
+
+    // Exactly the floor: four columns by three rows keeps the pane visible.
+    let floor = solve(&tree, rect(0, 0, 4, 3));
+    assert_eq!(floor.panes, [(a, rect(0, 0, 4, 3))]);
+    assert!(floor.suppressed.is_empty());
+    assert!(!floor.all_suppressed);
+}
+
+#[test]
+fn a_two_by_two_cell_tab_suppresses_every_pane() {
+    // Wave 2 — starvation geometry. A 2x2 terminal cannot hold even one
+    // bordered pane, so a four-pane grid drops entirely.
+    let (a, b, c, d) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let left = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(a), leaf(b)],
+    ));
+    let right = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(c), leaf(d)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![LayoutChild::new(left), LayoutChild::new(right)],
+    ));
+
+    let result = solve(&tree, rect(0, 0, 2, 2));
+    assert_eq!(result.suppressed, [a, b, c, d]);
+    assert!(result.all_suppressed);
+    assert!(result.panes.iter().all(|(_, r)| r.is_empty()));
+}
+
+#[test]
+fn a_two_by_two_grid_tiles_a_normal_tab_exactly() {
+    // Wave 2 — the same 2x2 grid at a real size lays four equal quadrants.
+    let (a, b, c, d) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let left = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(a), leaf(b)],
+    ));
+    let right = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![leaf(c), leaf(d)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![LayoutChild::new(left), LayoutChild::new(right)],
+    ));
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 40, 12)),
+            (b, rect(0, 12, 40, 12)),
+            (c, rect(40, 0, 40, 12)),
+            (d, rect(40, 12, 40, 12)),
+        ]
+    );
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn far_more_panes_than_fit_suppress_every_trailing_one() {
+    // Wave 2 — starvation. A hundred equal columns in eighty cells: each
+    // bordered pane needs four columns, so exactly the first twenty are kept
+    // (twenty times four is eighty), and the remaining eighty suppress in
+    // trailing order.
+    let panes: Vec<PaneId> = (0..100).map(|_| PaneId::new()).collect();
+    let tree = split(SplitDirection::Horizontal, &panes);
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(result.suppressed, panes[20..].to_vec());
+    assert!(!result.all_suppressed);
+    // The kept twenty each take exactly their four-column floor, back to back.
+    for (index, &pane) in panes.iter().take(20).enumerate() {
+        let placed = result.panes.iter().find(|&&(id, _)| id == pane).unwrap().1;
+        assert_eq!(placed, rect(index as u16 * 4, 0, 4, 24));
+    }
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn exactly_enough_columns_for_every_pane_keeps_all_of_them() {
+    // Wave 2 — the boundary: twenty bordered panes need exactly eighty
+    // columns, and nothing suppresses.
+    let panes: Vec<PaneId> = (0..20).map(|_| PaneId::new()).collect();
+    let tree = split(SplitDirection::Horizontal, &panes);
+    let tab = rect(0, 0, 80, 24);
+
+    let result = solve(&tree, tab);
+    assert!(result.suppressed.is_empty());
+    assert!(result.panes.iter().all(|(_, r)| r.size.cols == 4));
+    assert_tiles_exactly(&result, tab);
+
+    // One column short and the last pane drops.
+    let short = solve(&tree, rect(0, 0, 79, 24));
+    assert_eq!(short.suppressed, [panes[19]]);
+}
+
+#[test]
+fn odd_rows_send_the_extra_row_to_the_trailing_pane() {
+    // Wave 2 — off-by-one. Twenty-five rows split two ways is 12 then 13.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Vertical, &[a, b]);
+    let tab = rect(0, 0, 80, 25);
+
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [(a, rect(0, 0, 80, 12)), (b, rect(0, 12, 80, 13))]
+    );
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn odd_three_way_rows_give_the_remainder_to_the_last_pane() {
+    // Wave 2 — off-by-one. Twenty-five rows three ways floors to 8 each with
+    // one left over, which goes to the trailing child: 8, 8, 9.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = split(SplitDirection::Vertical, &[a, b, c]);
+    let tab = rect(0, 0, 80, 25);
+
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 80, 8)),
+            (b, rect(0, 8, 80, 8)),
+            (c, rect(0, 16, 80, 9)),
+        ]
+    );
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn nested_same_direction_splits_send_each_levels_remainder_trailing() {
+    // Wave 2 — rounding accumulation. An unnormalized h(a, h(b, c)) over an
+    // 81-column tab: the outer split rounds to 40 then 41, and the inner
+    // split rounds its own 41 to 20 then 21. Each level's leftover cell lands
+    // on that level's trailing child, and the whole thing still tiles.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(b), leaf(c)],
+    ));
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(inner)],
+    ));
+    let tab = rect(0, 0, 81, 24);
+
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [
+            (a, rect(0, 0, 40, 24)),
+            (b, rect(40, 0, 20, 24)),
+            (c, rect(60, 0, 21, 24)),
+        ]
+    );
+    assert_tiles_exactly(&result, tab);
+}
+
+#[test]
+fn a_fifty_deep_alternating_tree_tiles_exactly_and_solves_deterministically() {
+    // Wave 2 — deep nesting. Fifty alternating horizontal/vertical splits
+    // nest fifty-one leaves. Over a tab large enough to hold every floor the
+    // panes tile exactly, meet the minimum, and two solves agree.
+    let panes: Vec<PaneId> = (0..51).map(|_| PaneId::new()).collect();
+    let tree = deep_alternating(&panes);
+    let tab = rect(0, 0, 1000, 1000);
+
+    assert!(fits(&tree, tab, MIN_PANE_SIZE));
+    let result = solve(&tree, tab);
+    assert_eq!(result.panes.len(), 51);
+    assert_eq!(
+        result.panes.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+        panes
+    );
+    assert!(result.suppressed.is_empty());
+    assert_tiles_exactly(&result, tab);
+    assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
+    assert_eq!(solve(&tree, tab), result);
 }
 
 #[test]

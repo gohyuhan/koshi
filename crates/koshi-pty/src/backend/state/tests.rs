@@ -65,3 +65,17 @@ fn try_reads_work_while_receivers_are_held() {
     exit_tx.send(ExitStatus::Signaled(9)).expect("send exit");
     assert_eq!(handle.try_exit_status(), Some(ExitStatus::Signaled(9)));
 }
+
+#[test]
+fn dropping_the_handle_disconnects_the_senders() {
+    let (handle, output_tx, exit_tx) = PtyHandle::new(PaneId::new());
+
+    drop(handle);
+
+    // With the receiving ends gone, each send fails and hands its payload back.
+    assert_eq!(output_tx.send(b"x".to_vec()).unwrap_err().0, b"x".to_vec());
+    assert_eq!(
+        exit_tx.send(ExitStatus::ExitCode(0)).unwrap_err().0,
+        ExitStatus::ExitCode(0)
+    );
+}

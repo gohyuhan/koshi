@@ -159,6 +159,62 @@ fn from_str_delegates_to_from_hex() {
 }
 
 #[test]
+fn from_hex_parses_the_channel_boundaries() {
+    // Pure black and pure white are the two extreme channel values, with and
+    // without the leading hash.
+    assert_eq!(RgbColor::from_hex("#000000"), Ok(RgbColor::new(0, 0, 0)));
+    assert_eq!(RgbColor::from_hex("000000"), Ok(RgbColor::new(0, 0, 0)));
+    assert_eq!(
+        RgbColor::from_hex("#ffffff"),
+        Ok(RgbColor::new(0xff, 0xff, 0xff))
+    );
+    // Upper-case and mixed-case digits fold to the same value.
+    assert_eq!(
+        RgbColor::from_hex("#FFFFFF"),
+        Ok(RgbColor::new(0xff, 0xff, 0xff))
+    );
+    assert_eq!(
+        RgbColor::from_hex("#FfAa00"),
+        Ok(RgbColor::new(0xff, 0xaa, 0x00))
+    );
+}
+
+#[test]
+fn from_hex_rejects_a_named_color_word_by_its_length() {
+    // A CSS-style name is not hex; "red" is three characters, so it fails the
+    // length rule first, never reaching the digit check.
+    assert_eq!(
+        RgbColor::from_hex("red"),
+        Err(ColorParseError::BadLength { got: 3 })
+    );
+    // "orange" is six characters, so it passes the length rule and fails on
+    // the first non-hex digit instead.
+    assert_eq!(
+        RgbColor::from_hex("orange"),
+        Err(ColorParseError::BadDigit {
+            value: "orange".to_string()
+        })
+    );
+}
+
+#[test]
+fn from_hex_treats_a_lone_hash_length_as_zero() {
+    // Stripping the single `#` leaves an empty value, reported as zero digits.
+    assert_eq!(
+        RgbColor::from_hex("#"),
+        Err(ColorParseError::BadLength { got: 0 })
+    );
+    // Only the leading `#` is stripped: a trailing `#` stays as content, so
+    // the value is six characters with one non-hex digit.
+    assert_eq!(
+        RgbColor::from_hex("#12345#"),
+        Err(ColorParseError::BadDigit {
+            value: "12345#".to_string()
+        })
+    );
+}
+
+#[test]
 fn mode_name_roundtrips() {
     let mode = ModeName::new("resize");
     assert_eq!(mode.as_str(), "resize");

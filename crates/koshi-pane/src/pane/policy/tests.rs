@@ -80,3 +80,27 @@ fn an_exit_policy_survives_a_serde_round_trip() {
         assert_eq!(policy, restored);
     }
 }
+
+#[test]
+fn the_unit_close_policies_serialize_as_their_variant_names() {
+    assert_eq!(
+        serde_json::to_string(&PaneClosePolicy::Force).expect("serialize"),
+        r#""Force""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneClosePolicy::ConfirmIfBusy).expect("serialize"),
+        r#""ConfirmIfBusy""#
+    );
+}
+
+#[test]
+fn the_exit_policies_serialize_as_their_variant_names() {
+    assert_eq!(
+        serde_json::to_string(&PaneExitPolicy::CloseOnExit).expect("serialize"),
+        r#""CloseOnExit""#
+    );
+    assert_eq!(
+        serde_json::to_string(&PaneExitPolicy::RespawnShell).expect("serialize"),
+        r#""RespawnShell""#
+    );
+}

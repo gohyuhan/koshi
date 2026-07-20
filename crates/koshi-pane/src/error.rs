@@ -52,3 +52,6 @@ impl DomainError for InvalidTransition {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

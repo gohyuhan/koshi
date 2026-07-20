@@ -472,3 +472,67 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
     assert_eq!(offset(&rt, third, pane), 0); // followed live, untouched
     assert!(!held(&rt, third, pane));
 }
+
+/// The engine's effective view offset for the pane — what the renderer actually
+/// shows, which is `0` on the alternate screen however far the stored offset sits.
+fn effective_offset(rt: &Runtime, pane: PaneId, stored: usize) -> usize {
+    rt.terminal_engines
+        .get(&pane)
+        .unwrap()
+        .state()
+        .effective_view_offset(stored)
+}
+
+#[test]
+fn scrolling_up_on_the_alternate_screen_moves_the_stored_offset_but_shows_live() {
+    // The alternate screen keeps no history of its own, but the pane's one
+    // scrollback survives entering it (it is restored on exit), so `scroll_up`
+    // still clamps against those retained lines and moves the stored offset. The
+    // renderer never shows it there, though: the engine's effective offset is 0
+    // on the alternate screen.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n"); // three retained lines
+    rt.handle_pty_output(pane, b"\x1b[?1049h"); // enter the alternate screen
+    assert_eq!(retained(&rt, pane), 3, "the primary scrollback survives");
+
+    rt.scroll_up(client, pane, 2);
+    // The stored offset moved — `scroll_up` clamps to the retained count, which
+    // the alternate screen did not clear.
+    assert_eq!(offset(&rt, client, pane), 2);
+    // But nothing scrolled on screen: the effective offset is 0 on the alt screen.
+    assert_eq!(effective_offset(&rt, pane, 2), 0);
+}
+
+#[test]
+fn scroll_to_top_on_the_alternate_screen_clamps_to_the_retained_history() {
+    // `scroll_to_top` is a `scroll_up` by the maximum; on the alternate screen it
+    // still lands exactly on the retained primary line count, and still shows
+    // nothing scrolled.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n\n"); // four retained lines
+    rt.handle_pty_output(pane, b"\x1b[?1049h");
+
+    rt.scroll_to_top(client, pane);
+    assert_eq!(offset(&rt, client, pane), 4); // clamped to the retained count
+    assert_eq!(effective_offset(&rt, pane, 4), 0); // still live on screen
+}
+
+#[test]
+fn a_view_scrolled_while_on_the_alternate_screen_applies_once_it_exits() {
+    // Consequence of the two tests above: because the stored offset moves while
+    // the alternate screen hides it, leaving the alternate screen re-applies that
+    // offset — the primary view is now scrolled back by what was scrolled while
+    // the full-screen program was up.
+    let (mut rt, pane, client) = runtime_with_pane();
+    rt.handle_pty_output(pane, b"\n\n\n");
+    rt.handle_pty_output(pane, b"\x1b[?1049h"); // enter
+    rt.scroll_up(client, pane, 2);
+    assert_eq!(effective_offset(&rt, pane, 2), 0); // hidden while on the alt screen
+
+    rt.handle_pty_output(pane, b"\x1b[?1049l"); // leave the alternate screen
+    assert_eq!(retained(&rt, pane), 3, "the primary history is back");
+    // The stored offset is unchanged and now shows: the primary view sits two
+    // lines back.
+    assert_eq!(offset(&rt, client, pane), 2);
+    assert_eq!(effective_offset(&rt, pane, 2), 2);
+}

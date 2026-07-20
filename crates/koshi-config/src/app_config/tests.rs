@@ -388,3 +388,234 @@ fn a_duplicate_field_partial_section_warns_and_keeps_the_first() {
         vec!["ignored duplicate `scrollback` section".to_string()]
     );
 }
+
+// -- adversarial: type confusion and bounds -------------------------------
+
+#[test]
+fn a_string_pane_dimension_is_skipped_as_a_non_integer() {
+    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols \"wide\"\n}");
+    assert_eq!(layer.pane.expect("pane present").min_cols, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.min-cols`: expected an integer".to_string()]
+    );
+}
+
+#[test]
+fn an_out_of_range_pane_dimension_is_skipped_with_the_range_reason() {
+    // 70000 overflows u16 and -1 underflows it; both are skipped with the same
+    // bound reason, and the default dimension stands.
+    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 70000\n    min-rows -1\n}");
+    let pane = layer.pane.expect("pane present");
+    assert_eq!(pane.min_cols, None);
+    assert_eq!(pane.min_rows, None);
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `pane.min-cols`: must be between 0 and 65535".to_string(),
+            "ignored `pane.min-rows`: must be between 0 and 65535".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_negative_scroll_lines_is_skipped_not_clamped() {
+    // Scroll lines is a plain u16 field (unlike the scrollback caps, which
+    // clamp): a negative value is the wrong kind and is dropped.
+    let (layer, warnings) = parse_with_warnings("mouse {\n    scroll-lines -5\n}");
+    assert_eq!(layer.mouse.expect("mouse present").scroll_lines, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `mouse.scroll-lines`: must be between 0 and 65535".to_string()]
+    );
+}
+
+#[test]
+fn a_garbage_version_value_is_a_validation_error() {
+    let error = parse_app_config(Path::new("koshi.kdl"), "version \"abc\"")
+        .expect_err("string is not a version integer");
+    match error {
+        ConfigError::Validation { key, detail } => {
+            assert_eq!(key, "version");
+            assert_eq!(detail, "expected an integer");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_negative_version_is_a_validation_error() {
+    let error = parse_app_config(Path::new("koshi.kdl"), "version -1")
+        .expect_err("a negative version does not fit u32");
+    assert!(matches!(error, ConfigError::Validation { key, .. } if key == "version"));
+}
+
+#[test]
+fn a_comments_only_file_sets_no_layer_and_no_warnings() {
+    let (layer, warnings) = parse_with_warnings("// only a comment\n// and another\n");
+    assert_eq!(layer.update, None);
+    assert_eq!(layer.pane, None);
+    assert_eq!(layer.scrollback, None);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn carriage_return_line_endings_parse_like_line_feeds() {
+    // A file written on Windows arrives with CRLF; it must parse identically to
+    // the same content with plain LF, on every platform.
+    let lf = "scrollback {\n    max-lines 123\n}\n";
+    let crlf = "scrollback {\r\n    max-lines 123\r\n}\r\n";
+    let from_lf = parse(lf).scrollback.expect("lf scrollback present");
+    let from_crlf = parse(crlf).scrollback.expect("crlf scrollback present");
+    assert_eq!(from_lf.max_lines, Some(123));
+    assert_eq!(from_crlf.max_lines, Some(123));
+}
+
+#[test]
+fn a_whitespace_only_file_sets_no_layer_and_no_warnings() {
+    // Spaces, tabs, and blank lines with no node at all leave every section
+    // unset, the same as an empty file, and raise no warning.
+    let (layer, warnings) = parse_with_warnings("   \n\t  \n \n");
+    assert_eq!(layer.update, None);
+    assert_eq!(layer.pane, None);
+    assert_eq!(layer.scrollback, None);
+    assert_eq!(layer.terminal, None);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_leading_byte_order_mark_is_tolerated() {
+    // An editor that saves UTF-8 with a leading BOM prepends U+FEFF; the file
+    // must still parse, with the first section read exactly as if the BOM were
+    // absent, on every platform.
+    let (layer, warnings) = parse_with_warnings("\u{feff}scrollback {\n    max-lines 5\n}");
+    assert_eq!(
+        layer.scrollback.expect("scrollback present").max_lines,
+        Some(5)
+    );
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_float_where_an_integer_is_required_is_skipped_as_a_non_integer() {
+    // `1.5` parses as a KDL float, which is the wrong kind for a u16 dimension:
+    // the field is dropped with the same reason a string would give, and the
+    // default dimension stands.
+    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 1.5\n}");
+    assert_eq!(layer.pane.expect("pane present").min_cols, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.min-cols`: expected an integer".to_string()]
+    );
+}
+
+#[test]
+fn the_largest_u32_interval_is_accepted_and_one_past_it_is_a_validation_error() {
+    // u32's ceiling, 4294967295, fits the strict `update` interval field; one
+    // more overflows it and fails the whole parse with the range reason.
+    let at_max = parse("update {\n    check-interval-days 4294967295\n}")
+        .update
+        .expect("update present");
+    assert_eq!(at_max.check_interval_days, Some(4_294_967_295));
+
+    let error = parse_app_config(
+        Path::new("koshi.kdl"),
+        "update {\n    check-interval-days 4294967296\n}",
+    )
+    .expect_err("one past u32 max");
+    match error {
+        ConfigError::Validation { key, detail } => {
+            assert_eq!(key, "check-interval-days");
+            assert_eq!(detail, "must be between 0 and 4294967295");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_first_unsupported_schema_version_is_rejected_at_the_boundary() {
+    // The build supports schema version 1, so version 2 — exactly one past the
+    // boundary — is the smallest rejected version, named in the exact detail.
+    let error = parse_app_config(Path::new("koshi.kdl"), "version 2")
+        .expect_err("version 2 is newer than this build");
+    match error {
+        ConfigError::Validation { key, detail } => {
+            assert_eq!(key, "version");
+            assert_eq!(
+                detail,
+                "config schema version 2 is newer than this koshi supports (1)"
+            );
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_repeated_field_inside_one_section_keeps_the_last_value() {
+    // Two `min-cols` lines in one `pane` block is not a duplicate section: the
+    // later value wins and no warning is raised, matching KDL's last-node-wins
+    // reading of repeated fields.
+    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 5\n    min-cols 10\n}");
+    assert_eq!(layer.pane.expect("pane present").min_cols, Some(10));
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_field_with_no_value_is_skipped_with_a_warning() {
+    // A bare `min-cols` with no argument has zero values where exactly one is
+    // required: it is dropped like any bad field and the default stands.
+    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols\n}");
+    assert_eq!(layer.pane.expect("pane present").min_cols, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `pane.min-cols`: expected exactly one value".to_string()]
+    );
+}
+
+#[test]
+fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
+    // A string value left open by a newline is a KDL lexer error, surfaced as a
+    // parse error rather than crashing the parser.
+    let error = parse_app_config(Path::new("koshi.kdl"), "terminal {\n    term \"xterm\n}")
+        .expect_err("unterminated string");
+    assert!(matches!(error, ConfigError::Parse { .. }));
+}
+
+#[test]
+fn hostile_byte_sequences_never_panic_and_a_later_valid_parse_still_succeeds() {
+    // The parser is a trust boundary: user-authored bytes must always return a
+    // result, never panic. Each of these malformed inputs is parsed only for
+    // its no-panic effect (a panic would fail the test); the value is ignored.
+    // (Deeply nested blocks are excluded — the KDL parser recurses per level
+    // and overflows the stack well before a hundred levels; see the report.)
+    let hostile: &[&str] = &[
+        "\0",
+        "{",
+        "}",
+        "pane {",
+        "\"unterminated",
+        "pane {\n    min-cols=5\n}",
+        "pane {\n    min-cols \0\n}",
+        "\u{feff}\u{feff}\u{feff}",
+        "scrollback {\n    max-lines 999999999999999999999999999999\n}",
+        &format!(
+            "// {}\nscrollback {{\n    max-lines 7\n}}",
+            "x".repeat(200_000)
+        ),
+        &"\u{4f60}\u{597d}".repeat(500),
+        "version\tupdate\tpane",
+    ];
+    for src in hostile {
+        // Discarded on purpose: the only property under test is that the call
+        // returns instead of panicking or aborting.
+        let _ = parse_app_config(Path::new("koshi.kdl"), src);
+    }
+
+    // After the barrage, an ordinary config still parses to the right value —
+    // the parser holds no poisoned state between calls.
+    let good = parse("scrollback {\n    max-lines 4242\n}");
+    assert_eq!(
+        good.scrollback.expect("scrollback present").max_lines,
+        Some(4242)
+    );
+}

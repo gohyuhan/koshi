@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use koshi_core::ids::PaneId;
+use koshi_core::error::DomainCategory;
+use koshi_core::ids::{PaneId, PluginId};
 
 use super::{PaneKind, PaneRecord};
 use crate::error::InvalidTransition;
@@ -59,4 +60,20 @@ fn an_accepted_lifecycle_event_advances_the_record() {
         .expect("ProcessStarted is legal from Spawning");
 
     assert_eq!(record.lifecycle(), &PaneLifecycle::Running);
+}
+
+#[test]
+fn a_plugin_record_carries_the_plugin_kind_and_its_domain() {
+    let plugin_id = PluginId::new();
+
+    let record = PaneRecord::new_with_kind(
+        PaneId::new(),
+        PaneKind::Plugin { plugin_id },
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(record.kind(), &PaneKind::Plugin { plugin_id });
+    assert_eq!(record.kind().domain_category(), DomainCategory::Plugin);
+    // A plugin pane still starts life in `Spawning`, like a terminal one.
+    assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
 }

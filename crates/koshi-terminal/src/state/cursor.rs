@@ -40,3 +40,6 @@ pub struct Cursor {
     /// own snapshot independent of the other.
     pub(in crate::state) saved: Option<SavedCursor>,
 }
+
+#[cfg(test)]
+mod tests;

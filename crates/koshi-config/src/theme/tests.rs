@@ -101,3 +101,100 @@ fn a_syntax_error_is_a_parse_error() {
         .expect_err("unclosed block");
     assert!(matches!(error, ConfigError::Parse { .. }));
 }
+
+// -- adversarial: type confusion and exact warnings -----------------------
+
+#[test]
+fn a_bad_color_names_the_exact_reason_in_its_warning() {
+    // The skip warning carries the underlying color-parse reason verbatim, not
+    // just the field name.
+    let (theme, warnings) = parse("colors {\n    ramp-start \"nothex\"\n}");
+    assert_eq!(theme.colors.expect("colors present").ramp_start, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit".to_string()]
+    );
+
+    let (_, warnings) = parse("colors {\n    accent \"#fff\"\n}");
+    assert_eq!(
+        warnings,
+        vec!["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3".to_string()]
+    );
+}
+
+#[test]
+fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
+    // A number where a hex string belongs is the wrong kind of value; it is
+    // skipped with the shared "expected a string" reason and the default
+    // color stands.
+    let (theme, warnings) = parse("colors {\n    accent 5\n}");
+    assert_eq!(theme.colors.expect("colors present").accent, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `colors.accent`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_non_string_name_is_skipped_with_a_warning() {
+    let (theme, warnings) = parse("name 42");
+    assert_eq!(theme.name, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `name`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_color_role_keeps_the_last_value() {
+    // Two entries for one role: the later one overwrites the earlier, with no
+    // warning — KDL allows the repeat and the parser takes the final word.
+    let (theme, warnings) = parse("colors {\n    accent \"#000000\"\n    accent \"#ffffff\"\n}");
+    assert_eq!(
+        theme.colors.expect("colors present").accent,
+        Some(RgbColor::new(0xff, 0xff, 0xff))
+    );
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn the_channel_boundaries_survive_the_parser() {
+    let (theme, warnings) =
+        parse("colors {\n    on-accent \"#000000\"\n    on-ramp \"#ffffff\"\n}");
+    let colors = theme.colors.expect("colors present");
+    assert_eq!(colors.on_accent, Some(RgbColor::new(0, 0, 0)));
+    assert_eq!(colors.on_ramp, Some(RgbColor::new(0xff, 0xff, 0xff)));
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn an_empty_colors_block_sets_no_role() {
+    // A `colors` block with no children is present but overrides nothing.
+    let (theme, warnings) = parse("colors {\n}");
+    let colors = theme.colors.expect("colors present");
+    assert_eq!(colors.ramp_start, None);
+    assert_eq!(colors.accent, None);
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_non_integer_version_is_a_validation_error() {
+    // A garbage version value is a validation failure, not a silent skip.
+    let error = parse_theme(Path::new("theme.kdl"), "version \"abc\"")
+        .expect_err("string is not a version integer");
+    match error {
+        ConfigError::Validation { key, detail } => {
+            assert_eq!(key, "version");
+            assert_eq!(detail, "expected an integer");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_comments_only_theme_is_treated_as_empty() {
+    let (theme, warnings) = parse("// just a comment\n");
+    assert_eq!(theme.name, None);
+    assert!(theme.colors.is_none());
+    assert!(warnings.is_empty());
+}
