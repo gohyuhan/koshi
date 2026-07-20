@@ -40,7 +40,7 @@ spaces for a multi-key shortcut.
   prefix, so `<leader>p` is `<Space>` then `p` — two presses. Rebind `leader`
   and every `<leader>` binding moves with it — **including koshi's own
   defaults**, which are written with `<leader>` (see the example). Explicit
-  chords like `<A-t>` are *not* the leader and never move.
+  chords like `<A-f>` are *not* the leader and never move.
 
 ## `mode` blocks
 
@@ -61,8 +61,8 @@ This is koshi's **complete default keymap**, written exactly as koshi ships it �
 the leader-relative bindings use `<leader>`, so changing `leader` moves them all
 at once. With the default `leader "C-"`, `<leader>p n` **is** `<C-p> n`; set
 `leader "A-"` and it becomes `<A-p> n`. `bind` and `remove` both accept
-`<leader>`. `<C-l>` (the reserved lock/unlock) and the `<A-…>` bindings are
-explicit — they never move. Run `koshi keys list` to see the resolved keymap.
+`<leader>`. `<C-l>` (the reserved lock/unlock) and `<A-f>` are explicit — they
+never move. Run `koshi keys list` to see the resolved keymap.
 
 ```kdl
 // keybinding.kdl — the complete default keymap.
@@ -91,25 +91,17 @@ mode "normal" {
     bind "<leader>p <Down>" "core:focus-pane-down"
     bind "<leader>p <Up>" "core:focus-pane-up"
     bind "<leader>p <Right>" "core:focus-pane-right"
-    bind "<leader>s h" "core:resize-pane-left"
-    bind "<leader>s j" "core:resize-pane-down"
-    bind "<leader>s k" "core:resize-pane-up"
-    bind "<leader>s l" "core:resize-pane-right"
+    bind "<leader>s <Left>" "core:resize-pane-left"
+    bind "<leader>s <Down>" "core:resize-pane-down"
+    bind "<leader>s <Up>" "core:resize-pane-up"
+    bind "<leader>s <Right>" "core:resize-pane-right"
+    bind "<leader>t n" "core:new-tab"           // <C-t> n with the default leader
+    bind "<leader>t x" "core:close-tab"
 
-    // explicit chords — alternatives that never move with the leader
+    // explicit chords — they never move with the leader
     bind "<A-f>" "core:toggle-pane-fullscreen"
-    bind "<A-h>" "core:focus-pane-left"
-    bind "<A-j>" "core:focus-pane-down"
-    bind "<A-k>" "core:focus-pane-up"
-    bind "<A-l>" "core:focus-pane-right"
-    bind "<A-t>" "core:new-tab"
     bind "<Tab>" "core:next-tab"
     bind "<S-Tab>" "core:previous-tab"
-
-    // additions (not defaults): give Ctrl+b back to the program, and add a
-    // leader-relative binding of your own
-    remove "<C-b>"
-    bind "<leader>d" "core:close-pane-tree"
 }
 
 mode "locked" {

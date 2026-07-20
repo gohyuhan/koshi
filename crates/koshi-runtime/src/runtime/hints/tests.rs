@@ -22,8 +22,8 @@ fn ctrl(key: char) -> KeyChord {
 fn normal_mode_joins_defaults_to_display_names() {
     let hints = catalog().hints_for(LockMode::Normal);
 
-    // All 25 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.entries.len(), 25);
+    // All 22 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.entries.len(), 22);
 
     let new_pane = KeySequence::new(
         ctrl('p'),
@@ -95,7 +95,11 @@ fn prefix_labels_carry_the_shipped_names() {
         hints.prefix_labels.get(&ctrl('s')).map(String::as_str),
         Some("RESIZE")
     );
-    assert_eq!(hints.prefix_labels.len(), 2);
+    assert_eq!(
+        hints.prefix_labels.get(&ctrl('t')).map(String::as_str),
+        Some("TAB")
+    );
+    assert_eq!(hints.prefix_labels.len(), 3);
 }
 
 #[test]

@@ -8,12 +8,11 @@ mod tests;
 
 /// Draw the tabline: the whole row is filled with the theme's bar background
 /// (black by default), then the session name plus the `[v…]` version badge on
-/// the left and the scroll indicator plus mode tag on the right are shown
-/// whole as colored text over that fill; only the tab list between them
-/// carries its own block
+/// the left and the mode tag on the right are shown whole as colored text over
+/// that fill; only the tab list between them carries its own block
 /// backgrounds — each tab a hint-bar-style ribbon on its own stop of the
-/// theme's chrome ramp (light-purple → light-blue by default). Tabs that
-/// don't fit are dropped whole with a trailing `…`.
+/// theme's chrome ramp (light-purple → light-blue by default). Tabs that don't
+/// fit are dropped whole, and a `◀` or `▶` marks the side they went off.
 ///
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
 /// same solve [`crate::hit_test`] reads, so the tab a click lands on is the tab

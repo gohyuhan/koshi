@@ -138,7 +138,7 @@ fn empty_report_applies() {
 
 #[test]
 fn user_vs_session_same_key_different_action_collides() {
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let layers = [
         defaults(),
         layer(
@@ -171,7 +171,7 @@ fn user_vs_session_same_key_different_action_collides() {
 fn three_layers_with_three_distinct_actions_all_appear_in_the_collision() {
     // Two claimants is the minimum for a collision; a third distinct
     // claimant must still be listed, not silently dropped after the pair.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -211,7 +211,7 @@ fn a_repeated_claim_across_nonadjacent_layers_dedups_against_a_third_distinct_on
     // Session's differing claim sits between them. Dedup must compare
     // against every earlier distinct claim, not just the immediately
     // preceding one, so the result is exactly two distinct claims.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -261,7 +261,7 @@ fn steal_of_a_defaulted_key_is_not_a_collision() {
 
 #[test]
 fn identical_bound_action_in_two_user_layers_passes() {
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -326,7 +326,7 @@ fn same_action_with_different_args_collides() {
 fn orphan_actions_on_a_shared_key_do_not_collide() {
     // Both claims name unregistered actions: inactive bindings, warned as
     // orphans, re-judged when detection re-runs at registration.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let ghost = |name: &str| BoundAction {
         action: ActionRef::user(name).expect("valid user action name"),
         args: ActionArgs::None,
@@ -362,7 +362,7 @@ fn orphan_actions_on_a_shared_key_do_not_collide() {
 
 #[test]
 fn one_orphan_claim_does_not_collide_with_a_live_one() {
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let ghost = BoundAction {
         action: ActionRef::user("ghost").expect("valid user action name"),
         args: ActionArgs::None,
@@ -445,7 +445,7 @@ fn coming_soon_claims_do_not_collide() {
     // Neither binding can fire in this build, so nothing is unreachable;
     // the collision surfaces at the first load of the build that
     // implements the actions.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -484,7 +484,7 @@ fn unresolvable_args_binding_warns_and_does_not_collide() {
     // The user layer's binding carries arguments `core:lock` cannot take,
     // so it can never fire; it must not escalate the session layer's
     // working binding into the all-or-nothing revert.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let broken = BoundAction {
         action: core("lock"),
         args: ActionArgs::Run {
@@ -1003,7 +1003,7 @@ fn a_later_redundant_remove_voids_a_rebind_that_an_earlier_remove_would_not() {
     // wrongly survive (1 is not > 2) and collide with the top claim;
     // recording the last remove correctly voids it, leaving the top claim
     // alone.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
@@ -1195,7 +1195,7 @@ fn non_typeable_leaders_do_not_warn() {
 
 #[test]
 fn a_fatal_finding_outranks_a_collision() {
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -1234,7 +1234,7 @@ fn severity_table() {
         (
             ConflictDiagnostic::KeyCollision {
                 mode: mode("normal"),
-                key: seq(ModFlags::CTRL, 't'),
+                key: seq(ModFlags::CTRL, 'y'),
                 claims,
             },
             ConflictSeverity::Collision,
@@ -1292,7 +1292,7 @@ fn severity_table() {
             ConflictDiagnostic::UnresolvableArgs {
                 origin: LayerOrigin::User,
                 mode: mode("normal"),
-                key: seq(ModFlags::CTRL, 't'),
+                key: seq(ModFlags::CTRL, 'y'),
                 action: core("lock"),
             },
             ConflictSeverity::Warning,
@@ -1338,7 +1338,7 @@ fn severity_table() {
 fn display_messages_are_exact() {
     let collision = ConflictDiagnostic::KeyCollision {
         mode: mode("normal"),
-        key: seq(ModFlags::CTRL, 't'),
+        key: seq(ModFlags::CTRL, 'y'),
         claims: vec![
             (LayerOrigin::User, bound("new-tab")),
             (LayerOrigin::Session, bound("lock")),
@@ -1346,7 +1346,7 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         collision.to_string(),
-        "key `<C-t>` in mode `normal` is bound by user to `core:new-tab` and by session \
+        "key `<C-y>` in mode `normal` is bound by user to `core:new-tab` and by session \
          to `core:lock`; all user keybindings revert to defaults"
     );
 
@@ -1444,12 +1444,12 @@ fn display_messages_are_exact() {
     let unresolvable = ConflictDiagnostic::UnresolvableArgs {
         origin: LayerOrigin::User,
         mode: mode("normal"),
-        key: seq(ModFlags::CTRL, 't'),
+        key: seq(ModFlags::CTRL, 'y'),
         action: core("lock"),
     };
     assert_eq!(
         unresolvable.to_string(),
-        "`<C-t>` in mode `normal` (user) binds `core:lock` with arguments it cannot \
+        "`<C-y>` in mode `normal` (user) binds `core:lock` with arguments it cannot \
          take; the binding can never fire as written"
     );
 
@@ -1513,7 +1513,7 @@ fn display_messages_are_exact() {
 fn remove_then_rebind_across_user_layers_is_not_a_collision() {
     // The supported way to re-key: the session layer removes the user
     // layer's key, voiding its claim, and rebinds the key itself.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -1536,7 +1536,7 @@ fn remove_then_rebind_across_user_layers_is_not_a_collision() {
 fn remove_without_rebind_voids_the_lower_claim() {
     // The user layer binds the key, session only removes it: one claim,
     // voided — no collision, and the key reaches nothing.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -1554,7 +1554,7 @@ fn remove_without_rebind_voids_the_lower_claim() {
 fn remove_below_both_claims_does_not_stop_their_collision() {
     // A remove voids only LOWER layers' claims: with the remove at the
     // bottom user layer, the two claims above it still collide.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
@@ -1588,7 +1588,7 @@ fn remove_above_both_claims_voids_the_collision() {
     // The user disabled the key wholesale in a higher layer; two voided
     // claims cannot collide, and no warning fires — the removal is the
     // user's own authored intent.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(
@@ -1732,7 +1732,7 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
 fn remove_in_an_unregistered_mode_is_inert() {
     // Removals in an unknown mode are skipped like its bindings; only the
     // orphan-mode warning surfaces.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let report = detect(&[
         defaults(),
         layer(

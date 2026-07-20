@@ -228,9 +228,12 @@ pub struct BoundAction {
 /// The bindings for one input mode, keyed by the key sequence pressed.
 ///
 /// The map key is the sequence, so one sequence resolves to exactly one
-/// action by construction — the hard binding invariant. Several sequences
-/// may name the same action (`<C-p> <Left>` and `<A-h>` both bind
-/// `focus-pane-left` in the defaults).
+/// action by construction — the hard binding invariant. The reverse is open:
+/// several sequences in one mode may name the same action, though no shipped
+/// default does — within a mode every default action has exactly one key
+/// (`core:focus-pane-left` is reachable only as `<C-p> <Left>`). An action
+/// bound in two modes is two entries in two maps: `core:quit` is `<C-q>` in
+/// both `normal` and `locked`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModeBindings {
     /// Key sequence → the action it triggers.
@@ -253,17 +256,18 @@ pub struct ModeBindings {
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
 /// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
-/// splits, and directional focus — live under the `<C-p>` prefix and resize
-/// under the `<C-s>` prefix. Every binding is argless: an action choice with
-/// a fixed set of values is part of the action name (`new-pane-left`,
-/// `close-pane-tree`), so any key here can be rebound from `keybinding.kdl`.
+/// splits, and directional focus — live under the `<C-p>` prefix, resize under
+/// `<C-s>`, and tab lifecycle under `<C-t>`. Every binding is argless: an
+/// action choice with a fixed set of values is part of the action name
+/// (`new-pane-left`, `close-pane-tree`), so any key here can be rebound from
+/// `keybinding.kdl`.
 /// Action names here are compile-time constants known to satisfy the
 /// action-name grammar; an invalid one is a bug in this table and is caught
 /// by its tests.
 pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
     // Leader-relative bindings are written with `<leader>` and resolved against
-    // `leader`, so rebinding the leader moves them; explicit chords (the Alt
-    // alternatives, the reserved unlock) are written literally and never move.
+    // `leader`, so rebinding the leader moves them; explicit chords (`<A-f>`,
+    // the reserved unlock, the Tab pair) are written literally and never move.
     let seq = |text: &str| {
         parse_sequence(text, leader, u8::MAX).expect("a built-in default binding must parse")
     };
@@ -293,30 +297,27 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
         (seq("<leader>p l"), bound("new-pane-right")),
         // The close key kills the pane's whole process group.
         (seq("<leader>p x"), bound("close-pane-tree")),
-        // Fullscreen — an explicit Alt alternative.
+        // Fullscreen — an explicit chord, so it stays put under any leader.
         (seq("<A-f>"), bound("toggle-pane-fullscreen")),
-        // Directional focus: arrows under the pane prefix, and explicit Alt+vim
-        // letters. Both fire continuous actions, so the prefix stays armed
-        // after each press.
+        // Directional focus: arrows under the pane prefix. These fire
+        // continuous actions, so the prefix stays armed after each press.
         (seq("<leader>p <Left>"), bound("focus-pane-left")),
         (seq("<leader>p <Down>"), bound("focus-pane-down")),
         (seq("<leader>p <Up>"), bound("focus-pane-up")),
         (seq("<leader>p <Right>"), bound("focus-pane-right")),
-        (seq("<A-h>"), bound("focus-pane-left")),
-        (seq("<A-j>"), bound("focus-pane-down")),
-        (seq("<A-k>"), bound("focus-pane-up")),
-        (seq("<A-l>"), bound("focus-pane-right")),
-        // Resize: one cell per press, under the leader then `s`.
-        (seq("<leader>s h"), bound("resize-pane-left")),
-        (seq("<leader>s j"), bound("resize-pane-down")),
-        (seq("<leader>s k"), bound("resize-pane-up")),
-        (seq("<leader>s l"), bound("resize-pane-right")),
+        // Resize: one cell per press, arrows under the leader then `s`.
+        (seq("<leader>s <Left>"), bound("resize-pane-left")),
+        (seq("<leader>s <Down>"), bound("resize-pane-down")),
+        (seq("<leader>s <Up>"), bound("resize-pane-up")),
+        (seq("<leader>s <Right>"), bound("resize-pane-right")),
         // Copy and paste have NO bindings — they follow the OS.
-        // Tabs. New tab is an explicit Alt binding; switching is the bare
-        // Tab / Shift+Tab pair — an OWNER-CHOSEN exception, never
-        // leader-relative: outside locked mode the keymap owns Tab, so a shell
-        // sees a literal Tab only while the client is locked.
-        (seq("<A-t>"), bound("new-tab")),
+        // Tab lifecycle, under the leader then `t`: `n` opens, `x` closes.
+        // Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
+        // exception, never leader-relative: outside locked mode the keymap
+        // owns Tab, so a shell sees a literal Tab only while the client is
+        // locked.
+        (seq("<leader>t n"), bound("new-tab")),
+        (seq("<leader>t x"), bound("close-tab")),
         (seq("<Tab>"), bound("next-tab")),
         (seq("<S-Tab>"), bound("previous-tab")),
     ]
@@ -373,16 +374,25 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
             .first()
             .expect("a prefix sequence has an opening chord")
     };
-    let pane = opening("<leader>p");
-    let resize = opening("<leader>s");
-    // A modifier-run leader opens these at distinct chords (`<C-p>`, `<C-s>`),
-    // each naming its own group. A chord leader (e.g. `<Space>`) makes both open
-    // the SAME leader chord, so no single group label fits it — leave it
-    // unlabeled and let the hint bar show its derived `+N` count instead.
-    if pane == resize {
+    let groups = [
+        ("<leader>p", "PANE"),
+        ("<leader>s", "RESIZE"),
+        ("<leader>t", "TAB"),
+    ];
+    // Keying by opening chord is also the ambiguity check. A modifier-run
+    // leader gives each group its own chord, so all three survive: `C-` yields
+    // `<C-p> PANE`, `<C-s> RESIZE`, `<C-t> TAB`. A chord leader opens every
+    // group at the leader itself, so they collapse onto one key: `<Space>`
+    // yields a single entry. Fewer entries than groups means no label names
+    // one group, so drop them all and let the hint bar show its `+N` count.
+    let labels: BTreeMap<KeyChord, String> = groups
+        .iter()
+        .map(|(prefix, label)| (opening(prefix), (*label).to_string()))
+        .collect();
+    if labels.len() < groups.len() {
         return BTreeMap::new();
     }
-    BTreeMap::from([(pane, "PANE".to_string()), (resize, "RESIZE".to_string())])
+    labels
 }
 
 /// Defaults applied when creating panes and layouts.

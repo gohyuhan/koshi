@@ -652,14 +652,14 @@ fn view_with_binding(key: &str, action: &str) -> crate::keymap::KeymapView {
 
 #[test]
 fn keys_list_shows_a_steal_and_its_unbound_default() {
-    let view = view_with_binding("<A-t>", "core:close-pane");
+    let view = view_with_binding("<A-f>", "core:close-pane");
     let rendered = render_keys_list(&view, Some("normal"), None, FormatArg::Json);
     let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
     let bindings = value["bindings"].as_array().expect("array");
     assert!(
         bindings.contains(&serde_json::json!({
             "mode": "normal",
-            "key": "<A-t>",
+            "key": "<A-f>",
             "action": "core:close-pane",
             "source": "user",
         })),
@@ -668,8 +668,8 @@ fn keys_list_shows_a_steal_and_its_unbound_default() {
     assert!(
         bindings.contains(&serde_json::json!({
             "mode": "normal",
-            "key": "<A-t>",
-            "action": "core:new-tab",
+            "key": "<A-f>",
+            "action": "core:toggle-pane-fullscreen",
             "source": "defaults (unbound)",
         })),
         "got: {rendered}"
@@ -771,12 +771,15 @@ fn keys_describe_renders_system_authored_args_as_json() {
 #[test]
 fn keys_describe_renders_missing_args_as_null() {
     let view = crate::keymap::view_from_partial(None, None, None);
-    let rendered = render_keys_describe(&view, "<A-t>", FormatArg::Json)
+    let rendered = render_keys_describe(&view, "<A-f>", FormatArg::Json)
         .expect("sequence parses")
         .expect("bound in normal mode");
     let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
     assert_eq!(value[0]["args"], serde_json::Value::Null);
-    assert_eq!(value[0]["action"], serde_json::json!("core:new-tab"));
+    assert_eq!(
+        value[0]["action"],
+        serde_json::json!("core:toggle-pane-fullscreen")
+    );
 }
 
 #[test]

@@ -52,6 +52,12 @@ fn chord(mods: ModFlags, key: char) -> KeyChord {
     KeyChord::new(mods, Key::Char(key))
 }
 
+/// An unmodified named key, for the arrows the default focus and resize
+/// sequences continue with.
+fn named(key: NamedKey) -> KeyChord {
+    KeyChord::new(ModFlags::NONE, Key::Named(key))
+}
+
 fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
@@ -306,14 +312,14 @@ fn continuous_resize_keeps_the_prefix_armed_for_repeat_presses() {
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'n'), now);
 
-    // First resize: full `<C-s> h` sequence.
+    // First resize: full `<C-s> <Left>` sequence.
     let sizes_start = runtime.pty_sizes.clone();
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     let sizes_once = runtime.pty_sizes.clone();
     assert_ne!(sizes_once, sizes_start);
 
-    // The prefix stayed armed: `h` alone fires the resize again…
+    // The prefix stayed armed: `<Left>` alone fires the resize again…
     assert_eq!(
         runtime
             .build_snapshot(client)
@@ -322,7 +328,7 @@ fn continuous_resize_keeps_the_prefix_armed_for_repeat_presses() {
             .pending_sequence,
         Some(KeySequence::from(chord(ModFlags::CTRL, 's')))
     );
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     assert_ne!(runtime.pty_sizes, sizes_once);
 
     // …and Escape puts the bar back to idle.
@@ -472,13 +478,15 @@ fn directional_focus_binding_moves_focus_across_a_split() {
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'n'), now);
     let focused_after_split = focused_pane(&runtime, client);
 
-    // `<A-h>` focuses the left neighbor.
-    runtime.handle_key_input(client, chord(ModFlags::ALT, 'h'), now);
+    // `<C-p> <Left>` focuses the left neighbor.
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     let focused_left = focused_pane(&runtime, client);
     assert_ne!(focused_left, focused_after_split);
 
-    // `<A-l>` returns to the right pane.
-    runtime.handle_key_input(client, chord(ModFlags::ALT, 'l'), now);
+    // Focus is continuous, so the prefix stays armed: `<Right>` alone returns
+    // to the right pane.
+    runtime.handle_key_input(client, named(NamedKey::Right), now);
     assert_eq!(focused_pane(&runtime, client), focused_after_split);
 }
 
@@ -499,7 +507,8 @@ fn directional_new_pane_binding_splits_on_that_side() {
     // The original pane is the new pane's RIGHT neighbor — exactly where a
     // left split puts it. A wrong split side leaves nothing to the right and
     // this focus move would stay put.
-    runtime.handle_key_input(client, chord(ModFlags::ALT, 'l'), now);
+    runtime.handle_key_input(client, chord(ModFlags::CTRL, 'p'), now);
+    runtime.handle_key_input(client, named(NamedKey::Right), now);
     assert_eq!(focused_pane(&runtime, client), original);
 }
 
@@ -571,7 +580,7 @@ fn resize_prefix_moves_a_live_split_border() {
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'n'), now);
     let sizes_before = runtime.pty_sizes.clone();
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     assert_ne!(runtime.pty_sizes, sizes_before);
 }
 
@@ -619,7 +628,7 @@ fn abandoned_rearmed_prefix_writes_nothing_to_the_pane() {
     // Resize once, leave the re-armed prefix hanging, then cancel with Esc:
     // the re-armed prefix carries no fallback bytes, so the shell sees none.
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     runtime.handle_key_input(
         client,
         KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc)),
@@ -645,7 +654,7 @@ fn an_unmatched_key_under_a_rearmed_prefix_is_discarded_and_it_stays_armed() {
     let focused = focused_pane(&runtime, client);
 
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     let sizes_after_one_resize = runtime.pty_sizes.clone();
 
     // A re-armed prefix is an open sequence like any other, and captures like
@@ -663,8 +672,8 @@ fn an_unmatched_key_under_a_rearmed_prefix_is_discarded_and_it_stays_armed() {
         Some(KeySequence::from(chord(ModFlags::CTRL, 's')))
     );
 
-    // Still armed, so the next `h` resizes again without re-pressing `<C-s>`.
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'h'), now);
+    // Still armed, so the next `<Left>` resizes again without re-pressing `<C-s>`.
+    runtime.handle_key_input(client, named(NamedKey::Left), now);
     assert_ne!(runtime.pty_sizes, sizes_after_one_resize);
 
     // Escape is the way out, and it types nothing at the pane.
@@ -696,7 +705,7 @@ fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
     // The focused pane touches the tab's right edge: `<C-s> l` has no right
     // border to grow through, so its left border moves right — it shrinks.
     runtime.handle_key_input(client, chord(ModFlags::CTRL, 's'), now);
-    runtime.handle_key_input(client, chord(ModFlags::NONE, 'l'), now);
+    runtime.handle_key_input(client, named(NamedKey::Right), now);
     let after = runtime.pty_sizes[&focused];
     assert_eq!(after.cols, before.cols - 1);
     assert_eq!(after.rows, before.rows);
