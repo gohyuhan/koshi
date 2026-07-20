@@ -63,6 +63,7 @@ pub fn resolve_theme(config: &ThemeConfig) -> Theme {
         stack_header_fg: rgb_color(colors.stack_header_fg),
         stack_header_bg: rgb_color(colors.stack_header_bg),
         letterbox: rgb_color(colors.letterbox),
+        bar_bg: rgb_color(colors.bar_bg),
     }
 }
 

@@ -1,12 +1,14 @@
 //! Stock (plugin-free) frame composition.
 //!
 //! [`render_frame`] paints one [`RenderSnapshot`] into a ratatui [`Buffer`] as
-//! three fixed zones: a **tabline** on the top row (session name and tab list on
-//! the left, a right-aligned status section — scroll position and mode tag), the
-//! **pane area** in the middle (a bordered box per visible pane, the focused
-//! pane's border highlighted), and the **keybinding hint bar** on the bottom row
-//! — a koshi-owned row painted by [`crate::statusline_hints`] from the
-//! snapshot's per-mode keybinding data.
+//! three fixed zones: a **tabline** on the top row (session name, the running
+//! koshi version, and the tab list on the left, a right-aligned status
+//! section — scroll position and mode tag), the **pane area** in the middle (a
+//! bordered box per visible pane, the focused pane's border highlighted), and
+//! the **keybinding hint bar** on the bottom row — a koshi-owned row painted by
+//! [`crate::statusline_hints`] from the snapshot's per-mode keybinding data.
+//! Both chrome rows are filled with the theme's bar background before anything
+//! is drawn on them.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -598,6 +600,9 @@ mod tabline;
 
 use style::*;
 use tabline::draw_tabline;
+// Both koshi-owned rows fill with the same bar background, so the hint bar
+// reads this one from here rather than keeping its own copy.
+pub(crate) use style::bar_style;
 pub(crate) use tabline::tabline_layout;
 
 #[cfg(test)]

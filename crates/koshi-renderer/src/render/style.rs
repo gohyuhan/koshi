@@ -7,8 +7,8 @@ use super::*;
 mod tests;
 
 /// A tab's `#N` block. The active tab is inverted — its ramp stop as the
-/// TEXT color on the terminal's own background; an inactive tab paints the
-/// dimmed stop as the block background with quiet text.
+/// TEXT color over the bar background; an inactive tab paints the dimmed stop
+/// as the block background with quiet text.
 pub(super) fn tab_index_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
         Style::default()
@@ -22,8 +22,8 @@ pub(super) fn tab_index_style(theme: &Theme, active: bool, index: usize, count: 
 }
 
 /// A tab's name block: same inversion as the `#N` block — the active tab's
-/// name is its ramp stop as text on the terminal background, an inactive
-/// tab's sits on the dimmed stop.
+/// name is its ramp stop as text over the bar background, an inactive tab's
+/// sits on the dimmed stop.
 pub(super) fn tab_name_style(theme: &Theme, active: bool, index: usize, count: usize) -> Style {
     if active {
         Style::default().fg(theme.ramp(index, count))
@@ -35,18 +35,32 @@ pub(super) fn tab_name_style(theme: &Theme, active: bool, index: usize, count: u
 }
 
 /// The session name anchoring the tabline's left edge: the ramp's start end
-/// as the text color on the terminal's own background.
+/// as the text color over the bar background.
 pub(super) fn session_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.ramp(0, 2))
         .add_modifier(Modifier::BOLD)
 }
 
-/// The `<`/`>` scroll arrows framing a scrolled tab strip.
+/// The `[v0.1.0]` badge beside the session name: the ramp's start end again,
+/// without the name's bold, so the version reads as a quieter tag on the same
+/// block rather than a second heading.
+pub(super) fn version_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.ramp(0, 2))
+}
+
+/// The `◀`/`▶` scroll arrows framing a scrolled tab strip.
 pub(super) fn scroll_arrow_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.on_ramp_dim)
         .add_modifier(Modifier::BOLD)
+}
+
+/// The background filling a koshi-owned bar row whole — the tab bar and the
+/// key-hint bar — laid down before any text, so chrome reads against a color
+/// the theme picks rather than whatever the terminal's own background is.
+pub(crate) fn bar_style(theme: &Theme) -> Style {
+    Style::default().bg(theme.bar_bg)
 }
 
 /// Filled strip style marking a collapsed stack member's koshi-owned header.
@@ -57,7 +71,7 @@ pub(super) fn stack_header_style(theme: &Theme) -> Style {
 }
 
 /// The mode tag anchoring the tabline's right edge: the ramp's other end as
-/// the text color on the terminal's own background.
+/// the text color over the bar background.
 pub(super) fn mode_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.ramp(1, 2))

@@ -156,14 +156,14 @@ fn modifier_key_and_action_ribbons_use_the_group_ramp_stop() {
     // One modifier group → the ramp's purple end everywhere in it: the
     // header as text color, the key block as background, the label block as
     // the dimmed background.
-    let purple = Color::Rgb(0x58, 0x1c, 0x87);
-    let purple_dim = Color::Rgb(0x30, 0x0f, 0x4a);
+    let purple = Color::Rgb(0xd0, 0xa5, 0xff);
+    let purple_dim = Color::Rgb(0x72, 0x5a, 0x8c);
     assert_eq!(buf[(1, 0)].fg, purple);
     assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
     assert_eq!(buf[(9, 0)].bg, purple);
-    assert_eq!(buf[(9, 0)].fg, Color::Rgb(0xf4, 0xf1, 0xfa));
+    assert_eq!(buf[(9, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
     assert_eq!(buf[(12, 0)].bg, purple_dim);
-    assert_eq!(buf[(12, 0)].fg, Color::Rgb(0xc9, 0xc4, 0xd4));
+    assert_eq!(buf[(12, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
 }
 
 #[test]
@@ -226,16 +226,17 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
         row_text(&buf),
         " Ctrl +  l  Lock  Shift +  Tab  Previous Tab  Tab  Next Tab"
     );
-    // The Shift group's key is a block: light text on the mid ramp stop.
-    assert_eq!(buf[(27, 0)].bg, Color::Rgb(0x4a, 0x4f, 0xbe));
-    assert_eq!(buf[(27, 0)].fg, Color::Rgb(0xf4, 0xf1, 0xfa));
+    // The Shift group's key is a block: dark text on the mid ramp stop.
+    assert_eq!(buf[(27, 0)].bg, Color::Rgb(0xa7, 0xb0, 0xff));
+    assert_eq!(buf[(27, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
     // The bare Tab is its own opener: header-styled text on the bar itself —
-    // the blue ramp end as foreground, no block behind it.
-    assert_eq!(buf[(46, 0)].fg, Color::Rgb(0x3b, 0x82, 0xf6));
-    assert_eq!(buf[(46, 0)].bg, Color::Reset);
+    // the blue ramp end as foreground over the bar background, no block
+    // behind it.
+    assert_eq!(buf[(46, 0)].fg, Color::Rgb(0x7d, 0xbc, 0xff));
+    assert_eq!(buf[(46, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
     assert!(buf[(46, 0)].modifier.contains(Modifier::BOLD));
     // Its action label keeps the dimmed block, same as any other ribbon.
-    assert_eq!(buf[(51, 0)].bg, Color::Rgb(0x20, 0x47, 0x87));
+    assert_eq!(buf[(51, 0)].bg, Color::Rgb(0x44, 0x67, 0x8c));
 }
 
 #[test]
@@ -421,6 +422,11 @@ fn empty_mode_blanks_the_row() {
     buf.set_string(0, 0, "X".repeat(20), Style::default());
     draw_hint_bar(&snapshot, area, &mut buf);
     assert_eq!(row_text(&buf), "");
+    // Blank of text, but not of color: the row still carries the bar
+    // background, so an empty mode reads as a bar rather than a hole.
+    for x in 0..20 {
+        assert_eq!(buf[(x, 0)].bg, Color::Rgb(0x00, 0x00, 0x00), "col {x}");
+    }
 }
 
 #[test]

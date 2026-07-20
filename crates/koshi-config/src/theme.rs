@@ -14,8 +14,8 @@
 //! version 1          // optional; a version newer than this build is rejected
 //! name "midnight"
 //! colors {
-//!     ramp-start "#581c87"
-//!     accent "#a78bfa"
+//!     ramp-start "#d0a5ff"
+//!     accent "#f5c2ff"
 //!     border-focused "#00afd7"
 //! }
 //! ```
@@ -80,6 +80,7 @@ fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalet
             "stack-header-fg" => &mut palette.stack_header_fg,
             "stack-header-bg" => &mut palette.stack_header_bg,
             "letterbox" => &mut palette.letterbox,
+            "bar-bg" => &mut palette.bar_bg,
             other => {
                 warnings.push(format!("ignored unknown `colors.{other}`"));
                 continue;

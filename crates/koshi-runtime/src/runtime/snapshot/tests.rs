@@ -254,9 +254,11 @@ fn resolve_theme_maps_every_palette_role() {
     config.colors.on_accent = RgbColor::new(0x10, 0x11, 0x12);
     config.colors.border_focused = RgbColor::new(0x13, 0x14, 0x15);
     config.colors.border_unfocused = RgbColor::new(0x16, 0x17, 0x18);
+    config.colors.border_hover = RgbColor::new(0x22, 0x23, 0x24);
     config.colors.stack_header_fg = RgbColor::new(0x19, 0x1a, 0x1b);
     config.colors.stack_header_bg = RgbColor::new(0x1c, 0x1d, 0x1e);
     config.colors.letterbox = RgbColor::new(0x1f, 0x20, 0x21);
+    config.colors.bar_bg = RgbColor::new(0x25, 0x26, 0x27);
 
     let theme = resolve_theme(&config);
     assert_eq!(theme.ramp_start, (0x01, 0x02, 0x03));
@@ -267,9 +269,11 @@ fn resolve_theme_maps_every_palette_role() {
     assert_eq!(theme.on_accent, Color::Rgb(0x10, 0x11, 0x12));
     assert_eq!(theme.border_focused, Color::Rgb(0x13, 0x14, 0x15));
     assert_eq!(theme.border_unfocused, Color::Rgb(0x16, 0x17, 0x18));
+    assert_eq!(theme.border_hover, Color::Rgb(0x22, 0x23, 0x24));
     assert_eq!(theme.stack_header_fg, Color::Rgb(0x19, 0x1a, 0x1b));
     assert_eq!(theme.stack_header_bg, Color::Rgb(0x1c, 0x1d, 0x1e));
     assert_eq!(theme.letterbox, Color::Rgb(0x1f, 0x20, 0x21));
+    assert_eq!(theme.bar_bg, Color::Rgb(0x25, 0x26, 0x27));
 }
 
 #[test]

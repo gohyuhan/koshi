@@ -14,7 +14,7 @@ fn active_tab_index_is_its_ramp_stop_as_bold_text() {
     // Active: the ramp stop is the TEXT color, no block background.
     let got = tab_index_style(&theme(), true, 0, 1);
     let want = Style::default()
-        .fg(Color::Rgb(0x58, 0x1c, 0x87))
+        .fg(Color::Rgb(0xd0, 0xa5, 0xff))
         .add_modifier(Modifier::BOLD);
     assert_eq!(got, want);
 }
@@ -24,8 +24,8 @@ fn inactive_tab_index_is_quiet_text_on_the_dimmed_stop() {
     // Inactive: quiet text over the dimmed ramp stop as the block background.
     let got = tab_index_style(&theme(), false, 0, 1);
     let want = Style::default()
-        .fg(Color::Rgb(0xc9, 0xc4, 0xd4))
-        .bg(Color::Rgb(0x30, 0x0f, 0x4a));
+        .fg(Color::Rgb(0xf0, 0xec, 0xfa))
+        .bg(Color::Rgb(0x72, 0x5a, 0x8c));
     assert_eq!(got, want);
 }
 
@@ -33,7 +33,7 @@ fn inactive_tab_index_is_quiet_text_on_the_dimmed_stop() {
 fn active_tab_name_is_its_ramp_stop_without_bold() {
     // The name block takes the same inversion as the `#N` block but is not bold.
     let got = tab_name_style(&theme(), true, 0, 1);
-    let want = Style::default().fg(Color::Rgb(0x58, 0x1c, 0x87));
+    let want = Style::default().fg(Color::Rgb(0xd0, 0xa5, 0xff));
     assert_eq!(got, want);
 }
 
@@ -41,8 +41,8 @@ fn active_tab_name_is_its_ramp_stop_without_bold() {
 fn inactive_tab_name_matches_the_inactive_index_block() {
     let got = tab_name_style(&theme(), false, 0, 1);
     let want = Style::default()
-        .fg(Color::Rgb(0xc9, 0xc4, 0xd4))
-        .bg(Color::Rgb(0x30, 0x0f, 0x4a));
+        .fg(Color::Rgb(0xf0, 0xec, 0xfa))
+        .bg(Color::Rgb(0x72, 0x5a, 0x8c));
     assert_eq!(got, want);
 }
 
@@ -52,7 +52,7 @@ fn a_middle_tab_stop_reads_the_blended_ramp_color() {
     // of 3 gets the blended middle stop, not an endpoint.
     let got = tab_index_style(&theme(), true, 1, 3);
     let want = Style::default()
-        .fg(Color::Rgb(0x4a, 0x4f, 0xbe))
+        .fg(Color::Rgb(0xa7, 0xb0, 0xff))
         .add_modifier(Modifier::BOLD);
     assert_eq!(got, want);
 }
@@ -61,7 +61,7 @@ fn a_middle_tab_stop_reads_the_blended_ramp_color() {
 fn session_block_is_the_ramp_start_end_as_bold_text() {
     let got = session_style(&theme());
     let want = Style::default()
-        .fg(Color::Rgb(0x58, 0x1c, 0x87))
+        .fg(Color::Rgb(0xd0, 0xa5, 0xff))
         .add_modifier(Modifier::BOLD);
     assert_eq!(got, want);
 }
@@ -70,7 +70,7 @@ fn session_block_is_the_ramp_start_end_as_bold_text() {
 fn mode_tag_is_the_ramp_far_end_as_bold_text() {
     let got = mode_style(&theme());
     let want = Style::default()
-        .fg(Color::Rgb(0x3b, 0x82, 0xf6))
+        .fg(Color::Rgb(0x7d, 0xbc, 0xff))
         .add_modifier(Modifier::BOLD);
     assert_eq!(got, want);
 }
@@ -79,8 +79,15 @@ fn mode_tag_is_the_ramp_far_end_as_bold_text() {
 fn scroll_arrow_is_quiet_text_in_bold() {
     let got = scroll_arrow_style(&theme());
     let want = Style::default()
-        .fg(Color::Rgb(0xc9, 0xc4, 0xd4))
+        .fg(Color::Rgb(0xf0, 0xec, 0xfa))
         .add_modifier(Modifier::BOLD);
+    assert_eq!(got, want);
+}
+
+#[test]
+fn bar_sets_only_the_row_background() {
+    let got = bar_style(&theme());
+    let want = Style::default().bg(Color::Rgb(0x00, 0x00, 0x00));
     assert_eq!(got, want);
 }
 

@@ -603,18 +603,21 @@ pub struct ColorPalette {
     pub stack_header_bg: RgbColor,
     /// Backdrop of the letterbox margin around a centered layout.
     pub letterbox: RgbColor,
+    /// Background filling koshi's own two rows whole: the tab bar on top and
+    /// the key-hint bar on the bottom.
+    pub bar_bg: RgbColor,
 }
 
 impl Default for ColorPalette {
-    /// The stock koshi chrome — a dark-purple → blue ramp with a violet
-    /// accent — applied when no theme is configured.
+    /// The stock koshi chrome — a light-purple → light-blue ramp with a pink
+    /// accent over black bars — applied when no theme is configured.
     fn default() -> Self {
         Self {
-            ramp_start: RgbColor::new(0x58, 0x1c, 0x87),
-            ramp_end: RgbColor::new(0x3b, 0x82, 0xf6),
-            on_ramp: RgbColor::new(0xf4, 0xf1, 0xfa),
-            on_ramp_dim: RgbColor::new(0xc9, 0xc4, 0xd4),
-            accent: RgbColor::new(0xa7, 0x8b, 0xfa),
+            ramp_start: RgbColor::new(0xd0, 0xa5, 0xff),
+            ramp_end: RgbColor::new(0x7d, 0xbc, 0xff),
+            on_ramp: RgbColor::new(0x12, 0x09, 0x1f),
+            on_ramp_dim: RgbColor::new(0xf0, 0xec, 0xfa),
+            accent: RgbColor::new(0xf5, 0xc2, 0xff),
             on_accent: RgbColor::new(0x1e, 0x10, 0x33),
             border_focused: RgbColor::new(0x00, 0xaf, 0xd7),
             border_unfocused: RgbColor::new(0x58, 0x58, 0x58),
@@ -622,6 +625,7 @@ impl Default for ColorPalette {
             stack_header_fg: RgbColor::new(0xf4, 0xf1, 0xfa),
             stack_header_bg: RgbColor::new(0x30, 0x0f, 0x4a),
             letterbox: RgbColor::new(0x58, 0x58, 0x58),
+            bar_bg: RgbColor::new(0x00, 0x00, 0x00),
         }
     }
 }

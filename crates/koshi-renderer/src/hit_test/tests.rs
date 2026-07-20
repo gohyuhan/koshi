@@ -210,10 +210,14 @@ fn stack_header_hits_its_pane() {
 /// tabs are the bare tabline.
 #[test]
 fn tabs_hit_by_column() {
+    use crate::render::tabline_layout;
+    use ratatui::layout::Rect as RatatuiRect;
+
     let a = TabId::new();
     let b = TabId::new();
-    // session " s " = 3 cols, right block " BASE " = 6, so tabs start at x=4:
-    // tab a spans [4, 11), a one-cell gap at 11, tab b spans [12, 19).
+    // The session block and its version badge hold the left, then each 7-cell
+    // tab ribbon with a one-cell gap between them. The columns come from the
+    // same solve the paint uses, so the badge's width is never spelled out.
     let s = snap(
         Size { cols: 40, rows: 10 },
         Size { cols: 40, rows: 10 },
@@ -221,11 +225,28 @@ fn tabs_hit_by_column() {
         &[],
         &[(a, "a"), (b, "b")],
     );
+    let tabs = tabline_layout(
+        &s,
+        RatatuiRect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 1,
+        },
+    )
+    .tabs;
+    assert_eq!(tabs.len(), 2);
 
-    assert_eq!(hit_test(&s, at(5, 0)), HitRegion::Tab { tab_id: a });
-    assert_eq!(hit_test(&s, at(15, 0)), HitRegion::Tab { tab_id: b });
+    assert_eq!(
+        hit_test(&s, at(tabs[0].1 + 1, 0)),
+        HitRegion::Tab { tab_id: a }
+    );
+    assert_eq!(
+        hit_test(&s, at(tabs[1].1 + 1, 0)),
+        HitRegion::Tab { tab_id: b }
+    );
     // The one-cell gap between the two ribbons.
-    assert_eq!(hit_test(&s, at(11, 0)), HitRegion::Tabline);
+    assert_eq!(hit_test(&s, at(tabs[1].1 - 1, 0)), HitRegion::Tabline);
     // The session block on the left.
     assert_eq!(hit_test(&s, at(1, 0)), HitRegion::Tabline);
 }

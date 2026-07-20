@@ -42,6 +42,7 @@ fn every_color_role_parses() {
          stack-header-fg \"#0a0a0a\"\n\
          stack-header-bg \"#0b0b0b\"\n\
          letterbox \"#0c0c0c\"\n\
+         bar-bg \"#0d0d0d\"\n\
          }",
     );
     let c = theme.colors.expect("colors present");
@@ -57,6 +58,7 @@ fn every_color_role_parses() {
     assert_eq!(c.stack_header_fg, Some(RgbColor::new(10, 10, 10)));
     assert_eq!(c.stack_header_bg, Some(RgbColor::new(11, 11, 11)));
     assert_eq!(c.letterbox, Some(RgbColor::new(12, 12, 12)));
+    assert_eq!(c.bar_bg, Some(RgbColor::new(13, 13, 13)));
     assert!(warnings.is_empty());
 }
 

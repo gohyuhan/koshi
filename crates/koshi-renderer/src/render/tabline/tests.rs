@@ -69,6 +69,12 @@ fn snap(
     }
 }
 
+/// Cells the `[v0.1.0] ` version badge takes beside the session name: the
+/// version string plus `[`, `v`, `]`, and the trailing space. Measured rather
+/// than hardcoded, so a version bump that lengthens the string (`0.9.0` →
+/// `0.10.0`) shifts every expected column below instead of failing.
+const BADGE: u16 = KOSHI_VERSION.len() as u16 + 4;
+
 /// A one-row render area `width` cells wide, anchored at the origin.
 fn area(width: u16) -> RatatuiRect {
     RatatuiRect {
@@ -96,16 +102,17 @@ fn cell(buf: &Buffer, x: u16) -> &str {
 
 #[test]
 fn one_tab_that_fits_shows_whole_with_no_arrows() {
-    // session " s " = 3 cells; right block " BASE " = 6; strip starts one cell
-    // past the session block, so the tab " #1  a " (7 cells) sits at x = 4.
+    // Session block ` s ` (3 cells) plus the version badge; right block
+    // " BASE " = 6; the strip starts one cell past the session block, so the
+    // tab " #1  a " (7 cells) sits just after the badge.
     let layout = tabline_layout(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
-        area(20),
+        area(20 + BADGE),
     );
-    assert_eq!(layout.session_width, 3);
-    assert_eq!(layout.right_x, 14);
+    assert_eq!(layout.session_width, 3 + BADGE);
+    assert_eq!(layout.right_x, 14 + BADGE);
     assert_eq!(layout.first_visible, 0);
-    assert_eq!(layout.tabs, vec![(0, 4, 7)]);
+    assert_eq!(layout.tabs, vec![(0, 4 + BADGE, 7)]);
     assert_eq!(layout.left_arrow, None);
     assert_eq!(layout.right_arrow, None);
 }
@@ -120,43 +127,47 @@ fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
             LockMode::Normal,
             false,
         ),
-        area(40),
+        area(40 + BADGE),
     );
-    assert_eq!(layout.tabs, vec![(0, 4, 7), (1, 12, 7), (2, 20, 7)]);
+    assert_eq!(
+        layout.tabs,
+        vec![(0, 4 + BADGE, 7), (1, 12 + BADGE, 7), (2, 20 + BADGE, 7)]
+    );
     assert_eq!(layout.left_arrow, None);
     assert_eq!(layout.right_arrow, None);
 }
 
 #[test]
 fn a_tab_that_exactly_fills_the_gap_is_kept() {
-    // width 17: right_x = 11, tab ends at x + width = 4 + 7 = 11 == right_x, so
-    // it just fits and no scrolling begins.
+    // One cell wider than the tab needs: the tab's last cell lands exactly on
+    // `right_x`, so it just fits and no scrolling begins.
     let layout = tabline_layout(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
-        area(17),
+        area(17 + BADGE),
     );
-    assert_eq!(layout.tabs, vec![(0, 4, 7)]);
+    assert_eq!(layout.tabs, vec![(0, 4 + BADGE, 7)]);
     assert_eq!(layout.left_arrow, None);
     assert_eq!(layout.right_arrow, None);
 }
 
 #[test]
 fn one_column_too_narrow_drops_the_tab_and_shows_a_right_arrow() {
-    // width 16: the tab no longer fits, so the strip scrolls; nothing is visible
-    // yet and a right arrow marks the tab hidden off the right edge.
+    // One cell narrower than that: the tab no longer fits, so the strip
+    // scrolls; nothing is visible yet and a right arrow marks the tab hidden
+    // off the right edge.
     let layout = tabline_layout(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
-        area(16),
+        area(16 + BADGE),
     );
     assert_eq!(layout.first_visible, 0);
     assert!(layout.tabs.is_empty());
     assert_eq!(layout.left_arrow, None);
-    assert_eq!(layout.right_arrow, Some((9, 1)));
+    assert_eq!(layout.right_arrow, Some((9 + BADGE, 1)));
 }
 
 #[test]
 fn following_the_active_tab_scrolls_it_into_view() {
-    // width 24 holds one tab in the arrow-framed window; with the last tab
+    // The strip holds one tab in the arrow-framed window; with the last tab
     // active and no peek offset, the window starts at it and only a left arrow
     // shows.
     let layout = tabline_layout(
@@ -167,11 +178,11 @@ fn following_the_active_tab_scrolls_it_into_view() {
             LockMode::Normal,
             false,
         ),
-        area(24),
+        area(24 + BADGE),
     );
     assert_eq!(layout.first_visible, 2);
-    assert_eq!(layout.tabs, vec![(2, 5, 7)]);
-    assert_eq!(layout.left_arrow, Some((4, 1)));
+    assert_eq!(layout.tabs, vec![(2, 5 + BADGE, 7)]);
+    assert_eq!(layout.left_arrow, Some((4 + BADGE, 1)));
     assert_eq!(layout.right_arrow, None);
 }
 
@@ -185,12 +196,12 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
             LockMode::Normal,
             false,
         ),
-        area(24),
+        area(24 + BADGE),
     );
     assert_eq!(layout.first_visible, 1);
-    assert_eq!(layout.tabs, vec![(1, 5, 7)]);
-    assert_eq!(layout.left_arrow, Some((4, 0)));
-    assert_eq!(layout.right_arrow, Some((17, 2)));
+    assert_eq!(layout.tabs, vec![(1, 5 + BADGE, 7)]);
+    assert_eq!(layout.left_arrow, Some((4 + BADGE, 0)));
+    assert_eq!(layout.right_arrow, Some((17 + BADGE, 2)));
 }
 
 #[test]
@@ -203,19 +214,22 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
             LockMode::Normal,
             false,
         ),
-        area(24),
+        area(24 + BADGE),
     );
     assert_eq!(layout.first_visible, 2);
-    assert_eq!(layout.tabs, vec![(2, 5, 7)]);
-    assert_eq!(layout.left_arrow, Some((4, 1)));
+    assert_eq!(layout.tabs, vec![(2, 5 + BADGE, 7)]);
+    assert_eq!(layout.left_arrow, Some((4 + BADGE, 1)));
     assert_eq!(layout.right_arrow, None);
 }
 
 #[test]
 fn an_empty_tab_list_leaves_only_the_two_blocks() {
-    let layout = tabline_layout(&snap("s", &[], None, LockMode::Normal, false), area(20));
-    assert_eq!(layout.session_width, 3);
-    assert_eq!(layout.right_x, 14);
+    let layout = tabline_layout(
+        &snap("s", &[], None, LockMode::Normal, false),
+        area(20 + BADGE),
+    );
+    assert_eq!(layout.session_width, 3 + BADGE);
+    assert_eq!(layout.right_x, 14 + BADGE);
     assert_eq!(layout.first_visible, 0);
     assert!(layout.tabs.is_empty());
     assert_eq!(layout.left_arrow, None);
@@ -240,12 +254,13 @@ fn no_room_between_the_blocks_yields_no_tabs() {
 
 #[test]
 fn the_select_mode_tag_widens_the_right_block() {
-    // " SELECT " is 8 cells, so the right block starts at width - 8 = 12.
+    // " SELECT " is 8 cells, so the right block starts 8 cells from the right
+    // edge — two cells left of where the 6-cell " BASE " block starts.
     let layout = tabline_layout(
         &snap("s", &[("a", true)], None, LockMode::Normal, true),
-        area(20),
+        area(20 + BADGE),
     );
-    assert_eq!(layout.right_x, 12);
+    assert_eq!(layout.right_x, 12 + BADGE);
 }
 
 #[test]
@@ -253,9 +268,9 @@ fn a_lock_mode_tag_is_the_same_width_as_base() {
     // " LOCK " and " BASE " are both 6 cells.
     let layout = tabline_layout(
         &snap("s", &[("a", true)], None, LockMode::Locked, false),
-        area(20),
+        area(20 + BADGE),
     );
-    assert_eq!(layout.right_x, 14);
+    assert_eq!(layout.right_x, 14 + BADGE);
 }
 
 // --- display-width titles ----------------------------------------------------
@@ -265,18 +280,18 @@ fn a_wide_cjk_title_counts_two_cells_per_glyph() {
     // " 字 " is 1 + 2 + 1 = 4 cells, so the tab is " #1 "(4) + 4 = 8 wide.
     let layout = tabline_layout(
         &snap("s", &[("字", true)], None, LockMode::Normal, false),
-        area(60),
+        area(60 + BADGE),
     );
-    assert_eq!(layout.tabs, vec![(0, 4, 8)]);
+    assert_eq!(layout.tabs, vec![(0, 4 + BADGE, 8)]);
 }
 
 #[test]
 fn an_emoji_title_counts_two_cells() {
     let layout = tabline_layout(
         &snap("s", &[("🎉", true)], None, LockMode::Normal, false),
-        area(60),
+        area(60 + BADGE),
     );
-    assert_eq!(layout.tabs, vec![(0, 4, 8)]);
+    assert_eq!(layout.tabs, vec![(0, 4 + BADGE, 8)]);
 }
 
 #[test]
@@ -284,16 +299,19 @@ fn a_combining_mark_title_stays_one_cell() {
     // "e" + combining acute is one display cell: " é " is 3, tab is 4 + 3 = 7.
     let layout = tabline_layout(
         &snap("s", &[("e\u{0301}", true)], None, LockMode::Normal, false),
-        area(60),
+        area(60 + BADGE),
     );
-    assert_eq!(layout.tabs, vec![(0, 4, 7)]);
+    assert_eq!(layout.tabs, vec![(0, 4 + BADGE, 7)]);
 }
 
 #[test]
 fn a_two_digit_tab_number_widens_that_tab() {
     // Tab 9 shows "#10" — a wider `#N` block than the single-digit tabs.
     let tabs: Vec<(&str, bool)> = (0..10).map(|i| ("a", i == 0)).collect();
-    let layout = tabline_layout(&snap("s", &tabs, None, LockMode::Normal, false), area(200));
+    let layout = tabline_layout(
+        &snap("s", &tabs, None, LockMode::Normal, false),
+        area(200 + BADGE),
+    );
     assert_eq!(layout.tabs.len(), 10);
     assert_eq!(layout.tabs[8].2, 7);
     assert_eq!(layout.tabs[9].2, 8);
@@ -303,84 +321,129 @@ fn a_two_digit_tab_number_widens_that_tab() {
 
 #[test]
 fn draw_paints_session_tab_and_mode_with_their_styles() {
+    let width = 20 + BADGE;
     let buf = draw(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
-        20,
+        width,
     );
 
     // Session block " s " on the left.
     assert_eq!(cell(&buf, 0), " ");
     assert_eq!(cell(&buf, 1), "s");
     assert_eq!(cell(&buf, 2), " ");
-    assert_eq!(buf[(1, 0)].fg, Color::Rgb(0x58, 0x1c, 0x87));
+    assert_eq!(buf[(1, 0)].fg, Color::Rgb(0xd0, 0xa5, 0xff));
     assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
 
-    // One-cell gap, then the tab " #1  a " starting at x = 4.
-    assert_eq!(cell(&buf, 3), " ");
-    assert_eq!(cell(&buf, 4), " ");
-    assert_eq!(cell(&buf, 5), "#");
-    assert_eq!(cell(&buf, 6), "1");
-    assert_eq!(cell(&buf, 7), " ");
-    assert_eq!(cell(&buf, 8), " ");
-    assert_eq!(cell(&buf, 9), "a");
-    assert_eq!(cell(&buf, 10), " ");
-    // The active tab's `#N` block is its ramp stop as bold text.
-    assert_eq!(buf[(5, 0)].fg, Color::Rgb(0x58, 0x1c, 0x87));
-    assert!(buf[(5, 0)].modifier.contains(Modifier::BOLD));
+    // Then the version badge `[v0.1.0] `: the same ramp color as the name,
+    // without its bold.
+    let badge: String = (3..3 + BADGE).map(|x| cell(&buf, x)).collect();
+    assert_eq!(badge, format!("[v{KOSHI_VERSION}] "));
+    assert_eq!(buf[(4, 0)].fg, Color::Rgb(0xd0, 0xa5, 0xff));
+    assert!(!buf[(4, 0)].modifier.contains(Modifier::BOLD));
 
-    // Right block " BASE " anchored to the right edge (cols 14..20).
-    assert_eq!(cell(&buf, 14), " ");
-    assert_eq!(cell(&buf, 15), "B");
-    assert_eq!(cell(&buf, 16), "A");
-    assert_eq!(cell(&buf, 17), "S");
-    assert_eq!(cell(&buf, 18), "E");
-    assert_eq!(cell(&buf, 19), " ");
-    assert_eq!(buf[(15, 0)].fg, Color::Rgb(0x3b, 0x82, 0xf6));
-    assert!(buf[(15, 0)].modifier.contains(Modifier::BOLD));
+    // One-cell gap after the badge, then the tab " #1  a ".
+    let tab = 4 + BADGE;
+    assert_eq!(cell(&buf, tab - 1), " ");
+    assert_eq!(cell(&buf, tab), " ");
+    assert_eq!(cell(&buf, tab + 1), "#");
+    assert_eq!(cell(&buf, tab + 2), "1");
+    assert_eq!(cell(&buf, tab + 3), " ");
+    assert_eq!(cell(&buf, tab + 4), " ");
+    assert_eq!(cell(&buf, tab + 5), "a");
+    assert_eq!(cell(&buf, tab + 6), " ");
+    // The active tab's `#N` block is its ramp stop as bold text.
+    assert_eq!(buf[(tab + 1, 0)].fg, Color::Rgb(0xd0, 0xa5, 0xff));
+    assert!(buf[(tab + 1, 0)].modifier.contains(Modifier::BOLD));
+
+    // Right block " BASE " anchored to the right edge, its last 6 cells.
+    let base = width - 6;
+    assert_eq!(cell(&buf, base), " ");
+    assert_eq!(cell(&buf, base + 1), "B");
+    assert_eq!(cell(&buf, base + 2), "A");
+    assert_eq!(cell(&buf, base + 3), "S");
+    assert_eq!(cell(&buf, base + 4), "E");
+    assert_eq!(cell(&buf, base + 5), " ");
+    assert_eq!(buf[(base + 1, 0)].fg, Color::Rgb(0x7d, 0xbc, 0xff));
+    assert!(buf[(base + 1, 0)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn a_row_too_narrow_for_the_badge_drops_it_whole() {
+    // 16 cells hold the session block and the " BASE " tag but not the badge
+    // as well. It is dropped entire rather than clipped — no half-written
+    // "[v0.1.0" with its closing bracket cut off. The tab does not fit either,
+    // so the strip is just its right arrow.
+    let snapshot = snap("s", &[("a", true)], None, LockMode::Normal, false);
+    let buf = draw(&snapshot, 16);
+    let row: String = (0..16).map(|x| cell(&buf, x)).collect();
+    assert_eq!(row, " s       ▶ BASE ");
+    assert_eq!(tabline_layout(&snapshot, area(16)).session_width, 3);
+}
+
+#[test]
+fn draw_fills_the_whole_row_with_the_bar_background() {
+    // The session block, badge, and one tab leave the middle empty; every cell
+    // of the row still carries the bar background, painted before any text.
+    let width = 20 + BADGE;
+    let buf = draw(
+        &snap("s", &[("a", true)], None, LockMode::Normal, false),
+        width,
+    );
+    for x in 0..width {
+        assert_eq!(buf[(x, 0)].bg, Color::Rgb(0x00, 0x00, 0x00), "col {x}");
+    }
 }
 
 #[test]
 fn draw_paints_the_select_tag_when_the_mouse_is_grabbed() {
-    let buf = draw(&snap("s", &[("a", true)], None, LockMode::Normal, true), 20);
-    // " SELECT " fills cols 12..20.
-    assert_eq!(cell(&buf, 12), " ");
-    assert_eq!(cell(&buf, 13), "S");
-    assert_eq!(cell(&buf, 14), "E");
-    assert_eq!(cell(&buf, 15), "L");
-    assert_eq!(cell(&buf, 16), "E");
-    assert_eq!(cell(&buf, 17), "C");
-    assert_eq!(cell(&buf, 18), "T");
-    assert_eq!(cell(&buf, 19), " ");
+    let width = 20 + BADGE;
+    let buf = draw(
+        &snap("s", &[("a", true)], None, LockMode::Normal, true),
+        width,
+    );
+    // " SELECT " fills the row's last 8 cells.
+    let tag = width - 8;
+    assert_eq!(cell(&buf, tag), " ");
+    assert_eq!(cell(&buf, tag + 1), "S");
+    assert_eq!(cell(&buf, tag + 2), "E");
+    assert_eq!(cell(&buf, tag + 3), "L");
+    assert_eq!(cell(&buf, tag + 4), "E");
+    assert_eq!(cell(&buf, tag + 5), "C");
+    assert_eq!(cell(&buf, tag + 6), "T");
+    assert_eq!(cell(&buf, tag + 7), " ");
 }
 
 #[test]
 fn draw_paints_the_lock_tag_in_locked_mode() {
+    let width = 20 + BADGE;
     let buf = draw(
         &snap("s", &[("a", true)], None, LockMode::Locked, false),
-        20,
+        width,
     );
-    // " LOCK " fills cols 14..20.
-    assert_eq!(cell(&buf, 14), " ");
-    assert_eq!(cell(&buf, 15), "L");
-    assert_eq!(cell(&buf, 16), "O");
-    assert_eq!(cell(&buf, 17), "C");
-    assert_eq!(cell(&buf, 18), "K");
-    assert_eq!(cell(&buf, 19), " ");
+    // " LOCK " fills the row's last 6 cells.
+    let tag = width - 6;
+    assert_eq!(cell(&buf, tag), " ");
+    assert_eq!(cell(&buf, tag + 1), "L");
+    assert_eq!(cell(&buf, tag + 2), "O");
+    assert_eq!(cell(&buf, tag + 3), "C");
+    assert_eq!(cell(&buf, tag + 4), "K");
+    assert_eq!(cell(&buf, tag + 5), " ");
 }
 
 #[test]
 fn draw_paints_the_right_scroll_arrow_when_a_tab_is_hidden() {
+    let width = 16 + BADGE;
     let buf = draw(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
-        16,
+        width,
     );
-    // The tab is dropped; a ">" sits one cell left of the right block.
-    assert_eq!(cell(&buf, 5), " ");
-    assert_eq!(cell(&buf, 9), ">");
-    assert_eq!(buf[(9, 0)].fg, Color::Rgb(0xc9, 0xc4, 0xd4));
-    assert!(buf[(9, 0)].modifier.contains(Modifier::BOLD));
-    // Right block " BASE " still anchors the edge (cols 10..16).
-    assert_eq!(cell(&buf, 11), "B");
+    // The tab is dropped; a "▶" sits one cell left of the right block.
+    let arrow = width - 7;
+    assert_eq!(cell(&buf, arrow), "▶");
+    assert_eq!(buf[(arrow, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
+    assert!(buf[(arrow, 0)].modifier.contains(Modifier::BOLD));
+    // Right block " BASE " still anchors the edge.
+    assert_eq!(cell(&buf, width - 5), "B");
 }
 
 #[test]
@@ -393,12 +456,13 @@ fn draw_paints_the_left_scroll_arrow_when_a_tab_is_hidden_left() {
             LockMode::Normal,
             false,
         ),
-        24,
+        24 + BADGE,
     );
-    // Peeking from index 1 hides tab 0 off the left: "<" at the strip start.
-    assert_eq!(cell(&buf, 4), "<");
-    assert_eq!(buf[(4, 0)].fg, Color::Rgb(0xc9, 0xc4, 0xd4));
-    assert!(buf[(4, 0)].modifier.contains(Modifier::BOLD));
+    // Peeking from index 1 hides tab 0 off the left: "◀" at the strip start,
+    // one cell past the session block and its badge.
+    assert_eq!(cell(&buf, 4 + BADGE), "◀");
+    assert_eq!(buf[(4 + BADGE, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
+    assert!(buf[(4 + BADGE, 0)].modifier.contains(Modifier::BOLD));
     // And the right arrow marks tab 2 hidden off the right.
-    assert_eq!(cell(&buf, 17), ">");
+    assert_eq!(cell(&buf, 17 + BADGE), "▶");
 }
