@@ -866,6 +866,7 @@ dependencies = [
  "koshi-terminal",
  "koshi-test-support",
  "ratatui",
+ "tracing",
 ]
 
 [[package]]
@@ -897,7 +898,6 @@ dependencies = [
  "koshi-core",
  "percent-encoding",
  "thiserror 2.0.18",
- "tracing",
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "vte",

@@ -8,7 +8,6 @@ license.workspace = true
 percent-encoding = "2.3.2"
 thiserror = "2.0.18"
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
-tracing = "0.1.44"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 vte = "0.15.0"

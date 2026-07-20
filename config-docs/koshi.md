@@ -87,6 +87,28 @@ and appended thereafter.
 | `level` | `"info"` \| `"warning"` \| `"error"` — lowest severity written: `info` writes everything, `warning` writes warnings and errors, `error` writes only errors | `"warning"` | ≥ 0.1.0 |
 | `format` | `"pretty"` \| `"json"` — `pretty` is human-readable, `json` is one JSON object per line for a machine to parse | `"pretty"` | ≥ 0.1.0 |
 
+What you get at each level:
+
+- `info` — everything that worked, as it happens: config files read, config
+  applied, terminal ready, session started, panes and tabs opening and closing,
+  focus moving, a pane's process exiting. Set this when you want to see what
+  koshi did.
+- `warning` — only the things that went wrong but that koshi had an answer for,
+  so it kept running: a profile that would not parse (one plain shell starts
+  instead), a `keybinding.kdl` with a conflict (the built-in keys stay), a
+  command that was rejected.
+- `error` — only the things koshi could not work around at all, after which it
+  exits: it could not enter raw mode, could not build its output terminal, could
+  not start the shell, or panicked.
+
+Each level includes the ones below it, so `info` writes all three. The default
+`warning` records failures only; if you turn logging on to follow what koshi is
+doing, set `level "info"`.
+
+Log lines carry ids, never content. A copied selection is recorded as its byte
+count, not its text; a rename is recorded without the new name; what you type
+into a pane is never written at any level.
+
 ## `update`
 
 The self-update check. **This section is strict:** a bad value here drops the

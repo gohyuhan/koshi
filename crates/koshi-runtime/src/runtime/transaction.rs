@@ -7,12 +7,18 @@
 //! scope dropped without committing reports nothing, so a handler that fails
 //! partway leaves no events behind. Delivery of the events to subscribers is
 //! layered on by the event bus; this module only buffers and seals the batch.
+//!
+//! Sealing is also where each event becomes a log line, via
+//! [`koshi_observability::logging::event_log::log_event`]. Every committed
+//! event passes through here, so no handler has to remember to log, and an
+//! uncommitted scope logs nothing for the same reason it reports nothing.
 
 use koshi_core::{
     command::CommandResult,
     event::Event,
     ids::{CommandId, EventId},
 };
+use koshi_observability::logging::event_log::log_event;
 
 /// An ordered buffer of the [`Event`]s one command emits, sealed by
 /// [`commit`](TransactionScope::commit) into a [`CommandResult`].
@@ -40,15 +46,23 @@ impl TransactionScope {
         self.events.push(event);
     }
 
-    /// Consume the scope and seal its batch: mint one [`EventId`] per buffered
-    /// event and report them as an applied [`CommandResult::Ok`] keyed to
-    /// `command_id`. The events keep their emission order.
+    /// Consume the scope and seal its batch: write each buffered event to the
+    /// log, mint one [`EventId`] per event, and report them as an applied
+    /// [`CommandResult::Ok`] keyed to `command_id`. The events keep their
+    /// emission order.
     ///
     /// Until the event bus exists, the event payloads are dropped once their ids
     /// are minted; only the ids reach the result.
     #[must_use]
     pub fn commit(self, command_id: CommandId) -> CommandResult {
-        let emitted_events = self.events.iter().map(|_| EventId::new()).collect();
+        let emitted_events = self
+            .events
+            .iter()
+            .map(|event| {
+                log_event(event);
+                EventId::new()
+            })
+            .collect();
         CommandResult::Ok {
             command_id,
             emitted_events,

@@ -212,10 +212,8 @@ impl vte::Perform for TerminalState {
             0x0F => self.active_render_mut().gl = 0,
             // BEL: discarded.
             0x07 => {}
-            // Any other control byte: trace and ignore, never raw-rendered.
-            _ => {
-                tracing::trace!(byte, "unhandled control byte; ignored");
-            }
+            // Any other control byte: ignored, never raw-rendered.
+            _ => {}
         }
     }
 
@@ -848,12 +846,8 @@ impl TerminalState {
             ('h', 12) => self.modes.cursor_blink = true,
             ('l', 12) => self.modes.cursor_blink = false,
             // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
-            // keyboard auto-repeat): modes koshi does not implement. Trace
-            // and ignore.
-            ('h' | 'l', 2 | 3 | 8) => {
-                tracing::trace!(mode, "unsupported DEC private mode; ignored");
-            }
-            // Any other DEC private mode is not handled yet.
+            // keyboard auto-repeat), and every other DEC private mode: not
+            // implemented, ignored.
             _ => {}
         }
     }
