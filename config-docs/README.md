@@ -5,15 +5,16 @@ runs on its built-in defaults.
 
 | File | What it sets | Reference |
 |---|---|---|
-| `koshi.kdl` | App settings: scrollback, mouse, split direction, terminal, updates | [koshi.md](koshi.md) |
-| `theme.kdl` | Chrome colors (borders, tab ribbon, accents) | [theme.md](theme.md) |
+| `koshi.kdl` | App settings: which theme, scrollback, mouse, split direction, terminal, updates | [koshi.md](koshi.md) |
+| `themes/<name>.kdl` | Chrome colors (borders, tab ribbon, accents), selected by `koshi.kdl`'s `theme "<name>"` | [theme.md](theme.md) |
 | `keybinding.kdl` | Key bindings and the modes they live in | [keybinding.md](keybinding.md) |
 | `profile/<name>.kdl` | A saved session layout: tabs, panes, commands, opened with `koshi --profile <name>` | [profile.md](profile.md) |
 
 ## Where the files go
 
-koshi looks in one config directory. The three top-level files sit directly in
-it; profiles sit in a `profile/` subdirectory.
+koshi looks in one config directory. The two top-level files sit directly in
+it; themes and profiles sit in their own subdirectories, one file per theme and
+one per profile.
 
 | Platform | Config directory |
 |---|---|
@@ -30,12 +31,21 @@ So a full config directory looks like:
 ```
 <config dir>/
     koshi.kdl
-    theme.kdl
     keybinding.kdl
+    themes/
+        midnight.kdl
+        solarized.kdl
     profile/
         dev.kdl
         writing.kdl
 ```
+
+Only one theme is in effect at a time — the one `koshi.kdl` names with
+`theme "<name>"`. The others just sit there until you switch.
+
+You do not have to write a theme yourself: [`themes-example/`](../themes-example/)
+ships 25 ready-made ones (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé
+Pine, Solarized and more) to copy into `themes/`.
 
 ## Versions
 
@@ -49,10 +59,13 @@ version is newer than the running build understands, and otherwise ignores it.
 
 ## When a file has a mistake
 
-- **`koshi.kdl` and `theme.kdl` are field-partial.** One bad field (a typo, the
-  wrong kind of value) is skipped — that setting keeps its default — and every
-  other field in the file still applies. koshi logs which field it skipped.
+- **`koshi.kdl` and `themes/<name>.kdl` are field-partial.** One bad field (a
+  typo, the wrong kind of value) is skipped — that setting keeps its default —
+  and every other field in the file still applies. koshi logs which field it
+  skipped.
 - **`keybinding.kdl` and `profile/<name>.kdl` are all-or-nothing.** Any error
   in the file drops the *whole* file back to defaults, because a half-applied
   keymap or a half-built layout (some panes spawned, some silently missing) is
   worse than a clean fallback.
+- **A theme koshi cannot find or parse** falls back to the built-in `default`
+  theme, with the reason logged. The rest of `koshi.kdl` still applies.

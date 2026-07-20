@@ -1,0 +1,22 @@
+// Rosé Pine Dawn — https://rosepinetheme.com
+// Copy to your config dir as themes/rose-pine-dawn.kdl, then set `theme "rose-pine-dawn"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#907aa9"
+    ramp-end "#d7827e"
+    on-ramp "#faf4ed"
+    on-ramp-dim "#464261"
+    accent "#286983"
+    on-accent "#faf4ed"
+    bar-bg "#faf4ed"
+    border-focused "#907aa9"
+    border-unfocused "#9893a5"
+    border-hover "#56949f"
+    stack-header-fg "#464261"
+    stack-header-bg "#f2e9e1"
+    letterbox "#f2e9e1"
+}

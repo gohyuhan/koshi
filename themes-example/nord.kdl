@@ -1,0 +1,19 @@
+// Nord — https://www.nordtheme.com
+// Copy to your config dir as themes/nord.kdl, then set `theme "nord"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#88c0d0"
+    ramp-end "#81a1c1"
+    on-ramp "#2e3440"
+    on-ramp-dim "#eceff4"
+    accent "#8fbcbb"
+    on-accent "#2e3440"
+    bar-bg "#2e3440"
+    border-focused "#88c0d0"
+    border-unfocused "#4c566a"
+    border-hover "#8fbcbb"
+    stack-header-fg "#eceff4"
+    stack-header-bg "#3b4252"
+    letterbox "#434c5e"
+}

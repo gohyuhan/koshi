@@ -1,0 +1,22 @@
+// Catppuccin Latte — https://catppuccin.com
+// Copy to your config dir as themes/catppuccin-latte.kdl, then set `theme "catppuccin-latte"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#8839ef"
+    ramp-end "#ea76cb"
+    on-ramp "#eff1f5"
+    on-ramp-dim "#4c4f69"
+    accent "#179299"
+    on-accent "#eff1f5"
+    bar-bg "#eff1f5"
+    border-focused "#8839ef"
+    border-unfocused "#9ca0b0"
+    border-hover "#179299"
+    stack-header-fg "#4c4f69"
+    stack-header-bg "#ccd0da"
+    letterbox "#bcc0cc"
+}

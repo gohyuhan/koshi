@@ -1,0 +1,19 @@
+// Catppuccin Frappé — https://catppuccin.com
+// Copy to your config dir as themes/catppuccin-frappe.kdl, then set `theme "catppuccin-frappe"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#ca9ee6"
+    ramp-end "#f4b8e4"
+    on-ramp "#303446"
+    on-ramp-dim "#c6d0f5"
+    accent "#81c8be"
+    on-accent "#303446"
+    bar-bg "#303446"
+    border-focused "#ca9ee6"
+    border-unfocused "#737994"
+    border-hover "#81c8be"
+    stack-header-fg "#c6d0f5"
+    stack-header-bg "#414559"
+    letterbox "#51576d"
+}

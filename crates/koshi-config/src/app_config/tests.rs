@@ -9,24 +9,96 @@ use crate::error::ConfigError;
 use crate::layer::PartialKoshiConfig;
 use crate::types::WheelScroll;
 
-use super::parse_app_config;
+use super::{parse_app_config, AppConfigFile};
 
 /// Parses `source` as `koshi.kdl`, panicking on error, dropping warnings.
 fn parse(source: &str) -> PartialKoshiConfig {
-    parse_app_config(Path::new("koshi.kdl"), source)
-        .expect("valid config")
-        .0
+    parse_file(source).layer
 }
 
 /// Parses `source`, returning both the layer and the field-partial warnings.
 fn parse_with_warnings(source: &str) -> (PartialKoshiConfig, Vec<String>) {
+    let file = parse_file(source);
+    (file.layer, file.warnings)
+}
+
+/// Parses `source` as `koshi.kdl` whole — layer, theme name, and warnings —
+/// panicking on error.
+fn parse_file(source: &str) -> AppConfigFile {
     parse_app_config(Path::new("koshi.kdl"), source).expect("valid config")
 }
 
 #[test]
 fn empty_source_sets_no_layer() {
-    let layer = parse("");
-    assert_eq!(layer.update, None);
+    let file = parse_file("");
+    assert_eq!(file.layer.update, None);
+    assert_eq!(file.theme, None);
+}
+
+#[test]
+fn the_theme_line_records_the_name_outside_the_merge_layer() {
+    // `koshi.kdl` only names the theme; the colors come from the matching
+    // `themes/<name>.kdl`, which the loader reads. The name rides beside the
+    // layer, never inside it, so merging can never apply a theme by name only.
+    let file = parse_file("theme \"midnight\"");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(file.layer.theme, None);
+}
+
+#[test]
+fn a_blank_theme_name_is_skipped_with_a_warning() {
+    // An empty name points at no file at all, so it is skipped like any other
+    // bad field and the built-in theme stands.
+    let file = parse_file("theme \"\"");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_whitespace_only_theme_name_is_skipped_with_a_warning() {
+    // `theme "   "` would name a file called three spaces; it is treated as
+    // blank, not as a real name.
+    let file = parse_file("theme \"   \"");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_non_string_theme_name_is_skipped_with_a_warning() {
+    let file = parse_file("theme 42");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_theme_line_keeps_the_first_and_warns() {
+    // `theme` may appear once like the rest: the later line is dropped rather
+    // than silently winning.
+    let file = parse_file("theme \"midnight\"\ntheme \"solarized\"");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(
+        file.warnings,
+        vec!["ignored duplicate `theme` section".to_string()]
+    );
+}
+
+#[test]
+fn a_colors_block_in_the_app_file_is_ignored() {
+    // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
+    // is an unknown top-level node and sets nothing, so one file's settings
+    // can never reach another file's state.
+    let file = parse_file("theme \"midnight\"\ncolors {\n    accent \"#ff0000\"\n}");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(file.layer.theme, None);
 }
 
 #[test]
@@ -270,6 +342,45 @@ fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment(
     assert_eq!(
         warnings,
         vec!["ignored `terminal.default-shell`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn surrounding_whitespace_is_trimmed_off_every_nonempty_string_field() {
+    // A stray space is invisible in the file but breaks whatever consumes the
+    // value: `term " xterm-256color "` would export a `TERM` terminfo cannot
+    // look up, and `default-shell " /bin/zsh "` would spawn a path that does
+    // not exist. The value is stored trimmed, and the field still applies.
+    let file = parse_file(
+        "theme \"  midnight  \"\n\
+         terminal {\n\
+         term \" xterm-256color \"\n\
+         colorterm \"\\ttruecolor \"\n\
+         default-shell \" /bin/zsh \"\n\
+         }",
+    );
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    let terminal = file.layer.terminal.expect("terminal section present");
+    assert_eq!(terminal.term, Some("xterm-256color".to_string()));
+    assert_eq!(terminal.colorterm, Some("truecolor".to_string()));
+    assert_eq!(terminal.default_shell, Some(Some("/bin/zsh".to_string())));
+    assert!(
+        file.warnings.is_empty(),
+        "trimming is not a skip: {:?}",
+        file.warnings
+    );
+}
+
+#[test]
+fn inner_whitespace_in_a_string_field_is_left_alone() {
+    // Only the ends are trimmed. A shell path with a space inside it is a real
+    // path, not a typo, so it survives intact.
+    let terminal = parse("terminal {\n    default-shell \"/Applications/My Shell/bin/sh\"\n}")
+        .terminal
+        .expect("terminal section present");
+    assert_eq!(
+        terminal.default_shell,
+        Some(Some("/Applications/My Shell/bin/sh".to_string()))
     );
 }
 

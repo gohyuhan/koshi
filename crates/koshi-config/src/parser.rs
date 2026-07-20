@@ -23,7 +23,7 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
         .map_err(|err| ConfigParseDiagnostic::new(path, err))
 }
 
-// Field-value readers shared by the `koshi.kdl` and `theme.kdl` parsers. Each
+// Field-value readers shared by the `koshi.kdl` and theme-file parsers. Each
 // takes one field node (`key value`) and returns the value or a plain-words
 // reason it could not be read, so a field-partial parser can turn that reason
 // into a warning and skip the field.
@@ -51,16 +51,24 @@ pub(crate) fn value_string(node: &KdlNode) -> Result<String, String> {
         .ok_or_else(|| "expected a string".to_string())
 }
 
-/// Reads the node's single value as a non-empty string, rejecting an empty or
-/// whitespace-only value. Used for fields that are exported to child programs
-/// or spawned as a program path, where a blank value would break the child
-/// (an empty `TERM` disables terminfo, an empty shell path spawns nothing).
+/// Reads the node's single value as a non-empty string, **trimmed** of
+/// surrounding whitespace, rejecting an empty or whitespace-only value.
+///
+/// Used for fields that are exported to child programs, spawned as a program
+/// path, or turned into a file name — all places a stray space breaks
+/// something downstream while looking fine in the file. `term " xterm-256color "`
+/// yields `xterm-256color`, so the child gets a `TERM` terminfo can actually
+/// look up; `theme " midnight "` yields `midnight`, so the loader reads
+/// `themes/midnight.kdl` rather than a file named with spaces around it.
+/// A blank value is still rejected outright (an empty `TERM` disables
+/// terminfo, an empty shell path spawns nothing).
 pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
     let value = value_string(node)?;
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         Err("must not be empty".to_string())
     } else {
-        Ok(value)
+        Ok(trimmed.to_string())
     }
 }
 

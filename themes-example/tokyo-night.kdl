@@ -1,0 +1,19 @@
+// Tokyo Night — https://github.com/folke/tokyonight.nvim
+// Copy to your config dir as themes/tokyo-night.kdl, then set `theme "tokyo-night"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#7aa2f7"
+    ramp-end "#bb9af7"
+    on-ramp "#1a1b26"
+    on-ramp-dim "#c0caf5"
+    accent "#7dcfff"
+    on-accent "#1a1b26"
+    bar-bg "#1a1b26"
+    border-focused "#7aa2f7"
+    border-unfocused "#565f89"
+    border-hover "#7dcfff"
+    stack-header-fg "#c0caf5"
+    stack-header-bg "#292e42"
+    letterbox "#3b4261"
+}

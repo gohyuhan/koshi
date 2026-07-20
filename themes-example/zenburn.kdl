@@ -1,0 +1,19 @@
+// Zenburn — https://github.com/jnurmine/Zenburn
+// Copy to your config dir as themes/zenburn.kdl, then set `theme "zenburn"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#f0dfaf"
+    ramp-end "#dca3a3"
+    on-ramp "#3f3f3f"
+    on-ramp-dim "#dcdccc"
+    accent "#7f9f7f"
+    on-accent "#3f3f3f"
+    bar-bg "#3f3f3f"
+    border-focused "#f0dfaf"
+    border-unfocused "#7f9f7f"
+    border-hover "#efef8f"
+    stack-header-fg "#dcdccc"
+    stack-header-bg "#434443"
+    letterbox "#2f2f2f"
+}

@@ -1,23 +1,48 @@
-# `theme.kdl` — colors
+# `themes/<name>.kdl` — colors
 
 The colors koshi draws its own chrome with: pane borders, the tab ribbon, the
 key-hint bar, stack headers. It does **not** recolor what runs inside a pane —
 that is the program's own output, drawn with the colors it asks for.
 
-**Where it goes:** directly in the config directory — `~/.config/koshi/theme.kdl`
-on Linux, `~/Library/Application Support/koshi/theme.kdl` on macOS,
-`%APPDATA%\koshi\config\theme.kdl` on Windows. See [README](README.md#where-the-files-go).
+**Where it goes:** in a `themes/` subdirectory of the config directory —
+`~/.config/koshi/themes/midnight.kdl` on Linux,
+`~/Library/Application Support/koshi/themes/midnight.kdl` on macOS,
+`%APPDATA%\koshi\config\themes\midnight.kdl` on Windows. See
+[README](README.md#where-the-files-go).
+
+**How a theme is picked:** keep as many themes side by side as you like, one
+file each, and name the one you want in [`koshi.kdl`](koshi.md):
+
+```kdl
+// koshi.kdl
+theme "midnight"        // reads themes/midnight.kdl
+```
+
+**Don't want to build one?** [`themes-example/`](../themes-example/) ships 25
+ready-made themes — Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé Pine,
+Solarized, Everforest, Kanagawa and more, in both dark and light. Copy one into
+your `themes/` folder and name it. Its [README](../themes-example/README.md)
+lists them all.
+
+The theme's name **is** its file name — `themes/midnight.kdl` is the theme
+`midnight`. The file itself carries no name.
+
+**Falling back to the built-in theme.** koshi has one theme compiled in, called
+`default`. You get it when:
+
+- `koshi.kdl` has no `theme` line, or
+- it says `theme "default"` — the name is reserved for the built-in colors, so
+  a `themes/default.kdl` of your own is never read, or
+- it names a theme whose file is missing or cannot be parsed. koshi logs which
+  theme it could not load and carries on with the built-in colors, so a typo in
+  the name never stops koshi from starting.
 
 **If a color is wrong:** it is skipped (keeps its default) and koshi logs it;
 every other color still applies.
 
-The file is the theme itself — no wrapping block. It has an optional `name` and
-a `colors` block. Every color is a `#RRGGBB` hex string (the leading `#` is
+The file is the theme itself — no wrapping block, just an optional `version`
+and a `colors` block. Every color is a `#RRGGBB` hex string (the leading `#` is
 optional).
-
-| Key | Value / type | Default | Since |
-|---|---|---|---|
-| `name` | string — a label for the theme | `"default"` | ≥ 0.1.0 |
 
 ## `colors`
 
@@ -57,14 +82,16 @@ color.
 
 ## Full example
 
-This is **every** `theme.kdl` field, set to its **default** value — copy it as a
-complete baseline and change the colors you like. Any color you delete just
-restores its default.
+This is **every** theme field, set to its **default** value — save it as
+`themes/<your name>.kdl`, point `koshi.kdl` at that name, and change the colors
+you like. Any color you delete just restores its default.
+
+For themes that are already built, see
+[`themes-example/`](../themes-example/).
 
 ```kdl
-// theme.kdl — the complete default theme.
+// themes/midnight.kdl — every color, at its default value.
 version 1
-name "default"
 
 colors {
     ramp-start "#d0a5ff"

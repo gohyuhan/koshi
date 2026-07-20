@@ -1,0 +1,22 @@
+// One Light — https://github.com/atom/atom/tree/master/packages/one-light-syntax
+// Copy to your config dir as themes/one-light.kdl, then set `theme "one-light"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#4078f2"
+    ramp-end "#a626a4"
+    on-ramp "#fafafa"
+    on-ramp-dim "#383a42"
+    accent "#0184bc"
+    on-accent "#fafafa"
+    bar-bg "#fafafa"
+    border-focused "#4078f2"
+    border-unfocused "#a0a1a7"
+    border-hover "#0184bc"
+    stack-header-fg "#383a42"
+    stack-header-bg "#e6e6e6"
+    letterbox "#dcdcdc"
+}

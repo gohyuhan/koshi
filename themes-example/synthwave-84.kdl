@@ -1,0 +1,19 @@
+// SynthWave '84 — https://github.com/robb0wen/synthwave-vscode
+// Copy to your config dir as themes/synthwave-84.kdl, then set `theme "synthwave-84"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#ff7edb"
+    ramp-end "#03edf9"
+    on-ramp "#262335"
+    on-ramp-dim "#ffffff"
+    accent "#fede5d"
+    on-accent "#262335"
+    bar-bg "#262335"
+    border-focused "#ff7edb"
+    border-unfocused "#614d85"
+    border-hover "#03edf9"
+    stack-header-fg "#ffffff"
+    stack-header-bg "#241b2f"
+    letterbox "#614d85"
+}

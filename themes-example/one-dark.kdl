@@ -1,0 +1,19 @@
+// One Dark — https://github.com/atom/atom/tree/master/packages/one-dark-syntax
+// Copy to your config dir as themes/one-dark.kdl, then set `theme "one-dark"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#61afef"
+    ramp-end "#c678dd"
+    on-ramp "#282c34"
+    on-ramp-dim "#abb2bf"
+    accent "#56b6c2"
+    on-accent "#282c34"
+    bar-bg "#282c34"
+    border-focused "#61afef"
+    border-unfocused "#5c6370"
+    border-hover "#56b6c2"
+    stack-header-fg "#abb2bf"
+    stack-header-bg "#4b5263"
+    letterbox "#5c6370"
+}

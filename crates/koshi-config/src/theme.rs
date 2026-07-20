@@ -1,4 +1,4 @@
-//! Parser for `theme.kdl`, the color-theme config file.
+//! Parser for a theme file, one of the `themes/<name>.kdl` color themes.
 //!
 //! Turns the file into a [`PartialThemeConfig`] override layer. Like the app
 //! config it is **field-partial**: a color whose value is not a `#RRGGBB` hex
@@ -7,12 +7,15 @@
 //! field is named in the returned warnings for the loader to log. Does no file
 //! I/O: the caller reads the file and hands the text in.
 //!
+//! The theme's name is its file name, so the file itself carries no name: the
+//! loader fills [`PartialThemeConfig::name`] in from the stem of the path it
+//! read.
+//!
 //! # Schema
 //! Top-level nodes, no wrapping `theme` block (the file *is* the theme), the
 //! same shape the keybinding file uses:
 //! ```kdl
 //! version 1          // optional; a version newer than this build is rejected
-//! name "midnight"
 //! colors {
 //!     ramp-start "#d0a5ff"
 //!     accent "#f5c2ff"
@@ -29,8 +32,10 @@ use crate::layer::{PartialColorPalette, PartialThemeConfig};
 use crate::parser::{parse_kdl, value_string, value_u32};
 use crate::types::RgbColor;
 
-/// Parses `theme.kdl` `source` into a [`PartialThemeConfig`] override layer and
-/// the warning for every color that was skipped.
+/// Parses a theme file's `source` into a [`PartialThemeConfig`] override layer
+/// and the warning for every color that was skipped. The returned layer's
+/// [`name`](PartialThemeConfig::name) is left unset: the theme is named by its
+/// file, which the caller knows and this parser does not.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
@@ -50,7 +55,6 @@ pub fn parse_theme(
                 check_version(found)
                     .map_err(|diagnostic| validation("version", &diagnostic.to_string()))?;
             }
-            "name" => set(&mut theme.name, value_string(node), "name", &mut warnings),
             "colors" => theme.colors = Some(parse_colors(node, &mut warnings)),
             // Unknown top-level nodes are ignored, matching the app config.
             _ => {}

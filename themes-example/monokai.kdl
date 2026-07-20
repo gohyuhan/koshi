@@ -1,0 +1,19 @@
+// Monokai — https://monokai.pro
+// Copy to your config dir as themes/monokai.kdl, then set `theme "monokai"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#f92672"
+    ramp-end "#fd971f"
+    on-ramp "#272822"
+    on-ramp-dim "#f8f8f2"
+    accent "#66d9ef"
+    on-accent "#272822"
+    bar-bg "#272822"
+    border-focused "#f92672"
+    border-unfocused "#75715e"
+    border-hover "#66d9ef"
+    stack-header-fg "#f8f8f2"
+    stack-header-bg "#3c3d37"
+    letterbox "#3c3d37"
+}

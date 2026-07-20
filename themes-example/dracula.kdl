@@ -1,0 +1,19 @@
+// Dracula — https://draculatheme.com
+// Copy to your config dir as themes/dracula.kdl, then set `theme "dracula"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#bd93f9"
+    ramp-end "#ff79c6"
+    on-ramp "#282a36"
+    on-ramp-dim "#f8f8f2"
+    accent "#8be9fd"
+    on-accent "#282a36"
+    bar-bg "#282a36"
+    border-focused "#bd93f9"
+    border-unfocused "#6272a4"
+    border-hover "#8be9fd"
+    stack-header-fg "#f8f8f2"
+    stack-header-bg "#44475a"
+    letterbox "#44475a"
+}

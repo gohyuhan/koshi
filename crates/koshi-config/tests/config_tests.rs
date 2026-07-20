@@ -1,6 +1,6 @@
 //! Guards that the full "complete default" examples shipped in `config-docs/`
 //! stay valid: each is fed through its real parser, so a schema change that
-//! breaks a documented config fails here. `koshi.kdl` and `theme.kdl` must
+//! breaks a documented config fails here. `koshi.kdl` and the theme file must
 //! parse with no field-partial warnings (every field is spelled correctly);
 //! `keybinding.kdl` and the profile must parse cleanly.
 
@@ -13,19 +13,19 @@ use koshi_config::theme::parse_theme;
 
 const KOSHI: &str = r#"
 version 1
+theme "default"
 pane { min-cols 2; min-rows 1 }
-scrollback { max-lines 10000; max-bytes 33554432 }
+scrollback { max-lines 10000; max-bytes 33554432; scroll-on-input #true }
 layout { new-pane-direction "right" }
 mouse { border-resize #true; scroll-lines 3; wheel "scroll-scrollback" }
 copy { trim-trailing-whitespace #true }
 terminal { term "xterm-256color"; colorterm "truecolor"; default-shell "/bin/zsh" }
-logging { enabled #false }
+logging { enabled #false; level "warning"; format "pretty" }
 update { auto-check #true; check-interval-days 14; allow-prerelease #false }
 "#;
 
 const THEME: &str = r##"
 version 1
-name "default"
 colors {
     ramp-start "#d0a5ff"
     ramp-end "#7dbcff"
@@ -124,13 +124,20 @@ tab {
 
 #[test]
 fn koshi_example_parses_without_warnings() {
-    let (_, warnings) = parse_app_config(Path::new("koshi.kdl"), KOSHI).expect("koshi.kdl parses");
-    assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    let file = parse_app_config(Path::new("koshi.kdl"), KOSHI).expect("koshi.kdl parses");
+    assert!(
+        file.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        file.warnings
+    );
+    // The documented example names the built-in theme.
+    assert_eq!(file.theme, Some("default".to_string()));
 }
 
 #[test]
 fn theme_example_parses_without_warnings() {
-    let (_, warnings) = parse_theme(Path::new("theme.kdl"), THEME).expect("theme.kdl parses");
+    let (_, warnings) =
+        parse_theme(Path::new("themes/default.kdl"), THEME).expect("theme file parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 }
 
@@ -142,4 +149,56 @@ fn keybinding_example_parses() {
 #[test]
 fn profile_example_parses() {
     parse_profile(Path::new("profile/dev.kdl"), PROFILE).expect("profile parses");
+}
+
+/// Every ready-made theme shipped in `themes-example/` must parse cleanly and
+/// set all thirteen color roles.
+///
+/// These files are meant to be copied straight into a config directory, so a
+/// typo'd role name — which the parser skips with a warning rather than
+/// rejecting — would ship a theme that silently draws one part of the chrome in
+/// koshi's default color. Requiring zero warnings turns that into a failure
+/// here instead.
+#[test]
+fn every_shipped_example_theme_is_complete_and_warning_free() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("themes-example directory exists") {
+        let path = entry.expect("readable directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("kdl") {
+            continue;
+        }
+        let name = path.file_name().expect("a file name").to_string_lossy();
+        let source = std::fs::read_to_string(&path).expect("theme file is readable");
+        let (theme, warnings) = parse_theme(&path, &source)
+            .unwrap_or_else(|err| panic!("{name} does not parse: {err}"));
+        assert!(warnings.is_empty(), "{name} has warnings: {warnings:?}");
+
+        let colors = theme
+            .colors
+            .unwrap_or_else(|| panic!("{name} has no `colors` block"));
+        // Named one by one so a failure says which role is missing.
+        for (role, set) in [
+            ("ramp-start", colors.ramp_start.is_some()),
+            ("ramp-end", colors.ramp_end.is_some()),
+            ("on-ramp", colors.on_ramp.is_some()),
+            ("on-ramp-dim", colors.on_ramp_dim.is_some()),
+            ("accent", colors.accent.is_some()),
+            ("on-accent", colors.on_accent.is_some()),
+            ("bar-bg", colors.bar_bg.is_some()),
+            ("border-focused", colors.border_focused.is_some()),
+            ("border-unfocused", colors.border_unfocused.is_some()),
+            ("border-hover", colors.border_hover.is_some()),
+            ("stack-header-fg", colors.stack_header_fg.is_some()),
+            ("stack-header-bg", colors.stack_header_bg.is_some()),
+            ("letterbox", colors.letterbox.is_some()),
+        ] {
+            assert!(set, "{name} does not set `{role}`");
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 20,
+        "expected at least 20 shipped themes, found {checked}"
+    );
 }

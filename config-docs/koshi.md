@@ -1,8 +1,9 @@
 # `koshi.kdl` — app settings
 
-The main settings file: scrollback size, mouse behavior, the default split
-direction, what koshi advertises to child programs, and the self-update check.
-Every setting is optional and falls back to the default shown below.
+The main settings file: which color theme to use, scrollback size, mouse
+behavior, the default split direction, what koshi advertises to child programs,
+and the self-update check. Every setting is optional and falls back to the
+default shown below.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
@@ -13,7 +14,22 @@ every other field still applies. The one exception is the `update` section,
 which is stricter — see its note below.
 
 Settings are grouped into sections. Each section is a block; each field inside
-it is one node with one value.
+it is one node with one value. `theme` is the one setting that stands on its
+own, outside any block.
+
+## `theme`
+
+Which color theme koshi draws its chrome with. The value is the name of a file
+in the `themes/` subdirectory: `theme "midnight"` reads
+`themes/midnight.kdl`. The colors live in that file, never here.
+
+`"default"` is koshi's built-in theme. Naming it — or leaving the line out, or
+naming a theme koshi cannot load — draws the built-in colors. See
+[theme.md](theme.md).
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `theme` | string — the `themes/<name>.kdl` to use, without the `.kdl` | `"default"` | ≥ 0.1.0 |
 
 ## `pane`
 
@@ -92,6 +108,8 @@ optional; deleting any line just restores that default.
 ```kdl
 // koshi.kdl — the complete default configuration.
 version 1
+
+theme "default"
 
 pane {
     min-cols 2

@@ -1,4 +1,4 @@
-//! Tests for the `theme.kdl` color-theme parser.
+//! Tests for the `themes/<name>.kdl` color-theme parser.
 
 use std::path::Path;
 
@@ -8,16 +8,18 @@ use crate::types::RgbColor;
 
 use super::parse_theme;
 
-/// Parses `source` as `theme.kdl`, panicking on error.
+/// Parses `source` as a theme file, panicking on error.
 fn parse(source: &str) -> (PartialThemeConfig, Vec<String>) {
-    parse_theme(Path::new("theme.kdl"), source).expect("valid theme")
+    parse_theme(Path::new("themes/midnight.kdl"), source).expect("valid theme")
 }
 
 #[test]
-fn name_and_colors_parse() {
+fn colors_parse_and_the_theme_is_left_unnamed() {
     let (theme, warnings) =
-        parse("name \"midnight\"\ncolors {\n    ramp-start \"#581c87\"\n    accent \"#a78bfa\"\n}");
-    assert_eq!(theme.name, Some("midnight".to_string()));
+        parse("colors {\n    ramp-start \"#581c87\"\n    accent \"#a78bfa\"\n}");
+    // The theme is named by its file, which this parser never sees; the loader
+    // fills the name in from the path it read.
+    assert_eq!(theme.name, None);
     let colors = theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, Some(RgbColor::new(0x58, 0x1c, 0x87)));
     assert_eq!(colors.accent, Some(RgbColor::new(0xa7, 0x8b, 0xfa)));
@@ -92,14 +94,14 @@ fn a_bare_hex_without_a_hash_parses() {
 
 #[test]
 fn a_newer_schema_version_is_rejected() {
-    let error = parse_theme(Path::new("theme.kdl"), "version 999")
+    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 999")
         .expect_err("version newer than this build");
     assert!(matches!(error, ConfigError::Validation { key, .. } if key == "version"));
 }
 
 #[test]
 fn a_syntax_error_is_a_parse_error() {
-    let error = parse_theme(Path::new("theme.kdl"), "colors { accent \"#fff\"")
+    let error = parse_theme(Path::new("themes/midnight.kdl"), "colors { accent \"#fff\"")
         .expect_err("unclosed block");
     assert!(matches!(error, ConfigError::Parse { .. }));
 }
@@ -138,13 +140,16 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
 }
 
 #[test]
-fn a_non_string_name_is_skipped_with_a_warning() {
-    let (theme, warnings) = parse("name 42");
+fn a_name_node_is_ignored_like_any_other_unknown_top_level_node() {
+    // The theme's name comes from its file name, so a `name` node in the file
+    // is not part of the schema and is passed over in silence.
+    let (theme, warnings) = parse("name \"solarized\"\ncolors {\n    accent \"#ffffff\"\n}");
     assert_eq!(theme.name, None);
     assert_eq!(
-        warnings,
-        vec!["ignored `name`: expected a string".to_string()]
+        theme.colors.expect("colors present").accent,
+        Some(RgbColor::new(0xff, 0xff, 0xff))
     );
+    assert!(warnings.is_empty());
 }
 
 #[test]
@@ -182,7 +187,7 @@ fn an_empty_colors_block_sets_no_role() {
 #[test]
 fn a_non_integer_version_is_a_validation_error() {
     // A garbage version value is a validation failure, not a silent skip.
-    let error = parse_theme(Path::new("theme.kdl"), "version \"abc\"")
+    let error = parse_theme(Path::new("themes/midnight.kdl"), "version \"abc\"")
         .expect_err("string is not a version integer");
     match error {
         ConfigError::Validation { key, detail } => {

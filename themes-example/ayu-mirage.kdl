@@ -1,0 +1,19 @@
+// Ayu Mirage — https://github.com/ayu-theme/ayu-vim
+// Copy to your config dir as themes/ayu-mirage.kdl, then set `theme "ayu-mirage"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#ffd57f"
+    ramp-end "#ffcc66"
+    on-ramp "#212733"
+    on-ramp-dim "#d9d7ce"
+    accent "#5ccfe6"
+    on-accent "#212733"
+    bar-bg "#212733"
+    border-focused "#ffcc66"
+    border-unfocused "#5c6773"
+    border-hover "#5ccfe6"
+    stack-header-fg "#d9d7ce"
+    stack-header-bg "#343f4c"
+    letterbox "#3d4751"
+}

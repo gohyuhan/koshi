@@ -1,0 +1,19 @@
+// Kanagawa (Wave) — https://github.com/rebelot/kanagawa.nvim
+// Copy to your config dir as themes/kanagawa.kdl, then set `theme "kanagawa"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#7e9cd8"
+    ramp-end "#957fb8"
+    on-ramp "#1f1f28"
+    on-ramp-dim "#dcd7ba"
+    accent "#e6c384"
+    on-accent "#1f1f28"
+    bar-bg "#1f1f28"
+    border-focused "#7e9cd8"
+    border-unfocused "#727169"
+    border-hover "#7aa89f"
+    stack-header-fg "#dcd7ba"
+    stack-header-bg "#2a2a37"
+    letterbox "#223249"
+}

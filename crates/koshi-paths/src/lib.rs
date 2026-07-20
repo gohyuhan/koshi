@@ -38,8 +38,9 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("", "", "koshi")
 }
 
-/// The directory user configuration lives in: `koshi.kdl`, `theme.kdl`,
-/// `keybinding.kdl`. See the [module table](self) for the per-platform
+/// The directory user configuration lives in: `koshi.kdl` and
+/// `keybinding.kdl` directly, the color themes under `themes/` and the session
+/// layouts under `profile/`. See the [module table](self) for the per-platform
 /// location. Example: on Linux this is `~/.config/koshi`.
 #[must_use]
 pub fn config_dir() -> Option<PathBuf> {

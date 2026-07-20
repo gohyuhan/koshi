@@ -1,0 +1,19 @@
+// Catppuccin Macchiato — https://catppuccin.com
+// Copy to your config dir as themes/catppuccin-macchiato.kdl, then set `theme "catppuccin-macchiato"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#c6a0f6"
+    ramp-end "#f5bde6"
+    on-ramp "#24273a"
+    on-ramp-dim "#cad3f5"
+    accent "#8bd5ca"
+    on-accent "#24273a"
+    bar-bg "#24273a"
+    border-focused "#c6a0f6"
+    border-unfocused "#6e738d"
+    border-hover "#8bd5ca"
+    stack-header-fg "#cad3f5"
+    stack-header-bg "#363a4f"
+    letterbox "#494d64"
+}

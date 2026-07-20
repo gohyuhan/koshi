@@ -16,9 +16,17 @@
 //! `auto-check #false` would re-enable it — so the update loader must fail
 //! closed, which needs the parse to fail rather than skip the field.
 //!
+//! # The `theme` line
+//!
+//! `theme "midnight"` names which color theme to use; the colors live in a
+//! separate `themes/midnight.kdl`. This parser only records the name, and
+//! hands it back beside the layer rather than inside it — the loader turns it
+//! into a path and reads that file. See [`AppConfigFile`].
+//!
 //! # Example
 //! A `koshi.kdl` of
 //! ```kdl
+//! theme "midnight"
 //! scrollback {
 //!     max-lines 50000
 //! }
@@ -26,9 +34,9 @@
 //!     new-pane-direction "down"
 //! }
 //! ```
-//! yields a layer setting `scrollback.max_lines = 50000` and the default
-//! new-pane direction to [`Direction::Down`], leaving every other field at its
-//! built-in default.
+//! yields `theme = Some("midnight")` and a layer setting
+//! `scrollback.max_lines = 50000` and the default new-pane direction to
+//! [`Direction::Down`], leaving every other field at its built-in default.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -52,6 +60,7 @@ use crate::types::WheelScroll;
 const SECTIONS: &[&str] = &[
     "version",
     "update",
+    "theme",
     "pane",
     "scrollback",
     "layout",
@@ -61,19 +70,36 @@ const SECTIONS: &[&str] = &[
     "logging",
 ];
 
-/// Parses `koshi.kdl` `source` into a [`PartialKoshiConfig`] override layer and
+/// A parsed `koshi.kdl`.
+///
+/// The theme it names is kept **out** of [`layer`](Self::layer) on purpose.
+/// Every other setting in the file is an override that folds onto the defaults;
+/// the theme line is not a color at all, it is the name of another file to go
+/// read. Keeping it separate means merging the layer can never produce a config
+/// claiming a theme whose colors were never loaded.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AppConfigFile {
+    /// The settings this file overrides, to fold onto the built-in defaults.
+    pub layer: PartialKoshiConfig,
+    /// The name from the `theme "<name>"` line — which `themes/<name>.kdl`
+    /// supplies the colors. `None` when the file names no theme.
+    pub theme: Option<String>,
+    /// One entry per field-partial field that was skipped, for the loader to
+    /// log.
+    pub warnings: Vec<String>,
+}
+
+/// Parses `koshi.kdl` `source` into its override layer, the theme it names, and
 /// the warning for every field-partial field that was skipped.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
 /// [`ConfigError::Validation`] for a schema version newer than this build, a
 /// duplicate `update` section, or a bad value in the strict `update` section.
-pub fn parse_app_config(
-    path: &Path,
-    source: &str,
-) -> Result<(PartialKoshiConfig, Vec<String>), ConfigError> {
+pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, ConfigError> {
     let doc = parse_kdl(path, source)?;
     let mut partial = PartialKoshiConfig::default();
+    let mut theme = None;
     let mut warnings = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for node in doc.nodes() {
@@ -97,6 +123,13 @@ pub fn parse_app_config(
                     detail: diagnostic.to_string(),
                 })?;
             }
+            // `theme` names which `themes/<name>.kdl` supplies the colors; the
+            // colors themselves are never spelled here. A blank name would
+            // point at no file, so it is skipped and the built-in theme stands.
+            "theme" => match value_nonempty_string(node) {
+                Ok(name) => theme = Some(name),
+                Err(detail) => warnings.push(format!("ignored `theme`: {detail}")),
+            },
             "update" => partial.update = Some(parse_update(node)?),
             "pane" => partial.pane = Some(parse_pane(node, &mut warnings)),
             "scrollback" => partial.scrollback = Some(parse_scrollback(node, &mut warnings)),
@@ -110,7 +143,11 @@ pub fn parse_app_config(
             _ => {}
         }
     }
-    Ok((partial, warnings))
+    Ok(AppConfigFile {
+        layer: partial,
+        theme,
+        warnings,
+    })
 }
 
 /// Reads the strict `update { … }` block: any bad field fails the whole parse
