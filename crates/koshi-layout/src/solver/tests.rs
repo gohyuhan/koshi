@@ -6,6 +6,7 @@ use koshi_test_support::layout_assert::{
 };
 
 use super::*;
+use crate::test_trees::deep_alternating;
 use crate::tree::LayoutChild;
 
 /// Construct a rectangle with the given origin (x, y) and size (cols, rows).
@@ -34,28 +35,6 @@ fn split_with(direction: SplitDirection, children: Vec<(PaneId, SizeWeight)>) ->
     );
     node.weights = children.into_iter().map(|(_, weight)| weight).collect();
     LayoutNode::Split(node)
-}
-
-/// A left-leaning tree of `panes.len() - 1` splits whose direction alternates
-/// horizontal/vertical by depth: `split(h, [p0, split(v, [p1, split(h, …)])])`.
-/// Used to stress deeply nested solving and close ordering.
-fn deep_alternating(panes: &[PaneId]) -> LayoutNode {
-    let (&last, rest) = panes
-        .split_last()
-        .expect("deep_alternating needs at least one pane");
-    let mut node = LayoutNode::Pane(last);
-    for (index, &pane) in rest.iter().enumerate().rev() {
-        let direction = if index % 2 == 0 {
-            SplitDirection::Horizontal
-        } else {
-            SplitDirection::Vertical
-        };
-        node = LayoutNode::Split(SplitNode::with_equal_weights(
-            direction,
-            vec![leaf(pane), LayoutChild::new(node)],
-        ));
-    }
-    node
 }
 
 /// Verify that the solved panes fill the tab completely with no gaps, overlaps, or spillage.

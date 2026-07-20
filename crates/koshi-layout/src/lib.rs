@@ -15,4 +15,6 @@ pub mod size;
 pub mod snapshot;
 pub mod solver;
 pub mod template;
+#[cfg(test)]
+mod test_trees;
 pub mod tree;

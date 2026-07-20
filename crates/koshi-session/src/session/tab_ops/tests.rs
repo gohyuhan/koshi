@@ -937,6 +937,15 @@ fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
 fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
     let mut session = session_with(vec![], vec![]);
     let start_tab = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        start_tab,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
     let client_id = attach_client_on(&mut session, start_tab);
 
     let tab_id = TabId::new();
@@ -986,7 +995,17 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
     // `focus_leaf` past the last leaf falls back to the root pane (index 0),
     // never panics and never focuses a pane the profile does not hold.
     let mut session = session_with(vec![], vec![]);
-    let client_id = attach_client_on(&mut session, TabId::new());
+    let start_tab = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        start_tab,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    let client_id = attach_client_on(&mut session, start_tab);
 
     let tab_id = TabId::new();
     let (p0, p1) = (PaneId::new(), PaneId::new());
@@ -1010,6 +1029,7 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
     let client = session.clients.get(client_id).unwrap();
     assert_eq!(client.focused_pane(tab_id), Some(p0));
     assert_eq!(session.tabs[&tab_id].focus_mru(), &[p0]);
+    assert_eq!(session.validate(), Ok(()));
 }
 
 #[test]

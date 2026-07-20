@@ -12,6 +12,7 @@ use koshi_test_support::layout_assert::{
 use super::*;
 use crate::size::SizeWeight;
 use crate::solver::{solve, MIN_PANE_SIZE};
+use crate::test_trees::deep_alternating;
 
 /// Wraps a single pane ID as a leaf node ready to insert into a tree.
 fn leaf(pane: PaneId) -> LayoutChild {
@@ -451,26 +452,6 @@ fn removing_the_last_stack_member_prunes_the_stack() {
     assert_eq!(removed.leaf_panes(), [x]);
     assert_eq!(info.absorbed_by, [x]);
     assert_tiles(&removed, tab());
-}
-
-/// A left-leaning tree of `panes.len() - 1` splits alternating
-/// horizontal/vertical by depth. Index 0 is the outermost leaf, the last
-/// index the deepest.
-fn deep_alternating(panes: &[PaneId]) -> LayoutNode {
-    let (&last, rest) = panes.split_last().expect("need at least one pane");
-    let mut node = LayoutNode::Pane(last);
-    for (index, &pane) in rest.iter().enumerate().rev() {
-        let direction = if index % 2 == 0 {
-            SplitDirection::Horizontal
-        } else {
-            SplitDirection::Vertical
-        };
-        node = LayoutNode::Split(SplitNode::with_equal_weights(
-            direction,
-            vec![leaf(pane), LayoutChild::new(node)],
-        ));
-    }
-    node
 }
 
 /// Close every pane except `keep_index`, visiting victims in `order`,
