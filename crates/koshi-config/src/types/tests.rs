@@ -4,8 +4,8 @@ use super::*;
 
 use koshi_core::action::ActionRef;
 use koshi_core::command::{
-    ClosePaneArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, NewPaneArgs,
-    NewTabArgs, ResizePaneArgs, TabTarget,
+    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
+    NewPaneArgs, NewTabArgs, ResizePaneArgs, TabTarget,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
@@ -366,69 +366,48 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         row(
             "normal",
-            "<A-h>",
-            "focus-pane-left",
-            ActionArgs::None,
-            Ok(focus_cmd(Direction::Left)),
-        ),
-        row(
-            "normal",
-            "<A-j>",
-            "focus-pane-down",
-            ActionArgs::None,
-            Ok(focus_cmd(Direction::Down)),
-        ),
-        row(
-            "normal",
-            "<A-k>",
-            "focus-pane-up",
-            ActionArgs::None,
-            Ok(focus_cmd(Direction::Up)),
-        ),
-        row(
-            "normal",
-            "<A-l>",
-            "focus-pane-right",
-            ActionArgs::None,
-            Ok(focus_cmd(Direction::Right)),
-        ),
-        row(
-            "normal",
-            "<C-s> h",
+            "<C-s> <Left>",
             "resize-pane-left",
             ActionArgs::None,
             Ok(resize_cmd(Direction::Left)),
         ),
         row(
             "normal",
-            "<C-s> j",
+            "<C-s> <Down>",
             "resize-pane-down",
             ActionArgs::None,
             Ok(resize_cmd(Direction::Down)),
         ),
         row(
             "normal",
-            "<C-s> k",
+            "<C-s> <Up>",
             "resize-pane-up",
             ActionArgs::None,
             Ok(resize_cmd(Direction::Up)),
         ),
         row(
             "normal",
-            "<C-s> l",
+            "<C-s> <Right>",
             "resize-pane-right",
             ActionArgs::None,
             Ok(resize_cmd(Direction::Right)),
         ),
         row(
             "normal",
-            "<A-t>",
+            "<C-t> n",
             "new-tab",
             ActionArgs::None,
             Ok(Command::NewTab(NewTabArgs {
                 cwd: None,
                 client: None,
             })),
+        ),
+        row(
+            "normal",
+            "<C-t> x",
+            "close-tab",
+            ActionArgs::None,
+            Ok(Command::CloseTab(CloseTabArgs::default())),
         ),
         row(
             "normal",
@@ -588,7 +567,7 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 #[test]
 fn prefix_labels_name_exactly_the_default_prefix_chords() {
     let labels = default_prefix_labels(Leader::default());
-    assert_eq!(labels.len(), 2);
+    assert_eq!(labels.len(), 3);
     assert_eq!(
         labels
             .get(&KeyChord::new(ModFlags::CTRL, Key::Char('p')))
@@ -600,6 +579,12 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
             .get(&KeyChord::new(ModFlags::CTRL, Key::Char('s')))
             .map(String::as_str),
         Some("RESIZE")
+    );
+    assert_eq!(
+        labels
+            .get(&KeyChord::new(ModFlags::CTRL, Key::Char('t')))
+            .map(String::as_str),
+        Some("TAB")
     );
 
     // Every labeled chord opens at least one multi-chord default sequence,
@@ -656,12 +641,12 @@ fn default_bindings_follow_the_leader() {
     );
     assert!(space.contains_key(&space_p_n));
 
-    // Explicit bindings never move: `<A-t>` and the reserved `<C-l>` are the
+    // Explicit bindings never move: `<A-f>` and the reserved `<C-l>` are the
     // same under every leader.
-    let new_tab = one(ModFlags::ALT, 't');
+    let fullscreen = one(ModFlags::ALT, 'f');
     let unlock = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     for map in [&ctrl, &alt, &space] {
-        assert!(map.contains_key(&new_tab), "explicit <A-t> never moves");
+        assert!(map.contains_key(&fullscreen), "explicit <A-f> never moves");
         assert!(map.contains_key(&unlock), "reserved <C-l> never moves");
     }
 }
@@ -669,16 +654,16 @@ fn default_bindings_follow_the_leader() {
 #[test]
 fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
     // A chord leader opens every leader binding with the leader chord, so
-    // `<leader>p` and `<leader>s` share an opening — no single group label fits,
-    // and the hint bar shows the derived `+N` instead.
+    // `<leader>p`, `<leader>s`, and `<leader>t` share an opening — no single
+    // group label fits, and the hint bar shows the derived `+N` instead.
     let space = default_prefix_labels(Leader::Chord(KeyChord::new(
         ModFlags::NONE,
         Key::Named(NamedKey::Space),
     )));
     assert!(space.is_empty());
 
-    // A modifier-run leader keeps `<leader>p` and `<leader>s` at distinct
-    // openings, so both labels stand.
+    // A modifier-run leader keeps `<leader>p`, `<leader>s`, and `<leader>t` at
+    // distinct openings, so all three labels stand.
     let alt = default_prefix_labels(Leader::Mods(ModFlags::ALT));
-    assert_eq!(alt.len(), 2);
+    assert_eq!(alt.len(), 3);
 }

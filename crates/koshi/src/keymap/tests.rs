@@ -105,19 +105,19 @@ fn an_admitted_user_layer_appears_as_user_set() {
 #[test]
 fn a_steal_moves_the_default_to_unbound() {
     let view = view_from_partial(
-        Some(partial_binding("<A-t>", "core:close-pane")),
+        Some(partial_binding("<A-f>", "core:close-pane")),
         None,
         None,
     );
     let normal = &view.merged.modes[&ModeName::new("normal")];
     assert_eq!(
-        normal.user_set[&seq("<A-t>")].bound.action,
+        normal.user_set[&seq("<A-f>")].bound.action,
         ActionRef::core("close-pane").unwrap()
     );
-    assert!(!normal.defaults.contains_key(&seq("<A-t>")));
+    assert!(!normal.defaults.contains_key(&seq("<A-f>")));
     assert_eq!(
-        normal.unbound_defaults[&seq("<A-t>")].action,
-        ActionRef::core("new-tab").unwrap()
+        normal.unbound_defaults[&seq("<A-f>")].action,
+        ActionRef::core("toggle-pane-fullscreen").unwrap()
     );
 }
 

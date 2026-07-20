@@ -87,9 +87,10 @@ fn merge(layers: &[KeyMapLayer]) -> MergedKeyMap {
     merge_keymaps(layers, None, DEPTH, &ActionRegistry::new(), &known())
 }
 
-/// The `<A-t>` → `core:new-tab` shipped default.
-fn default_new_tab_key() -> KeySequence {
-    seq(ModFlags::ALT, 't')
+/// The `<A-f>` → `core:toggle-pane-fullscreen` shipped default, a
+/// single-chord default a user layer can steal or remove whole.
+fn default_fullscreen_key() -> KeySequence {
+    seq(ModFlags::ALT, 'f')
 }
 
 #[test]
@@ -97,9 +98,12 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge(&[defaults()]);
     let normal = &merged.modes[&mode("normal")];
 
-    // All 25 shipped normal-mode defaults fire in this build.
-    assert_eq!(normal.defaults.len(), 25);
-    assert_eq!(normal.defaults[&default_new_tab_key()], bound("new-tab"));
+    // All 22 shipped normal-mode defaults fire in this build.
+    assert_eq!(normal.defaults.len(), 22);
+    assert_eq!(
+        normal.defaults[&default_fullscreen_key()],
+        bound("toggle-pane-fullscreen")
+    );
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.removed_keys, BTreeSet::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
@@ -157,13 +161,13 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             source: LayerOrigin::User,
         }
     );
-    assert_eq!(normal.defaults.len(), 25);
+    assert_eq!(normal.defaults.len(), 22);
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
 #[test]
 fn user_binding_steals_a_defaulted_key() {
-    let key = default_new_tab_key();
+    let key = default_fullscreen_key();
     let merged = merge(&[
         defaults(),
         layer(
@@ -182,9 +186,12 @@ fn user_binding_steals_a_defaulted_key() {
         }
     );
     assert_eq!(normal.defaults.get(&key), None);
-    assert_eq!(normal.unbound_defaults[&key], bound("new-tab"));
+    assert_eq!(
+        normal.unbound_defaults[&key],
+        bound("toggle-pane-fullscreen")
+    );
     // Sibling defaults untouched.
-    assert_eq!(normal.defaults.len(), 24);
+    assert_eq!(normal.defaults.len(), 21);
     assert_eq!(normal.defaults[&seq(ModFlags::CTRL, 'l')], bound("lock"));
 }
 
@@ -219,7 +226,7 @@ fn later_user_layer_wins_the_key_and_its_attribution() {
 
 #[test]
 fn remove_clears_a_default_and_records_both_sides() {
-    let key = default_new_tab_key();
+    let key = default_fullscreen_key();
     let merged = merge(&[
         defaults(),
         layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
@@ -227,7 +234,10 @@ fn remove_clears_a_default_and_records_both_sides() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.defaults.get(&key), None);
-    assert_eq!(normal.unbound_defaults[&key], bound("new-tab"));
+    assert_eq!(
+        normal.unbound_defaults[&key],
+        bound("toggle-pane-fullscreen")
+    );
     assert_eq!(normal.removed_keys, BTreeSet::from([key]));
     assert_eq!(normal.user_set, BTreeMap::new());
 }
@@ -236,7 +246,7 @@ fn remove_clears_a_default_and_records_both_sides() {
 fn remove_then_rebind_moves_a_key_between_user_layers() {
     // The supported way to re-key: the session layer removes the user
     // layer's key and rebinds it itself.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let merged = merge(&[
         defaults(),
         layer(
@@ -268,7 +278,7 @@ fn remove_then_rebind_moves_a_key_between_user_layers() {
 
 #[test]
 fn remove_below_does_not_void_a_higher_binding() {
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let merged = merge(&[
         defaults(),
         layer_with_removed(LayerOrigin::User, "normal", Vec::new(), vec![key.clone()]),
@@ -299,7 +309,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.removed_keys, BTreeSet::from([key]));
-    assert_eq!(normal.defaults.len(), 25);
+    assert_eq!(normal.defaults.len(), 22);
     assert_eq!(normal.user_set, BTreeMap::new());
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
@@ -308,7 +318,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
 fn removed_user_binding_vanishes_silently() {
     // A user entry voided by a higher layer's remove is the user's own
     // authored intent: absent from the merged map, nothing unbound.
-    let key = seq(ModFlags::CTRL, 't');
+    let key = seq(ModFlags::CTRL, 'y');
     let merged = merge(&[
         defaults(),
         layer(
@@ -334,7 +344,7 @@ fn removed_user_binding_vanishes_silently() {
 fn dead_user_binding_leaves_the_default_beneath_live() {
     // An orphan user binding (unregistered action) is transparent: it
     // steals nothing, and the shipped default keeps firing.
-    let key = default_new_tab_key();
+    let key = default_fullscreen_key();
     let merged = merge(&[
         defaults(),
         layer(
@@ -346,7 +356,7 @@ fn dead_user_binding_leaves_the_default_beneath_live() {
     let normal = &merged.modes[&mode("normal")];
 
     assert_eq!(normal.user_set.get(&key), None);
-    assert_eq!(normal.defaults[&key], bound("new-tab"));
+    assert_eq!(normal.defaults[&key], bound("toggle-pane-fullscreen"));
     assert_eq!(normal.unbound_defaults, BTreeMap::new());
 }
 
