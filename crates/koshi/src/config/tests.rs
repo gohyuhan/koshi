@@ -263,25 +263,47 @@ fn a_theme_file_with_an_unsupported_version_falls_back_to_the_default_with_a_war
 }
 
 #[test]
-fn an_unreadable_theme_file_reports_both_the_cause_and_the_fallback() {
+fn an_unreadable_theme_file_reports_the_cause_and_the_fallback_in_one_line() {
     // A directory named `midnight.kdl` exists but reads as no string on any
-    // platform, so the read arm is taken and the built-in theme stands. The
-    // user gets two lines: why the file could not be read, then what koshi
-    // used instead — so no theme failure is silent about its consequence.
+    // platform, so the read fails with something other than `NotFound` and the
+    // built-in theme stands. One warning carries the path, the OS reason, and
+    // what koshi used instead.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("themes").join("midnight.kdl");
     std::fs::create_dir_all(&path).expect("create dir in place of the file");
     let mut warnings = Vec::new();
     assert_eq!(load_theme(dir.path(), "midnight", &mut warnings), None);
-    assert_eq!(warnings.len(), 2);
+    assert_eq!(warnings.len(), 1);
     assert!(
-        warnings[0].starts_with(&format!("could not read config file {}: ", path.display())),
+        warnings[0].starts_with(&format!(
+            "theme `midnight` could not be read ({}): ",
+            path.display()
+        )),
         "unexpected warning: {}",
         warnings[0]
     );
+    assert!(
+        warnings[0].ends_with("; using the default theme"),
+        "unexpected warning: {}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn a_missing_theme_is_reported_as_missing_not_as_unreadable() {
+    // The absent case and the unreadable case are told apart by the error kind
+    // off a single read, so each warning names the real cause: a theme that was
+    // never there says "not found", never "could not be read".
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("themes")).expect("create themes dir");
+    let mut warnings = Vec::new();
+    assert_eq!(load_theme(dir.path(), "midnight", &mut warnings), None);
     assert_eq!(
-        warnings[1],
-        "theme `midnight` could not be read; using the default theme"
+        warnings,
+        vec![format!(
+            "theme `midnight` not found at {}; using the default theme",
+            dir.path().join("themes").join("midnight.kdl").display()
+        )]
     );
 }
 

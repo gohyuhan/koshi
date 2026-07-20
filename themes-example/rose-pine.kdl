@@ -1,0 +1,19 @@
+// Rosé Pine — https://rosepinetheme.com
+// Copy to your config dir as themes/rose-pine.kdl, then set `theme "rose-pine"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#c4a7e7"
+    ramp-end "#ebbcba"
+    on-ramp "#191724"
+    on-ramp-dim "#e0def4"
+    accent "#9ccfd8"
+    on-accent "#191724"
+    bar-bg "#191724"
+    border-focused "#c4a7e7"
+    border-unfocused "#6e6a86"
+    border-hover "#9ccfd8"
+    stack-header-fg "#e0def4"
+    stack-header-bg "#1f1d2e"
+    letterbox "#26233a"
+}

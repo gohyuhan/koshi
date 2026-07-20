@@ -1,0 +1,19 @@
+// Everforest Dark — https://github.com/sainnhe/everforest
+// Copy to your config dir as themes/everforest-dark.kdl, then set `theme "everforest-dark"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#a7c080"
+    ramp-end "#83c092"
+    on-ramp "#2d353b"
+    on-ramp-dim "#d3c6aa"
+    accent "#dbbc7f"
+    on-accent "#2d353b"
+    bar-bg "#2d353b"
+    border-focused "#a7c080"
+    border-unfocused "#859289"
+    border-hover "#83c092"
+    stack-header-fg "#d3c6aa"
+    stack-header-bg "#343f44"
+    letterbox "#3d484d"
+}

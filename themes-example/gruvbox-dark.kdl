@@ -1,0 +1,19 @@
+// Gruvbox Dark — https://github.com/morhetz/gruvbox
+// Copy to your config dir as themes/gruvbox-dark.kdl, then set `theme "gruvbox-dark"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#fabd2f"
+    ramp-end "#fe8019"
+    on-ramp "#282828"
+    on-ramp-dim "#ebdbb2"
+    accent "#8ec07c"
+    on-accent "#282828"
+    bar-bg "#282828"
+    border-focused "#fabd2f"
+    border-unfocused "#928374"
+    border-hover "#8ec07c"
+    stack-header-fg "#ebdbb2"
+    stack-header-bg "#504945"
+    letterbox "#3c3836"
+}

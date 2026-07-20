@@ -1,0 +1,22 @@
+// Tokyo Night Day — https://github.com/folke/tokyonight.nvim
+// Copy to your config dir as themes/tokyo-night-day.kdl, then set `theme "tokyo-night-day"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#2e7de9"
+    ramp-end "#9854f1"
+    on-ramp "#e1e2e7"
+    on-ramp-dim "#3760bf"
+    accent "#007197"
+    on-accent "#e1e2e7"
+    bar-bg "#e1e2e7"
+    border-focused "#2e7de9"
+    border-unfocused "#848cb5"
+    border-hover "#007197"
+    stack-header-fg "#3760bf"
+    stack-header-bg "#c4c8da"
+    letterbox "#a8aecb"
+}

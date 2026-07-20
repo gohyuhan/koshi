@@ -1,0 +1,22 @@
+// Solarized Light — https://ethanschoonover.com/solarized
+// Copy to your config dir as themes/solarized-light.kdl, then set `theme "solarized-light"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#268bd2"
+    ramp-end "#2aa198"
+    on-ramp "#fdf6e3"
+    on-ramp-dim "#586e75"
+    accent "#b58900"
+    on-accent "#fdf6e3"
+    bar-bg "#fdf6e3"
+    border-focused "#268bd2"
+    border-unfocused "#93a1a1"
+    border-hover "#2aa198"
+    stack-header-fg "#586e75"
+    stack-header-bg "#eee8d5"
+    letterbox "#eee8d5"
+}

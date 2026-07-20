@@ -1,0 +1,19 @@
+// Catppuccin Mocha — https://catppuccin.com
+// Copy to your config dir as themes/catppuccin-mocha.kdl, then set `theme "catppuccin-mocha"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#cba6f7"
+    ramp-end "#f5c2e7"
+    on-ramp "#1e1e2e"
+    on-ramp-dim "#cdd6f4"
+    accent "#94e2d5"
+    on-accent "#1e1e2e"
+    bar-bg "#1e1e2e"
+    border-focused "#cba6f7"
+    border-unfocused "#6c7086"
+    border-hover "#94e2d5"
+    stack-header-fg "#cdd6f4"
+    stack-header-bg "#313244"
+    letterbox "#45475a"
+}

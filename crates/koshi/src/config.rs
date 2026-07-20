@@ -25,6 +25,7 @@
 //! string for the caller to replay once tracing is up.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
@@ -127,6 +128,11 @@ fn load_app(path: &Path, warnings: &mut Vec<String>) -> Option<AppConfigFile> {
 /// recorded in `warnings`: asking for the built-in theme by name is a normal
 /// choice, while asking for a theme koshi could not load is a surprise the
 /// user should see explained.
+///
+/// Unlike the files loaded by [`read`], the theme file is opened directly and
+/// its absence reported: `koshi.kdl` and `keybinding.kdl` are optional, so
+/// missing is silent and normal there, but a theme koshi was *told* to use and
+/// cannot find is worth a line in the log.
 fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<PartialThemeConfig> {
     if name == DEFAULT_THEME {
         return None;
@@ -141,16 +147,27 @@ fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Part
         );
     }
     let path = dir.join("themes").join(format!("{name}.kdl"));
-    if !path.exists() {
-        return fall_back_to_default(
-            warnings,
-            format!("theme `{name}` not found at {}", path.display()),
-        );
-    }
-    // `path` exists, so a `None` here is the unreadable case, which `read` has
-    // already explained; this adds what that cost.
-    let Some(source) = read(&path, warnings) else {
-        return fall_back_to_default(warnings, format!("theme `{name}` could not be read"));
+    // Read once and take the reason off the error, rather than asking whether
+    // the file exists and then opening it: a named theme that is absent and one
+    // that is unreadable get different warnings, and reading once means the
+    // warning always matches what actually happened.
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return fall_back_to_default(
+                warnings,
+                format!("theme `{name}` not found at {}", path.display()),
+            );
+        }
+        Err(err) => {
+            return fall_back_to_default(
+                warnings,
+                format!(
+                    "theme `{name}` could not be read ({}): {err}",
+                    path.display()
+                ),
+            );
+        }
     };
     match parse_theme(&path, &source) {
         Ok((mut layer, field_warnings)) => {

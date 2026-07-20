@@ -43,6 +43,10 @@ So a full config directory looks like:
 Only one theme is in effect at a time — the one `koshi.kdl` names with
 `theme "<name>"`. The others just sit there until you switch.
 
+You do not have to write a theme yourself: [`themes-example/`](../themes-example/)
+ships 25 ready-made ones (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé
+Pine, Solarized and more) to copy into `themes/`.
+
 ## Versions
 
 Every field table has a **Since** column: the lowest koshi version that

@@ -1,0 +1,19 @@
+// Ayu Dark — https://github.com/ayu-theme/ayu-vim
+// Copy to your config dir as themes/ayu-dark.kdl, then set `theme "ayu-dark"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#ffb454"
+    ramp-end "#f29718"
+    on-ramp "#0f1419"
+    on-ramp-dim "#e6e1cf"
+    accent "#36a3d9"
+    on-accent "#0f1419"
+    bar-bg "#0f1419"
+    border-focused "#f29718"
+    border-unfocused "#5c6773"
+    border-hover "#36a3d9"
+    stack-header-fg "#e6e1cf"
+    stack-header-bg "#253340"
+    letterbox "#2d3640"
+}

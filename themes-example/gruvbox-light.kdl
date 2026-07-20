@@ -1,0 +1,22 @@
+// Gruvbox Light — https://github.com/morhetz/gruvbox
+// Copy to your config dir as themes/gruvbox-light.kdl, then set `theme "gruvbox-light"` in koshi.kdl.
+//
+// A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
+// pale because it sits on top of those dark ramp blocks.
+version 1
+
+colors {
+    ramp-start "#b57614"
+    ramp-end "#af3a03"
+    on-ramp "#fbf1c7"
+    on-ramp-dim "#3c3836"
+    accent "#427b58"
+    on-accent "#fbf1c7"
+    bar-bg "#fbf1c7"
+    border-focused "#b57614"
+    border-unfocused "#7c6f64"
+    border-hover "#427b58"
+    stack-header-fg "#3c3836"
+    stack-header-bg "#d5c4a1"
+    letterbox "#ebdbb2"
+}

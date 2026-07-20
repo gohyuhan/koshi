@@ -150,3 +150,55 @@ fn keybinding_example_parses() {
 fn profile_example_parses() {
     parse_profile(Path::new("profile/dev.kdl"), PROFILE).expect("profile parses");
 }
+
+/// Every ready-made theme shipped in `themes-example/` must parse cleanly and
+/// set all thirteen color roles.
+///
+/// These files are meant to be copied straight into a config directory, so a
+/// typo'd role name — which the parser skips with a warning rather than
+/// rejecting — would ship a theme that silently draws one part of the chrome in
+/// koshi's default color. Requiring zero warnings turns that into a failure
+/// here instead.
+#[test]
+fn every_shipped_example_theme_is_complete_and_warning_free() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("themes-example directory exists") {
+        let path = entry.expect("readable directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("kdl") {
+            continue;
+        }
+        let name = path.file_name().expect("a file name").to_string_lossy();
+        let source = std::fs::read_to_string(&path).expect("theme file is readable");
+        let (theme, warnings) = parse_theme(&path, &source)
+            .unwrap_or_else(|err| panic!("{name} does not parse: {err}"));
+        assert!(warnings.is_empty(), "{name} has warnings: {warnings:?}");
+
+        let colors = theme
+            .colors
+            .unwrap_or_else(|| panic!("{name} has no `colors` block"));
+        // Named one by one so a failure says which role is missing.
+        for (role, set) in [
+            ("ramp-start", colors.ramp_start.is_some()),
+            ("ramp-end", colors.ramp_end.is_some()),
+            ("on-ramp", colors.on_ramp.is_some()),
+            ("on-ramp-dim", colors.on_ramp_dim.is_some()),
+            ("accent", colors.accent.is_some()),
+            ("on-accent", colors.on_accent.is_some()),
+            ("bar-bg", colors.bar_bg.is_some()),
+            ("border-focused", colors.border_focused.is_some()),
+            ("border-unfocused", colors.border_unfocused.is_some()),
+            ("border-hover", colors.border_hover.is_some()),
+            ("stack-header-fg", colors.stack_header_fg.is_some()),
+            ("stack-header-bg", colors.stack_header_bg.is_some()),
+            ("letterbox", colors.letterbox.is_some()),
+        ] {
+            assert!(set, "{name} does not set `{role}`");
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 20,
+        "expected at least 20 shipped themes, found {checked}"
+    );
+}

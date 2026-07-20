@@ -1,0 +1,19 @@
+// Solarized Dark — https://ethanschoonover.com/solarized
+// Copy to your config dir as themes/solarized-dark.kdl, then set `theme "solarized-dark"` in koshi.kdl.
+version 1
+
+colors {
+    ramp-start "#268bd2"
+    ramp-end "#2aa198"
+    on-ramp "#002b36"
+    on-ramp-dim "#93a1a1"
+    accent "#b58900"
+    on-accent "#002b36"
+    bar-bg "#002b36"
+    border-focused "#268bd2"
+    border-unfocused "#586e75"
+    border-hover "#2aa198"
+    stack-header-fg "#93a1a1"
+    stack-header-bg "#073642"
+    letterbox "#073642"
+}

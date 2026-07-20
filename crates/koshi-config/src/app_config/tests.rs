@@ -346,6 +346,45 @@ fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment(
 }
 
 #[test]
+fn surrounding_whitespace_is_trimmed_off_every_nonempty_string_field() {
+    // A stray space is invisible in the file but breaks whatever consumes the
+    // value: `term " xterm-256color "` would export a `TERM` terminfo cannot
+    // look up, and `default-shell " /bin/zsh "` would spawn a path that does
+    // not exist. The value is stored trimmed, and the field still applies.
+    let file = parse_file(
+        "theme \"  midnight  \"\n\
+         terminal {\n\
+         term \" xterm-256color \"\n\
+         colorterm \"\\ttruecolor \"\n\
+         default-shell \" /bin/zsh \"\n\
+         }",
+    );
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    let terminal = file.layer.terminal.expect("terminal section present");
+    assert_eq!(terminal.term, Some("xterm-256color".to_string()));
+    assert_eq!(terminal.colorterm, Some("truecolor".to_string()));
+    assert_eq!(terminal.default_shell, Some(Some("/bin/zsh".to_string())));
+    assert!(
+        file.warnings.is_empty(),
+        "trimming is not a skip: {:?}",
+        file.warnings
+    );
+}
+
+#[test]
+fn inner_whitespace_in_a_string_field_is_left_alone() {
+    // Only the ends are trimmed. A shell path with a space inside it is a real
+    // path, not a typo, so it survives intact.
+    let terminal = parse("terminal {\n    default-shell \"/Applications/My Shell/bin/sh\"\n}")
+        .terminal
+        .expect("terminal section present");
+    assert_eq!(
+        terminal.default_shell,
+        Some(Some("/Applications/My Shell/bin/sh".to_string()))
+    );
+}
+
+#[test]
 fn logging_section_parses() {
     let logging =
         parse("logging {\n    enabled #true\n    level \"error\"\n    format \"json\"\n}")

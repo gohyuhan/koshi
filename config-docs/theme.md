@@ -18,6 +18,12 @@ file each, and name the one you want in [`koshi.kdl`](koshi.md):
 theme "midnight"        // reads themes/midnight.kdl
 ```
 
+**Don't want to build one?** [`themes-example/`](../themes-example/) ships 25
+ready-made themes — Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé Pine,
+Solarized, Everforest, Kanagawa and more, in both dark and light. Copy one into
+your `themes/` folder and name it. Its [README](../themes-example/README.md)
+lists them all.
+
 The theme's name **is** its file name — `themes/midnight.kdl` is the theme
 `midnight`. The file itself carries no name.
 
@@ -79,6 +85,9 @@ color.
 This is **every** theme field, set to its **default** value — save it as
 `themes/<your name>.kdl`, point `koshi.kdl` at that name, and change the colors
 you like. Any color you delete just restores its default.
+
+For themes that are already built, see
+[`themes-example/`](../themes-example/).
 
 ```kdl
 // themes/midnight.kdl — every color, at its default value.
