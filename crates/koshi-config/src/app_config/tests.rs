@@ -9,24 +9,96 @@ use crate::error::ConfigError;
 use crate::layer::PartialKoshiConfig;
 use crate::types::WheelScroll;
 
-use super::parse_app_config;
+use super::{parse_app_config, AppConfigFile};
 
 /// Parses `source` as `koshi.kdl`, panicking on error, dropping warnings.
 fn parse(source: &str) -> PartialKoshiConfig {
-    parse_app_config(Path::new("koshi.kdl"), source)
-        .expect("valid config")
-        .0
+    parse_file(source).layer
 }
 
 /// Parses `source`, returning both the layer and the field-partial warnings.
 fn parse_with_warnings(source: &str) -> (PartialKoshiConfig, Vec<String>) {
+    let file = parse_file(source);
+    (file.layer, file.warnings)
+}
+
+/// Parses `source` as `koshi.kdl` whole — layer, theme name, and warnings —
+/// panicking on error.
+fn parse_file(source: &str) -> AppConfigFile {
     parse_app_config(Path::new("koshi.kdl"), source).expect("valid config")
 }
 
 #[test]
 fn empty_source_sets_no_layer() {
-    let layer = parse("");
-    assert_eq!(layer.update, None);
+    let file = parse_file("");
+    assert_eq!(file.layer.update, None);
+    assert_eq!(file.theme, None);
+}
+
+#[test]
+fn the_theme_line_records_the_name_outside_the_merge_layer() {
+    // `koshi.kdl` only names the theme; the colors come from the matching
+    // `themes/<name>.kdl`, which the loader reads. The name rides beside the
+    // layer, never inside it, so merging can never apply a theme by name only.
+    let file = parse_file("theme \"midnight\"");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(file.layer.theme, None);
+}
+
+#[test]
+fn a_blank_theme_name_is_skipped_with_a_warning() {
+    // An empty name points at no file at all, so it is skipped like any other
+    // bad field and the built-in theme stands.
+    let file = parse_file("theme \"\"");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_whitespace_only_theme_name_is_skipped_with_a_warning() {
+    // `theme "   "` would name a file called three spaces; it is treated as
+    // blank, not as a real name.
+    let file = parse_file("theme \"   \"");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_non_string_theme_name_is_skipped_with_a_warning() {
+    let file = parse_file("theme 42");
+    assert_eq!(file.theme, None);
+    assert_eq!(
+        file.warnings,
+        vec!["ignored `theme`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_theme_line_keeps_the_first_and_warns() {
+    // `theme` may appear once like the rest: the later line is dropped rather
+    // than silently winning.
+    let file = parse_file("theme \"midnight\"\ntheme \"solarized\"");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(
+        file.warnings,
+        vec!["ignored duplicate `theme` section".to_string()]
+    );
+}
+
+#[test]
+fn a_colors_block_in_the_app_file_is_ignored() {
+    // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
+    // is an unknown top-level node and sets nothing, so one file's settings
+    // can never reach another file's state.
+    let file = parse_file("theme \"midnight\"\ncolors {\n    accent \"#ff0000\"\n}");
+    assert_eq!(file.theme, Some("midnight".to_string()));
+    assert_eq!(file.layer.theme, None);
 }
 
 #[test]

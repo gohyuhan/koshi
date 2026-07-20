@@ -3,11 +3,12 @@
 //! is invalid.
 //!
 //! Config lives in separate files in the koshi config directory —
-//! `koshi.kdl` (app settings), `theme.kdl` (colors), `keybinding.kdl` (key
-//! bindings) — and each file reloads on its own, so one file's reload never
-//! touches another file's settings. A file arrives here already
-//! deserialized into its partial config layer; discovering, reading, and
-//! deserializing the files is the config loader's job.
+//! `koshi.kdl` (app settings), a `themes/<name>.kdl` color theme,
+//! `keybinding.kdl` (key bindings) — and each file reloads on its own, so one
+//! file's reload never touches another file's settings. A file arrives here
+//! already deserialized into its partial config layer; discovering, reading,
+//! and deserializing the files is the config loader's job — including turning
+//! `koshi.kdl`'s `theme "<name>"` line into the theme file it names.
 //!
 //! Theme and app settings are typed values and always apply. Keybindings
 //! additionally run conflict detection against the live action registry and
@@ -40,7 +41,7 @@ use crate::runtime::{
 pub(crate) struct ConfigLayers {
     /// The `koshi.kdl` app-settings layer.
     app: PartialKoshiConfig,
-    /// The `theme.kdl` layer; only its theme section is set.
+    /// The color-theme file's layer; only its theme section is set.
     theme: PartialKoshiConfig,
     /// The `keybinding.kdl` layer; only its keybindings section is set.
     keybindings: PartialKoshiConfig,
@@ -90,7 +91,7 @@ pub struct KeymapReloadOutcome {
 }
 
 impl Runtime {
-    /// Swap in a reloaded `theme.kdl`: store the candidate as the theme
+    /// Swap in a reloaded color theme: store the candidate as the theme
     /// layer, recompute the effective config, resolve the chrome theme from
     /// it, and schedule a repaint. Returns one [`Event::ConfigReloaded`] per
     /// live session.
@@ -110,8 +111,12 @@ impl Runtime {
     /// recompute the effective config, and hand the new values to their
     /// consumers — the default split direction takes effect for the next
     /// `new-pane`. The candidate's theme and keybinding sections are
-    /// dropped: those belong to `theme.kdl` and `keybinding.kdl`, so one
-    /// file's reload never reaches another file's state. Returns one
+    /// dropped: the colors belong to the theme file and the bindings to
+    /// `keybinding.kdl`, so one file's reload never reaches another file's
+    /// state. Parsing `koshi.kdl` cannot fill either section, so this guards
+    /// only against a hand-built candidate. The theme `koshi.kdl` *names* is
+    /// resolved by the config loader, which reads that file and reloads it as
+    /// its own transaction. Returns one
     /// [`Event::ConfigReloaded`] per live session.
     pub fn reload_app_config(&mut self, mut candidate: PartialKoshiConfig) -> Vec<Event> {
         candidate.theme = None;

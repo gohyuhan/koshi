@@ -23,7 +23,7 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
         .map_err(|err| ConfigParseDiagnostic::new(path, err))
 }
 
-// Field-value readers shared by the `koshi.kdl` and `theme.kdl` parsers. Each
+// Field-value readers shared by the `koshi.kdl` and theme-file parsers. Each
 // takes one field node (`key value`) and returns the value or a plain-words
 // reason it could not be read, so a field-partial parser can turn that reason
 // into a warning and skip the field.

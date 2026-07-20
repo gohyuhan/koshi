@@ -500,7 +500,7 @@ fn load_update_config() -> UpdateConfig {
     match parse_app_config(&path, &source) {
         // Only the strict `update` section matters here; a bad field there is
         // still an `Err` (fail closed), so field-partial warnings are ignored.
-        Ok((layer, _warnings)) => merge(KoshiConfig::default(), vec![layer]).update,
+        Ok(file) => merge(KoshiConfig::default(), vec![file.layer]).update,
         Err(err) => {
             tracing::warn!(%err, "koshi.kdl did not parse; disabling auto update check");
             UpdateConfig {

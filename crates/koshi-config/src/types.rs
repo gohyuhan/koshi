@@ -27,6 +27,11 @@ use crate::key_sequence::parse_sequence;
 /// number and migrated forward to the current shape.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The name of the built-in theme, whose colors are compiled into koshi. It is
+/// the theme in effect when `koshi.kdl` names no theme, names this one, or
+/// names one whose `themes/<name>.kdl` cannot be loaded.
+pub const DEFAULT_THEME: &str = "default";
+
 /// The complete configuration tree. Each field is an independent section with
 /// its own defaults, so a user file that sets one section leaves the rest at the
 /// built-in defaults.
@@ -557,7 +562,9 @@ impl Default for TerminalConfig {
 /// A named color theme and its palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeConfig {
-    /// The theme's display name.
+    /// The theme's name: the file stem of the `themes/<name>.kdl` its colors
+    /// were read from, or [`DEFAULT_THEME`] when the built-in colors are in
+    /// effect.
     pub name: String,
     /// The theme's colors.
     pub colors: ColorPalette,
@@ -566,7 +573,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            name: "default".to_string(),
+            name: DEFAULT_THEME.to_string(),
             colors: ColorPalette::default(),
         }
     }
