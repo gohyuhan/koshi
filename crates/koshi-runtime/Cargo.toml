@@ -17,6 +17,7 @@ koshi-renderer = { version = "0.1.0", path = "../koshi-renderer" }
 koshi-session = { version = "0.1.0", path = "../koshi-session" }
 koshi-terminal = { version = "0.1.0", path = "../koshi-terminal" }
 ratatui = { version = "0.30.2", default-features = false }
+tracing = "0.1.44"
 
 [dev-dependencies]
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

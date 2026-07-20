@@ -31,16 +31,13 @@ impl TerminalState {
     /// Designate the `G0`–`G3` slot `index` (from the `ESC ( ) * +`
     /// intermediate) to the charset named by the final `byte`: `0` = DEC line
     /// drawing, `B` = ASCII, `A` = UK; any other final falls back to ASCII (a
-    /// passthrough) and is traced. Writes the active screen's render state.
+    /// passthrough). Writes the active screen's render state.
     pub(super) fn designate_charset(&mut self, index: usize, byte: u8) {
         let charset = match byte {
             b'0' => Charset::DecLineDrawing,
             b'B' => Charset::Ascii,
             b'A' => Charset::Uk,
-            _ => {
-                tracing::trace!(byte, "unsupported charset designation; treated as ASCII");
-                Charset::Ascii
-            }
+            _ => Charset::Ascii,
         };
         self.active_render_mut().charsets[index] = charset;
     }

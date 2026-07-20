@@ -267,9 +267,14 @@ impl Runtime {
     }
 
     /// Build a rejection for a command with no handler wired yet, keyed back to
-    /// its originating envelope by `command_id`. `label` names the command in
-    /// the human-facing hint.
+    /// its originating envelope by `command_id`, and log it. `label` names the
+    /// command in both the human-facing hint and the log line.
     fn reject(&self, command_id: CommandId, label: &str) -> CommandResult {
+        tracing::warn!(
+            command_id = %command_id,
+            command = label,
+            "command rejected; no handler for it yet"
+        );
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
@@ -303,7 +308,17 @@ impl Runtime {
 
     /// Turn a [`Rejection`] into a [`CommandResult::Rejected`] keyed to
     /// `command_id`.
+    ///
+    /// Every rejection a handler or validation produces is built here, so this
+    /// is where one is logged. It is a warning: the command simply did not
+    /// apply, state is untouched, and the session carries on.
     fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
+        tracing::warn!(
+            command_id = %command_id,
+            reason = %rejection.reason,
+            help = rejection.help.as_deref(),
+            "command rejected"
+        );
         CommandResult::Rejected {
             command_id,
             reason: rejection.reason,

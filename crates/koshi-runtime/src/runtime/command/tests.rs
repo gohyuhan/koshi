@@ -10020,3 +10020,65 @@ fn a_command_after_quit_still_dispatches() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     assert_eq!(lock_mode_of(&rt, sid, client_id), LockMode::Locked);
 }
+
+// A rejected command leaves a warning in the log: state is untouched and the
+// session carries on, which is exactly what a warning means. The line names the
+// command and the reason, so the log says what the user tried and why it did
+// not happen.
+#[test]
+fn a_rejected_command_writes_a_warning_naming_the_reason() {
+    let (mut rt, _tx) = new_runtime();
+    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+
+    // The client this command names is attached to no session, so validation
+    // rejects it on the source before it ever resolves the tab.
+    let env = envelope_from(
+        CommandSource::key_binding(ClientId::new()),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(TabId::new()),
+            client: None,
+        }),
+    );
+    let command_id = env.id;
+    let result = rt.dispatch(env);
+
+    assert!(
+        matches!(result, CommandResult::Rejected { .. }),
+        "{result:?}"
+    );
+    let out = logs.contents();
+    assert!(out.contains(r#""level":"WARN""#), "{out}");
+    assert!(out.contains(r#""message":"command rejected""#), "{out}");
+    assert!(
+        out.contains(&format!(r#""command_id":"{command_id}""#)),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#""reason":"source client has detached""#),
+        "{out}"
+    );
+    // This rejection carries no hint, so the field is left off the line rather
+    // than written as an empty string.
+    assert!(!out.contains("help"), "{out}");
+}
+
+// A command that dispatch accepts leaves info lines, one per event it committed
+// — the success side of the same trail, so the log shows what worked as well as
+// what did not.
+#[test]
+fn an_applied_command_writes_one_info_line_per_event_it_committed() {
+    let (mut rt, _tx, client_id, _sid) = lock_fixture();
+    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleLockMode,
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    let out = logs.contents();
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(out.contains(r#""message":"input mode changed""#), "{out}");
+    assert!(out.contains(r#""mode":"Locked""#), "{out}");
+}

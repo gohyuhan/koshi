@@ -27,6 +27,25 @@
 //! This keeps the file small over a session and free of user data — and keeps
 //! the per-line file open cheap, since the volume stays low.
 //!
+//! # What each level means
+//!
+//! The three levels answer one question: *did koshi know what to do about it?*
+//!
+//! - **`info`** — it worked. A thing koshi does finished: the config applied,
+//!   a pane opened, a session started, a plugin loaded.
+//! - **`warn`** — it failed, koshi expected that it might, and koshi had an
+//!   answer ready. It kept running on the fallback. A profile that will not
+//!   parse starts one plain shell instead; a `keybinding.kdl` with a conflict
+//!   leaves the built-in keys in place.
+//! - **`error`** — it failed in a way koshi did not anticipate, so there is no
+//!   fallback to take. koshi or the client is going down. Entering raw mode
+//!   fails and there is no way to draw anything at all.
+//!
+//! The consequence worth stating: a runtime [`koshi_core::event::Event`] is
+//! never an `error`, because every variant of it is a fact koshi modelled in
+//! advance. Errors are written at the startup and teardown steps that have
+//! nowhere to fall back to. Events are classified in [`logging::event_log`].
+//!
 //! When enabled, logs never go to stdout: that is Koshi's render surface, and
 //! writing to it would corrupt the terminal UI.
 //!
@@ -49,6 +68,9 @@ use tracing_subscriber::fmt::MakeWriter;
 use koshi_core::ids::SessionId;
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::redact::redact_env_map;
+
+/// Writing a log line for a committed runtime event.
+pub mod event_log;
 
 /// The canonical field names every cross-cutting log line should carry. They are
 /// correlation IDs — the join keys for tracing one event back to its cause across
@@ -154,10 +176,16 @@ fn max_level(level: LogLevel) -> Level {
 
 /// A [`MakeWriter`] that appends each formatted event to a per-session log
 /// file, creating the file — and its `logs/` parent — on the first write and
-/// re-creating it if it is removed while koshi runs. The [logging
-/// policy](self#logging-policy) keeps the volume low (errors and domain events
-/// only), so opening the file per event is not a hot path.
-// ponytail: reopen-per-event is fine at these volumes; cache the handle if logging ever gets chatty.
+/// re-creating it if it is removed while koshi runs.
+///
+/// Every line is one open-append-close, which is what lets a log file deleted
+/// mid-session come back on the next line. Measured against a local disk that
+/// costs about 25µs per line, against about 1.5µs for a handle held open. The
+/// write runs on the runtime's dispatch thread, so a command committing several
+/// events pays it once per event before dispatch returns.
+// ponytail: reopen-per-line buys surviving `rm` of the log file for ~24µs a
+// line. Hold the handle, reopening when a write fails, if dispatch latency
+// needs those microseconds back.
 struct SessionLogMaker {
     path: PathBuf,
 }

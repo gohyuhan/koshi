@@ -1,6 +1,7 @@
 //! The runnable `koshi` binary: terminal setup, genesis, and the event loop.
 //!
-//! Startup enters raw mode + the alternate screen + mouse capture (all restored
+//! Startup reads the config, installs the log subscriber the config asks for,
+//! then enters raw mode + the alternate screen + mouse capture (all restored
 //! on drop or panic by a cleanup guard), builds the runtime, and seeds one
 //! session/tab/shell pane. A background thread turns crossterm key and mouse
 //! events into inbox events; the main loop drains the inbox, applies each event
@@ -33,6 +34,7 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
+use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::portable::PortablePtyBackend;
@@ -80,9 +82,26 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         format: logging.format,
         session_id,
     })?;
+    // The first line written, so a log file that exists at all already says
+    // which level and format the session ran under.
+    tracing::info!(
+        session_id = %session_id,
+        level = ?logging.level,
+        format = ?logging.format,
+        "logging started"
+    );
     for warning in &config_warnings {
         tracing::warn!("{warning}");
     }
+    // Which config files were read, and how many pieces of them were skipped —
+    // the warnings above say what each skip was.
+    tracing::info!(
+        koshi_kdl = loaded.app.is_some(),
+        theme = loaded.theme.is_some(),
+        keybinding_kdl = loaded.keybindings.is_some(),
+        skipped = config_warnings.len(),
+        "config files read"
+    );
     ensure_koshi_dirs();
 
     // Restore the terminal on any exit — normal, error, or panic.
@@ -100,15 +119,22 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }));
     let _panic_guard = install_panic_hook(&cleanup);
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    // Each step below is one koshi has no way to work around: without it there
+    // is no surface to draw on, so the failure is logged as an error naming the
+    // step and the launch ends here.
+    enable_raw_mode().inspect_err(|error| tracing::error!(%error, "could not enter raw mode"))?;
+    execute!(io::stdout(), EnterAlternateScreen)
+        .inspect_err(|error| tracing::error!(%error, "could not enter the alternate screen"))?;
     // Capture mouse events so koshi can hit-test clicks (tabs, panes, scroll).
     // This is terminal-global: while on, programs inside panes and native text
     // selection do not see the mouse until koshi forwards it.
-    execute!(io::stdout(), EnableMouseCapture)?;
+    execute!(io::stdout(), EnableMouseCapture)
+        .inspect_err(|error| tracing::error!(%error, "could not capture the mouse"))?;
     // Ask the outer terminal to bracket its pastes, so the OS paste key
     // arrives as one block of text instead of a burst of keystrokes.
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    execute!(io::stdout(), EnableBracketedPaste)
+        .inspect_err(|error| tracing::error!(%error, "could not enable bracketed paste"))?;
+    tracing::info!("terminal ready");
 
     // Build the runtime, handing it the cleanup guard so it restores the
     // terminal when the runtime drops at the end of this function.
@@ -130,36 +156,47 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Apply the config (loaded before tracing above) before genesis, so the
     // first session already sees the configured split direction, theme, and
     // keymap. A rejected keybinding file leaves the built-in keymap in place.
-    if let Some(report) = runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings)
-    {
-        if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply {
+    // `keybinding.kdl` is the one file that can be read and then refused, so it
+    // is the one with an outcome to report. App settings and the theme are typed
+    // values that always apply, so the line above already accounts for them.
+    match runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
+        Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
         }
+        Some(_) => tracing::info!("keybinding.kdl applied"),
+        None => {}
     }
 
-    let (cols, rows) = size()?;
+    let (cols, rows) =
+        size().inspect_err(|error| tracing::error!(%error, "could not read the terminal size"))?;
     let viewport = Size { cols, rows };
 
     // The ratatui terminal owns the output side; the renderer paints its buffer.
     // Construct it BEFORE spawning the shell, so a size-ioctl failure here can't
     // orphan a live child — after the spawn below, no fallible step precedes the
     // kill guard.
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
+        .inspect_err(|error| tracing::error!(%error, "could not build the output terminal"))?;
 
     // Genesis: a named profile's tabs and panes, or one shell sized to the
     // terminal. A profile that cannot be loaded or launched falls back to the
     // single shell, so the terminal always comes up.
     let now = SystemTime::now();
+    // A profile that will not launch falls back to the single shell, so it is a
+    // warning; the single shell failing to start has nothing left to fall back
+    // to, so it is an error and the launch ends.
     let client_id = match profile.and_then(crate::config::load_profile) {
         Some(template) => match runtime.bootstrap_profile(session_id, template, viewport, now) {
-            Ok(client_id) => client_id,
+            Ok(client_id) => Ok(client_id),
             Err(err) => {
                 tracing::warn!(%err, "profile could not launch; starting a single shell");
-                runtime.bootstrap_local(session_id, viewport, now)?
+                runtime.bootstrap_local(session_id, viewport, now)
             }
         },
-        None => runtime.bootstrap_local(session_id, viewport, now)?,
-    };
+        None => runtime.bootstrap_local(session_id, viewport, now),
+    }
+    .inspect_err(|error| tracing::error!(%error, "could not start the session"))?;
+    tracing::info!(session_id = %session_id, client_id = %client_id, "session started");
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
@@ -168,7 +205,8 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         run_loop(&mut runtime, &mut terminal, client_id)
     }));
-    teardown(&mut runtime, outcome)?;
+    teardown(&mut runtime, outcome)
+        .inspect_err(|error| tracing::error!(%error, "the render loop failed"))?;
     Ok(())
 }
 
@@ -178,11 +216,12 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// directory.
 fn ensure_koshi_dirs() {
     match koshi_paths::config_dir() {
-        Some(config) => {
-            if let Err(error) = koshi_paths::ensure_dir(&config) {
+        Some(config) => match koshi_paths::ensure_dir(&config) {
+            Ok(()) => tracing::info!(path = %config.display(), "config directory ready"),
+            Err(error) => {
                 tracing::warn!(path = %config.display(), %error, "could not create config directory");
             }
-        }
+        },
         None => tracing::warn!("no home directory found; skipping config directory setup"),
     }
 }
@@ -201,10 +240,14 @@ fn ensure_koshi_dirs() {
 fn teardown<E>(runtime: &mut Runtime, outcome: thread::Result<Result<(), E>>) -> Result<(), E> {
     match outcome {
         Ok(result) => {
+            tracing::info!("shutting down");
             runtime.shutdown();
             result
         }
         Err(panic) => {
+            // Nothing anticipated this, so there is no fallback to take: every
+            // child is killed and the panic is re-raised.
+            tracing::error!("koshi panicked; killing every pane");
             runtime.kill_all_panes();
             resume_unwind(panic);
         }
@@ -329,7 +372,7 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
             status,
             exited_at,
         } => {
-            let _ = runtime.handle_child_exit(pane_id, status, exited_at);
+            record(runtime.handle_child_exit(pane_id, status, exited_at));
         }
         RuntimeEvent::KeyInput { client_id, chord } => {
             runtime.handle_key_input(client_id, chord, Instant::now());
@@ -347,19 +390,19 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
             active_tab,
             attached_at,
         } => {
-            let _ = runtime.handle_client_attach(
+            record(runtime.handle_client_attach(
                 session_id,
                 client_id,
                 viewport,
                 active_tab,
                 attached_at,
-            );
+            ));
         }
         RuntimeEvent::ClientDetached { client_id } => {
-            let _ = runtime.handle_client_detach(client_id);
+            record(runtime.handle_client_detach(client_id));
         }
         RuntimeEvent::Resize { client_id, size } => {
-            let _ = runtime.handle_client_resize(client_id, size);
+            record(runtime.handle_client_resize(client_id, size));
         }
         RuntimeEvent::Timer => runtime.expire_key_sequences(Instant::now()),
         RuntimeEvent::Ipc(envelope) | RuntimeEvent::Plugin(envelope) => {
@@ -367,6 +410,20 @@ fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
         }
     }
     ControlFlow::Continue(())
+}
+
+/// Log a runtime handler's events, then drop them.
+///
+/// A command's events are logged where the command's transaction is sealed. The
+/// handlers reached here run outside any command — a child process exiting, a
+/// client attaching, detaching, or resizing — so their events never reach that
+/// seal. Until the event bus exists to deliver them, this call is where they
+/// end, so it is also where they are recorded: without it, a shell exiting and
+/// its pane closing would leave nothing in the log.
+fn record(events: Vec<koshi_core::event::Event>) {
+    for event in &events {
+        log_event(event);
+    }
 }
 
 fn earliest(
