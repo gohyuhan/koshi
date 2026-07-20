@@ -12,6 +12,7 @@ use koshi_test_support::layout_assert::{
 use super::*;
 use crate::size::SizeWeight;
 use crate::solver::{solve, MIN_PANE_SIZE};
+use crate::test_trees::deep_alternating;
 
 /// Wraps a single pane ID as a leaf node ready to insert into a tree.
 fn leaf(pane: PaneId) -> LayoutChild {
@@ -451,6 +452,135 @@ fn removing_the_last_stack_member_prunes_the_stack() {
     assert_eq!(removed.leaf_panes(), [x]);
     assert_eq!(info.absorbed_by, [x]);
     assert_tiles(&removed, tab());
+}
+
+/// Close every pane except `keep_index`, visiting victims in `order`,
+/// normalizing after each removal. A big tab keeps every survivor fitting, so
+/// the layout must tile exactly and solve deterministically at every step, and
+/// end as the single kept leaf.
+fn close_all_but_one_in_order(order: &[usize], keep_index: usize) {
+    use std::collections::HashSet;
+
+    use crate::normalize::normalize;
+
+    let panes: Vec<PaneId> = (0..51).map(|_| PaneId::new()).collect();
+    let mut tree = deep_alternating(&panes);
+    let big = Rect::new(
+        Point { x: 0, y: 0 },
+        Size {
+            cols: 1000,
+            rows: 1000,
+        },
+    );
+    let mut live: HashSet<PaneId> = panes.iter().copied().collect();
+
+    for &index in order {
+        assert_ne!(index, keep_index, "the kept pane is never removed");
+        let victim = panes[index];
+        let (next, _) = remove_pane(&tree, big, victim, MIN_PANE_SIZE).unwrap();
+        live.remove(&victim);
+        tree = normalize(&next, &live).unwrap();
+
+        // Every surviving leaf is still live, the layout tiles the big tab
+        // exactly, and solving twice agrees.
+        for pane in tree.leaf_panes() {
+            assert!(live.contains(&pane), "dead pane {pane} left in the tree");
+        }
+        assert_tiles(&tree, big);
+        assert_eq!(solve(&tree, big), solve(&tree, big));
+    }
+
+    assert_eq!(tree, LayoutNode::Pane(panes[keep_index]));
+}
+
+#[test]
+fn deep_tree_closed_newest_first_collapses_to_the_outermost_pane() {
+    // LIFO: remove the deepest (last-created) leaf first, up to the outermost.
+    let order: Vec<usize> = (1..51).rev().collect();
+    close_all_but_one_in_order(&order, 0);
+}
+
+#[test]
+fn deep_tree_closed_oldest_first_collapses_to_the_deepest_pane() {
+    // FIFO: remove the outermost leaf first, down to the deepest.
+    let order: Vec<usize> = (0..50).collect();
+    close_all_but_one_in_order(&order, 50);
+}
+
+#[test]
+fn deep_tree_closed_in_a_fixed_scrambled_order_stays_consistent() {
+    // A fixed permutation (i*20 mod 51 is a full cycle since 20 and 51 are
+    // coprime), skipping the pane we keep. Same invariants, arbitrary order.
+    let keep = 25;
+    let order: Vec<usize> = (0..51)
+        .map(|i| (i * 20) % 51)
+        .filter(|&index| index != keep)
+        .collect();
+    assert_eq!(order.len(), 50);
+    close_all_but_one_in_order(&order, keep);
+}
+
+#[test]
+fn splitting_a_removed_pane_is_rejected_then_a_live_pane_still_splits() {
+    // Remove a pane, then try to split the now-dead id: rejected, tree
+    // unchanged. The next split against a live pane still works.
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let tree = pair(SplitDirection::Horizontal, a, b);
+    let (after_remove, _) = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap();
+    assert_eq!(after_remove.leaf_panes(), [b]);
+
+    let snapshot = after_remove.clone();
+    let err = split_leaf(&after_remove, a, PaneId::new(), Direction::Right).unwrap_err();
+    assert_eq!(err, SplitError::PaneNotFound { target: a });
+    assert_eq!(after_remove, snapshot);
+
+    let new = PaneId::new();
+    let split = split_leaf(&after_remove, b, new, Direction::Right).unwrap();
+    assert_eq!(split.leaf_panes(), [b, new]);
+}
+
+#[test]
+fn removing_the_last_pane_is_rejected_then_it_can_still_be_split() {
+    // The last pane cannot be removed, but the rejection leaves it intact and
+    // a following split succeeds.
+    let a = PaneId::new();
+    let tree = LayoutNode::Pane(a);
+    let err = remove_pane(&tree, tab(), a, MIN_PANE_SIZE).unwrap_err();
+    assert_eq!(err, RemoveError::LastPane { pane: a });
+    assert_eq!(tree, LayoutNode::Pane(a));
+
+    let new = PaneId::new();
+    let split = split_leaf(&tree, a, new, Direction::Down).unwrap();
+    assert_eq!(split.leaf_panes(), [a, new]);
+}
+
+#[test]
+fn removing_stack_members_until_one_remains_then_normalizing_gives_a_leaf() {
+    use std::collections::HashSet;
+
+    use crate::normalize::normalize;
+
+    // A four-member stack, closed one member at a time. The stack keeps
+    // exactly one expanded child throughout, and the final survivor
+    // normalizes to a plain leaf with no header.
+    let (a, b, c, d) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let mut tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c, d], 1));
+
+    for victim in [d, a, b] {
+        let (next, _) = remove_pane(&tree, tab(), victim, MIN_PANE_SIZE).unwrap();
+        tree = next;
+        // After every removal exactly one child stays expanded.
+        if let LayoutNode::Split(stack) = &tree {
+            let expanded = stack.children.iter().filter(|c| !c.collapsed).count();
+            assert_eq!(expanded, 1, "a stack always has one expanded member");
+        }
+    }
+    assert_eq!(tree.leaf_panes(), [c]);
+
+    let live: HashSet<PaneId> = [c].into_iter().collect();
+    let normalized = normalize(&tree, &live).unwrap();
+    assert_eq!(normalized, LayoutNode::Pane(c));
+    assert!(solve(&normalized, tab()).stack_headers.is_empty());
 }
 
 #[test]

@@ -159,6 +159,42 @@ fn a_file_error_reverts_the_view_and_carries_the_reason() {
 }
 
 #[test]
+fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults() {
+    // A file that only tweaks the chord timers and depth has no conflicts, so
+    // it admits and its values replace the defaults in the effective config.
+    let view = view_from_partial(
+        Some(PartialKeybindingsConfig {
+            chord_timeout_ms: Some(750),
+            which_key_delay_ms: Some(250),
+            max_chord_depth: Some(6),
+            ..PartialKeybindingsConfig::default()
+        }),
+        None,
+        None,
+    );
+    assert!(!view.reverted);
+    assert_eq!(view.config.chord_timeout_ms, 750);
+    assert_eq!(view.config.which_key_delay_ms, 250);
+    assert_eq!(view.config.max_chord_depth, 6);
+}
+
+#[test]
+fn a_syntax_error_renders_as_one_line_that_render_joins_unchanged() {
+    // An unbalanced brace is a KDL syntax error, so the parser returns the
+    // `Syntax` variant. That branch renders as exactly one line, and the
+    // single-string render is that same line.
+    let err = parse_keybindings(Path::new("keybinding.kdl"), "mode \"normal\" {")
+        .expect_err("unbalanced brace is a syntax error");
+    match &err {
+        KeybindingParseError::Syntax(inner) => {
+            assert_eq!(parse_error_lines(&err), vec![inner.to_string()]);
+            assert_eq!(render_parse_error(&err), inner.to_string());
+        }
+        other => panic!("expected a syntax error, got {other:?}"),
+    }
+}
+
+#[test]
 fn validate_file_reports_parse_failures_and_clean_files() {
     let dir = std::env::temp_dir();
     let good = dir.join("koshi-keymap-test-good.kdl");

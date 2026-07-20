@@ -16,7 +16,10 @@ use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
-use super::{close_tab, commit_new_tab, focus_tab, move_tab, rename_tab, TabTarget};
+use super::{
+    close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, rename_tab, ProfileTab,
+    TabTarget,
+};
 use crate::client::{Client, ClientRegistry};
 use crate::error::SessionConsistencyError;
 use crate::session::lifecycle::SessionLifecycle;
@@ -681,6 +684,26 @@ fn move_tab_with_only_two_tabs_swaps_them() {
     ));
 }
 
+#[test]
+fn move_tab_keeps_the_session_consistent_and_indices_dense() {
+    // Reordering must leave the registry contract intact: after a move the
+    // indices are still a dense 0..len with no duplicate, and an attached
+    // client viewing a moved tab still resolves — `validate` finds nothing.
+    let (mut session, ids) = four_tab_session(); // a0 b1 c2 d3
+    let client_id = attach_client_on(&mut session, ids[3]); // viewing the tab that moves
+
+    let _ = move_tab(&mut session, ids[3], 0); // d to the front
+
+    assert_eq!(session.tabs[&ids[3]].index(), 0);
+    assert_eq!(session.tabs[&ids[0]].index(), 1);
+    assert_eq!(session.tabs[&ids[1]].index(), 2);
+    assert_eq!(session.tabs[&ids[2]].index(), 3);
+    // The client's active tab is unchanged by a reorder — a move shifts
+    // positions, not which tab a client views.
+    assert_eq!(session.clients.get(client_id).unwrap().active_tab(), ids[3]);
+    assert_eq!(session.validate(), Ok(()));
+}
+
 // --- close_and_refocus_tab / focus_tab edge cases ---------------------------
 
 #[test]
@@ -841,4 +864,250 @@ fn focus_next_and_prev_on_a_single_tab_session_is_a_noop() {
     assert!(next.is_empty());
     assert!(prev.is_empty());
     assert_eq!(session.clients.get(client_id).unwrap().active_tab(), a);
+}
+
+// --- commit_profile_tab -----------------------------------------------------
+
+/// A two-leaf horizontal split of `left` and `right`, as a profile's tree.
+fn two_leaf_layout(left: PaneId, right: PaneId) -> LayoutNode {
+    LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(left)),
+            LayoutChild::new(LayoutNode::Pane(right)),
+        ],
+    ))
+}
+
+#[test]
+fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
+    let mut session = session_with(vec![], vec![]);
+    let tab_id = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let layout = two_leaf_layout(p0, p1);
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: layout.clone(),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 0,
+    };
+
+    let events = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile,
+        "dev".to_owned(),
+        None,
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
+
+    // The first tab moves the session from Starting to Running.
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
+    // Every pane in the profile is registered and live (each child was already
+    // spawned before the commit).
+    assert_eq!(
+        *session.panes.get(p0).unwrap().lifecycle(),
+        PaneLifecycle::Running
+    );
+    assert_eq!(
+        *session.panes.get(p1).unwrap().lifecycle(),
+        PaneLifecycle::Running
+    );
+    assert_eq!(session.panes.len(), 2);
+    // The tab carries the whole profile tree, not just its single root leaf.
+    assert_eq!(*session.tabs[&tab_id].layout(), layout);
+    assert_eq!(session.tabs[&tab_id].index(), 0);
+
+    // No focus client, so only creation events: one TabCreated then one
+    // PaneCreated per pane, in layout order.
+    match events.as_slice() {
+        [Event::TabCreated(t), Event::PaneCreated(a), Event::PaneCreated(b)] => {
+            assert_eq!(t.tab_id, tab_id);
+            assert_eq!(a.pane_id, p0);
+            assert_eq!(a.tab_id, tab_id);
+            assert_eq!(b.pane_id, p1);
+            assert_eq!(b.tab_id, tab_id);
+        }
+        other => panic!("unexpected events: {other:?}"),
+    }
+}
+
+#[test]
+fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
+    let mut session = session_with(vec![], vec![]);
+    let start_tab = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        start_tab,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    let client_id = attach_client_on(&mut session, start_tab);
+
+    let tab_id = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: two_leaf_layout(p0, p1),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 1, // focus the second leaf, not the root
+    };
+
+    let events = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile,
+        "dev".to_owned(),
+        Some(client_id),
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let client = session.clients.get(client_id).unwrap();
+    // Active profile tab: the client switches onto it and focuses the chosen leaf.
+    assert_eq!(client.active_tab(), tab_id);
+    assert_eq!(client.focused_pane(tab_id), Some(p1));
+    assert_eq!(session.tabs[&tab_id].focus_mru(), &[p1]);
+
+    // TabCreated, one PaneCreated per pane, then the focus pair naming the leaf.
+    match events.as_slice() {
+        [Event::TabCreated(_), Event::PaneCreated(_), Event::PaneCreated(_), Event::TabFocused(tf), Event::PaneFocused(pf)] =>
+        {
+            assert_eq!(tf.client_id, client_id);
+            assert_eq!(tf.tab_id, tab_id);
+            assert_eq!(tf.prior_tab, start_tab);
+            assert_eq!(pf.client_id, client_id);
+            assert_eq!(pf.tab_id, tab_id);
+            assert_eq!(pf.pane_id, p1);
+            assert_eq!(pf.prior_pane, None);
+        }
+        other => panic!("unexpected events: {other:?}"),
+    }
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
+    // `focus_leaf` past the last leaf falls back to the root pane (index 0),
+    // never panics and never focuses a pane the profile does not hold.
+    let mut session = session_with(vec![], vec![]);
+    let start_tab = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        start_tab,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    let client_id = attach_client_on(&mut session, start_tab);
+
+    let tab_id = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: two_leaf_layout(p0, p1),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 9, // out of range
+    };
+
+    let _ = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile,
+        "dev".to_owned(),
+        Some(client_id),
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let client = session.clients.get(client_id).unwrap();
+    assert_eq!(client.focused_pane(tab_id), Some(p0));
+    assert_eq!(session.tabs[&tab_id].focus_mru(), &[p0]);
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
+    // An inactive profile tab records the client's starting pane so a later
+    // switch resolves focus at once, but does not steal the client's view and
+    // emits no focus events.
+    let mut session = session_with(vec![], vec![]);
+    let tab0 = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        tab0,
+        PaneId::new(),
+        "code".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+    let client_id = attach_client_on(&mut session, tab0);
+
+    let tab1 = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: two_leaf_layout(p0, p1),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 0,
+    };
+
+    let events = commit_profile_tab(
+        &mut session,
+        tab1,
+        profile,
+        "dev".to_owned(),
+        Some(client_id),
+        false, // inactive
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let client = session.clients.get(client_id).unwrap();
+    // The view stays on the original tab: an inactive tab does not switch it.
+    assert_eq!(client.active_tab(), tab0);
+    // But the starting pane is recorded on both the client and the tab history.
+    assert_eq!(client.focused_pane(tab1), Some(p0));
+    assert_eq!(session.tabs[&tab1].focus_mru(), &[p0]);
+    // No TabFocused/PaneFocused while inactive — only the creation events.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::TabFocused(_) | Event::PaneFocused(_)))
+            .count(),
+        0
+    );
+    assert_eq!(session.tabs[&tab1].index(), 1); // appended after tab0
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
+fn a_new_tab_after_a_close_takes_the_freed_index_densely() {
+    // Closing the middle of three tabs renumbers the survivors to 0,1; a tab
+    // created next lands at the freed dense slot (2) with no duplicate index,
+    // and the session stays consistent.
+    let (mut session, ids) = three_tab_session(); // a0 b1 c2
+    let _ = close_tab(&mut session, ids[1]); // remove the middle → a0 c1
+    assert_eq!(session.tabs[&ids[0]].index(), 0);
+    assert_eq!(session.tabs[&ids[2]].index(), 1);
+
+    let fresh = TabId::new();
+    let _ = commit_new_tab(
+        &mut session,
+        fresh,
+        PaneId::new(),
+        "d".to_owned(),
+        None,
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(session.tabs[&fresh].index(), 2);
+    assert_eq!(session.validate(), Ok(()));
 }

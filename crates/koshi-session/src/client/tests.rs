@@ -10,6 +10,7 @@ use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseButton;
+use koshi_layout::mode::LayoutMode;
 
 use super::{
     pane_viewport, ClickCount, Client, ClientRegistry, MouseState, ResizeDragState,
@@ -179,6 +180,99 @@ fn updating_a_tabs_focus_returns_the_previous_pane() {
     assert_eq!(client.update_focused_pane(tab, first), None);
     assert_eq!(client.update_focused_pane(tab, second), Some(first));
     assert_eq!(client.focused_pane(tab), Some(second));
+}
+
+#[test]
+fn focusing_another_pane_in_a_zoomed_tab_moves_the_zoom_to_it() {
+    // Zoom follows focus: with a tab zoomed on one pane, focusing a different
+    // pane there swaps the zoom onto it rather than dropping back to tiled.
+    let tab = TabId::new();
+    let (zoomed, next) = (PaneId::new(), PaneId::new());
+    let mut client = a_client(tab);
+    client.update_focused_pane(tab, zoomed);
+    client.zoom_pane(tab, zoomed);
+    assert_eq!(client.zoomed_pane(tab), Some(zoomed));
+
+    let prior = client.update_focused_pane(tab, next);
+
+    assert_eq!(prior, Some(zoomed));
+    assert_eq!(client.zoomed_pane(tab), Some(next));
+    assert_eq!(client.focused_pane(tab), Some(next));
+    assert_eq!(
+        client.layout_mode(tab),
+        LayoutMode::Fullscreen { focused: next }
+    );
+}
+
+#[test]
+fn focusing_a_pane_in_a_tiled_tab_creates_no_zoom() {
+    // Focusing a pane in a tab with no zoom must not invent one — the tab stays
+    // tiled for this client.
+    let tab = TabId::new();
+    let mut client = a_client(tab);
+
+    client.update_focused_pane(tab, PaneId::new());
+
+    assert_eq!(client.zoomed_pane(tab), None);
+    assert_eq!(client.layout_mode(tab), LayoutMode::Tiled);
+}
+
+#[test]
+fn removing_a_tabs_focus_also_drops_its_zoom() {
+    // Forgetting the focused pane in a tab drops any zoom there too: with no
+    // focused pane there is no pane for a zoom to show.
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut client = a_client(tab);
+    client.update_focused_pane(tab, pane);
+    client.zoom_pane(tab, pane);
+
+    client.remove_focused_pane(tab);
+
+    assert_eq!(client.focused_pane(tab), None);
+    assert_eq!(client.zoomed_pane(tab), None);
+    assert_eq!(client.layout_mode(tab), LayoutMode::Tiled);
+}
+
+#[test]
+fn zoom_is_tracked_independently_per_client() {
+    // Two clients on the same tab zoom independently: one zooming a pane leaves
+    // the other's tiled view untouched.
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut alice = a_client(tab);
+    let bob = a_client(tab);
+
+    alice.zoom_pane(tab, pane);
+
+    assert_eq!(alice.zoomed_pane(tab), Some(pane));
+    assert_eq!(bob.zoomed_pane(tab), None);
+    assert_eq!(bob.layout_mode(tab), LayoutMode::Tiled);
+}
+
+#[test]
+fn switching_tabs_ends_a_selection_drag_and_mouse_capture() {
+    // A tab switch moves the client off the pane those gestures belonged to, so
+    // an in-flight selection drag and a captured mouse both end — while any
+    // highlight the drag already made lives on in its pane.
+    let tab = TabId::new();
+    let other = TabId::new();
+    let pane = PaneId::new();
+    let mut client = a_client(tab);
+
+    client.set_selection_drag(Some(SelectionDragState {
+        pane,
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 1, col: 2 },
+        at: Point { x: 3, y: 4 },
+        scroll_at: None,
+    }));
+    client.set_mouse_capture(Some((pane, MouseButton::Left)));
+
+    client.update_active_tab(other);
+
+    assert_eq!(client.selection_drag(), None);
+    assert_eq!(client.mouse_capture(), None);
 }
 
 #[test]

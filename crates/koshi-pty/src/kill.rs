@@ -248,3 +248,6 @@ impl PtyChildKillControl {
         self.pid
     }
 }
+
+#[cfg(test)]
+mod tests;

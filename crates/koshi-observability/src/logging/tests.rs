@@ -167,3 +167,78 @@ fn a_line_below_the_configured_level_is_dropped() {
         "error must be written at level error"
     );
 }
+
+// The most verbose configured level, `info`, admits an info line — the arm the
+// other cutoff tests never reach (they configure `warning`/`error`). Uses the
+// thread-local test writer so it never races the one global install above.
+#[test]
+fn a_line_at_info_level_is_written_when_the_cutoff_is_info() {
+    let logs = CapturedLogs::default();
+    let subscriber = fmt()
+        .with_max_level(max_level(LogLevel::Info))
+        .json()
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    tracing::info!("an info line at the info cutoff");
+
+    assert!(
+        logs.contents().contains("an info line at the info cutoff"),
+        "info must be written at level info"
+    );
+}
+
+// The per-session file writer, exercised directly (without a subscriber): its
+// first write creates the `logs/` parent and the file, a second write appends,
+// and flush is a no-op that reports success.
+#[test]
+fn session_log_writer_creates_parent_then_appends_each_write() {
+    use std::io::Write as _;
+
+    let dir = std::env::temp_dir().join(format!("koshi-writer-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("logs").join("koshi-log-writer.log");
+
+    let mut writer = SessionLogWriter { path: path.clone() };
+    let first = writer
+        .write(b"line one\n")
+        .expect("first write creates the file");
+    let second = writer.write(b"line two\n").expect("second write appends");
+    writer.flush().expect("flush is a no-op");
+
+    assert_eq!(first, 9, "write reports the byte count it accepted");
+    assert_eq!(second, 9);
+    assert_eq!(std::fs::read(&path).unwrap(), b"line one\nline two\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The capture writer records raw bytes, `contents` returns them verbatim, and
+// `lines` splits on newlines; flush reports success without touching the buffer.
+#[test]
+fn captured_writer_records_bytes_and_lines_split_on_newlines() {
+    use std::io::Write as _;
+
+    let logs = CapturedLogs::default();
+    let mut writer = logs.make_writer();
+    let written = writer
+        .write(b"first\nsecond\n")
+        .expect("capture write always succeeds");
+    writer.flush().expect("flush is a no-op");
+
+    assert_eq!(written, 13, "write reports the byte count it captured");
+    assert_eq!(logs.contents(), "first\nsecond\n");
+    assert_eq!(
+        logs.lines(),
+        vec!["first".to_string(), "second".to_string()]
+    );
+}
+
+#[test]
+fn tracing_error_display_names_the_already_initialized_cause() {
+    assert_eq!(
+        TracingError::AlreadyInitialized.to_string(),
+        "tracing is already initialized for this process"
+    );
+}

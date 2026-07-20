@@ -425,6 +425,33 @@ fn resize_amount_far_exceeding_available_reports_the_exact_spare() {
 }
 
 #[test]
+fn a_pane_still_resizes_after_a_sibling_was_closed() {
+    // Closing the middle of three columns reflows to two even halves; the
+    // survivors carry no stale resize delta, so a following resize moves the
+    // border by exactly its cell count.
+    use crate::edit::remove_pane;
+    use crate::solver::MIN_PANE_SIZE;
+
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), leaf(b), leaf(c)],
+    ));
+
+    let (after_close, _) = remove_pane(&tree, tab(), b, MIN_PANE_SIZE).unwrap();
+    assert_eq!(after_close.leaf_panes(), [a, c]);
+    // The two survivors share the tab evenly with no leftover delta.
+    assert_eq!(solved_size(&after_close, tab(), a).cols, 40);
+    assert_eq!(solved_size(&after_close, tab(), c).cols, 40);
+
+    // Growing a's right border by five moves exactly five columns.
+    let resized = resize(&after_close, tab(), a, Direction::Right, 5).unwrap();
+    assert_eq!(solved_size(&resized, tab(), a).cols, 45);
+    assert_eq!(solved_size(&resized, tab(), c).cols, 35);
+    assert_tiles(&resized, tab());
+}
+
+#[test]
 fn a_request_exactly_at_the_spare_boundary_succeeds_one_past_it_fails() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);

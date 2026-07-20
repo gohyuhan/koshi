@@ -30,3 +30,6 @@ impl DomainError for StorageError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

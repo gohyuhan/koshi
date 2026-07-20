@@ -532,6 +532,82 @@ fn client_detached_event_removes_the_client_and_continues() {
 }
 
 #[test]
+fn host_paste_event_writes_the_pasted_text_to_the_focused_pane() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, _tx, client_id, pane_id) = boot(&fake);
+
+    // The default pane has bracketed paste off, so the raw text reaches it.
+    assert!(handle_event(
+        &mut runtime,
+        RuntimeEvent::HostPaste {
+            client_id,
+            text: "pasted".to_string(),
+        },
+    )
+    .is_continue());
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        vec![b"pasted".to_vec()]
+    );
+}
+
+#[test]
+fn render_for_a_client_without_a_snapshot_draws_nothing() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (runtime, _tx, _client_id, _pane_id) = boot(&fake);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+    // An unknown client resolves to no snapshot, so render early-returns and
+    // leaves the screen blank.
+    render(
+        &mut terminal,
+        &runtime,
+        ClientId::new(),
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("render");
+
+    assert_eq!(screen_text(&terminal).trim(), "");
+}
+
+#[test]
+fn render_emits_a_changed_cursor_style_and_records_it() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut runtime, _tx, client_id, pane_id) = boot(&fake);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+    // The pane asks for a steady bar via DECSCUSR (`CSI 6 SP q`); the first
+    // render sees it differ from the starting `None` and records the new style.
+    assert!(handle_event(
+        &mut runtime,
+        RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: b"\x1b[6 q".to_vec(),
+        },
+    )
+    .is_continue());
+    let mut last_cursor = None;
+    render(
+        &mut terminal,
+        &runtime,
+        client_id,
+        &mut String::new(),
+        &mut last_cursor,
+    )
+    .expect("render");
+
+    assert_eq!(
+        last_cursor,
+        Some(CursorStyle::Shaped {
+            shape: CursorShape::Bar,
+            blink: false,
+        })
+    );
+}
+
+#[test]
 fn timer_event_never_breaks_the_loop() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut runtime, _tx, _client_id, _pane_id) = boot(&fake);

@@ -79,3 +79,6 @@ pub struct MouseInput {
     /// The modifier keys held during the event.
     pub mods: ModFlags,
 }
+
+#[cfg(test)]
+mod tests;

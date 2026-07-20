@@ -126,3 +126,110 @@ fn a_partial_decode_survives_a_resize() {
     assert_eq!(cell.ch(), 'x');
     assert_eq!(cell.style(), red);
 }
+
+// --- Adversarial: chunk-split torture and scale ---
+
+/// A mixed run of SGR, cursor moves, an erase, line feeds, and text. Fed both
+/// whole and one byte at a time, the parser must reach byte-identical state:
+/// splitting a sequence at any boundary may never change the outcome.
+#[test]
+fn a_sequence_split_at_every_byte_boundary_matches_the_whole_feed() {
+    let seq = b"\x1b[1;31mAB\x1b[2;3HCD\r\n\x1b[Kxy";
+
+    let mut whole = engine();
+    let _ = whole.advance(seq);
+
+    let mut split = engine();
+    for byte in seq {
+        let _ = split.advance(&[*byte]);
+    }
+
+    // Concrete landmarks so the comparison is not vacuously two blank grids.
+    assert_eq!(ch(&whole, 0, 0), 'A');
+    assert_eq!(ch(&whole, 1, 2), 'C');
+    assert_eq!(ch(&whole, 2, 0), 'x');
+    assert_eq!(whole.state().active_cursor_position(), (2, 2));
+
+    // The one-byte-at-a-time feed lands on exactly the same grid and cursor.
+    assert_eq!(whole.state().active_grid(), split.state().active_grid());
+    assert_eq!(
+        whole.state().active_cursor_position(),
+        split.state().active_cursor_position(),
+    );
+}
+
+#[test]
+fn a_three_byte_wide_char_split_across_chunks_decodes_once() {
+    let mut engine = engine();
+
+    // '世' is 0xE4 0xB8 0x96 — a wide CJK glyph split after its first byte.
+    assert_eq!(engine.advance(b"\xe4"), b"");
+    assert_eq!(engine.advance(b"\xb8\x96"), b"");
+
+    let cell = engine
+        .state()
+        .active_grid()
+        .cell(0, 0)
+        .expect("cell in bounds");
+    assert_eq!(cell.ch(), '世');
+    assert_eq!(cell.width(), 2);
+    assert_eq!(engine.state().active_cursor_position(), (0, 2));
+}
+
+#[test]
+fn a_truncated_csi_resumes_and_applies_on_the_next_chunk() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"abc"); // fill row 0
+    let _ = engine.advance(b"\x1b["); // CSI opened but not completed — held
+    let _ = engine.advance(b"2J"); // completes ED 2 across the chunk boundary
+
+    // The held CSI resumed and cleared the whole screen.
+    assert_eq!(ch(&engine, 0, 0), ' ');
+    assert_eq!(ch(&engine, 0, 1), ' ');
+    assert_eq!(ch(&engine, 0, 2), ' ');
+}
+
+#[test]
+fn an_escape_split_from_its_bracket_still_forms_a_csi() {
+    let mut engine = engine();
+
+    let _ = engine.advance(b"abc"); // fill row 0
+    let _ = engine.advance(b"\x1b"); // lone ESC at a chunk end — held in Escape
+    let _ = engine.advance(b"[2J"); // the bracket + ED 2 arrive next
+
+    assert_eq!(ch(&engine, 0, 0), ' ');
+    assert_eq!(ch(&engine, 0, 1), ' ');
+    assert_eq!(ch(&engine, 0, 2), ' ');
+}
+
+#[test]
+fn a_ten_thousand_column_line_wraps_without_panicking() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 80, rows: 24 });
+
+    let flood = vec![b'a'; 10_000];
+    let _ = engine.advance(&flood);
+
+    // 10000 / 80 = 125 logical rows; the last parks unscrolled, so the bottom
+    // row holds the final run and the cursor rests on the last column.
+    assert_eq!(engine.state().active_cursor_position(), (23, 79));
+    assert_eq!(ch(&engine, 23, 0), 'a');
+    assert_eq!(ch(&engine, 23, 79), 'a');
+    // 125 rows produced, 24 on screen (the last unscrolled) → 101 in history.
+    assert_eq!(engine.state().scrollback().len(), 101);
+}
+
+#[test]
+fn many_line_feeds_cap_the_scrollback_and_tally_the_drops() {
+    let mut engine = TerminalEngine::new(PtySize { cols: 8, rows: 2 });
+
+    // 12000 line feeds on a 2-row screen: the first descends without scrolling,
+    // the remaining 11999 each push one row into history.
+    let feeds = vec![b'\n'; 12_000];
+    let _ = engine.advance(&feeds);
+
+    // The default 10 000-line cap holds; the overflow is dropped and tallied.
+    assert_eq!(engine.state().scrollback().len(), 10_000);
+    assert_eq!(engine.state().scrollback().dropped_lines(), 1_999);
+    assert_eq!(engine.state().active_cursor_position(), (1, 0));
+}

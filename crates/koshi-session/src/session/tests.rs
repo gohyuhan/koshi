@@ -9,10 +9,10 @@ use std::time::SystemTime;
 
 use koshi_core::constant::MAX_TAB_FOCUS_MRU;
 use koshi_core::event::Event;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::tree::LayoutNode;
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
+use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
+use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pane::registry::PaneRegistry;
 
@@ -801,6 +801,174 @@ fn a_closed_tab_left_in_the_map_is_reported() {
         .validate()
         .expect_err("a closed tab still in the map is inconsistent");
     assert!(errors.contains(&SessionConsistencyError::LingeringClosedTab { tab: tab_id }));
+}
+
+/// An `Exited` pane record registered in `session`, returned by id. Live enough
+/// to have a record — a dead placeholder whose child is gone — but not
+/// `Removed`, so the orphan check (not the lingering-removed one) is the guard
+/// that fires when it is a leaf nowhere.
+fn register_exited_pane(session: &mut Session) -> PaneId {
+    let id = PaneId::new();
+    let mut record = PaneRecord::new(id, SystemTime::UNIX_EPOCH);
+    record
+        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+        .expect("Spawning -> Running is a legal transition");
+    record
+        .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+            code: Some(0),
+            at: SystemTime::UNIX_EPOCH,
+        })
+        .expect("Running -> Exited is a legal transition");
+    session
+        .panes
+        .insert(record)
+        .expect("a fresh pane id is unique");
+    id
+}
+
+#[test]
+fn a_focus_on_a_ghost_pane_in_a_real_tab_reports_both_missing_record_and_missing_target() {
+    // Focus pointing at a pane with no record, inside a tab that *does* exist,
+    // trips two independent checks at once: the registry has no such pane
+    // (`FocusPaneNotInRegistry`), and the tab's layout does not hold it either
+    // (`FocusTargetMissing`). Both name the same client, tab, and pane.
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+
+    let ghost = PaneId::new();
+    let client_id = attach_viewing(&mut session, tab);
+    session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached")
+        .update_focused_pane(tab, ghost);
+
+    let errors = session
+        .validate()
+        .expect_err("a ghost focus in a real tab is inconsistent");
+    assert!(
+        errors.contains(&SessionConsistencyError::FocusPaneNotInRegistry {
+            client: client_id,
+            tab,
+            pane: ghost,
+        })
+    );
+    assert!(
+        errors.contains(&SessionConsistencyError::FocusTargetMissing {
+            client: client_id,
+            tab,
+            pane: ghost,
+        })
+    );
+    // Exactly those two — the real tab, its real pane, and the session-matched
+    // client add nothing else.
+    assert_eq!(errors.len(), 2);
+}
+
+#[test]
+fn a_zoom_on_a_pane_with_no_record_is_reported() {
+    // A zoom naming a pane the registry has never heard of is not a live leaf,
+    // so it is reported even though the tab it is keyed under is real. The
+    // client's focus sits on the real pane, so no focus check fires alongside.
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
+
+    let ghost = PaneId::new();
+    let client_id = attach_viewing(&mut session, tab);
+    let client = session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached");
+    client.update_focused_pane(tab, pane);
+    client.zoom_pane(tab, ghost);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::ZoomTargetMissing {
+            client: client_id,
+            tab,
+            pane: ghost,
+        }])
+    );
+}
+
+#[test]
+fn a_zoom_in_a_tab_that_is_gone_is_reported() {
+    // A zoom entry left under a tab that has since closed points at a real pane
+    // but through a tab that is no longer in the session, so the pane is not a
+    // live leaf of it — reported as `ZoomTargetMissing` naming the gone tab.
+    let mut session = empty_session();
+    let events = new_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let tab = created_tab_id(&events);
+    let pane = created_pane_id(&events);
+
+    let phantom_tab = TabId::new();
+    let client_id = attach_viewing(&mut session, tab);
+    let client = session
+        .clients
+        .get_mut(client_id)
+        .expect("the client was just attached");
+    client.update_focused_pane(tab, pane);
+    client.zoom_pane(phantom_tab, pane);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::ZoomTargetMissing {
+            client: client_id,
+            tab: phantom_tab,
+            pane,
+        }])
+    );
+}
+
+#[test]
+fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
+    // The multi-layout check also catches a pane that is a leaf twice inside a
+    // *single* tab's tree, not only one split across two tabs. Both entries name
+    // the same tab id.
+    let mut session = empty_session();
+    let doubled = register_live_pane(&mut session);
+    let tab_id = TabId::new();
+    let mut tab = Tab::new(tab_id, "code".to_owned(), 0, doubled);
+    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(doubled)),
+            LayoutChild::new(LayoutNode::Pane(doubled)),
+        ],
+    )));
+    session.tabs.insert(tab_id, tab);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::PaneInMultipleLayouts {
+            pane: doubled,
+            tabs: vec![tab_id, tab_id],
+        }])
+    );
+}
+
+#[test]
+fn an_exited_orphan_record_is_reported() {
+    // The orphan check covers `Exited` records, not just live ones: a dead
+    // placeholder pane that is a leaf nowhere is reported, and the reported
+    // lifecycle is the exact `Exited` state it holds.
+    let mut session = empty_session();
+    let orphan = register_exited_pane(&mut session);
+
+    assert_eq!(
+        session.validate(),
+        Err(vec![SessionConsistencyError::OrphanedPaneRecord {
+            pane: orphan,
+            lifecycle: PaneLifecycle::Exited {
+                code: Some(0),
+                at: SystemTime::UNIX_EPOCH,
+            },
+        }])
+    );
 }
 
 #[test]

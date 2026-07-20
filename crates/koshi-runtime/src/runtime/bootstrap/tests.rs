@@ -8,8 +8,9 @@ use std::time::SystemTime;
 use koshi_config::profile::parse_profile;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::SessionId;
-use koshi_layout::template::ProfileTemplate;
+use koshi_layout::template::{ProfileTemplate, TemplateError};
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
@@ -139,6 +140,76 @@ fn a_profile_sizes_its_focused_tab_panes_to_the_split() {
     assert!(
         widths.iter().all(|&w| w < full),
         "split panes {widths:?} should each be narrower than one full pane ({full})"
+    );
+}
+
+#[test]
+fn a_profile_pane_with_a_command_spawns_that_program() {
+    // A `command` leaf takes the command arm of the pane-spec builder: the pane
+    // spawns the named program rather than the default shell.
+    let (mut rt, fake) = runtime();
+    let tmpl = template("version 1\ntab {\n    pane {\n        command \"htop\"\n    }\n}");
+    let _client = rt
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .expect("profile launches");
+
+    let pane = fake.spawned_panes();
+    assert_eq!(pane.len(), 1, "one pane spawned");
+    let spec = fake.spawn_spec(pane[0]).expect("pane was spawned");
+    assert_eq!(
+        spec.program,
+        Path::new("htop"),
+        "the command's program is launched"
+    );
+    assert!(spec.args.is_empty(), "the command carried no arguments");
+}
+
+#[test]
+fn a_profile_whose_pane_fails_to_spawn_is_refused_and_commits_nothing() {
+    let (mut rt, fake) = runtime();
+    fake.fail_spawns_with(PtyError::Spawn {
+        detail: "no shell".to_string(),
+    });
+    let tmpl = template("version 1\ntab {\n    pane\n}");
+
+    let err = rt
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .expect_err("a failed spawn aborts the launch");
+
+    let ProfileLaunchError::Spawn(inner) = err else {
+        panic!("expected a Spawn error, got {err:?}");
+    };
+    assert_eq!(
+        inner,
+        PtyError::Spawn {
+            detail: "no shell".to_string()
+        }
+    );
+    // The failure happens before any commit, so nothing is left behind.
+    assert!(rt.sessions.is_empty(), "no session committed");
+    assert!(rt.pty_handles.is_empty(), "no PTY parked");
+}
+
+#[test]
+fn profile_launch_error_display_names_each_cause() {
+    assert_eq!(
+        ProfileLaunchError::PluginPane.to_string(),
+        "profile uses a plugin pane, which is not supported yet"
+    );
+    assert_eq!(
+        ProfileLaunchError::Template(TemplateError::PaneCountMismatch {
+            expected: 2,
+            got: 1
+        })
+        .to_string(),
+        "profile layout could not be built: template has 2 pane slots but 1 pane ids were supplied"
+    );
+    assert_eq!(
+        ProfileLaunchError::Spawn(PtyError::Spawn {
+            detail: "boom".to_string()
+        })
+        .to_string(),
+        "a profile pane failed to start: failed to spawn pty: boom"
     );
 }
 

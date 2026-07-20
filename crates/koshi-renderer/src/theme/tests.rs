@@ -47,6 +47,13 @@ fn a_zero_count_run_returns_the_start_end_without_dividing_by_zero() {
 }
 
 #[test]
+fn the_dim_variant_tracks_the_ramp_stop_it_darkens() {
+    // The dim of the far ramp end is that end pulled to 55% of each channel.
+    let theme = Theme::default();
+    assert_eq!(theme.ramp_dim(1, 2), Color::Rgb(0x20, 0x47, 0x87));
+}
+
+#[test]
 fn custom_endpoints_drive_the_ramp() {
     let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),

@@ -616,3 +616,99 @@ fn an_error_names_the_token_and_the_reason() {
         "invalid key `\t`: the character '\\t' is written by its key name, such as `<Space>` or `<Tab>`"
     );
 }
+
+// -- adversarial: hostile bytes and unicode --------------------------------
+
+#[test]
+fn a_nul_byte_is_refused_as_a_control_character() {
+    // A literal nul reaching the parser is a control character, so it is
+    // refused the same way a raw tab is, never panicking.
+    assert_eq!(
+        parse_chord("\0"),
+        Err(KeyParseError {
+            token: "\0".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\0' },
+        })
+    );
+    // Inside a modified bracket the fold is the same.
+    assert_eq!(
+        parse_chord("<C-\0>"),
+        Err(KeyParseError {
+            token: "<C-\0>".to_string(),
+            kind: KeyParseErrorKind::RawWhitespaceOrControl { ch: '\0' },
+        })
+    );
+}
+
+#[test]
+fn a_non_ascii_letter_is_a_bare_chord_and_may_carry_modifiers() {
+    // A multi-byte printable letter is one chord; it is already lowercase, so
+    // no Shift bit is folded in.
+    assert_eq!(parse_chord("é"), Ok(chord(ModFlags::NONE, Key::Char('é'))));
+    assert_eq!(
+        parse_chord("<C-é>"),
+        Ok(chord(ModFlags::CTRL, Key::Char('é')))
+    );
+}
+
+#[test]
+fn a_byte_order_mark_is_a_bare_chord_not_whitespace() {
+    // U+FEFF is neither control nor whitespace in Rust, so it parses as an
+    // ordinary one-character key rather than being refused.
+    assert_eq!(
+        parse_chord("\u{feff}"),
+        Ok(chord(ModFlags::NONE, Key::Char('\u{feff}')))
+    );
+}
+
+#[test]
+fn an_absurdly_long_bare_token_is_the_unbracketed_multichar_error() {
+    // A thousand characters with no brackets is still just "more than one bare
+    // character", reported once, not a panic or a hang.
+    let token = "a".repeat(1000);
+    assert_eq!(
+        parse_chord(&token),
+        Err(KeyParseError {
+            token: token.clone(),
+            kind: KeyParseErrorKind::UnbracketedMultiChar,
+        })
+    );
+}
+
+#[test]
+fn a_third_modifier_repeat_is_caught_in_any_order() {
+    // The duplicate is flagged at the second occurrence of the same letter,
+    // whichever modifiers sit between them.
+    assert_eq!(
+        parse_chord("<C-A-C-x>"),
+        Err(KeyParseError {
+            token: "<C-A-C-x>".to_string(),
+            kind: KeyParseErrorKind::DuplicateModifier { modifier: 'C' },
+        })
+    );
+    // A repeat that lands after all four distinct modifiers is still caught.
+    assert_eq!(
+        parse_chord("<C-A-S-D-A-x>"),
+        Err(KeyParseError {
+            token: "<C-A-S-D-A-x>".to_string(),
+            kind: KeyParseErrorKind::DuplicateModifier { modifier: 'A' },
+        })
+    );
+}
+
+#[test]
+fn a_two_space_bracket_is_read_as_an_unknown_named_key() {
+    // A single space inside brackets is one raw key (refused as whitespace),
+    // but two characters make it a multi-character name, so it takes the
+    // named-key table path and is refused there as unknown — the two inner
+    // spaces are the reported name.
+    assert_eq!(
+        parse_chord("<  >"),
+        Err(KeyParseError {
+            token: "<  >".to_string(),
+            kind: KeyParseErrorKind::UnknownNamedKey {
+                name: "  ".to_string(),
+            },
+        })
+    );
+}

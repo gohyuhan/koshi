@@ -847,3 +847,235 @@ fn keys_validate_renders_both_outcome_shapes() {
     assert!(validation_applies(&checked));
     assert!(!validation_applies(&failed));
 }
+
+/// The offline view for a user file whose `unlock_alternative` sits on a chord
+/// plain typing produces, which detection rejects as fatal.
+fn view_with_typeable_unlock_alternative() -> crate::keymap::KeymapView {
+    crate::keymap::view_from_partial(
+        Some(koshi_config::layer::PartialKeybindingsConfig {
+            unlock_alternative: Some(Some(KeyChord::new(ModFlags::NONE, Key::Char('u')))),
+            ..Default::default()
+        }),
+        None,
+        None,
+    )
+}
+
+#[test]
+fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
+    // A typeable unlock alternative is a fatal finding, so the verdict rejects
+    // the file and the offline listing keeps the defaults.
+    let view = view_with_typeable_unlock_alternative();
+    let rendered = render_keys_conflicts(&view, FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value["verdict"], serde_json::json!("reject"));
+    assert_eq!(value["file_error"], serde_json::Value::Null);
+    let findings = value["findings"].as_array().expect("array");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["severity"] == serde_json::json!("fatal")),
+        "expected a fatal finding: {rendered}"
+    );
+}
+
+#[test]
+fn keys_list_marks_a_rejected_user_file_as_reverted() {
+    // The rejected file drops the view back to the defaults, so every listed
+    // binding is a shipped one and none is sourced to the user layer.
+    let view = view_with_typeable_unlock_alternative();
+    let rendered = render_keys_list(&view, None, None, FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(value["reverted"], serde_json::json!(true));
+    let bindings = value["bindings"].as_array().expect("array");
+    assert!(!bindings.is_empty(), "defaults still list: {rendered}");
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding["source"] != serde_json::json!("user")),
+        "a rejected file must contribute no user bindings: {rendered}"
+    );
+}
+
+#[test]
+fn keys_describe_renders_one_field_block_per_mode_the_key_is_bound_in() {
+    // The same key bound in two modes prints two field blocks, separated by a
+    // blank line, in mode-name order (`locked` before `normal`).
+    let mut view = crate::keymap::view_from_partial(None, None, None);
+    let key = KeySequence::from(KeyChord::new(ModFlags::ALT, Key::Char('y')));
+    for mode_name in ["locked", "normal"] {
+        view.merged
+            .modes
+            .get_mut(&ModeName::new(mode_name))
+            .expect("built-in mode is merged")
+            .defaults
+            .insert(
+                key.clone(),
+                BoundAction {
+                    action: ActionRef::core("new-tab").expect("valid name"),
+                    args: ActionArgs::None,
+                },
+            );
+    }
+    let rendered = render_keys_describe(&view, "<A-y>", FormatArg::Table)
+        .expect("sequence parses")
+        .expect("bound in two modes");
+    let expected = "\
+key: <A-y>
+mode: locked
+action: core:new-tab
+display_name: New Tab
+description: Create a new tab
+scope: tab
+args: -
+source: defaults
+continuous: false
+
+key: <A-y>
+mode: normal
+action: core:new-tab
+display_name: New Tab
+description: Create a new tab
+scope: tab
+args: -
+source: defaults
+continuous: false
+";
+    assert_eq!(rendered, expected);
+}
+
+#[test]
+fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
+    let view = crate::keymap::view_from_partial(None, None, None);
+    let rendered = render_keys_list(&view, None, Some(ScopeArg::Default), FormatArg::Json);
+    let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    let bindings = value["bindings"].as_array().expect("array");
+    assert!(!bindings.is_empty(), "defaults exist: {rendered}");
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding["source"] == serde_json::json!("defaults")),
+        "the defaults filter keeps only defaults: {rendered}"
+    );
+}
+
+#[test]
+fn keys_list_scope_filter_for_session_or_layout_is_empty_offline() {
+    // No session or layout layer is visible offline, so filtering to either
+    // leaves an empty listing: the table is just its header row.
+    let view = crate::keymap::view_from_partial(None, None, None);
+    let header = "mode  key  action  source\n";
+    assert_eq!(
+        render_keys_list(&view, None, Some(ScopeArg::Session), FormatArg::Table),
+        header
+    );
+    assert_eq!(
+        render_keys_list(&view, None, Some(ScopeArg::Layout), FormatArg::Table),
+        header
+    );
+}
+
+#[test]
+fn keys_validate_checked_carries_the_conflict_findings() {
+    // A binding on an unregistered action is an orphan warning; the file still
+    // applies, and the answer carries the finding on both formats.
+    let view = view_with_binding("<C-y>", "core:not-a-real-action");
+    let applies = !view.reverted;
+    let checked = crate::keymap::ValidationOutcome::Checked {
+        report: view.report,
+        applies,
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&render_keys_validate(&checked, FormatArg::Json)).expect("valid JSON");
+    assert_eq!(value["valid"], serde_json::json!(true));
+    assert_eq!(value["applies"], serde_json::json!(true));
+    assert_eq!(value["errors"], serde_json::json!([]));
+    let findings = value["findings"].as_array().expect("array");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
+
+    let table_rendered = render_keys_validate(&checked, FormatArg::Table);
+    let lines: Vec<&str> = table_rendered.lines().collect();
+    assert_eq!(lines[0], "valid: a reload would apply this file");
+    assert_eq!(
+        lines[1].split_whitespace().collect::<Vec<_>>(),
+        ["severity", "finding"]
+    );
+    assert_eq!(lines[2].split_whitespace().next(), Some("warning"));
+}
+
+// --- Entity inspect (single-item) renderings ---
+
+#[test]
+fn session_inspect_renders_as_field_lines() {
+    let expected = "\
+id: session-00000000-0000-0000-0000-000000000001
+name: quiet-lake
+created_at: 1234
+clients: 1
+panes: 3
+";
+    assert_eq!(render_session(&session_info(), FormatArg::Table), expected);
+}
+
+#[test]
+fn tab_inspect_renders_as_field_lines() {
+    let expected = "\
+id: tab-00000000-0000-0000-0000-000000000001
+name: amber-fox
+index: 1
+active_pane: pane-00000000-0000-0000-0000-000000000001
+panes: 2
+";
+    assert_eq!(render_tab(&tab_info(), FormatArg::Table), expected);
+}
+
+#[test]
+fn pane_inspect_renders_as_field_lines() {
+    let expected = "\
+id: pane-00000000-0000-0000-0000-000000000001
+tab: tab-00000000-0000-0000-0000-000000000001
+session: session-00000000-0000-0000-0000-000000000001
+title: htop
+cwd: /home/user
+command: htop --tree
+state: running
+focused_by: 1
+rect: 80x23@0,1
+";
+    assert_eq!(render_pane(&pane_info(), FormatArg::Table), expected);
+}
+
+#[test]
+fn client_list_table_widens_columns_to_the_widest_row() {
+    // Two clients, one with a focused pane and one without, so the
+    // `focused_pane` column widens from the header to the pane-id width and
+    // the shorter cells pad out to match.
+    let focused = ClientInfo {
+        focused_pane: Some(PaneId::from_uuid(fixed_uuid())),
+        ..client_info()
+    };
+    let expected = "\
+id                                           session                                       attached_at  viewport  active_tab                                focused_pane                               lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  -                                          Normal
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  pane-00000000-0000-0000-0000-000000000001  Normal
+";
+    assert_eq!(
+        render_clients(&[client_info(), focused], FormatArg::Table),
+        expected
+    );
+}
+
+#[test]
+fn empty_client_list_table_is_just_the_header() {
+    assert_eq!(
+        render_clients(&[], FormatArg::Table),
+        "id  session  attached_at  viewport  active_tab  focused_pane  lock\n"
+    );
+}
+
+#[test]
+fn explain_of_an_empty_or_blank_action_name_is_none() {
+    assert_eq!(render_action_explain("", FormatArg::Json), None);
+    assert_eq!(render_action_explain("   ", FormatArg::Json), None);
+}

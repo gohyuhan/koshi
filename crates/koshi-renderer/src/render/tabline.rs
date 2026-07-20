@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Draw the tabline: the session name on the left and the scroll indicator
 /// plus mode tag on the right are always shown whole, as colored text on the
 /// terminal's own background; only the tab list between them carries

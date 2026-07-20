@@ -133,3 +133,6 @@ impl DomainError for SessionConsistencyError {
         Severity::Recoverable
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -116,3 +116,6 @@ impl Default for TerminalModes {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

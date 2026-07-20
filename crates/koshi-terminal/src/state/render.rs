@@ -51,3 +51,6 @@ impl RenderState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

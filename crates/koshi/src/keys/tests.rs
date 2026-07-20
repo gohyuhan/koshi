@@ -42,3 +42,17 @@ fn the_reexport_drops_a_release_identically_to_the_wrapped_function() {
     assert_eq!(via_wrapped, via_reexport, "the re-export must not diverge");
     assert_eq!(via_reexport, None, "a key release decodes to nothing");
 }
+
+#[test]
+fn the_reexport_decodes_an_unmodified_char_identically_to_the_wrapped_function() {
+    let event = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+    let via_reexport = decode_key(event);
+    let via_wrapped = koshi_input::keyboard::decode_key(event);
+
+    assert_eq!(via_wrapped, via_reexport, "the re-export must not diverge");
+    assert_eq!(
+        via_reexport,
+        Some(KeyChord::new(ModFlags::NONE, Key::Char('a')))
+    );
+}

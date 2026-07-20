@@ -4363,3 +4363,239 @@ fn unsupported_dec_modes_are_ignored() {
     state.print('x');
     assert_eq!(glyph(&state, 0, 0), Some('x'));
 }
+
+// --- Adversarial: malformed / hostile escape sequences ---
+
+#[test]
+fn csi_param_saturates_at_u16_max_and_clamps_to_the_grid() {
+    // vte collects a parameter with saturating arithmetic, so a value past
+    // u16::MAX becomes 65535, then koshi's saturating cursor math clamps it to
+    // the grid — an absurd count never wraps around to a small move.
+    let mut state = state(10, 5); // last row 4, last col 9
+    advance(&mut state, b"\x1b[5;5H"); // (4, 4)
+    advance(&mut state, b"\x1b[99999999A"); // CUU by a saturated 65535 -> row 0
+    assert_eq!(state.active_cursor_position(), (0, 4));
+    advance(&mut state, b"\x1b[99999999C"); // CUF by 65535 -> last column
+    assert_eq!(state.active_cursor_position(), (0, 9));
+}
+
+#[test]
+fn a_csi_with_too_many_parameters_is_dropped() {
+    // vte holds at most 32 parameters; the parameter that would overflow flags
+    // the whole sequence `ignore`, and koshi drops an ignored CSI. The cursor
+    // move never happens.
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    let mut seq = Vec::from(&b"\x1b["[..]);
+    seq.extend(std::iter::repeat_n(&b"1;"[..], 40).flatten().copied());
+    seq.push(b'H'); // 40 params + a final H — far past the 32 cap
+    advance(&mut state, &seq);
+    assert_eq!(state.active_cursor_position(), (2, 2)); // unmoved
+}
+
+#[test]
+fn a_csi_at_the_max_parameter_count_still_dispatches() {
+    // Exactly 32 parameters fit, so the sequence is NOT flagged ignore and its
+    // SGR applies. Thirty-two `1`s all mean bold.
+    let mut state = state(5, 2);
+    let mut seq = Vec::from(&b"\x1b["[..]);
+    seq.extend(std::iter::repeat_n(&b"1;"[..], 31).flatten().copied());
+    seq.push(b'1'); // 32nd parameter
+    seq.push(b'm');
+    advance(&mut state, &seq);
+    assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
+}
+
+#[test]
+fn a_carriage_return_inside_a_csi_executes_then_the_move_completes() {
+    // A C0 control byte mid-CSI is executed in place, then parameter collection
+    // resumes and the final byte still dispatches. The CR homes the column, then
+    // CUD moves down — both effects are observable.
+    let mut state = state(10, 3); // last row 2
+    advance(&mut state, b"\x1b[3;5H"); // (2, 4)
+    advance(&mut state, b"\x1b[2\x0dB"); // CR (col -> 0), then CUD 2 (clamped to row 2)
+    assert_eq!(state.active_cursor_position(), (2, 0));
+}
+
+#[test]
+fn an_escape_inside_a_csi_cancels_the_pending_sequence() {
+    // An ESC mid-CSI abandons the half-built sequence and starts a fresh escape.
+    // The trailing `B` is then a plain ESC final koshi ignores, so the CUD never
+    // runs and the cursor stays put.
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[5\x1bB"); // CSI 5 abandoned by ESC; ESC B ignored
+    assert_eq!(state.active_cursor_position(), (2, 2));
+    state.print('z'); // the parser recovered: a glyph lands normally
+    assert_eq!(glyph(&state, 2, 2), Some('z'));
+}
+
+#[test]
+fn leading_zero_params_are_read_as_decimal() {
+    // `007` is decimal seven, not octal — CUP maps it 1-based to row 6.
+    let mut state = state(10, 10);
+    advance(&mut state, b"\x1b[007;003H");
+    assert_eq!(state.active_cursor_position(), (6, 2));
+}
+
+#[test]
+fn an_empty_leading_csi_parameter_uses_the_default() {
+    // `CSI ; 5 H` — the missing row argument defaults to 1 (top), the column to 5.
+    let mut state = state(10, 10);
+    advance(&mut state, b"\x1b[3;3H"); // move away first
+    advance(&mut state, b"\x1b[;5H");
+    assert_eq!(state.active_cursor_position(), (0, 4));
+}
+
+#[test]
+fn an_unknown_csi_final_byte_leaves_the_cursor_unmoved() {
+    // `W` (CTC) is not handled; it must be a silent no-op, not a stray move.
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[2W");
+    assert_eq!(state.active_cursor_position(), (2, 2));
+}
+
+#[test]
+fn a_csi_with_an_unhandled_intermediate_is_ignored() {
+    // `CSI ! p` (DECSTR) carries a `!` intermediate koshi does not act on; it
+    // must not disturb the cursor or the pen.
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
+    advance(&mut state, b"\x1b[1m"); // bold on
+    advance(&mut state, b"\x1b[!p"); // DECSTR — unhandled intermediate
+    assert_eq!(state.active_cursor_position(), (2, 2));
+    assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
+}
+
+#[test]
+fn an_ignored_private_marker_csi_does_not_break_a_cluster() {
+    // A private marker after a parameter (`CSI 1 < m`) routes vte straight to
+    // ground with NO Perform callback, so it neither moves the cursor nor resets
+    // the cluster. A combining mark printed afterward still folds onto the
+    // preceding glyph — the documented, accepted edge.
+    let mut state = state(5, 3);
+    state.print('e');
+    advance(&mut state, b"\x1b[1<m"); // swallowed with no dispatch
+    state.print('\u{0301}'); // combining acute accent
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), ['\u{0301}']);
+}
+
+#[test]
+fn a_lone_c1_control_byte_is_inert() {
+    // Raw C1 bytes (0x80..=0x9F) decode as C1 controls koshi does not act on:
+    // they must not print, move the cursor, or panic.
+    let mut state = state(5, 3);
+    state.print('a'); // (0, 1)
+    advance(&mut state, b"\x9b\x9c\x80"); // C1 CSI, ST, PAD — all ignored
+    assert_eq!(glyph(&state, 0, 0), Some('a'));
+    assert_eq!(glyph(&state, 0, 1), Some(' '));
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+#[test]
+fn a_lone_invalid_high_byte_prints_the_replacement_char() {
+    // An invalid UTF-8 lead byte above the C1 range decodes to U+FFFD, which
+    // lands as an ordinary narrow glyph.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\xff");
+    assert_eq!(glyph(&state, 0, 0), Some('\u{FFFD}'));
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}
+
+#[test]
+fn an_unterminated_osc_sets_no_title() {
+    // An OSC with no string terminator never reaches `osc_dispatch`, so no title
+    // is recorded.
+    let mut state = state(5, 3);
+    advance(&mut state, b"\x1b]0;hello"); // no BEL / ST
+    assert_eq!(state.title(), None);
+}
+
+#[test]
+fn a_very_long_osc_title_is_accepted_whole_and_recovers() {
+    // vte's OSC buffer grows on the heap, so a 2000-byte title is taken in full
+    // rather than truncated; the parser still returns to ground for the next
+    // command afterward.
+    let mut state = state(5, 3);
+    let mut seq = Vec::from(&b"\x1b]0;"[..]);
+    seq.extend(std::iter::repeat_n(b'A', 2000));
+    seq.push(0x07); // BEL terminator
+    advance(&mut state, &seq);
+    let title = state.title().expect("the title is set");
+    assert_eq!(title.len(), 2000);
+    assert!(title.chars().all(|c| c == 'A'));
+    // The parser recovered: a following sequence and glyph land normally.
+    advance(&mut state, b"\x1b[2J");
+    state.print('z');
+    assert_eq!(glyph(&state, 0, 0), Some('z'));
+}
+
+// --- Adversarial: boundary geometry ---
+
+#[test]
+fn printing_into_a_one_by_one_grid_scrolls_each_glyph_into_history() {
+    // A 1x1 screen with autowrap on: each glyph fills the only cell and parks;
+    // the next glyph wraps, scrolling the parked one into scrollback.
+    let mut state = state(1, 1);
+    state.print('a'); // fills (0, 0), parks with the wrap latch armed
+    assert!(state.active_cursor().pending_wrap);
+    state.print('b'); // wraps: 'a' scrolls into history, 'b' takes the cell
+    assert_eq!(glyph(&state, 0, 0), Some('b'));
+    assert_eq!(state.active_cursor_position(), (0, 0));
+    assert!(state.active_cursor().pending_wrap);
+    assert_eq!(state.scrollback().len(), 1);
+    assert_eq!(
+        state.scrollback().lines().front().expect("a row").0[0].ch(),
+        'a'
+    );
+}
+
+#[test]
+fn a_one_by_one_grid_with_autowrap_off_overwrites_in_place() {
+    // With autowrap off there is no line to wrap onto, so each glyph overwrites
+    // the sole cell and nothing ever scrolls.
+    let mut state = state(1, 1);
+    advance(&mut state, b"\x1b[?7l"); // autowrap off
+    state.print('a');
+    assert!(!state.active_cursor().pending_wrap);
+    state.print('b');
+    assert_eq!(glyph(&state, 0, 0), Some('b'));
+    assert_eq!(state.active_cursor_position(), (0, 0));
+    assert!(state.scrollback().is_empty());
+}
+
+#[test]
+fn decstbm_clamps_a_bottom_margin_past_the_grid() {
+    // A bottom margin past the last row is clamped to it; the region is still
+    // set because the top margin is above the clamped bottom.
+    let mut state = state(5, 5); // last row 4
+    advance(&mut state, b"\x1b[2;99r"); // top 2 (1-based), bottom clamped to 4
+    assert_eq!(state.primary_scroll_region, Some((1, 4)));
+    assert_eq!(state.active_cursor_position(), (0, 0)); // homed
+}
+
+#[test]
+fn decstbm_with_a_top_past_the_last_row_is_ignored() {
+    // Clamping a huge top margin lands it on the last row, equal to the clamped
+    // bottom; an equal top and bottom is an invalid range, so the request is
+    // dropped and the prior region stands.
+    let mut state = state(5, 5);
+    advance(&mut state, b"\x1b[2;4r"); // establish (1, 3)
+    advance(&mut state, b"\x1b[99;5r"); // top and bottom both clamp to row 4 -> ignored
+    assert_eq!(state.primary_scroll_region, Some((1, 3)));
+}
+
+#[test]
+fn cursor_moves_on_a_single_row_grid_stay_on_row_zero() {
+    // Vertical moves on a one-row screen all clamp to the only row, while
+    // horizontal moves still work.
+    let mut state = state(5, 1); // one row, last col 4
+    advance(&mut state, b"\x1b[9B"); // CUD 9 -> clamped to row 0
+    advance(&mut state, b"\x1b[3G"); // CHA to column 3 (1-based)
+    assert_eq!(state.active_cursor_position(), (0, 2));
+    advance(&mut state, b"\x1b[9A"); // CUU 9 -> still row 0
+    assert_eq!(state.active_cursor_position(), (0, 2));
+}

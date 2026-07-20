@@ -472,3 +472,61 @@ fn the_canonical_text_form_parses_back_to_an_equal_sequence() {
         );
     }
 }
+
+// -- adversarial: hostile length and bytes --------------------------------
+
+#[test]
+fn an_absurdly_long_sequence_reports_its_length_without_panicking() {
+    // A thousand single-character chords, well past the largest possible cap
+    // of 255, is counted and reported once — not a panic, hang, or overflow.
+    let text = "a ".repeat(1000);
+    let err = parse_sequence(&text, ctrl_leader(), u8::MAX).unwrap_err();
+    assert_eq!(
+        err.kind,
+        KeyParseErrorKind::SequenceTooLong {
+            len: 1000,
+            max: 255,
+        }
+    );
+}
+
+#[test]
+fn a_nul_byte_token_is_refused_as_a_control_character() {
+    let err = parse_sequence("\0", ctrl_leader(), 4).unwrap_err();
+    assert_eq!(
+        err.kind,
+        KeyParseErrorKind::RawWhitespaceOrControl { ch: '\0' }
+    );
+}
+
+#[test]
+fn a_modifier_run_leader_merges_into_a_greater_than_key_that_extends() {
+    // The `<C->>` "the key is `>` itself" recovery must still fire when a
+    // modifier-run leader is waiting to merge into it: the result is one
+    // chord, Ctrl+`>`.
+    assert_eq!(
+        parse_sequence("<leader><C->>", ctrl_leader(), 4),
+        Ok(seq(&[chord(ModFlags::CTRL, Key::Char('>'))]))
+    );
+}
+
+#[test]
+fn a_cap_at_the_largest_byte_value_still_rejects_one_more() {
+    // 256 chords against a cap of 255 is the boundary just past the widest
+    // representable cap.
+    let text = "a".repeat(256);
+    let err = parse_sequence(&text, ctrl_leader(), u8::MAX).unwrap_err();
+    assert_eq!(
+        err.kind,
+        KeyParseErrorKind::SequenceTooLong { len: 256, max: 255 }
+    );
+    // Exactly 255 chords fits.
+    let at_cap = "a".repeat(255);
+    assert_eq!(
+        parse_sequence(&at_cap, ctrl_leader(), u8::MAX)
+            .expect("255 chords fits the cap")
+            .chords()
+            .len(),
+        255
+    );
+}
