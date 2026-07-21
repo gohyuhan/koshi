@@ -30,8 +30,8 @@ use crate::runtime::{
     hints::{built_in_modes, keymap_layers, KeymapHintCatalog},
     render_schedule::InvalidationReason,
     snapshot::resolve_theme,
-    state::Runtime,
 };
+use crate::server::Server;
 
 /// The user's stored config overrides, one layer per config file, folded
 /// onto the built-in defaults to produce the effective config. Each file's
@@ -90,7 +90,7 @@ pub struct KeymapReloadOutcome {
     pub report: ConflictReport,
 }
 
-impl Runtime {
+impl Server {
     /// Swap in a reloaded color theme: store the candidate as the theme
     /// layer, recompute the effective config, resolve the chrome theme from
     /// it, and schedule a repaint. Returns one [`Event::ConfigReloaded`] per

@@ -8,7 +8,6 @@ use std::sync::mpsc;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::PaneId;
 use koshi_core::process::{PtySize, SpawnSpec};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -22,19 +21,18 @@ const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 
 /// A runtime sharing one fake backend, returned alongside it so a test can
 /// assert on the kills the driver issues. The sender keeps the inbox open.
-fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, fake, tx)
@@ -43,7 +41,7 @@ fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<Runtim
 /// Spawn a pane in the fake backend and park its handle in the runtime, so the
 /// pane is live in both — the backend can record kills and the runtime counts
 /// it as active.
-fn spawn_and_park(rt: &mut Runtime, fake: &FakePtyBackend, pane: PaneId) {
+fn spawn_and_park(rt: &mut Server, fake: &FakePtyBackend, pane: PaneId) {
     let handle = fake
         .spawn(
             pane,

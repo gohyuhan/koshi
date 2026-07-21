@@ -1,8 +1,9 @@
 //! Command dispatch: the single entrypoint every requested mutation passes
 //! through.
 //!
-//! [`Runtime::dispatch`] validates one [`CommandEnvelope`] against live state,
-//! then routes it via an exhaustive `match` on [`Command`] — one arm per
+//! `Server::dispatch` — reached from outside the crate through
+//! [`Server::submit_command`] — validates one [`CommandEnvelope`] against live
+//! state, then routes it via an exhaustive `match` on [`Command`] — one arm per
 //! variant. Validation runs first: a command whose source may not issue it, or
 //! whose target does not resolve, is rejected before any handler runs. A
 //! command whose handler has not landed yet still rejects cleanly with
@@ -22,9 +23,10 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::runtime::{
-    render_schedule::InvalidationReason, snapshot::solve_tab, state::Runtime,
+    bus::EventBus, render_schedule::InvalidationReason, snapshot::solve_tab,
     transaction::TransactionScope,
 };
+use crate::server::Server;
 use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
@@ -118,7 +120,7 @@ fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
 }
 
 /// A validation failure: the reason a command was rejected, plus an optional
-/// human-facing hint. The `Err` half of [`Runtime::validate`].
+/// human-facing hint. The `Err` half of [`Server::validate`].
 struct Rejection {
     reason: RejectReason,
     help: Option<String>,
@@ -163,7 +165,7 @@ struct PaneTarget {
 /// A resolved [`Command::FocusPane`] target: the session and client whose
 /// focus moves, that client's active tab — the tab the pane was resolved
 /// in — and the pane taking focus. The `Ok` half of
-/// [`Runtime::resolve_focus_target`].
+/// [`Server::resolve_focus_target`].
 struct FocusPaneTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -174,7 +176,7 @@ struct FocusPaneTarget {
 /// The resolved default-pane context of a command that names no target: the
 /// acting session, the source's client, and the pane the command acts on —
 /// an in-session CLI's issuing pane, else the client's focused pane. The
-/// `Ok` half of [`Runtime::resolve_default_pane`].
+/// `Ok` half of [`Server::resolve_default_pane`].
 struct DefaultPaneTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -183,7 +185,7 @@ struct DefaultPaneTarget {
 
 /// A resolved [`Command::NewTab`] target: the session the tab joins and the
 /// client that switches onto it. The `Ok` half of
-/// [`Runtime::resolve_new_tab_target`].
+/// [`Server::resolve_new_tab_target`].
 struct NewTabTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -191,14 +193,14 @@ struct NewTabTarget {
 
 /// A resolved [`Command::FocusTab`] target: the session, the client whose
 /// view switches, and the concrete tab the target named. The `Ok` half of
-/// [`Runtime::resolve_focus_tab_target`].
+/// [`Server::resolve_focus_tab_target`].
 struct FocusTabTarget {
     session_id: SessionId,
     client_id: ClientId,
     tab_id: TabId,
 }
 
-impl Runtime {
+impl Server {
     /// Dispatch one command and report its outcome.
     ///
     /// Every mutation enters here; nothing mutates session, layout, or pane
@@ -208,7 +210,7 @@ impl Runtime {
     /// [`RejectReason::InvalidState`]. A command that reaches its handler
     /// schedules a repaint, so a mutation shows regardless of which entry
     /// point — key binding, IPC, or plugin — delivered it.
-    pub fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
+    pub(crate) fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
         let command_id = envelope.id;
         if let Err(rejection) = self.validate(&envelope) {
             return Self::rejected(command_id, rejection);
@@ -327,13 +329,18 @@ impl Runtime {
     }
 
     /// Seal `events` as one committed transaction keyed to `command_id`: emit
-    /// each event into a fresh [`TransactionScope`] in order, then commit.
-    fn commit_events(command_id: CommandId, events: Vec<Event>) -> CommandResult {
+    /// each event into a fresh [`TransactionScope`] in order, then commit,
+    /// delivering the batch to every subscriber on `bus`.
+    fn commit_events(
+        bus: &mut EventBus,
+        command_id: CommandId,
+        events: Vec<Event>,
+    ) -> CommandResult {
         let mut scope = TransactionScope::new();
         for event in events {
             scope.emit(event);
         }
-        scope.commit(command_id)
+        scope.commit(command_id, bus)
     }
 
     /// Launch a pane's child process, mapping a backend failure onto the shared
@@ -441,7 +448,7 @@ impl Runtime {
 
         let events = session_ops::rename_session(session, new_name);
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::Quit`]: mark the process for immediate teardown.

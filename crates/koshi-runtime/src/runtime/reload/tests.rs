@@ -20,21 +20,19 @@ use koshi_core::ids::{ClientId, PluginId, SessionId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::hints::KeyMatch;
 
-fn runtime() -> (Runtime, ClientId) {
+fn runtime() -> (Server, ClientId) {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Runtime::new(
+    let mut runtime = Server::new(
         Arc::new(FakePtyBackend::new()),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     let client = runtime
@@ -47,20 +45,19 @@ fn runtime() -> (Runtime, ClientId) {
     (runtime, client)
 }
 
-fn only_session_id(runtime: &Runtime) -> SessionId {
+fn only_session_id(runtime: &Server) -> SessionId {
     *runtime.sessions.keys().next().expect("one session")
 }
 
 #[test]
 fn load_startup_config_applies_the_app_and_theme_layers_before_genesis() {
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Runtime::new(
+    let mut runtime = Server::new(
         Arc::new(FakePtyBackend::new()),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     let app = PartialKoshiConfig {
@@ -450,7 +447,7 @@ fn keybinding_reload_clears_pending_sequences() {
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
         Instant::now(),
     );
-    let has_pending = |runtime: &Runtime, client: ClientId| {
+    let has_pending = |runtime: &Server, client: ClientId| {
         runtime
             .session_for_client(client)
             .expect("session")
@@ -612,15 +609,14 @@ fn registry_refresh_turns_an_orphan_binding_live() {
 }
 
 /// A runtime with no bootstrapped session — zero live clients to notify.
-fn runtime_with_no_sessions() -> Runtime {
+fn runtime_with_no_sessions() -> Server {
     let (tx, rx) = mpsc::channel();
-    Runtime::new(
+    Server::new(
         Arc::new(FakePtyBackend::new()),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     )
 }
@@ -726,7 +722,7 @@ fn registry_refresh_clears_pending_sequences_when_the_keymap_reapplies() {
         KeyChord::new(ModFlags::CTRL, Key::Char('p')),
         Instant::now(),
     );
-    let has_pending = |runtime: &Runtime| {
+    let has_pending = |runtime: &Server| {
         runtime
             .session_for_client(client)
             .expect("session")

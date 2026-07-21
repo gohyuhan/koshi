@@ -25,12 +25,12 @@ use koshi_session::session::tab_ops;
 
 use crate::runtime::command::{pane_spawn_sizes, size_root_pane};
 use crate::runtime::render_schedule::InvalidationReason;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 #[cfg(test)]
 mod tests;
 
-impl Runtime {
+impl Server {
     /// Seed the first session/tab/root-pane/client for a local single-process
     /// start and return the client's id. The session is registered under
     /// `session_id` (the caller mints it so the log file can be named for the
@@ -237,7 +237,7 @@ struct TabPlan {
     focus_leaf: usize,
 }
 
-impl Runtime {
+impl Server {
     /// The spawn spec (what to launch) and record spec (what to remember) for
     /// one terminal leaf of a profile. A leaf with no command runs the default
     /// shell (honoring `terminal.default_shell`); either way the spec carries

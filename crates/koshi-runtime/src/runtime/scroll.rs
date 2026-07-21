@@ -15,9 +15,9 @@
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_session::client::Client;
 
-use crate::runtime::{render_schedule::InvalidationReason, state::Runtime};
+use crate::{runtime::render_schedule::InvalidationReason, server::Server};
 
-impl Runtime {
+impl Server {
     /// Scroll `client_id`'s view of `pane_id` up by `lines` into scrollback,
     /// clamped to the pane's retained history. An unknown client, a gone pane,
     /// or a view already at the clamp moves nothing and schedules no repaint.

@@ -36,7 +36,7 @@ use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::ModFlags;
 use koshi_session::client::{ClickCount, SelectionDragState};
 
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// How long after a press a second press still counts as a double click, and a
 /// third as a triple.
@@ -53,7 +53,7 @@ const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(15);
 /// Lines the view scrolls per firing while a drag is held past an edge.
 const SELECTION_SCROLL_LINES: usize = 1;
 
-impl Runtime {
+impl Server {
     /// Begin a selection drag in `pane_id`: record where it started and the
     /// shape `clicks` picked, drop any highlight the pane already had, and — for
     /// a double or triple click — highlight the word or line straight away.
@@ -195,7 +195,7 @@ impl Runtime {
     /// Highlight from `drag`'s anchor to the pointer at `at`, snapped to whole
     /// words or lines when the drag's shape asks for it.
     ///
-    /// Goes through [`Runtime::dispatch`] like every other mutation, so the
+    /// Goes through [`Server::dispatch`] like every other mutation, so the
     /// highlight lands in one place and emits its event there.
     fn extend_selection(&mut self, client_id: ClientId, drag: SelectionDragState, at: Point) {
         let Some(cursor) = self.text_pos_at(client_id, drag.pane, at) else {

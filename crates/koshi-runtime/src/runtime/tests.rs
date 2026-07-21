@@ -1,4 +1,4 @@
-//! Runtime-level integration: the pieces the event loop wires together across
+//! Server-level integration: the pieces the event loop wires together across
 //! the runtime submodules. A spawned pane's output reaches the inbox, the pane
 //! reports active, and the graceful quit teardown group-kills it.
 
@@ -10,13 +10,12 @@ use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::PaneId;
 use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -28,13 +27,12 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Runtime::new(
+    let mut rt = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
 

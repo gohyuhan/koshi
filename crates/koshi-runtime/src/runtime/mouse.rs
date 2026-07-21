@@ -66,12 +66,12 @@ use koshi_terminal::state::Screen;
 
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::selection::CLICK_THRESHOLD;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// Cells of horizontal drag that scroll the tab strip by one tab.
 const TABLINE_DRAG_STEP: i32 = 6;
 
-impl Runtime {
+impl Server {
     /// Route one decoded mouse event from `client_id`.
     ///
     /// Koshi acts on what it owns — a click on a tab, a border, the tab strip —

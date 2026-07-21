@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl Runtime {
+impl Server {
     /// Handle [`Command::NewPane`]: grow the source pane's tab by one pane —
     /// stacked onto the source or split from it — and spawn it, in
     /// launch-then-commit order — no session state changes until the child
@@ -164,7 +164,7 @@ impl Runtime {
             self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, prev_tab, &mut events);
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::ClosePane`]: tear the pane out of its session and
@@ -268,7 +268,7 @@ impl Runtime {
             let _ = backend.kill(pane_id, kill_policy);
         });
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Pick how a pane's child dies. `force` overrides the pane's own policy
@@ -551,7 +551,7 @@ impl Runtime {
         let rects = Self::tab_content_rects(session, target.tab_id, viewport, pane_min);
         self.reflow_changed(backend.as_ref(), rects, None, &mut events);
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
@@ -651,7 +651,7 @@ impl Runtime {
         }
 
         if prior_pane == Some(target.pane_id) && !activated && !retargeted {
-            return Ok(TransactionScope::new().commit(command_id));
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
 
         // Move the focus — which carries this client's zoom with it — BEFORE the
@@ -686,7 +686,7 @@ impl Runtime {
             }));
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::TogglePaneFullscreen`]: switch the **acting client's**
@@ -802,7 +802,7 @@ impl Runtime {
             }));
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::RenamePane`]: update the pane's display title.
@@ -836,7 +836,7 @@ impl Runtime {
 
         let events = pane_ops::rename_pane(session, target.pane_id, new_name);
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
@@ -913,7 +913,7 @@ impl Runtime {
                 self.on_input_reached_pane(client_id, target.pane_id);
             }
         }
-        Ok(TransactionScope::new().commit(command_id))
+        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
     }
 
     /// Choose the viewport a new split is sized against, and the *designated*

@@ -1,11 +1,11 @@
 //! Staged process teardown for the normal quit path, in a fixed order.
 //!
-//! The event loop calls [`Runtime::shutdown`] once it exits. Explicit quit
+//! The event loop calls [`Server::shutdown`] once it exits. Explicit quit
 //! group-kills immediately; hangup or last-pane exit keeps graceful teardown.
 //! Stages 1–4 run here; stages 5 (restore
 //! the outer terminal) and 6 (flush logs) run after this returns, as the
 //! binary's cleanup guard and tracing guard drop in that order. The panic path
-//! does not come here — it takes the abrupt [`Runtime::kill_all_panes`].
+//! does not come here — it takes the abrupt [`Server::kill_all_panes`].
 
 use std::sync::Arc;
 use std::thread;
@@ -13,9 +13,9 @@ use std::thread;
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::process::KillPolicy;
 
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
-impl Runtime {
+impl Server {
     /// Tear the process down in a fixed staged order:
     /// 1. enter draining mode (reject new IPC/plugin commands),
     /// 2. notify plugins of imminent shutdown *(seam — no host yet)*,

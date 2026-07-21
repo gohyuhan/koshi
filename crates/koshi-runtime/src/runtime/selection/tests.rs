@@ -10,23 +10,21 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use std::time::SystemTime;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 
 /// A runtime with one bootstrapped 80x24 client and its single pane.
-fn runtime() -> (Runtime, ClientId, PaneId) {
+fn runtime() -> (Server, ClientId, PaneId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut rt = Runtime::new(
+    let mut rt = Server::new(
         fake,
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     let client = rt
@@ -41,13 +39,13 @@ fn runtime() -> (Runtime, ClientId, PaneId) {
 }
 
 /// Feed `bytes` into `pane`'s terminal, so its screen has text to select.
-fn feed(rt: &mut Runtime, pane: PaneId, bytes: &[u8]) {
+fn feed(rt: &mut Server, pane: PaneId, bytes: &[u8]) {
     rt.handle_pty_output(pane, bytes);
 }
 
 /// The screen origin of `pane`'s content area: the cell its row 0, column 0
 /// draws at.
-fn origin(rt: &Runtime, client: ClientId, pane: PaneId) -> Point {
+fn origin(rt: &Server, client: ClientId, pane: PaneId) -> Point {
     let snapshot = rt.build_snapshot(client).expect("snapshot");
     koshi_renderer::pane_content_rect(&snapshot, pane)
         .expect("content rect")
@@ -55,7 +53,7 @@ fn origin(rt: &Runtime, client: ClientId, pane: PaneId) -> Point {
 }
 
 /// The screen cell for `pane`'s content row `row`, column `col`.
-fn cell_at(rt: &Runtime, client: ClientId, pane: PaneId, col: u16, row: u16) -> Point {
+fn cell_at(rt: &Server, client: ClientId, pane: PaneId, col: u16, row: u16) -> Point {
     let origin = origin(rt, client, pane);
     Point {
         x: origin.x + col,
@@ -66,7 +64,7 @@ fn cell_at(rt: &Runtime, client: ClientId, pane: PaneId, col: u16, row: u16) -> 
 /// `pane`'s last content column. Derived, not assumed: the pane's border ring
 /// eats into the client's viewport, so a pane in an 80-column terminal is
 /// narrower than 80.
-fn last_col(rt: &Runtime, client: ClientId, pane: PaneId) -> u16 {
+fn last_col(rt: &Server, client: ClientId, pane: PaneId) -> u16 {
     let snapshot = rt.build_snapshot(client).expect("snapshot");
     koshi_renderer::pane_content_rect(&snapshot, pane)
         .expect("content rect")
@@ -109,11 +107,11 @@ fn release_at(at: Point) -> MouseInput {
 
 /// Turn on this client's mouse-select mode, so a drag grabs the mouse for a
 /// koshi selection even over a program that asked for the mouse.
-fn grab_mouse(rt: &mut Runtime, client: ClientId) {
+fn grab_mouse(rt: &mut Server, client: ClientId) {
     rt.client_mut(client).expect("client").toggle_mouse_select();
 }
 
-fn select_hello(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+fn select_hello(rt: &mut Server, client: ClientId, pane: PaneId) {
     let mut clock = Clock::new();
     let from = cell_at(rt, client, pane, 0, 0);
     rt.handle_mouse_input(client, press_at(from), clock.tick());
@@ -153,12 +151,12 @@ impl Clock {
 }
 
 /// This client's highlight in `pane`.
-fn selection(rt: &mut Runtime, client: ClientId, pane: PaneId) -> Option<Selection> {
+fn selection(rt: &mut Server, client: ClientId, pane: PaneId) -> Option<Selection> {
     rt.client_mut(client).expect("client").selection(pane)
 }
 
 /// Split the focused pane and return the new pane's id.
-fn split(rt: &mut Runtime, client: ClientId) -> PaneId {
+fn split(rt: &mut Server, client: ClientId) -> PaneId {
     let before: Vec<PaneId> = rt.pty_handles.keys().copied().collect();
     let envelope = CommandEnvelope::new(
         CommandId::new(),
@@ -822,7 +820,7 @@ fn output_under_a_highlight_leaves_it_on_the_same_text_and_the_same_screen_row()
 }
 
 /// The highlight rows the client's first pane draws this frame.
-fn drawn_rows(rt: &Runtime, client: ClientId) -> Option<Vec<(u16, u16, u16)>> {
+fn drawn_rows(rt: &Server, client: ClientId) -> Option<Vec<(u16, u16, u16)>> {
     let snap = rt.build_snapshot(client).expect("snapshot");
     snap.panes[0]
         .selection

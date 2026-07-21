@@ -1,6 +1,7 @@
 //! Tests for [`TransactionScope`]: the buffer accumulates events in emission
 //! order, and `commit` seals the batch into an applied result with one freshly
-//! minted event id per buffered event, keyed to the command.
+//! minted event id per buffered event, keyed to the command, delivering the
+//! batch to the bus's subscribers.
 
 use std::collections::HashSet;
 
@@ -9,6 +10,7 @@ use koshi_core::event::{Event, LayoutChanged, TabCreated, TabFocused};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 
 use super::*;
+use crate::runtime::bus::EventFilter;
 
 #[test]
 fn a_new_scope_buffers_no_events() {
@@ -48,11 +50,12 @@ fn emit_appends_in_call_order() {
 fn commit_mints_one_unique_id_per_event_keyed_to_the_command() {
     let command_id = CommandId::new();
     let tab = TabId::new();
+    let mut bus = EventBus::new();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
 
-    match scope.commit(command_id) {
+    match scope.commit(command_id, &mut bus) {
         CommandResult::Ok {
             command_id: applied,
             emitted_events,
@@ -69,14 +72,36 @@ fn commit_mints_one_unique_id_per_event_keyed_to_the_command() {
 #[test]
 fn committing_an_empty_scope_applies_with_no_events() {
     let command_id = CommandId::new();
+    let mut bus = EventBus::new();
     let scope = TransactionScope::new();
 
     assert_eq!(
-        scope.commit(command_id),
+        scope.commit(command_id, &mut bus),
         CommandResult::Ok {
             command_id,
             emitted_events: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
+    let command_id = CommandId::new();
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let rx = bus.subscribe(EventFilter::All);
+    let mut scope = TransactionScope::new();
+    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+
+    let _ = scope.commit(command_id, &mut bus);
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Event::TabCreated(TabCreated { tab_id: tab }),
+            Event::LayoutChanged(LayoutChanged { tab_id: tab }),
+        ]
     );
 }
 
@@ -100,8 +125,9 @@ fn two_scopes_commit_independently_with_no_shared_state() {
         &[Event::TabCreated(TabCreated { tab_id: tab_a })]
     );
 
-    let result_a = scope_a.commit(command_a);
-    let result_b = scope_b.commit(command_b);
+    let mut bus = EventBus::new();
+    let result_a = scope_a.commit(command_a, &mut bus);
+    let result_b = scope_b.commit(command_b, &mut bus);
 
     // Each result carries its own command id and its own event count — no
     // cross-instance bleed.

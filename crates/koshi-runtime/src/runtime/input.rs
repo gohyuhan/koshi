@@ -1,6 +1,6 @@
 //! Outer keyboard routing: keybinding resolution first, transparent
 //! fallthrough to the focused terminal pane second. Text the outer terminal
-//! pastes routes here too ([`Runtime::handle_host_paste`]) — it is input for
+//! pastes routes here too ([`Server::handle_host_paste`]) — it is input for
 //! the same pane, delivered as one block so none of it can fire a binding.
 //!
 //! A chord that no binding consumes becomes bytes here rather than back at the
@@ -27,7 +27,7 @@
 //! focused pane the tab draws no content for — suppressed for want of space,
 //! hidden behind a fullscreen pane, collapsed to a stack header — takes
 //! nothing, and neither does a plugin pane, which has no PTY to write to. The
-//! pane a press may reach is the one `Runtime::typed_pane` names; when it names
+//! pane a press may reach is the one `Server::typed_pane` names; when it names
 //! none, the press is dropped.
 
 use std::time::{Duration, Instant, SystemTime};
@@ -46,12 +46,12 @@ use koshi_session::client::PendingKeySequence;
 
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::snapshot::solve_tab;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// The chord that backs out of an open multi-chord sequence.
 const ESCAPE: KeyChord = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Esc));
 
-impl Runtime {
+impl Server {
     /// Resolve one normalized key against the client's current mode: complete a
     /// binding, hold an open sequence, or write the press to the focused pane.
     pub fn handle_key_input(&mut self, client_id: ClientId, chord: KeyChord, now: Instant) {
