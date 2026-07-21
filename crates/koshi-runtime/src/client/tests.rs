@@ -1,4 +1,4 @@
-//! Tests for the client half: construction, viewport updates, and draining
+//! Tests for the client half: construction, viewport updates, and discarding
 //! the subscribed event feed.
 
 use std::sync::mpsc;
@@ -44,7 +44,7 @@ fn set_viewport_records_the_new_size() {
 }
 
 #[test]
-fn drain_events_takes_everything_delivered_in_order() {
+fn discard_events_drops_everything_delivered_and_counts_it() {
     let (mut client, tx) = new_client();
     let tab = TabId::new();
     tx.send(Event::TabCreated(TabCreated { tab_id: tab }))
@@ -52,12 +52,11 @@ fn drain_events_takes_everything_delivered_in_order() {
     tx.send(Event::LayoutChanged(LayoutChanged { tab_id: tab }))
         .expect("send into the subscription");
 
-    assert_eq!(
-        client.drain_events(),
-        vec![
-            Event::TabCreated(TabCreated { tab_id: tab }),
-            Event::LayoutChanged(LayoutChanged { tab_id: tab }),
-        ]
-    );
-    assert_eq!(client.drain_events(), Vec::new());
+    assert_eq!(client.discard_events(), 2);
+    assert_eq!(client.discard_events(), 0);
+
+    // The queue is empty again: a later event is delivered and discarded anew.
+    tx.send(Event::TabCreated(TabCreated { tab_id: tab }))
+        .expect("send into the subscription");
+    assert_eq!(client.discard_events(), 1);
 }

@@ -76,10 +76,12 @@ impl Client {
         self.viewport = viewport;
     }
 
-    /// Take every event the subscription has delivered since the last drain,
-    /// in emission order. Empty when nothing arrived.
-    pub fn drain_events(&mut self) -> Vec<Event> {
-        self.events.try_iter().collect()
+    /// Drop every event the subscription has delivered since the last call,
+    /// returning how many were dropped. Keeps the bounded queue from filling
+    /// while nothing consumes the feed; drops the events one by one without
+    /// collecting them.
+    pub fn discard_events(&mut self) -> usize {
+        self.events.try_iter().count()
     }
 
     /// Borrow the outer-terminal cleanup guard.

@@ -141,6 +141,56 @@ pub enum Event {
     Quit,
 }
 
+impl Event {
+    /// The variant's name, e.g. `"PaneCreated"`. Carries no payload, so it is
+    /// safe on a log line even for events whose payload holds user text.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Event::PaneCreated(_) => "PaneCreated",
+            Event::PaneProcessExited(_) => "PaneProcessExited",
+            Event::PaneClosing(_) => "PaneClosing",
+            Event::PaneRemoved(_) => "PaneRemoved",
+            Event::PaneFocused(_) => "PaneFocused",
+            Event::PtyResized(_) => "PtyResized",
+            Event::PaneOutputUpdated(_) => "PaneOutputUpdated",
+            Event::LayoutChanged(_) => "LayoutChanged",
+            Event::TabCreated(_) => "TabCreated",
+            Event::TabClosed(_) => "TabClosed",
+            Event::TabFocused(_) => "TabFocused",
+            Event::PaneRenamed(_) => "PaneRenamed",
+            Event::TabMoved(_) => "TabMoved",
+            Event::TabRenamed(_) => "TabRenamed",
+            Event::SessionRenamed(_) => "SessionRenamed",
+            Event::PaneSuppressed(_) => "PaneSuppressed",
+            Event::PaneResumed(_) => "PaneResumed",
+            Event::TerminalTooSmallEntered(_) => "TerminalTooSmallEntered",
+            Event::TerminalTooSmallExited(_) => "TerminalTooSmallExited",
+            Event::ConfigReloaded(_) => "ConfigReloaded",
+            Event::ConfigReloadFailed(_) => "ConfigReloadFailed",
+            Event::InputModeChanged(_) => "InputModeChanged",
+            Event::KeybindingMatched(_) => "KeybindingMatched",
+            Event::PaneTyped(_) => "PaneTyped",
+            Event::PaneEnterPressed(_) => "PaneEnterPressed",
+            Event::MousePressed(_) => "MousePressed",
+            Event::MouseReleased(_) => "MouseReleased",
+            Event::MouseDragged(_) => "MouseDragged",
+            Event::MouseScrolled(_) => "MouseScrolled",
+            Event::PaneMouseForwarded(_) => "PaneMouseForwarded",
+            Event::PluginMouseInput(_) => "PluginMouseInput",
+            Event::PaneCommandStarted(_) => "PaneCommandStarted",
+            Event::PaneCommandFinished(_) => "PaneCommandFinished",
+            Event::PaneScrollbackTruncated(_) => "PaneScrollbackTruncated",
+            Event::SubscriberLagged(_) => "SubscriberLagged",
+            Event::CommandRejected(_) => "CommandRejected",
+            Event::SelectionChanged(_) => "SelectionChanged",
+            Event::Copied(_) => "Copied",
+            Event::Plugin(_) => "Plugin",
+            Event::Quit => "Quit",
+        }
+    }
+}
+
 // ============================================================================
 // Pane and tab lifecycle
 // ============================================================================

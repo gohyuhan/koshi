@@ -332,9 +332,9 @@ fn run_loop<B: Backend>(
             quit |= apply_event(server, client, event).is_break();
         }
         // The embedded client renders from server snapshots, so the events its
-        // subscription delivers are drained and dropped here; the drain keeps
-        // its bounded queue from filling.
-        client.drain_events();
+        // subscription delivers are discarded here; the discard keeps its
+        // bounded queue from filling.
+        client.discard_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
         // They draw nothing and do not change renderer state.

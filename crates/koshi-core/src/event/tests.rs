@@ -637,6 +637,7 @@ fn event_variant_names_are_canonical() {
     assert_eq!(cases.len(), 40);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
+        assert_eq!(&value.name(), name);
     }
 }
 
