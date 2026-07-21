@@ -105,23 +105,56 @@ impl Connection {
     }
 }
 
+/// Buffer for one outgoing frame: 4 placeholder length bytes, then the JSON
+/// payload as encoding produces it. Refuses the payload byte that crosses
+/// [`MAX_FRAME_LEN`], which stops the encoder mid-message, so building a
+/// frame never allocates past the cap no matter how large the message is.
+struct FrameBuffer {
+    /// The frame being built: 4 placeholder bytes, then the payload so far.
+    bytes: Vec<u8>,
+    /// Set by the refused write: the payload size that write reached.
+    overflow: Option<u64>,
+}
+
+impl Write for FrameBuffer {
+    fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
+        let reached = self.bytes.len() - 4 + chunk.len();
+        if reached > MAX_FRAME_LEN as usize {
+            self.overflow = Some(reached as u64);
+            return Err(io::Error::other("frame over cap"));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Encode `message` and write it as one frame: 4-byte big-endian length, then
-/// the JSON bytes. The whole frame goes out in one `write_all`, and nothing
-/// is written when the message exceeds [`MAX_FRAME_LEN`].
+/// the JSON bytes. The whole frame goes out in one `write_all`. A message
+/// past [`MAX_FRAME_LEN`] is refused with nothing written, and its encoding
+/// stops at the byte that crossed the cap.
 fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> Result<(), IpcError> {
-    let mut frame = vec![0u8; 4];
-    serde_json::to_writer(&mut frame, message).map_err(|error| IpcError::MalformedFrame {
-        detail: error.to_string(),
-    })?;
-    let len = frame.len() - 4;
-    if len > MAX_FRAME_LEN as usize {
-        return Err(IpcError::FrameTooLarge {
-            len: len as u64,
-            max: MAX_FRAME_LEN,
+    let mut frame = FrameBuffer {
+        bytes: vec![0u8; 4],
+        overflow: None,
+    };
+    if let Err(error) = serde_json::to_writer(&mut frame, message) {
+        return Err(match frame.overflow {
+            Some(len) => IpcError::FrameTooLarge {
+                len,
+                max: MAX_FRAME_LEN,
+            },
+            None => IpcError::MalformedFrame {
+                detail: error.to_string(),
+            },
         });
     }
-    frame[..4].copy_from_slice(&(len as u32).to_be_bytes());
-    writer.write_all(&frame).map_err(io_failure)
+    let len = (frame.bytes.len() - 4) as u32;
+    frame.bytes[..4].copy_from_slice(&len.to_be_bytes());
+    writer.write_all(&frame.bytes).map_err(io_failure)
 }
 
 /// Read one frame and decode its JSON payload as `T`. The length prefix is

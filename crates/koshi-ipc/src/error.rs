@@ -25,8 +25,10 @@ pub enum IpcError {
     /// [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN). On receive, the
     /// length prefix named more bytes than the limit and the payload is left
     /// unread, so the stream is off frame boundaries and the connection must
-    /// close. On send, the encoded message exceeded the limit and nothing was
-    /// written.
+    /// close; `len` is the length the prefix named. On send, encoding stopped
+    /// at the byte that crossed the limit and nothing was written; `len` is
+    /// the payload size the refused write reached, which for a message
+    /// encoded in one piece is its full size.
     #[error("ipc frame of {len} bytes exceeds the {max}-byte limit")]
     FrameTooLarge { len: u64, max: u32 },
     /// A frame whose bytes are not a readable message: the payload arrived

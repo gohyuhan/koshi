@@ -97,10 +97,23 @@ fn oversized_message_is_refused_with_nothing_written() {
     let IpcError::FrameTooLarge { len, max } = err else {
         panic!("wrong error: {err}");
     };
-    // The JSON encoding wraps the string in two quote bytes.
-    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 2);
+    // Encoding stops at the write that crosses the cap: the opening quote
+    // byte was accepted, and the escape-free string body arrives as one
+    // refused write, so the size reached is 1 + the body.
+    assert_eq!(len, u64::from(MAX_FRAME_LEN) + 1);
     assert_eq!(max, MAX_FRAME_LEN);
     assert_eq!(written, Vec::<u8>::new());
+}
+
+#[test]
+fn message_encoding_to_exactly_the_limit_is_sent() {
+    // Two quote bytes around the body bring the payload to exactly the cap.
+    let body = "x".repeat(MAX_FRAME_LEN as usize - 2);
+    let mut written: Vec<u8> = Vec::new();
+
+    write_message(&mut written, &body).expect("write");
+    assert_eq!(written.len(), 4 + MAX_FRAME_LEN as usize);
+    assert_eq!(written[..4], MAX_FRAME_LEN.to_be_bytes());
 }
 
 #[test]
