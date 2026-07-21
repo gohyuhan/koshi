@@ -8,3 +8,5 @@ pub mod protocol;
 pub mod transport;
 /// Shared types.
 pub mod types;
+/// Socket-address trust checks and stale-socket reclaim.
+pub mod validate;

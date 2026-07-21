@@ -8,7 +8,11 @@ use thiserror::Error;
 /// A broken link ([`Transport`](IpcError::Transport),
 /// [`Disconnected`](IpcError::Disconnected)) and a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge)) are client-fatal: the affected
-/// connection must tear down, but the session keeps serving others. A frame
+/// connection must tear down, but the session keeps serving others. A socket
+/// address that fails its trust or liveness checks
+/// ([`UntrustedSocket`](IpcError::UntrustedSocket),
+/// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy))
+/// is client-fatal too: no connection comes up at all. A frame
 /// that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)) is recoverable: the stream
 /// is still aligned on frame boundaries, so the connection can answer and
@@ -35,6 +39,19 @@ pub enum IpcError {
     /// whole but did not decode, or a message failed to encode.
     #[error("ipc frame is not a readable message: {detail}")]
     MalformedFrame { detail: String },
+    /// A socket address that failed a trust check, named in `reason`: the
+    /// path is not directly inside the koshi runtime directory, that
+    /// directory is not private, or (Windows) the pipe name is outside the
+    /// `koshi-` namespace.
+    #[error("untrusted socket address {addr}: {reason}")]
+    UntrustedSocket { addr: String, reason: String },
+    /// Nothing listens at the address: what is there is a leftover from a
+    /// process that is gone, or nothing exists there at all.
+    #[error("no koshi is listening at {addr}")]
+    NoListener { addr: String },
+    /// A live listener already holds the address this process wants to bind.
+    #[error("another process is already listening at {addr}")]
+    SocketBusy { addr: String },
 }
 
 impl DomainError for IpcError {
@@ -46,7 +63,10 @@ impl DomainError for IpcError {
         match self {
             IpcError::Transport { .. }
             | IpcError::Disconnected
-            | IpcError::FrameTooLarge { .. } => Severity::ClientFatal,
+            | IpcError::FrameTooLarge { .. }
+            | IpcError::UntrustedSocket { .. }
+            | IpcError::NoListener { .. }
+            | IpcError::SocketBusy { .. } => Severity::ClientFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
     }

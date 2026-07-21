@@ -1,7 +1,8 @@
 //! Tests for [`IpcError`]: its `Display` wording and its [`DomainError`]
-//! classification. Link and refused-frame errors are client-fatal — they tear
-//! down only the affected connection, never the session — while a malformed
-//! frame is recoverable because the stream stays aligned on frame boundaries.
+//! classification. Link, refused-frame, and socket-address-check errors are
+//! client-fatal — they tear down only the affected connection, never the
+//! session — while a malformed frame is recoverable because the stream stays
+//! aligned on frame boundaries.
 
 use super::IpcError;
 use koshi_core::error::{DomainCategory, DomainError, Severity};
@@ -43,6 +44,40 @@ fn malformed_frame_display_carries_the_detail() {
 }
 
 #[test]
+fn untrusted_socket_display_names_the_address_and_reason() {
+    let err = IpcError::UntrustedSocket {
+        addr: "/tmp/evil.sock".to_string(),
+        reason: "not directly inside the koshi runtime directory".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "untrusted socket address /tmp/evil.sock: not directly inside the koshi runtime directory"
+    );
+}
+
+#[test]
+fn no_listener_display_names_the_address() {
+    let err = IpcError::NoListener {
+        addr: "/run/koshi/session-abc.sock".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "no koshi is listening at /run/koshi/session-abc.sock"
+    );
+}
+
+#[test]
+fn socket_busy_display_names_the_address() {
+    let err = IpcError::SocketBusy {
+        addr: "/run/koshi/session-abc.sock".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "another process is already listening at /run/koshi/session-abc.sock"
+    );
+}
+
+#[test]
 fn every_ipc_error_is_in_the_ipc_domain() {
     assert_eq!(
         IpcError::Transport {
@@ -62,6 +97,54 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         }
         .category(),
         DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::UntrustedSocket {
+            addr: String::new(),
+            reason: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::NoListener {
+            addr: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::SocketBusy {
+            addr: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+}
+
+#[test]
+fn socket_address_check_failures_are_client_fatal() {
+    assert_eq!(
+        IpcError::UntrustedSocket {
+            addr: String::new(),
+            reason: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::NoListener {
+            addr: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::SocketBusy {
+            addr: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
     );
 }
 
