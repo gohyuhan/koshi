@@ -265,11 +265,30 @@ fn one_listener_serves_two_callers_in_turn() {
 }
 
 #[test]
-fn connecting_where_nothing_listens_is_a_transport_error() {
-    let err = Connection::connect(&test_addr("nobody")).unwrap_err();
-    let IpcError::Transport { .. } = err else {
+fn connecting_where_nothing_listens_reports_no_listener() {
+    let expected = test_addr("nobody");
+    let err = Connection::connect(&expected).unwrap_err();
+    let IpcError::NoListener { addr } = err else {
         panic!("wrong error: {err}");
     };
+    assert_eq!(addr, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn connecting_to_a_stale_socket_file_reports_no_listener() {
+    let expected = test_addr("stalefile");
+    // `std`'s listener does not unlink its socket file on drop: the file
+    // stays behind with nothing listening, as after a crash.
+    let dead = std::os::unix::net::UnixListener::bind(&expected).expect("bind stale");
+    drop(dead);
+
+    let err = Connection::connect(&expected).unwrap_err();
+    let IpcError::NoListener { addr } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(addr, expected);
+    std::fs::remove_file(&expected).expect("cleanup");
 }
 
 #[cfg(unix)]

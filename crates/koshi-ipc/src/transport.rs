@@ -84,11 +84,20 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Connect to the listener at `addr`. Fails if nothing is listening
-    /// there.
+    /// Connect to the listener at `addr`. No listener behind the address —
+    /// a leftover file whose process is gone, or nothing there at all — is
+    /// [`IpcError::NoListener`].
     pub fn connect(addr: &str) -> Result<Connection, IpcError> {
         let name = socket_name(addr).map_err(io_failure)?;
-        let stream = socket::Stream::connect(name).map_err(io_failure)?;
+        let stream = socket::Stream::connect(name).map_err(|error| {
+            if no_listener_error(&error) {
+                IpcError::NoListener {
+                    addr: addr.to_string(),
+                }
+            } else {
+                io_failure(error)
+            }
+        })?;
         Ok(Connection { stream })
     }
 
@@ -174,6 +183,26 @@ fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, IpcErr
     serde_json::from_slice(&payload).map_err(|error| IpcError::MalformedFrame {
         detail: error.to_string(),
     })
+}
+
+/// True for the connect failures that mean "nothing answers at this
+/// address": the connection was refused (a socket file with no listener
+/// behind it), nothing exists at the address, or (Unix) the file at the
+/// address is not a socket. The errno spellings differ per OS — Linux
+/// refuses a non-socket file with `ECONNREFUSED`, macOS with `ENOTSOCK` —
+/// so both are checked.
+fn no_listener_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ENOTSOCK) {
+        return true;
+    }
+    false
 }
 
 /// Classify an IO failure: the kinds that mean "the peer is gone" become
