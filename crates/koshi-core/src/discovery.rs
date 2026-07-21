@@ -7,6 +7,10 @@
 //! printed by Koshi, usable directly as explicit `--session`/`--tab`/
 //! `--pane`/`--client` targets.
 //!
+//! [`SessionOverview`] gathers all four into one picture of a session, so a
+//! caller asking across process boundaries makes one request and filters the
+//! answer for the query it was actually given.
+//!
 //! Paths serialize as their lossy UTF-8 string, so a non-UTF-8 working
 //! directory never fails a render.
 
@@ -112,6 +116,24 @@ pub struct ClientInfo {
     pub focused_pane: Option<PaneId>,
     /// The client's modal input state.
     pub lock_state: LockMode,
+}
+
+/// One session described in full: itself, its tabs, every pane across those
+/// tabs, and the clients attached to it.
+///
+/// This is what a session answers a discovery request with. The caller keeps
+/// the rows its query asked for and drops the rest, and merges the overviews
+/// of several sessions when a query spans more than one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOverview {
+    /// The session itself.
+    pub session: SessionInfo,
+    /// The session's tabs, in tab-bar order.
+    pub tabs: Vec<TabInfo>,
+    /// Every pane in the session, across all of its tabs.
+    pub panes: Vec<PaneInfo>,
+    /// The clients currently attached to the session.
+    pub clients: Vec<ClientInfo>,
 }
 
 /// Serialize an optional path as its lossy UTF-8 string, so a path with

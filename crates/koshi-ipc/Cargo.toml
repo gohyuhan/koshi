@@ -7,3 +7,7 @@ license.workspace = true
 [dependencies]
 thiserror = "2.0.18"
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.151"

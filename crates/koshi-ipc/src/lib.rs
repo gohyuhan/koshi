@@ -3,6 +3,7 @@
 
 /// Error types.
 pub mod error;
+pub mod protocol;
 /// Transport layer.
 pub mod transport;
 /// Shared types.
