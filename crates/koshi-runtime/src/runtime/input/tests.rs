@@ -17,25 +17,23 @@ use koshi_core::ids::{PluginId, SessionId};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::Client;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::hints::KeymapHintCatalog;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
-fn runtime() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
+fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Runtime::new(
+    let mut runtime = Server::new(
         fake.clone(),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     let client = runtime
@@ -58,12 +56,12 @@ fn named(key: NamedKey) -> KeyChord {
     KeyChord::new(ModFlags::NONE, Key::Named(key))
 }
 
-fn only_pane(runtime: &Runtime) -> koshi_core::ids::PaneId {
+fn only_pane(runtime: &Server) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
 
 /// The client's scroll offset for the pane — `0` means the view follows live output.
-fn scroll_offset(runtime: &Runtime, client: ClientId, pane: koshi_core::ids::PaneId) -> usize {
+fn scroll_offset(runtime: &Server, client: ClientId, pane: koshi_core::ids::PaneId) -> usize {
     runtime
         .sessions()
         .values()
@@ -77,7 +75,7 @@ fn scroll_offset(runtime: &Runtime, client: ClientId, pane: koshi_core::ids::Pan
 
 /// A bootstrapped runtime whose one client has scrolled its view 3 lines up into a
 /// pane's history — the parked-view starting point the `scroll-on-input` tests share.
-fn runtime_scrolled_up() -> (Runtime, koshi_core::ids::PaneId, ClientId) {
+fn runtime_scrolled_up() -> (Server, koshi_core::ids::PaneId, ClientId) {
     let (mut runtime, _fake, client) = runtime();
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, &b"\n".repeat(40)); // push lines into history
@@ -88,7 +86,7 @@ fn runtime_scrolled_up() -> (Runtime, koshi_core::ids::PaneId, ClientId) {
 /// Run `command` as if `client` had issued it from a keybinding, asserting it
 /// was applied — a test that silently dispatched a rejected command would be
 /// asserting against a state it never reached.
-fn dispatch(runtime: &mut Runtime, client: ClientId, command: Command) {
+fn dispatch(runtime: &mut Server, client: ClientId, command: Command) {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::key_binding(client),
@@ -564,7 +562,7 @@ fn fullscreen_binding_toggles_the_layout_mode() {
     );
 }
 
-fn focused_pane(runtime: &Runtime, client: ClientId) -> koshi_core::ids::PaneId {
+fn focused_pane(runtime: &Server, client: ClientId) -> koshi_core::ids::PaneId {
     let session = runtime.session_for_client(client).expect("session");
     let state = session.clients.get(client).expect("client");
     state
@@ -711,15 +709,15 @@ fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
     assert_eq!(after.rows, before.rows);
 }
 
-/// Bind one `normal`-mode sequence to `action` via [`Runtime::reload_keybindings`].
-fn bind_normal(runtime: &mut Runtime, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
+/// Bind one `normal`-mode sequence to `action` via [`Server::reload_keybindings`].
+fn bind_normal(runtime: &mut Server, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
     bind_normal_all(runtime, vec![(sequence, action, args)]);
 }
 
 /// Bind one `locked`-mode sequence to `action`, keeping the shipped locked
 /// bindings (the unlock chord among them) beside it — a user layer that dropped
 /// the unlock entry would be refused by conflict detection.
-fn bind_locked(runtime: &mut Runtime, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
+fn bind_locked(runtime: &mut Server, sequence: KeySequence, action: ActionRef, args: ActionArgs) {
     let mut keys = KeybindingsConfig::default()
         .modes
         .remove(&ModeName::new("locked"))
@@ -746,7 +744,7 @@ fn bind_locked(runtime: &mut Runtime, sequence: KeySequence, action: ActionRef, 
 }
 
 /// The client's current lock mode.
-fn lock_mode(runtime: &Runtime, client: ClientId) -> LockMode {
+fn lock_mode(runtime: &Server, client: ClientId) -> LockMode {
     runtime
         .session_for_client(client)
         .expect("session")
@@ -757,11 +755,11 @@ fn lock_mode(runtime: &Runtime, client: ClientId) -> LockMode {
 }
 
 /// Bind every `(sequence, action, args)` triple in `bindings` under `normal`
-/// mode in a single [`Runtime::reload_keybindings`] call. A keybinding reload
+/// mode in a single [`Server::reload_keybindings`] call. A keybinding reload
 /// replaces the whole keybinding layer, so binding several sequences needs
 /// one call with every entry, not several calls that would each overwrite
 /// the last.
-fn bind_normal_all(runtime: &mut Runtime, bindings: Vec<(KeySequence, ActionRef, ActionArgs)>) {
+fn bind_normal_all(runtime: &mut Server, bindings: Vec<(KeySequence, ActionRef, ActionArgs)>) {
     let mut keys = BTreeMap::new();
     for (sequence, action, args) in bindings {
         keys.insert(sequence, BoundAction { action, args });

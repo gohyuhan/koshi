@@ -1,7 +1,7 @@
-//! The render-snapshot builder: freezing live [`Runtime`] state into the
+//! The render-snapshot builder: freezing live [`Server`] state into the
 //! read-only [`RenderSnapshot`] the renderer draws.
 //!
-//! [`Runtime::build_snapshot`] takes a `client_id` and produces the world the
+//! [`Server::build_snapshot`] takes a `client_id` and produces the world the
 //! way that one client sees it: its viewed tab solved into pane rectangles, and
 //! each of that tab's panes' terminal grids, cursors, and scrollback tallies
 //! copied out. The grid itself travels by reference — a per-pane
@@ -40,7 +40,7 @@ use koshi_terminal::selection::order;
 use koshi_terminal::state::Screen;
 use ratatui::style::Color;
 
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// Resolve a config theme into the renderer [`Theme`] the snapshot carries:
 /// each palette role's `#RRGGBB` value becomes the matching truecolor field.
@@ -77,7 +77,7 @@ fn rgb_color(color: RgbColor) -> Color {
     Color::Rgb(color.r, color.g, color.b)
 }
 
-impl Runtime {
+impl Server {
     /// Freeze the world the way `client_id` sees it into a [`RenderSnapshot`].
     ///
     /// Returns `None` when no attached client has that id, or its viewed tab has

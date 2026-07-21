@@ -9,25 +9,23 @@ use koshi_config::profile::parse_profile;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::SessionId;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 
-use super::{ProfileLaunchError, Runtime};
+use super::{ProfileLaunchError, Server};
 
 /// A runtime backed by a fake PTY, with no session yet.
-fn runtime() -> (Runtime, Arc<FakePtyBackend>) {
+fn runtime() -> (Server, Arc<FakePtyBackend>) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         fake.clone(),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, fake)

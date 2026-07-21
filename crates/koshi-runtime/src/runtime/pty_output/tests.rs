@@ -10,7 +10,6 @@ use std::time::Instant;
 
 use koshi_core::geometry::Direction;
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
@@ -24,26 +23,25 @@ use super::*;
 /// A bare runtime with stub services and no sessions, plus the fake PTY
 /// backend for asserting on writes. The sender is returned so the inbox stays
 /// open.
-fn new_runtime() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+fn new_runtime() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, fake, tx)
 }
 
 /// Install an 8x3 terminal engine for a fresh pane id and return the id.
-fn add_engine(rt: &mut Runtime) -> PaneId {
+fn add_engine(rt: &mut Server) -> PaneId {
     let pane_id = PaneId::new();
     rt.terminal_engines
         .insert(pane_id, TerminalEngine::new(PtySize { cols: 8, rows: 3 }));
@@ -64,7 +62,7 @@ fn spawn_in_fake(fake: &FakePtyBackend, pane_id: PaneId) {
 }
 
 /// The character at (`row`, `col`) on `pane_id`'s active grid.
-fn ch(rt: &Runtime, pane_id: PaneId, row: u16, col: u16) -> char {
+fn ch(rt: &Server, pane_id: PaneId, row: u16, col: u16) -> char {
     rt.terminal_engines()[&pane_id]
         .state()
         .active_grid()

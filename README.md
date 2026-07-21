@@ -57,7 +57,7 @@ bundled in.
 - 🎯 **Mouse Select Mode** — take the mouse back from a full-screen program that is using it, so you can select text
 - 📜 **Per-pane History** — each pane keeps its own scrollback and its own place in it
 - 🧾 **Terminal Behavior** — true color, bold and italics, full-screen programs, wide characters like CJK and emoji, box drawing
-- 🎨 **Themes** — 25 ready-made ones included (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé Pine, Solarized, and more)
+- 🎨 **Themes** — 25 ready-made config examples included (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé Pine, Solarized, and more)
 - ⚙️ **Simple Config Files** — app settings, themes, shortcuts, and saved layouts, each in its own readable file
 - 💾 **Saved Layouts** — save a set of tabs, panes, and the commands they run, then open the lot with one flag
 - 🪵 **Logging** — optional log file per session, plain text or JSON, recording ids and never your content

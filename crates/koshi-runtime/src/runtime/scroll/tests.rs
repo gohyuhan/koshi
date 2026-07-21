@@ -11,7 +11,6 @@ use koshi_core::command::{GridPos, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{Client, ClientRegistry};
@@ -22,23 +21,22 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::render_schedule::FRAME_INTERVAL;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// A runtime holding one session, one attached client, and one 1-row terminal
 /// engine for a pane — a 1-row screen so each fed newline pushes exactly one
 /// line into scrollback. Returns the runtime plus the pane and client ids.
-fn runtime_with_pane() -> (Runtime, PaneId, ClientId) {
+fn runtime_with_pane() -> (Server, PaneId, ClientId) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    let mut rt = Runtime::new(
+    let mut rt = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
 
@@ -78,7 +76,7 @@ fn runtime_with_pane() -> (Runtime, PaneId, ClientId) {
 }
 
 /// The client's current scroll offset for the pane.
-fn offset(rt: &Runtime, client: ClientId, pane: PaneId) -> usize {
+fn offset(rt: &Server, client: ClientId, pane: PaneId) -> usize {
     rt.sessions()
         .values()
         .next()
@@ -90,7 +88,7 @@ fn offset(rt: &Runtime, client: ClientId, pane: PaneId) -> usize {
 }
 
 /// Whether the client's view of the pane is held against live output.
-fn held(rt: &Runtime, client: ClientId, pane: PaneId) -> bool {
+fn held(rt: &Server, client: ClientId, pane: PaneId) -> bool {
     rt.sessions()
         .values()
         .next()
@@ -104,7 +102,7 @@ fn held(rt: &Runtime, client: ClientId, pane: PaneId) -> bool {
 /// Put the client in visual mode with a highlight in the pane, as the mouse layer
 /// does on a drag. The highlight sits on row 0 — the oldest line — which the view
 /// rules do not care about, until an erase drops every line under it.
-fn highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+fn highlight(rt: &mut Server, client: ClientId, pane: PaneId) {
     let selection = Selection {
         kind: SelectionKind::Character,
         anchor: GridPos { row: 0, col: 0 },
@@ -116,12 +114,12 @@ fn highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
 }
 
 /// Leave visual mode in `pane`, as a click or any non-copy key landing in it does.
-fn clear_highlight(rt: &mut Runtime, client: ClientId, pane: PaneId) {
+fn clear_highlight(rt: &mut Server, client: ClientId, pane: PaneId) {
     rt.client_mut(client).unwrap().clear_selection(pane);
 }
 
 /// The pane engine's current retained scrollback length.
-fn retained(rt: &Runtime, pane: PaneId) -> usize {
+fn retained(rt: &Server, pane: PaneId) -> usize {
     rt.terminal_engines
         .get(&pane)
         .unwrap()
@@ -475,7 +473,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
 
 /// The engine's effective view offset for the pane — what the renderer actually
 /// shows, which is `0` on the alternate screen however far the stored offset sits.
-fn effective_offset(rt: &Runtime, pane: PaneId, stored: usize) -> usize {
+fn effective_offset(rt: &Server, pane: PaneId, stored: usize) -> usize {
     rt.terminal_engines
         .get(&pane)
         .unwrap()

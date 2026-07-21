@@ -1,6 +1,6 @@
 //! Integration smoke for the one-pane interactive slice: genesis, PTY output
 //! forwarding, typed input, child-exit forwarding, and shutdown kill — driven
-//! through a fake PTY backend, exercising the public `Runtime` surface the
+//! through a fake PTY backend, exercising the public `Server` surface the
 //! binary's loop uses.
 
 use std::sync::mpsc;
@@ -12,29 +12,27 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::state::Runtime;
+use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
-/// A runtime driven by `fake`, holding its own inbox with a forwarder-facing
+/// A server driven by `fake`, holding its own inbox with a forwarder-facing
 /// sender clone — the shape the binary constructs.
-fn runtime_with(fake: Arc<FakePtyBackend>) -> Runtime {
+fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let backend: Arc<dyn PtyBackend> = fake;
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    Runtime::new(
+    Server::new(
         backend,
         snapshot_provider,
         storage,
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     )
 }
@@ -42,7 +40,7 @@ fn runtime_with(fake: Arc<FakePtyBackend>) -> Runtime {
 /// Receive the next event of the wanted shape, ignoring any earlier ones, or
 /// panic on timeout. The single relay forwards a pane's output before its exit,
 /// so a `ChildExit` is preceded by any trailing output.
-fn recv_matching(rt: &Runtime, mut want: impl FnMut(&RuntimeEvent) -> bool) -> RuntimeEvent {
+fn recv_matching(rt: &Server, mut want: impl FnMut(&RuntimeEvent) -> bool) -> RuntimeEvent {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let remaining = deadline
@@ -61,7 +59,7 @@ fn recv_matching(rt: &Runtime, mut want: impl FnMut(&RuntimeEvent) -> bool) -> R
 #[test]
 fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
 
     let client_id = rt
         .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
@@ -83,7 +81,7 @@ fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
 #[test]
 fn pty_output_is_forwarded_into_the_inbox() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
@@ -103,7 +101,7 @@ fn pty_output_is_forwarded_into_the_inbox() {
 #[test]
 fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     let client_id = rt
         .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
@@ -137,7 +135,7 @@ fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
 #[test]
 fn typed_keys_write_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     let client_id = rt
         .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
@@ -162,7 +160,7 @@ fn typed_keys_write_to_the_focused_pane() {
 #[test]
 fn child_exit_is_forwarded_and_ends_the_last_pane() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
@@ -193,7 +191,7 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
 #[test]
 fn trailing_output_is_forwarded_before_the_exit() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
@@ -227,7 +225,7 @@ fn trailing_output_is_forwarded_before_the_exit() {
 #[test]
 fn kill_all_panes_group_kills_the_shell() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
@@ -241,7 +239,7 @@ fn kill_all_panes_group_kills_the_shell() {
 #[test]
 fn shutdown_drains_and_graceful_group_kills_each_pane() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake.clone());
+    let mut rt = server_with(fake.clone());
     rt.bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
@@ -261,7 +259,7 @@ fn shutdown_drains_and_graceful_group_kills_each_pane() {
 #[test]
 fn shutdown_with_no_panes_drains_without_hanging() {
     let fake = Arc::new(FakePtyBackend::new());
-    let mut rt = runtime_with(fake);
+    let mut rt = server_with(fake);
     // No bootstrap: no panes are parked. Shutdown must still drain and return.
     rt.shutdown();
 

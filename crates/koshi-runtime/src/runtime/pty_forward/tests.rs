@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use koshi_core::geometry::Direction;
 use koshi_core::process::SpawnSpec;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -26,19 +25,18 @@ const DEADLINE: Duration = Duration::from_secs(5);
 
 /// A runtime sharing one fake backend, returned alongside it so a test can push
 /// output and exit through the backend. The sender keeps the inbox open.
-fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, fake, tx)

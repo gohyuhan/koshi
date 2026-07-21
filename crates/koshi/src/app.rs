@@ -2,10 +2,10 @@
 //!
 //! Startup reads the config, installs the log subscriber the config asks for,
 //! then enters raw mode + the alternate screen + mouse capture (all restored
-//! on drop or panic by a cleanup guard), builds the runtime, and seeds one
+//! on drop or panic by a cleanup guard), builds the server, and seeds one
 //! session/tab/shell pane. A background thread turns crossterm key and mouse
 //! events into inbox events; the main loop drains the inbox, applies each event
-//! to the runtime, and repaints when the render scheduler says a frame is due.
+//! to the server, and repaints when the render scheduler says a frame is due.
 //! Ctrl-Q, or the shell exiting, ends the loop.
 
 use std::io;
@@ -34,15 +34,16 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
-use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::portable::PortablePtyBackend;
 use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
+use koshi_runtime::client::Client;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
+use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::state::Runtime;
+use koshi_runtime::server::Server;
 use koshi_terminal::state::CursorShape;
 
 use crate::keys::decode_key;
@@ -136,19 +137,18 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         .inspect_err(|error| tracing::error!(%error, "could not enable bracketed paste"))?;
     tracing::info!("terminal ready");
 
-    // Build the runtime, handing it the cleanup guard so it restores the
-    // terminal when the runtime drops at the end of this function.
+    // Build the server. The cleanup guard stays out of it — the outer
+    // terminal is the client's, so the client built below holds the guard.
     let (inbox_tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
     let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::new());
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let mut runtime = Runtime::new(
+    let mut server = Server::new(
         backend,
         snapshot_provider,
         storage,
         inbox_rx,
         inbox_tx.clone(),
-        cleanup,
         // The stock default; the loaded config below supplies the real one.
         Direction::Right,
     );
@@ -159,7 +159,7 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // `keybinding.kdl` is the one file that can be read and then refused, so it
     // is the one with an outcome to report. App settings and the theme are typed
     // values that always apply, so the line above already accounts for them.
-    match runtime.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
+    match server.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
         Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
         }
@@ -186,26 +186,32 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // warning; the single shell failing to start has nothing left to fall back
     // to, so it is an error and the launch ends.
     let client_id = match profile.and_then(crate::config::load_profile) {
-        Some(template) => match runtime.bootstrap_profile(session_id, template, viewport, now) {
+        Some(template) => match server.bootstrap_profile(session_id, template, viewport, now) {
             Ok(client_id) => Ok(client_id),
             Err(err) => {
                 tracing::warn!(%err, "profile could not launch; starting a single shell");
-                runtime.bootstrap_local(session_id, viewport, now)
+                server.bootstrap_local(session_id, viewport, now)
             }
         },
-        None => runtime.bootstrap_local(session_id, viewport, now),
+        None => server.bootstrap_local(session_id, viewport, now),
     }
     .inspect_err(|error| tracing::error!(%error, "could not start the session"))?;
     tracing::info!(session_id = %session_id, client_id = %client_id, "session started");
+
+    // The client half: the view side of the process. It subscribes to the
+    // server's events and holds the cleanup guard, since the outer terminal
+    // it restores is the client's.
+    let events_rx = server.subscribe(EventFilter::All);
+    let mut client = Client::new(client_id, viewport, events_rx, cleanup);
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
 
     // Run the loop, then tear down however it ended — see [`teardown`].
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        run_loop(&mut runtime, &mut terminal, client_id)
+        run_loop(&mut server, &mut client, &mut terminal)
     }));
-    teardown(&mut runtime, outcome)
+    teardown(&mut server, outcome)
         .inspect_err(|error| tracing::error!(%error, "the render loop failed"))?;
     Ok(())
 }
@@ -226,36 +232,36 @@ fn ensure_koshi_dirs() {
     }
 }
 
-/// Tear the runtime down for whichever way the loop ended. A normal return —
+/// Tear the server down for whichever way the loop ended. A normal return —
 /// a clean quit or the loop's own I/O error — runs staged shutdown. Explicit
 /// quit uses immediate group-kill; natural/error exits use graceful group-kill;
 /// both then persist and hand back the loop's result for [`run`] to
 /// propagate. A caught panic takes the abrupt path — immediately group-kill
 /// every child so none is orphaned, then re-raise, so the panic still unwinds
-/// `runtime` and its cleanup guard restores the terminal (and the tracing
+/// `server` and its cleanup guard restores the terminal (and the tracing
 /// guard flushes logs) as before.
 ///
 /// Generic over the loop's error type so it threads through unchanged and a
 /// test can drive it with any backend.
-fn teardown<E>(runtime: &mut Runtime, outcome: thread::Result<Result<(), E>>) -> Result<(), E> {
+fn teardown<E>(server: &mut Server, outcome: thread::Result<Result<(), E>>) -> Result<(), E> {
     match outcome {
         Ok(result) => {
             tracing::info!("shutting down");
-            runtime.shutdown();
+            server.shutdown();
             result
         }
         Err(panic) => {
             // Nothing anticipated this, so there is no fallback to take: every
             // child is killed and the panic is re-raised.
             tracing::error!("koshi panicked; killing every pane");
-            runtime.kill_all_panes();
+            server.kill_all_panes();
             resume_unwind(panic);
         }
     }
 }
 
 /// Block on crossterm events and forward decoded keys plus every terminal
-/// resize into the runtime inbox. Read failure means terminal hangup and quits.
+/// resize into the server inbox. Read failure means terminal hangup and quits.
 fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId) {
     thread::spawn(move || loop {
         let runtime_event = match event::read() {
@@ -294,136 +300,81 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
 /// hangup) arrives, or no pane remains. Generic over the backend so a test
 /// can drive it headlessly.
 fn run_loop<B: Backend>(
-    runtime: &mut Runtime,
+    server: &mut Server,
+    client: &mut Client,
     terminal: &mut Terminal<B>,
-    client_id: ClientId,
 ) -> Result<(), B::Error> {
     let mut last_title = String::new();
     let mut last_cursor = None;
     loop {
         let now = Instant::now();
         let next = earliest(
-            earliest(
-                runtime.next_render_wakeup(now),
-                runtime.next_key_wakeup(now),
-            ),
-            runtime.next_selection_scroll_wakeup(now),
+            earliest(server.next_render_wakeup(now), server.next_key_wakeup(now)),
+            server.next_selection_scroll_wakeup(now),
         );
         let event = match next {
-            Some(timeout) => match runtime.inbox_rx().recv_timeout(timeout) {
+            Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
                 Ok(event) => Some(event),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
-            None => match runtime.inbox_rx().recv() {
+            None => match server.inbox_rx().recv() {
                 Ok(event) => Some(event),
                 Err(_) => break,
             },
         };
         let mut quit = false;
         if let Some(event) = event {
-            quit |= handle_event(runtime, event).is_break();
+            quit |= apply_event(server, client, event).is_break();
         }
         // Apply anything else already queued before painting one frame.
-        while let Ok(event) = runtime.inbox_rx().try_recv() {
-            quit |= handle_event(runtime, event).is_break();
+        while let Ok(event) = server.inbox_rx().try_recv() {
+            quit |= apply_event(server, client, event).is_break();
         }
+        // The embedded client renders from server snapshots, so the events its
+        // subscription delivers are drained and dropped here; the drain keeps
+        // its bounded queue from filling.
+        client.drain_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
         // They draw nothing and do not change renderer state.
-        if let Some(bytes) = runtime.take_host_writes(client_id) {
+        if let Some(bytes) = server.take_host_writes(client.id()) {
             use std::io::Write;
             let mut stdout = std::io::stdout();
             let _ = stdout.write_all(&bytes);
             let _ = stdout.flush();
         }
-        if quit || runtime.quit_requested() {
+        if quit || server.quit_requested() {
             break;
         }
-        runtime.expire_key_sequences(Instant::now());
-        runtime.expire_selection_scrolls(Instant::now());
-        if runtime.poll_render(Instant::now()) {
+        server.expire_key_sequences(Instant::now());
+        server.expire_selection_scrolls(Instant::now());
+        if server.poll_render(Instant::now()) {
             render(
                 terminal,
-                runtime,
-                client_id,
+                server,
+                client.id(),
                 &mut last_title,
                 &mut last_cursor,
             )?;
         }
-        if !runtime.has_active_panes() {
+        if !server.has_active_panes() {
             break;
         }
     }
     Ok(())
 }
 
-/// Route one inbox event to its runtime handler. Returns
+/// Hand one inbox event to the server, first letting the client record its
+/// own terminal's new size when the event is that client's resize. Returns
 /// [`ControlFlow::Break`] when the event is a quit request, so the loop stops.
-/// A [`RuntimeEvent::Quit`] is a terminal hangup — explicit quit travels
-/// through the `core:quit` command — so it breaks the loop and leaves
-/// teardown on the graceful path.
-fn handle_event(runtime: &mut Runtime, event: RuntimeEvent) -> ControlFlow<()> {
-    match event {
-        RuntimeEvent::Quit => return ControlFlow::Break(()),
-        RuntimeEvent::PtyOutput { pane_id, bytes } => runtime.handle_pty_output(pane_id, &bytes),
-        RuntimeEvent::ChildExit {
-            pane_id,
-            status,
-            exited_at,
-        } => {
-            record(runtime.handle_child_exit(pane_id, status, exited_at));
-        }
-        RuntimeEvent::KeyInput { client_id, chord } => {
-            runtime.handle_key_input(client_id, chord, Instant::now());
-        }
-        RuntimeEvent::MouseInput { client_id, mouse } => {
-            runtime.handle_mouse_input(client_id, mouse, Instant::now());
-        }
-        RuntimeEvent::HostPaste { client_id, text } => {
-            runtime.handle_host_paste(client_id, &text);
-        }
-        RuntimeEvent::ClientAttached {
-            session_id,
-            client_id,
-            viewport,
-            active_tab,
-            attached_at,
-        } => {
-            record(runtime.handle_client_attach(
-                session_id,
-                client_id,
-                viewport,
-                active_tab,
-                attached_at,
-            ));
-        }
-        RuntimeEvent::ClientDetached { client_id } => {
-            record(runtime.handle_client_detach(client_id));
-        }
-        RuntimeEvent::Resize { client_id, size } => {
-            record(runtime.handle_client_resize(client_id, size));
-        }
-        RuntimeEvent::Timer => runtime.expire_key_sequences(Instant::now()),
-        RuntimeEvent::Ipc(envelope) | RuntimeEvent::Plugin(envelope) => {
-            let _ = runtime.dispatch(envelope);
+fn apply_event(server: &mut Server, client: &mut Client, event: RuntimeEvent) -> ControlFlow<()> {
+    if let RuntimeEvent::Resize { client_id, size } = &event {
+        if *client_id == client.id() {
+            client.set_viewport(*size);
         }
     }
-    ControlFlow::Continue(())
-}
-
-/// Log a runtime handler's events, then drop them.
-///
-/// A command's events are logged where the command's transaction is sealed. The
-/// handlers reached here run outside any command — a child process exiting, a
-/// client attaching, detaching, or resizing — so their events never reach that
-/// seal. Until the event bus exists to deliver them, this call is where they
-/// end, so it is also where they are recorded: without it, a shell exiting and
-/// its pane closing would leave nothing in the log.
-fn record(events: Vec<koshi_core::event::Event>) {
-    for event in &events {
-        log_event(event);
-    }
+    server.handle_runtime_event(event)
 }
 
 fn earliest(
@@ -445,12 +396,12 @@ fn earliest(
 /// so frames that move nothing emit nothing.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
-    runtime: &Runtime,
+    server: &Server,
     client_id: ClientId,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), B::Error> {
-    let Some(snapshot) = runtime.build_snapshot(client_id) else {
+    let Some(snapshot) = server.build_snapshot(client_id) else {
         return Ok(());
     };
     let title = window_title(&snapshot);

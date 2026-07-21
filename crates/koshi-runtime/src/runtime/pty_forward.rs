@@ -20,9 +20,9 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::scrollback::ScrollbackLimit;
 
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
-impl Runtime {
+impl Server {
     /// Register a freshly spawned pane's PTY: hand its receivers to forwarder
     /// threads, then record its handle (as the live-pane token), its size, and
     /// a new terminal engine. Every spawn path funnels through here so output

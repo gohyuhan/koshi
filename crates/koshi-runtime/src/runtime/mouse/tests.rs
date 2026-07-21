@@ -1,7 +1,7 @@
 //! Mouse routing tests: a tab click focuses the tab and clears the peek, a
 //! scroll arrow and the wheel peek the strip, and a tabline drag scrolls it.
 //!
-//! Client state is read back through [`Runtime::build_snapshot`] — the same
+//! Client state is read back through [`Server::build_snapshot`] — the same
 //! projection the renderer draws — so a test never reaches into private client
 //! fields.
 
@@ -14,13 +14,12 @@ use koshi_core::command::{GridPos, NewPaneArgs, NewTabArgs, Selection, Selection
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::ModFlags;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::hit_test;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 
-fn runtime() -> (Runtime, ClientId) {
+fn runtime() -> (Server, ClientId) {
     let (runtime, _fake, client) = runtime_with_fake();
     (runtime, client)
 }
@@ -32,8 +31,8 @@ fn runtime() -> (Runtime, ClientId) {
 /// them, so a test that pressed twice at the wall clock would double-click by
 /// accident. Every event here is stamped an hour on, which no threshold reaches.
 /// A test that wants a real double click drives
-/// [`Runtime::handle_mouse_input`] with its own instants.
-fn mouse(runtime: &mut Runtime, client: ClientId, input: MouseInput) {
+/// [`Server::handle_mouse_input`] with its own instants.
+fn mouse(runtime: &mut Server, client: ClientId, input: MouseInput) {
     runtime.handle_mouse_input(client, input, far_apart());
 }
 
@@ -46,16 +45,15 @@ fn far_apart() -> Instant {
     Instant::now() + Duration::from_secs(hours * 3600)
 }
 
-fn runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
+fn runtime_with_fake() -> (Server, Arc<FakePtyBackend>, ClientId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
-    let mut runtime = Runtime::new(
+    let mut runtime = Server::new(
         fake.clone(),
         Arc::new(NullSnapshotProvider),
         Arc::new(NullStorage),
         rx,
         tx,
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     let client = runtime
@@ -69,13 +67,13 @@ fn runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, ClientId) {
 }
 
 /// The client's single bootstrap pane.
-fn only_pane(runtime: &Runtime) -> PaneId {
+fn only_pane(runtime: &Server) -> PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
 
 /// A screen cell inside `pane`'s content, with the 1-based pane-local column and
 /// row a mouse report would carry for it.
-fn a_content_cell(runtime: &Runtime, client: ClientId, pane: PaneId) -> (Point, u16, u16) {
+fn a_content_cell(runtime: &Server, client: ClientId, pane: PaneId) -> (Point, u16, u16) {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     for y in 0..viewport.rows {
@@ -98,7 +96,7 @@ fn press(x: u16, y: u16) -> MouseInput {
     }
 }
 
-fn add_tab(runtime: &mut Runtime, client: ClientId) {
+fn add_tab(runtime: &mut Server, client: ClientId) {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::key_binding(client),
@@ -111,7 +109,7 @@ fn add_tab(runtime: &mut Runtime, client: ClientId) {
 /// The first cell on the tabline row whose hit region satisfies `pred`, scanning
 /// from `min_x`.
 fn find_on_tabline(
-    runtime: &Runtime,
+    runtime: &Server,
     client: ClientId,
     min_x: u16,
     pred: impl Fn(HitRegion) -> bool,
@@ -122,7 +120,7 @@ fn find_on_tabline(
         .expect("a matching tabline cell")
 }
 
-fn offset(runtime: &Runtime, client: ClientId) -> Option<usize> {
+fn offset(runtime: &Server, client: ClientId) -> Option<usize> {
     runtime
         .build_snapshot(client)
         .expect("snapshot")
@@ -381,7 +379,7 @@ fn release() -> MouseInput {
 
 /// Split the focused pane in the runtime's default direction (Right), leaving
 /// the tab with two side-by-side panes and a vertical border between them.
-fn split_focused(runtime: &mut Runtime, client: ClientId) {
+fn split_focused(runtime: &mut Server, client: ClientId) {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::key_binding(client),
@@ -392,7 +390,7 @@ fn split_focused(runtime: &mut Runtime, client: ClientId) {
 }
 
 /// The solved width, in columns, of `pane`'s box in `client`'s current frame.
-fn pane_cols(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
+fn pane_cols(runtime: &Server, client: ClientId, pane: PaneId) -> u16 {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     snapshot
         .session
@@ -410,7 +408,7 @@ fn pane_cols(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
 /// border nearest the horizontal center, so it is the shared divider rather than
 /// the pane area's outer frame at either edge. Panics if the frame has no
 /// vertical border.
-fn find_vertical_border(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+fn find_vertical_border(runtime: &Server, client: ClientId) -> (Point, PaneId, Direction) {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     let y = viewport.rows / 2;
@@ -675,7 +673,7 @@ fn advance_toward_moves_the_anchor_toward_the_pointer_and_saturates() {
 
 /// Split the focused pane downward, leaving the tab with a top and bottom pane
 /// and a horizontal border between them.
-fn split_focused_vertical(runtime: &mut Runtime, client: ClientId) {
+fn split_focused_vertical(runtime: &mut Server, client: ClientId) {
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::key_binding(client),
@@ -689,7 +687,7 @@ fn split_focused_vertical(runtime: &mut Runtime, client: ClientId) {
 }
 
 /// The solved height, in rows, of `pane`'s box in `client`'s current frame.
-fn pane_rows(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
+fn pane_rows(runtime: &Server, client: ClientId, pane: PaneId) -> u16 {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     snapshot
         .session
@@ -706,7 +704,7 @@ fn pane_rows(runtime: &Runtime, client: ClientId, pane: PaneId) -> u16 {
 /// A cell on the horizontal divider between a top and bottom pane: the up/down
 /// border nearest the vertical center, so it is the shared divider rather than
 /// the outer frame. Panics if the frame has no horizontal border.
-fn find_horizontal_border(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+fn find_horizontal_border(runtime: &Server, client: ClientId) -> (Point, PaneId, Direction) {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     let x = viewport.cols / 2;
@@ -737,7 +735,7 @@ fn outward_y(side: Direction, y: u16, n: u16) -> u16 {
 
 /// The rightmost vertical border in the frame: the pane area's outer right
 /// frame, which has no neighbor on its outward side.
-fn find_outer_vertical_frame(runtime: &Runtime, client: ClientId) -> (Point, PaneId, Direction) {
+fn find_outer_vertical_frame(runtime: &Server, client: ClientId) -> (Point, PaneId, Direction) {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     let y = viewport.rows / 2;
@@ -1155,7 +1153,7 @@ fn wheel(direction: ScrollDirection, at: Point) -> MouseInput {
 }
 
 /// The client's scrollback view offset for a pane.
-fn scroll_offset(runtime: &Runtime, client: ClientId, pane: PaneId) -> usize {
+fn scroll_offset(runtime: &Server, client: ClientId, pane: PaneId) -> usize {
     runtime
         .sessions()
         .values()
@@ -1168,7 +1166,7 @@ fn scroll_offset(runtime: &Runtime, client: ClientId, pane: PaneId) -> usize {
 }
 
 /// Whether the client has a highlight up in the pane.
-fn has_highlight(runtime: &Runtime, client: ClientId, pane: PaneId) -> bool {
+fn has_highlight(runtime: &Server, client: ClientId, pane: PaneId) -> bool {
     runtime
         .sessions()
         .values()
@@ -1182,7 +1180,7 @@ fn has_highlight(runtime: &Runtime, client: ClientId, pane: PaneId) -> bool {
 }
 
 /// The pane the client's pointer is marked as hovering over.
-fn hovered(runtime: &Runtime, client: ClientId) -> Option<PaneId> {
+fn hovered(runtime: &Server, client: ClientId) -> Option<PaneId> {
     runtime
         .build_snapshot(client)
         .expect("snapshot")
@@ -1192,14 +1190,14 @@ fn hovered(runtime: &Runtime, client: ClientId) -> Option<PaneId> {
 
 /// Fill a pane's scrollback with `lines` lines by printing that many newlines,
 /// so a scroll up has room to move.
-fn feed_scrollback(runtime: &mut Runtime, pane: PaneId, lines: usize) {
+fn feed_scrollback(runtime: &mut Server, pane: PaneId, lines: usize) {
     for _ in 0..lines {
         runtime.handle_pty_output(pane, b"x\r\n");
     }
 }
 
 /// Put a highlight in the pane, as a drag would, so the view is held.
-fn set_highlight(runtime: &mut Runtime, client: ClientId, pane: PaneId) {
+fn set_highlight(runtime: &mut Server, client: ClientId, pane: PaneId) {
     runtime.client_mut(client).unwrap().set_selection(
         pane,
         Selection {
@@ -1521,7 +1519,7 @@ fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
 
 /// A screen cell that is chrome, not any pane's content — a pane border, the
 /// status line, or a gap — where a wheel falls through to the focused pane.
-fn a_chrome_cell(runtime: &Runtime, client: ClientId) -> Point {
+fn a_chrome_cell(runtime: &Server, client: ClientId) -> Point {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let viewport = snapshot.client.viewport;
     for y in 0..viewport.rows {

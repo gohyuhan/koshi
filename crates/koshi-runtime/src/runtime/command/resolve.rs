@@ -1,15 +1,15 @@
-//! Target resolution and admission checks for [`Runtime`] command dispatch.
+//! Target resolution and admission checks for [`Server`] command dispatch.
 //!
 //! Every command names — or implies — the session, client, tab, or pane it acts
 //! on. The methods here turn that into a concrete, validated target, or a
 //! [`Rejection`] saying why it cannot: no such pane, several clients with none
-//! named, a session shutting down. [`Runtime::validate`] runs them as the last
+//! named, a session shutting down. [`Server::validate`] runs them as the last
 //! gate before a handler mutates state, so a handler always receives a target it
 //! can trust.
 
 use super::*;
 
-impl Runtime {
+impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
     /// universal checks in fixed precedence: source policy, source-client
     /// liveness, session admission, then target resolution. Returns the first

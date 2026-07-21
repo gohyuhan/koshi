@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Runtime {
+impl Server {
     /// Resolve a tab-addressed command ([`Command::CloseTab`],
     /// [`Command::RenameTab`], [`Command::MoveTab`]): the explicit `tab`
     /// argument, else the source's active tab, together with the owning
@@ -128,7 +128,7 @@ impl Runtime {
             self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, prev_tab, &mut events);
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::CloseTab`]: tear the tab and every pane in it out of
@@ -217,7 +217,7 @@ impl Runtime {
             });
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::RenameTab`]: update the tab's display name.
@@ -241,7 +241,7 @@ impl Runtime {
 
         let events = tab_ops::rename_tab(session, tab_id, new_name);
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::FocusTab`]: switch the designated client's view to
@@ -279,7 +279,7 @@ impl Runtime {
         // Already viewing it — nothing to do, and no events: events are
         // completed facts.
         if prior_tab == target.tab_id {
-            return Ok(TransactionScope::new().commit(command_id));
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
 
         let mut events = tab_ops::focus_tab(
@@ -295,7 +295,7 @@ impl Runtime {
             self.reflow_tab_if_viewed(backend.as_ref(), target.session_id, tab_id, &mut events);
         }
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
@@ -318,6 +318,6 @@ impl Runtime {
 
         let events = tab_ops::move_tab(session, tab_id, args.index);
 
-        Ok(Self::commit_events(command_id, events))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 }

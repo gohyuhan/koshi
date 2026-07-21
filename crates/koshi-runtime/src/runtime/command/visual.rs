@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Runtime {
+impl Server {
     /// Route a [`Command::Visual`] sub-command to its handler.
     ///
     /// Every variant acts on the issuing client's own highlights — a highlight
@@ -53,6 +53,7 @@ impl Runtime {
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         client.set_selection(args.pane, args.selection);
         Ok(Self::commit_events(
+            &mut self.event_bus,
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
@@ -91,6 +92,7 @@ impl Runtime {
             client.set_selection_drag(None);
         }
         Ok(Self::commit_events(
+            &mut self.event_bus,
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,

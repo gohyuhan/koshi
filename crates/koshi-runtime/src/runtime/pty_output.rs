@@ -2,7 +2,7 @@
 //!
 //! A [`RuntimeEvent::PtyOutput`](crate::runtime::event::RuntimeEvent::PtyOutput)
 //! carries the raw bytes one pane's child wrote, already keyed by pane id.
-//! [`Runtime::handle_pty_output`] routes them into that pane's
+//! [`Server::handle_pty_output`] routes them into that pane's
 //! [`TerminalEngine`](koshi_terminal::engine::TerminalEngine) — updating its
 //! grid, cursor, and modes — writes the engine's device-query replies
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
@@ -13,9 +13,9 @@
 
 use koshi_core::ids::PaneId;
 
-use crate::runtime::{render_schedule::InvalidationReason, state::Runtime};
+use crate::{runtime::render_schedule::InvalidationReason, server::Server};
 
-impl Runtime {
+impl Server {
     /// Feed one chunk of child output into `pane_id`'s terminal engine, write
     /// any device-query replies the chunk produced back into the pane's PTY,
     /// and mark the screen stale with [`InvalidationReason::PtyOutput`].

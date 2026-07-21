@@ -1,5 +1,13 @@
-//! The runtime state container: the single owner of every live piece of one
-//! running koshi process, driven by the event loop.
+//! The server half of the in-process ownership split: the single owner of all
+//! authoritative session state, driven by the event loop.
+//!
+//! A [`Server`] owns the sessions and their layout trees, the per-pane
+//! terminal engines, the shared PTY backend, the action registry, and the
+//! service handles the event loop drives. The view side lives in
+//! [`Client`](crate::client::Client); the two halves talk only through the
+//! server's doors — [`Server::submit_command`] carries a client's command in,
+//! [`Server::subscribe`] carries the emitted events out — so the server never
+//! reads client view state and a client never mutates session or pane data.
 
 use std::{
     collections::HashMap,
@@ -10,30 +18,39 @@ use std::{
 };
 
 use koshi_config::types::KoshiConfig;
+use koshi_core::command::{CommandEnvelope, CommandResult};
+use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
-use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_observability::logging::event_log::log_event;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_renderer::theme::Theme;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
-    placeholder::{EventBus, IpcServer, SnapshotProvider, Storage},
+    placeholder::{IpcServer, SnapshotProvider, Storage},
     runtime::{
-        event::RuntimeEvent, hints::KeymapHintCatalog, reload::ConfigLayers,
-        render_schedule::RenderScheduler, snapshot::resolve_theme,
+        bus::{EventBus, EventFilter},
+        event::RuntimeEvent,
+        hints::KeymapHintCatalog,
+        reload::ConfigLayers,
+        render_schedule::RenderScheduler,
+        snapshot::resolve_theme,
     },
 };
 
-/// Owns all mutable state for one koshi process: the sessions and their layout
-/// trees, the per-pane terminal engines, the shared PTY backend, the action
-/// registry, and the service handles the event loop drives. One process holds
-/// exactly one.
-pub struct Runtime {
+/// The authoritative half of one koshi process: owns the sessions and their
+/// layout trees, the per-pane terminal engines, the shared PTY backend, the
+/// action registry, and the service handles the event loop drives. One
+/// process holds exactly one. The view side — viewport, rendering, the
+/// subscribed event feed — lives in [`Client`](crate::client::Client), which
+/// reaches session state only through [`submit_command`](Self::submit_command)
+/// and [`subscribe`](Self::subscribe).
+pub struct Server {
     /// Every session in this process, keyed by id. Each session owns its tabs,
     /// layout trees, pane registry, and clients.
     pub(crate) sessions: HashMap<SessionId, Session>,
@@ -54,8 +71,9 @@ pub struct Runtime {
     /// [`Event::PtyResized`](koshi_core::event::Event::PtyResized)) only for panes
     /// whose size actually changed — never re-solving to a stale reference.
     pub(crate) pty_sizes: HashMap<PaneId, PtySize>,
-    /// Event fan-out hub for subscribers.
-    event_bus: EventBus,
+    /// Event fan-out hub: every emitted [`Event`] is delivered to each
+    /// subscriber over its own bounded queue.
+    pub(crate) event_bus: EventBus,
     /// Source of render snapshots for attach and overflow resync.
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
@@ -93,8 +111,6 @@ pub struct Runtime {
     /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
     /// they can push [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`].
     pub(crate) inbox_tx: Sender<RuntimeEvent>,
-    /// Restores the outer terminal when the process ends or panics.
-    cleanup_guard: TerminalCleanupGuard,
     /// Set once shutdown begins, so that — once IPC/plugin command intake
     /// exists — newly-arriving commands will be rejected rather than mutate
     /// state mid-teardown. One-way; no command-dispatch path checks it yet —
@@ -113,10 +129,10 @@ pub struct Runtime {
     host_writes: HashMap<ClientId, Vec<u8>>,
 }
 
-impl Runtime {
-    /// Build a runtime with no sessions, no terminal engines, a fresh render
-    /// scheduler, and an action registry holding the built-in actions, holding
-    /// the given PTY backend, service handles, event inbox, cleanup guard,
+impl Server {
+    /// Build a server with no sessions, no terminal engines, no subscribers, a
+    /// fresh render scheduler, and an action registry holding the built-in
+    /// actions, holding the given PTY backend, service handles, event inbox,
     /// and the default split direction for new panes. The direction seeds the
     /// initial app config layer; a `koshi.kdl` reload replaces it.
     pub fn new(
@@ -125,20 +141,19 @@ impl Runtime {
         storage: Arc<dyn Storage>,
         inbox_rx: Receiver<RuntimeEvent>,
         inbox_tx: Sender<RuntimeEvent>,
-        cleanup_guard: TerminalCleanupGuard,
         default_new_pane_direction: Direction,
     ) -> Self {
         let action_registry = ActionRegistry::new();
         let config_layers =
             ConfigLayers::with_default_new_pane_direction(default_new_pane_direction);
         let config = config_layers.effective();
-        Runtime {
+        Server {
             sessions: HashMap::new(),
             pty_backend,
             terminal_engines: HashMap::new(),
             pty_handles: HashMap::new(),
             pty_sizes: HashMap::new(),
-            event_bus: EventBus,
+            event_bus: EventBus::new(),
             snapshot_provider,
             storage,
             ipc_server: None,
@@ -148,13 +163,37 @@ impl Runtime {
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
             inbox_tx,
-            cleanup_guard,
             draining: false,
             immediate_shutdown: false,
             quit_requested: false,
             host_writes: HashMap::new(),
             config_layers,
             config,
+        }
+    }
+
+    /// The client→server door: dispatch one command envelope against live
+    /// state and hand back its result. The only way a client-side caller
+    /// requests a session/pane mutation.
+    pub fn submit_command(&mut self, envelope: CommandEnvelope) -> CommandResult {
+        self.dispatch(envelope)
+    }
+
+    /// The server→client door: register a subscriber for the events `filter`
+    /// selects and hand back the receiving end of its own bounded queue.
+    /// Dropping the receiver ends the subscription.
+    pub fn subscribe(&mut self, filter: EventFilter) -> Receiver<Event> {
+        self.event_bus.subscribe(filter)
+    }
+
+    /// Log each of `events`, then deliver it to every subscriber. The shared
+    /// tail of every handler that emits events outside a command transaction
+    /// (attach, detach, resize, child exit); a command's events pass through
+    /// the same pair when its transaction is sealed.
+    pub(crate) fn publish_events(&mut self, events: &[Event]) {
+        for event in events {
+            log_event(event);
+            self.event_bus.publish(event);
         }
     }
 
@@ -226,10 +265,6 @@ impl Runtime {
     /// Borrow the runtime event inbox receiver.
     pub fn inbox_rx(&self) -> &Receiver<RuntimeEvent> {
         &self.inbox_rx
-    }
-    /// Borrow the terminal cleanup guard.
-    pub fn cleanup_guard(&self) -> &TerminalCleanupGuard {
-        &self.cleanup_guard
     }
     /// Whether shutdown has begun. Once command intake exists it will gate new
     /// commands; today it only records that teardown started.

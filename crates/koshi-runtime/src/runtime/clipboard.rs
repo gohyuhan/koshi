@@ -15,7 +15,7 @@ use base64::Engine;
 use koshi_config::types::ClipboardBackend;
 use koshi_core::ids::ClientId;
 
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
 /// One destination that can receive copied text.
 pub(crate) trait ClipboardWriter {
@@ -49,7 +49,7 @@ pub(crate) fn osc52_copy(text: &str) -> Vec<u8> {
     bytes
 }
 
-impl Runtime {
+impl Server {
     /// Write `text` to the clipboard backend selected by the current config.
     ///
     /// OSC 52 is the only backend koshi builds today; a native backend plugs a

@@ -2,10 +2,6 @@
 //! exist. Each is replaced in place once its owning crate ships the concrete
 //! type; the runtime field and these names change together at that point.
 
-/// Event fan-out hub. Stand-in until the bounded subscriber queue is built.
-#[derive(Debug)]
-pub struct EventBus;
-
 /// Control-socket server handle. Stand-in until the IPC layer is built.
 #[derive(Debug)]
 pub struct IpcServer;

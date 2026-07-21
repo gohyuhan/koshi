@@ -12,7 +12,6 @@ use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
@@ -28,20 +27,19 @@ use ratatui::style::Color;
 use super::resolve_theme;
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::state::Runtime;
+use crate::server::Server;
 
-fn new_runtime() -> Runtime {
+fn new_runtime() -> Server {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    Runtime::new(
+    Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     )
 }
@@ -188,7 +186,7 @@ fn mouse_select_mode_flips_its_hint_label() {
         session_with_client(Size { cols: 80, rows: 24 });
     rt.sessions.insert(session_id, session);
 
-    let has_label = |rt: &mut Runtime, label: &str| {
+    let has_label = |rt: &mut Server, label: &str| {
         rt.build_snapshot(client_id)
             .expect("snapshot")
             .keymap_hints
@@ -547,7 +545,7 @@ fn shorten_home_replaces_the_prefix_only_on_a_path_boundary() {
 // ============================================================================
 
 /// A runtime with one client and a pane whose terminal has run `bytes`.
-fn runtime_with_text(bytes: &[u8]) -> (Runtime, PaneId, ClientId) {
+fn runtime_with_text(bytes: &[u8]) -> (Server, PaneId, ClientId) {
     let mut rt = new_runtime();
     let (session, session_id, _tab, pane_id, client_id) =
         session_with_client(Size { cols: 80, rows: 24 });
@@ -559,7 +557,7 @@ fn runtime_with_text(bytes: &[u8]) -> (Runtime, PaneId, ClientId) {
 }
 
 /// The highlight rows the frame carries for the client's only pane.
-fn spans(rt: &Runtime, client: ClientId) -> Option<Vec<(u16, u16, u16)>> {
+fn spans(rt: &Server, client: ClientId) -> Option<Vec<(u16, u16, u16)>> {
     let snap = rt.build_snapshot(client).expect("snapshot");
     snap.panes[0]
         .selection

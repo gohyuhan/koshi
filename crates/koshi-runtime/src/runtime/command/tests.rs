@@ -27,7 +27,6 @@ use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutChild, SplitNode};
-use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
@@ -46,18 +45,17 @@ use super::*;
 
 /// A bare runtime with stub services and no sessions. The sender is returned so
 /// the inbox stays open.
-fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
+fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, tx)
@@ -66,19 +64,18 @@ fn new_runtime() -> (Runtime, mpsc::Sender<RuntimeEvent>) {
 /// Like [`new_runtime`], but also hands back the concrete fake backend so a test
 /// can drive spawn failures and assert on spawned panes, specs, and resizes.
 /// Both the runtime and the returned handle share one backend.
-fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let fake = Arc::new(FakePtyBackend::new());
     let pty_backend: Arc<dyn PtyBackend> = fake.clone();
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let runtime = Runtime::new(
+    let runtime = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
     (runtime, fake, tx)
@@ -86,7 +83,7 @@ fn new_runtime_with_fake() -> (Runtime, Arc<FakePtyBackend>, mpsc::Sender<Runtim
 
 /// The id of the single pane in `session` that is not `source` — the freshly
 /// split pane. Panics unless exactly one other pane exists.
-fn other_pane(rt: &Runtime, session: SessionId, source: PaneId) -> PaneId {
+fn other_pane(rt: &Server, session: SessionId, source: PaneId) -> PaneId {
     let mut others = rt.sessions[&session]
         .panes
         .list()
@@ -347,7 +344,7 @@ fn write_to_a_running_pane_delivers_the_bytes() {
 /// holds a live shell. Shrinking the terminal must not silently swallow a
 /// scripted `koshi input --pane <id> "…"`.
 ///
-/// This pins the asymmetry deliberately: `Runtime::typed_pane` refuses an
+/// This pins the asymmetry deliberately: `Server::typed_pane` refuses an
 /// undrawn pane because a person cannot type at what they cannot see, and this
 /// path must not inherit that rule.
 #[test]
@@ -374,7 +371,7 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
 }
 
 /// The client's scroll offset for the pane — `0` follows live output.
-fn client_scroll_offset(rt: &Runtime, client: ClientId, pane: PaneId) -> usize {
+fn client_scroll_offset(rt: &Server, client: ClientId, pane: PaneId) -> usize {
     rt.sessions()
         .values()
         .next()
@@ -888,13 +885,12 @@ fn new_pane_without_direction_splits_in_the_runtime_default() {
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Runtime::new(
+    let mut rt = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Down,
     );
 
@@ -1476,7 +1472,7 @@ fn in_session_cli_with_missing_source_pane_is_not_found() {
 
 /// A single-client session focused on one pane, returned with the session id
 /// so a lock test can dispatch and read the client's mode back.
-fn lock_fixture() -> (Runtime, mpsc::Sender<RuntimeEvent>, ClientId, SessionId) {
+fn lock_fixture() -> (Server, mpsc::Sender<RuntimeEvent>, ClientId, SessionId) {
     let (mut rt, tx) = new_runtime();
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -1491,7 +1487,7 @@ fn lock_fixture() -> (Runtime, mpsc::Sender<RuntimeEvent>, ClientId, SessionId) 
 }
 
 /// Read `client_id`'s lock mode out of session `sid`.
-fn lock_mode_of(rt: &Runtime, sid: SessionId, client_id: ClientId) -> LockMode {
+fn lock_mode_of(rt: &Server, sid: SessionId, client_id: ClientId) -> LockMode {
     rt.sessions[&sid]
         .clients
         .get(client_id)
@@ -1525,7 +1521,7 @@ fn toggle_lock_mode_locks_an_unlocked_client() {
 #[test]
 fn toggle_mouse_select_flips_the_client_flag() {
     let (mut rt, _tx, client_id, sid) = lock_fixture();
-    let grabs = |rt: &Runtime| {
+    let grabs = |rt: &Server| {
         rt.sessions[&sid]
             .clients
             .get(client_id)
@@ -2925,7 +2921,7 @@ fn run_command_pane_args_carry_placement_into_the_new_pane_mapping() {
         stacked: true,
     };
     assert_eq!(
-        Runtime::run_command_new_pane_args(&args),
+        Server::run_command_new_pane_args(&args),
         NewPaneArgs {
             source: Some(source),
             direction: Some(Direction::Down),
@@ -5740,7 +5736,7 @@ fn side_by_side(left: PaneId, right: PaneId) -> LayoutNode {
 /// so the new pane has a live PTY. Returns the runtime, fake backend, inbox
 /// sender, ids, and the new pane's spawn-time PTY size.
 fn resize_fixture() -> (
-    Runtime,
+    Server,
     Arc<FakePtyBackend>,
     mpsc::Sender<RuntimeEvent>,
     SessionId,
@@ -5887,7 +5883,7 @@ fn resize_pane_explicit_target_resolves_its_owning_session() {
 fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
     let (mut rt, fake, _tx, sid, client_id, _root, pane_a, size_a) = resize_fixture();
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before = Runtime::tab_content_rects(
+    let rects_before = Server::tab_content_rects(
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
@@ -5917,7 +5913,7 @@ fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
         }
     );
 
-    let rects_after = Runtime::tab_content_rects(
+    let rects_after = Server::tab_content_rects(
         &rt.sessions[&sid],
         rt.sessions[&sid].tabs.keys().copied().next().unwrap(),
         viewport,
@@ -6042,7 +6038,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
     let sid = session.id;
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
-    let rects_before = Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE);
+    let rects_before = Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE);
 
     // No client is attached anywhere, so no tab is viewed and no terminal
     // displays the result.
@@ -6061,7 +6057,7 @@ fn resize_pane_with_no_attached_client_is_rejected() {
         }
     );
     assert_eq!(
-        Runtime::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE),
+        Server::tab_content_rects(&rt.sessions[&sid], tab, viewport, MIN_PANE_SIZE),
         rects_before
     );
 }
@@ -6091,7 +6087,7 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
     rt.sessions.insert(sid, session);
     let viewport = Size { cols: 80, rows: 24 };
     let rects_before =
-        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE);
+        Server::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE);
 
     // A client is attached, but none views the back tab — no terminal
     // displays the result, so the resize rejects and mutates nothing.
@@ -6113,7 +6109,7 @@ fn resize_pane_in_an_unviewed_tab_is_rejected() {
         }
     );
     assert_eq!(
-        Runtime::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE),
+        Server::tab_content_rects(&rt.sessions[&sid], tab_back, viewport, MIN_PANE_SIZE),
         rects_before
     );
 }
@@ -6671,13 +6667,12 @@ fn close_tab_kills_every_pane_concurrently() {
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Runtime::new(
+    let mut rt = Server::new(
         pty_backend,
         snapshot_provider,
         storage,
         inbox_rx,
         tx.clone(),
-        TerminalCleanupGuard::new(),
         Direction::Right,
     );
 
@@ -7787,7 +7782,7 @@ fn focus_tab_index_next_and_prev_resolve_against_the_display_order() {
     add_client(&mut session, client_id, tab_a, Some(pane_a));
     let sid = session.id;
     rt.sessions.insert(sid, session);
-    let active = |rt: &Runtime| {
+    let active = |rt: &Server| {
         rt.sessions[&sid]
             .clients
             .get(client_id)
@@ -8229,7 +8224,7 @@ fn new_tab_for_a_client_below_minimum_size_is_rejected() {
 /// mode `Fullscreen { focused: pane_a }`, its PTY resized to the full-tab
 /// content rect (80x24 viewport -> 78x22).
 fn fullscreen_fixture() -> (
-    Runtime,
+    Server,
     Arc<FakePtyBackend>,
     mpsc::Sender<RuntimeEvent>,
     SessionId,
@@ -8248,14 +8243,14 @@ fn fullscreen_fixture() -> (
 }
 
 /// The id of the session's single tab.
-fn only_tab(rt: &Runtime, sid: SessionId) -> TabId {
+fn only_tab(rt: &Server, sid: SessionId) -> TabId {
     rt.sessions[&sid].tabs.keys().copied().next().unwrap()
 }
 
 /// How `client_id` sees `tab` laid out. Zoom is per-client, so the mode is read
 /// off the client — the tab holds only the tree, and two clients on one tab can
 /// answer this differently.
-fn mode_of(rt: &Runtime, sid: SessionId, client_id: ClientId, tab: TabId) -> LayoutMode {
+fn mode_of(rt: &Server, sid: SessionId, client_id: ClientId, tab: TabId) -> LayoutMode {
     rt.sessions[&sid]
         .clients
         .get(client_id)
@@ -8823,7 +8818,7 @@ fn close_pane_closing_the_promoted_pane_drops_the_fullscreen() {
 }
 
 /// The (rows, cols) of `pane`'s terminal-engine grid.
-fn engine_dimensions(rt: &Runtime, pane: PaneId) -> (u16, u16) {
+fn engine_dimensions(rt: &Server, pane: PaneId) -> (u16, u16) {
     rt.terminal_engines()[&pane]
         .state()
         .active_grid()
@@ -9156,7 +9151,7 @@ fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
 /// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
 /// of each. Panics unless the runtime holds a single session with a single tab
 /// and a single pane.
-fn only_slot(rt: &Runtime) -> (SessionId, TabId, PaneId) {
+fn only_slot(rt: &Server) -> (SessionId, TabId, PaneId) {
     let session = rt.sessions.values().next().expect("exactly one session");
     let tab_id = *session.tabs.keys().next().expect("exactly one tab");
     let pane = session

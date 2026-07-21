@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl Runtime {
+impl Server {
     /// Attach a client to `session_id` viewing `active_tab`, then reconcile the
     /// affected tabs' PTY sizes and schedule a redraw.
     ///
@@ -237,7 +237,7 @@ impl Runtime {
                 mode: Self::input_mode(next),
             }));
         }
-        Ok(scope.commit(command_id))
+        Ok(scope.commit(command_id, &mut self.event_bus))
     }
 
     /// The acting client's mutable record, for commands that act on the acting
