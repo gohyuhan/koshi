@@ -9,8 +9,9 @@
 
 use std::collections::BTreeMap;
 
-/// What replaces a hidden value in any text output.
-const REDACTED: &str = "***";
+/// What replaces a hidden value in any text output. Every type that withholds
+/// a secret prints this, so redacted output looks the same wherever it appears.
+pub const REDACTED: &str = "***";
 
 /// Case-insensitive key fragments that mark an environment variable as sensitive.
 /// A key is redacted if it *contains* any of these.
