@@ -768,6 +768,7 @@ dependencies = [
  "koshi-core",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
 ]
 

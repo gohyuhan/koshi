@@ -1,5 +1,7 @@
 //! Tests for the wire messages: every request and response variant survives a
-//! round trip, and the connection token neither prints nor compares carelessly.
+//! round trip and keeps its own tag, a message carrying a field the build does
+//! not know is refused, and the connection token neither prints nor compares
+//! carelessly.
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -48,6 +50,18 @@ fn overview() -> SessionOverview {
 fn round_trip<T: Serialize + DeserializeOwned>(message: &T) -> T {
     let encoded = serde_json::to_string(message).expect("message encodes");
     serde_json::from_str(&encoded).expect("message decodes")
+}
+
+/// The single tag an encoded enum variant carries, e.g. `"Overview"` for
+/// `{"Overview": { … }}`.
+fn tag_of(value: &serde_json::Value) -> String {
+    let fields = value
+        .as_object()
+        .expect("a tagged variant encodes as an object");
+
+    assert_eq!(fields.len(), 1, "expected exactly one tag in {value}");
+
+    fields.keys().next().expect("one key").clone()
 }
 
 #[test]
@@ -116,10 +130,10 @@ fn discovery_request_encodes_to_the_expected_shape() {
 }
 
 #[test]
-fn accepted_response_round_trips() {
+fn hello_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(1),
-        result: IpcResult::Accepted,
+        result: IpcResult::Hello,
     };
 
     assert_eq!(round_trip(&response), response);
@@ -214,6 +228,84 @@ fn a_response_to_unreadable_bytes_names_no_request() {
 }
 
 #[test]
+fn each_request_kind_is_tagged_with_its_own_name() {
+    assert_eq!(
+        tag_of(&serde_json::to_value(IpcRequestKind::SubmitCommand(Box::new(envelope()))).unwrap()),
+        "SubmitCommand"
+    );
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Discovery).unwrap(),
+        json!("Discovery")
+    );
+}
+
+#[test]
+fn each_result_is_tagged_with_its_own_name() {
+    assert_eq!(
+        serde_json::to_value(IpcResult::Hello).unwrap(),
+        json!("Hello")
+    );
+    assert_eq!(
+        tag_of(
+            &serde_json::to_value(IpcResult::CommandResult(CommandResult::Ok {
+                command_id: CommandId::new(),
+                emitted_events: Vec::new(),
+            }))
+            .unwrap()
+        ),
+        "CommandResult"
+    );
+    assert_eq!(
+        tag_of(&serde_json::to_value(IpcResult::Overview(overview())).unwrap()),
+        "Overview"
+    );
+    assert_eq!(
+        tag_of(
+            &serde_json::to_value(IpcResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::BadToken,
+                message: "the token does not match".to_string(),
+            }))
+            .unwrap()
+        ),
+        "Error"
+    );
+}
+
+#[test]
+fn a_response_with_a_misspelled_request_id_is_refused() {
+    let decoded: Result<IpcResponse, _> =
+        serde_json::from_str(r#"{"requst_id":7,"result":"Hello"}"#);
+
+    assert!(
+        decoded.is_err(),
+        "a misspelled field decoded instead of failing: {decoded:?}"
+    );
+}
+
+#[test]
+fn a_request_carrying_an_unknown_field_is_refused() {
+    let decoded: Result<IpcRequest, _> =
+        serde_json::from_str(r#"{"request_id":1,"kind":"Discovery","junk":5}"#);
+
+    assert!(
+        decoded.is_err(),
+        "an unknown field decoded instead of failing: {decoded:?}"
+    );
+}
+
+#[test]
+fn a_hello_carrying_an_unknown_field_is_refused() {
+    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":1,"kind":{"Hello":{"protocol_version":1,"token":"k7QxSecret","junk":5}}}"#,
+    );
+
+    assert!(
+        decoded.is_err(),
+        "an unknown field inside Hello decoded instead of failing: {decoded:?}"
+    );
+}
+
+#[test]
 fn token_encodes_as_a_bare_string() {
     assert_eq!(
         serde_json::to_value(token()).expect("token encodes"),
@@ -248,6 +340,40 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
         "the secret reached debug output: {printed}"
     );
     assert!(printed.contains("ConnectionToken(***)"), "{printed}");
+}
+
+#[test]
+fn every_request_kind_names_itself_without_its_payload() {
+    assert_eq!(
+        IpcRequestKind::Hello {
+            protocol_version: 1,
+            token: token(),
+        }
+        .name(),
+        "Hello"
+    );
+    assert_eq!(
+        IpcRequestKind::SubmitCommand(Box::new(envelope())).name(),
+        "SubmitCommand"
+    );
+    assert_eq!(IpcRequestKind::Discovery.name(), "Discovery");
+}
+
+/// Serializing is how the token reaches the endpoint file and the socket, so
+/// it writes the real secret. Redacting here would break both.
+#[test]
+fn serializing_a_hello_writes_the_real_secret() {
+    let request = IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Hello {
+            protocol_version: 1,
+            token: token(),
+        },
+    };
+
+    let encoded = serde_json::to_string(&request).expect("request encodes");
+
+    assert!(encoded.contains("k7QxSecret"), "{encoded}");
 }
 
 #[test]

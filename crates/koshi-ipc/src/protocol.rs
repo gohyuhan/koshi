@@ -18,6 +18,7 @@ use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::redact::REDACTED;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 /// The protocol version this build speaks. A connection whose
 /// [`IpcRequestKind::Hello`] names a different version is refused with
@@ -29,8 +30,19 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// Each running Koshi generates one and writes it to its endpoint file in the
 /// private runtime directory, so being able to read the value is itself the
-/// proof. `Debug` and `Display` print `***`: the token belongs in that file and
-/// on the wire, never in a log, a snapshot, or an event payload.
+/// proof.
+///
+/// Two ways out of this type, and only two:
+///
+/// - `Serialize` and [`expose`](Self::expose) write the **real secret**. They
+///   exist for the endpoint file and the socket, which cannot work without it.
+///   `serde_json::to_string(&hello)` yields `{"protocol_version":1,
+///   "token":"k7Qx…"}`, secret included.
+/// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
+///   trace, or an error dump reveals nothing.
+///
+/// Anything describing a request in a log takes the second form, or
+/// [`IpcRequestKind::name`], which carries no payload at all.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ConnectionToken(String);
@@ -52,20 +64,14 @@ impl ConnectionToken {
 impl PartialEq for ConnectionToken {
     /// Two secrets of the same length are compared byte by byte to the end,
     /// never stopping at the first mismatch, so how long the answer takes does
-    /// not reveal how many leading bytes a caller guessed right. Secrets of
-    /// different lengths are refused immediately: Koshi generates every token
-    /// at one length, so the length is not a secret.
+    /// not reveal how many leading bytes a caller guessed right. `subtle`
+    /// holds that property through optimization by reading each byte's verdict
+    /// back through a volatile load, which the compiler may not fold away.
+    ///
+    /// Secrets of different lengths are refused at once: Koshi generates every
+    /// token at one length, so a token's length is not a secret.
     fn eq(&self, other: &Self) -> bool {
-        let (ours, theirs) = (self.0.as_bytes(), other.0.as_bytes());
-        if ours.len() != theirs.len() {
-            return false;
-        }
-        ours.iter()
-            .zip(theirs)
-            .fold(0u8, |differences, (ours_byte, theirs_byte)| {
-                differences | (ours_byte ^ theirs_byte)
-            })
-            == 0
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
     }
 }
 
@@ -84,7 +90,11 @@ impl fmt::Display for ConnectionToken {
 }
 
 /// One message from a caller to a running Koshi.
+///
+/// Decoding rejects any field it does not know, so a misspelled name is an
+/// error rather than a field that quietly keeps its default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpcRequest {
     /// Caller-chosen id, repeated in the response that answers this request.
     /// Unique among the requests in flight on one connection.
@@ -95,9 +105,14 @@ pub struct IpcRequest {
 
 /// What a request asks for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum IpcRequestKind {
     /// Opens the connection: names the protocol version the caller speaks and
     /// presents the token. Sent before any other kind.
+    ///
+    /// Sending it again on an open connection is allowed and changes nothing:
+    /// the version and token are checked again and the same answer comes back,
+    /// since checking them alters no state.
     Hello {
         /// The protocol version the caller speaks.
         protocol_version: u32,
@@ -111,8 +126,27 @@ pub enum IpcRequestKind {
     Discovery,
 }
 
+impl IpcRequestKind {
+    /// The kind's name, e.g. `"SubmitCommand"`. Carries no payload, so it is
+    /// safe on a log line even though a payload can hold the connection token
+    /// or text the user typed.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            IpcRequestKind::Hello { .. } => "Hello",
+            IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
+            IpcRequestKind::Discovery => "Discovery",
+        }
+    }
+}
+
 /// One message answering an [`IpcRequest`].
+///
+/// Decoding rejects any field it does not know. `request_id` carries meaning
+/// when it is absent, so a misspelled `request_id` must fail loudly instead of
+/// reading as the "could not be read" answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpcResponse {
     /// The `request_id` of the request being answered, or `None` when the
     /// bytes received were too malformed to read one — a caller that sent
@@ -126,8 +160,9 @@ pub struct IpcResponse {
 /// The answer to a request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcResult {
-    /// The connection is open: versions agree and the token matched.
-    Accepted,
+    /// Answers [`IpcRequestKind::Hello`]: the connection is open, because the
+    /// versions agree and the token matched.
+    Hello,
     /// What dispatching the submitted command produced.
     CommandResult(CommandResult),
     /// The session's full description.
@@ -138,6 +173,7 @@ pub enum IpcResult {
 
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpcErrorPayload {
     /// The refusal, as a value a caller can branch on.
     pub code: IpcErrorCode,
