@@ -414,6 +414,48 @@ fn the_endpoint_file_lives_while_serving_and_both_files_go_at_shutdown() {
     cleanup(&runtime_dir);
 }
 
+#[test]
+fn dropping_the_server_without_shutdown_still_removes_both_files() {
+    let (server, session, runtime_dir, dispatcher) = serve("drop-cleans", None);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let endpoint = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+
+    drop(server);
+    dispatcher.join().expect("dispatcher exits");
+
+    assert!(!endpoint_path.exists(), "endpoint file gone after drop");
+    assert!(
+        matches!(
+            Connection::connect(&endpoint.socket),
+            Err(IpcError::NoListener { .. }),
+        ),
+        "nothing listens after drop",
+    );
+    cleanup(&runtime_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn shutdown_returns_and_removes_the_endpoint_even_when_the_wake_cannot_connect() {
+    let (server, session, runtime_dir, dispatcher) = serve("wake-fails", None);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let endpoint = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+
+    // Unlink the socket file out from under the listener: the wake connect
+    // inside shutdown now fails, so shutdown must skip the join instead of
+    // waiting forever on the still-blocked accept loop.
+    std::fs::remove_file(&endpoint.socket).expect("unlink the live socket");
+
+    server.shutdown();
+
+    assert!(
+        !endpoint_path.exists(),
+        "endpoint file gone even though the accept loop could not be woken",
+    );
+    drop(dispatcher);
+    cleanup(&runtime_dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_leftover_socket_file_is_reclaimed_at_start() {

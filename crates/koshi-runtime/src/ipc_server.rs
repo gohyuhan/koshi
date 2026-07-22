@@ -128,17 +128,40 @@ impl IpcServer {
     /// already being served run out on their own threads; with the
     /// dispatcher draining, their in-flight requests end in a closed
     /// connection rather than a mutation.
-    pub fn shutdown(mut self) {
+    ///
+    /// Dropping an `IpcServer` runs the same teardown, so a path that never
+    /// reaches an explicit shutdown — a panic unwinding the server — still
+    /// withdraws the files.
+    pub fn shutdown(self) {
+        // Teardown lives in `Drop`, so consuming `self` is the whole job;
+        // the method exists so call sites read as intent.
+        drop(self);
+    }
+
+    /// The teardown itself, safe to run at most once per field: the join is
+    /// guarded by taking `accept_thread`, and removing an already-removed
+    /// file is a no-op.
+    fn stop(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        // The accept loop sits blocked in `accept`; a bare connect wakes it
-        // so it can observe the flag. The connection itself is dropped
-        // without a byte sent.
-        let _ = Connection::connect(&self.addr);
         if let Some(handle) = self.accept_thread.take() {
-            let _ = handle.join();
+            // The accept loop sits blocked in `accept`; a bare connect wakes
+            // it so it can observe the flag (the connection is dropped
+            // without a byte sent). A failed connect — say, the process is
+            // out of file descriptors — leaves the loop blocked, so the join
+            // is skipped rather than waiting forever: the thread dies with
+            // the process, and the files below are removed either way.
+            if Connection::connect(&self.addr).is_ok() {
+                let _ = handle.join();
+            }
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
         remove_socket_file(&self.addr);
+    }
+}
+
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
