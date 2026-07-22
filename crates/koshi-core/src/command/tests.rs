@@ -401,7 +401,13 @@ fn command_source_variants_roundtrip() {
     });
     roundtrip(&CommandSource::InSessionCli {
         session_id: SessionId::new(),
-        client_id: ClientId::new(),
+        client_id: Some(ClientId::new()),
+        pane_id: PaneId::new(),
+        socket_path: PathBuf::from("/run/koshi/session.sock"),
+    });
+    roundtrip(&CommandSource::InSessionCli {
+        session_id: SessionId::new(),
+        client_id: None,
         pane_id: PaneId::new(),
         socket_path: PathBuf::from("/run/koshi/session.sock"),
     });
@@ -421,7 +427,7 @@ fn command_envelope_roundtrips() {
         CommandId::new(),
         CommandSource::InSessionCli {
             session_id: SessionId::new(),
-            client_id: ClientId::new(),
+            client_id: Some(ClientId::new()),
             pane_id: PaneId::new(),
             socket_path: PathBuf::from("/run/koshi/session.sock"),
         },
@@ -468,7 +474,7 @@ fn command_source_variant_names_are_canonical() {
         (
             CommandSource::InSessionCli {
                 session_id: SessionId::new(),
-                client_id: ClientId::new(),
+                client_id: Some(ClientId::new()),
                 pane_id: PaneId::new(),
                 socket_path: PathBuf::from("/run/koshi/session.sock"),
             },
@@ -490,6 +496,46 @@ fn command_source_variant_names_are_canonical() {
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
+}
+
+#[test]
+fn envelope_from_a_clientless_in_session_cli_carries_no_client() {
+    // A pane spawned with no designated client has no client to attribute:
+    // the envelope mirrors `None` and stays internally consistent.
+    let env = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::in_session_cli(
+            SessionId::new(),
+            None,
+            PaneId::new(),
+            PathBuf::from("/run/koshi/session.sock"),
+        ),
+        fixed_time(),
+        Command::ToggleLockMode,
+    );
+    assert_eq!(env.client_id, None);
+    assert!(env.validate().is_ok());
+}
+
+#[test]
+fn deserialize_rejects_a_forged_client_on_a_clientless_in_session_cli() {
+    // The source says "no client owned this pane", the wire claims one: the
+    // attribution is forged and must not decode.
+    let forged = CommandEnvelope {
+        id: CommandId::new(),
+        source: CommandSource::in_session_cli(
+            SessionId::new(),
+            None,
+            PaneId::new(),
+            PathBuf::from("/run/koshi/session.sock"),
+        ),
+        client_id: Some(ClientId::new()),
+        issued_at: fixed_time(),
+        command: Command::ToggleLockMode,
+    };
+    let json = serde_json::to_string(&forged).expect("serialize");
+    let decoded: Result<CommandEnvelope, _> = serde_json::from_str(&json);
+    assert!(decoded.is_err(), "forged envelope must not deserialize");
 }
 
 #[test]

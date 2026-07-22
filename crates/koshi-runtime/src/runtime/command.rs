@@ -174,12 +174,13 @@ struct FocusPaneTarget {
 }
 
 /// The resolved default-pane context of a command that names no target: the
-/// acting session, the source's client, and the pane the command acts on —
-/// an in-session CLI's issuing pane, else the client's focused pane. The
+/// acting session, the source's client (`None` for an in-session CLI whose
+/// pane was spawned with no designated client), and the pane the command acts
+/// on — an in-session CLI's issuing pane, else the client's focused pane. The
 /// `Ok` half of [`Server::resolve_default_pane`].
 struct DefaultPaneTarget {
     session_id: SessionId,
-    client_id: ClientId,
+    client_id: Option<ClientId>,
     pane_id: PaneId,
 }
 

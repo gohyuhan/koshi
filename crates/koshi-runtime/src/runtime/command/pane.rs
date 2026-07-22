@@ -724,6 +724,11 @@ impl Server {
         let acting = self.acting_session(source)?;
         let pane_min = self.effective_pane_min();
         let target = self.resolve_default_pane(source, acting)?;
+        // The zoom is per-client state, so the command needs a client;
+        // validation already rejected a clientless source.
+        let client_id = target
+            .client_id
+            .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
 
         let backend = Arc::clone(self.pty_backend());
 
@@ -740,7 +745,7 @@ impl Server {
         })?;
         let client = session
             .clients
-            .get(target.client_id)
+            .get(client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         let client_mode = client.layout_mode(tab_id);
         let prior_pane = client.focused_pane(tab_id);
@@ -778,7 +783,7 @@ impl Server {
         // sizes come from what the clients now display.
         let client = session
             .clients
-            .get_mut(target.client_id)
+            .get_mut(client_id)
             .ok_or_else(|| Rejection::bare(RejectReason::SourceClientStale))?;
         let focus_moved = entered && prior_pane != Some(target.pane_id);
         if entered {
@@ -803,7 +808,7 @@ impl Server {
 
         if focus_moved {
             events.push(Event::PaneFocused(PaneFocused {
-                client_id: target.client_id,
+                client_id,
                 tab_id,
                 pane_id: target.pane_id,
                 prior_pane,

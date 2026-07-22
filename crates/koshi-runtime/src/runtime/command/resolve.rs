@@ -11,10 +11,11 @@ use super::*;
 
 impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
-    /// universal checks in fixed precedence: source policy, source-client
-    /// liveness, session admission, then target resolution. Returns the first
-    /// failure, or `Ok(())` when the command is well-formed against current
-    /// state.
+    /// universal checks in fixed precedence: source policy, CLI command
+    /// admission, session resolution, session admission, in-session source
+    /// checks (issuing pane alive, issuing client attached for client-scoped
+    /// commands), then target resolution. Returns the first failure, or
+    /// `Ok(())` when the command is well-formed against current state.
     pub(super) fn validate(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
         // 1. Source policy: a client-scoped command needs a client to act for.
         if Self::requires_issuing_client(&envelope.command) && envelope.source.client_id().is_none()
@@ -25,10 +26,20 @@ impl Server {
             ));
         }
 
-        // 2. Source-client liveness + the session this command acts in.
+        // 2. CLI admission: a CLI source may only submit commands the CLI's
+        //    own verbs build.
+        if !Self::allowed_from_source(&envelope.command, &envelope.source) {
+            return Err(Rejection::new(
+                RejectReason::Unauthorized,
+                "command cannot be issued from the CLI",
+            ));
+        }
+
+        // 3. The session this command acts in (and, for a keybinding or mouse
+        //    source, the client's liveness — the session is located by it).
         let session = self.acting_session(&envelope.source)?;
 
-        // 3. Session admission: a winding-down session takes no mutations.
+        // 4. Session admission: a winding-down session takes no mutations.
         if let Some(session) = session {
             if Self::is_winding_down(session) {
                 return Err(Rejection::new(
@@ -38,8 +49,111 @@ impl Server {
             }
         }
 
-        // 4. Target resolution: the pane/tab/session the command names must resolve.
+        // 5. In-session CLI source checks: the issuing pane must still be
+        //    alive, and a client-scoped command's issuing client must still be
+        //    attached to the acting session. A pane- or session-scoped command
+        //    stays valid when the client that spawned the pane is gone — the
+        //    pane outlives it.
+        if let CommandSource::InSessionCli {
+            client_id, pane_id, ..
+        } = &envelope.source
+        {
+            let session = Self::require_session(session)?;
+            Self::require_live_source_pane(session, *pane_id)?;
+            if Self::is_client_scoped(&envelope.command) {
+                let attached =
+                    client_id.is_some_and(|client| session.clients.get(client).is_some());
+                if !attached {
+                    return Err(Rejection::new(
+                        RejectReason::SourceClientStale,
+                        "run this command from an active Koshi client",
+                    ));
+                }
+            }
+        }
+
+        // 6. Target resolution: the pane/tab/session the command names must resolve.
         self.resolve_target(&envelope.command, &envelope.source, session)
+    }
+
+    /// Whether `command` may arrive from `source`. CLI sources are limited to
+    /// the commands the CLI's own verbs build; everything else — selection and
+    /// mouse-select commands (mouse/keybinding only), plugin commands (plugin
+    /// host only) — is refused before any state is read. `Quit` is accepted
+    /// from an external CLI (`kill-session`) but not from inside a pane.
+    /// Non-CLI sources are unrestricted here.
+    pub(super) fn allowed_from_source(command: &Command, source: &CommandSource) -> bool {
+        let cli_verb = matches!(
+            command,
+            Command::NewPane(_)
+                | Command::ClosePane(_)
+                | Command::ResizePane(_)
+                | Command::TogglePaneFullscreen
+                | Command::RenamePane(_)
+                | Command::WriteToPane(_)
+                | Command::RunCommandPane(_)
+                | Command::NewTab(_)
+                | Command::CloseTab(_)
+                | Command::RenameTab(_)
+                | Command::MoveTab(_)
+                | Command::FocusTab(_)
+                | Command::FocusPane(_)
+                | Command::SetLockMode(_)
+                | Command::ToggleLockMode
+                | Command::RenameSession(_)
+        );
+        match source {
+            CommandSource::InSessionCli { .. } => cli_verb,
+            CommandSource::ExternalCli { .. } => cli_verb || matches!(command, Command::Quit),
+            CommandSource::KeyBinding { .. }
+            | CommandSource::Mouse { .. }
+            | CommandSource::Plugin { .. }
+            | CommandSource::Internal => true,
+        }
+    }
+
+    /// Whether `command` acts on one client's own view state (lock mode,
+    /// mouse-select, zoom, selection), so an in-session CLI issuing it needs
+    /// its client still attached. [`Command::FocusPane`] and
+    /// [`Command::FocusTab`] are absent: each resolves its own target client
+    /// in its resolver, including the sole-attached-client fallback.
+    /// [`Command::ToggleMouseSelect`] is client-scoped but has no CLI verb, so
+    /// [`Self::allowed_from_source`] refuses it before this check runs.
+    pub(super) fn is_client_scoped(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::ToggleLockMode
+                | Command::SetLockMode(_)
+                | Command::ToggleMouseSelect
+                | Command::TogglePaneFullscreen
+                | Command::Visual(_)
+        )
+    }
+
+    /// Confirm the pane an in-session CLI command was issued from is still a
+    /// valid source: registered in `session` and `Spawning`, `Running`, or
+    /// `Exited` (a dead pane its close policy keeps on screen can still be
+    /// commanded from — a background child it left behind may clean up after
+    /// itself). A pane that is `Closing`, `Removed`, or absent from the
+    /// registry rejects with [`RejectReason::TargetGone`].
+    pub(super) fn require_live_source_pane(
+        session: &Session,
+        pane_id: PaneId,
+    ) -> Result<(), Rejection> {
+        let alive = session.panes.get(pane_id).is_some_and(|record| {
+            matches!(
+                record.lifecycle(),
+                PaneLifecycle::Spawning | PaneLifecycle::Running | PaneLifecycle::Exited { .. }
+            )
+        });
+        if alive {
+            Ok(())
+        } else {
+            Err(Rejection::new(
+                RejectReason::TargetGone,
+                "source pane no longer exists",
+            ))
+        }
     }
 
     /// Whether `command` acts on a specific client's view (its focused pane,
@@ -58,37 +172,26 @@ impl Server {
         )
     }
 
-    /// Resolve the session a command acts in from its source, and confirm the
-    /// source's client (when it names one) is still attached.
+    /// Resolve the session a command acts in from its source.
     ///
     /// An in-session CLI's own `session_id` is authoritative — the session is
-    /// looked up by it, and the named client must be attached *there*; an
-    /// inconsistent envelope (client attached elsewhere) is rejected. A
-    /// keybinding/mouse names only a client and is located by it. An external
+    /// looked up by it; whether its client must still be attached depends on
+    /// the command's scope class, checked in [`Self::validate`], not here. A
+    /// keybinding/mouse names only a client and is located by it — a client
+    /// with no session is [`RejectReason::SourceClientStale`]. An external
     /// CLI naming a session must match one. A missing
-    /// session is [`RejectReason::TargetNotFound`]; a client not attached where
-    /// expected is [`RejectReason::SourceClientStale`]. Sources with no session
+    /// session is [`RejectReason::TargetNotFound`]. Sources with no session
     /// context (`Plugin`, `Internal`, external with no session) resolve to `None`.
     pub(super) fn acting_session(
         &self,
         source: &CommandSource,
     ) -> Result<Option<&Session>, Rejection> {
         match source {
-            CommandSource::InSessionCli {
-                session_id,
-                client_id,
-                ..
-            } => {
-                let session = self
-                    .sessions()
-                    .get(session_id)
-                    .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-                if session.clients.get(*client_id).is_some() {
-                    Ok(Some(session))
-                } else {
-                    Err(Rejection::bare(RejectReason::SourceClientStale))
-                }
-            }
+            CommandSource::InSessionCli { session_id, .. } => self
+                .sessions()
+                .get(session_id)
+                .map(Some)
+                .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound)),
             CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => self
                 .session_for_client(*client_id)
                 .map(Some)
@@ -132,8 +235,10 @@ impl Server {
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
             // Lock mode and mouse-select are client-scoped: the acting client
-            // (confirmed attached by `acting_session`) is the whole target — no
-            // pane or tab to resolve.
+            // (confirmed attached by the in-session client check in `validate`,
+            // or by `acting_session` locating a keybinding/mouse session
+            // through its client) is the whole target — no pane or tab to
+            // resolve.
             Command::ToggleLockMode | Command::SetLockMode(_) | Command::ToggleMouseSelect => {
                 Ok(())
             }
@@ -211,15 +316,22 @@ impl Server {
             }
             // With no explicit source the default-pane resolution is exactly
             // [`Self::resolve_pane_target`]'s: the in-session CLI's captured
-            // pane, else the issuing client's focused pane. The issuer (already
-            // confirmed attached by that resolution) becomes the focus client.
+            // pane, else the issuing client's focused pane. The issuer becomes
+            // the focus client only while still attached to the owning session
+            // — an in-session CLI whose client is gone still splits its pane,
+            // it just focuses the new pane for nobody.
             None => {
                 let target = self.resolve_pane_target(None, source, session)?;
+                let focus_client = source.client_id().filter(|client_id| {
+                    self.sessions
+                        .get(&target.session_id)
+                        .is_some_and(|owner| owner.clients.get(*client_id).is_some())
+                });
                 Ok(NewPaneTarget {
                     session_id: target.session_id,
                     source_pane: target.pane_id,
                     tab_id: target.tab_id,
-                    focus_client: source.client_id(),
+                    focus_client,
                 })
             }
         }
@@ -356,7 +468,7 @@ impl Server {
                     let pane_id = Self::resolve_focused_pane(session, client_id)?;
                     Ok(DefaultPaneTarget {
                         session_id: session.id,
-                        client_id,
+                        client_id: Some(client_id),
                         pane_id,
                     })
                 }
