@@ -9,8 +9,9 @@
 //! speak, and the [`ConnectionToken`] proving the caller is the user who
 //! started this Koshi — so no later request repeats them.
 //!
-//! This module is the vocabulary only: framing, sockets, and the checks
-//! themselves belong to the transport and server layers.
+//! This module is the vocabulary only: framing and sockets belong to the
+//! transport layer, and the Hello checks to
+//! [`handshake`](crate::handshake).
 
 use std::fmt;
 

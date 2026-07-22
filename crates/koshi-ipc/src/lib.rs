@@ -3,6 +3,8 @@
 
 /// Error types.
 pub mod error;
+/// Connection handshake checks.
+pub mod handshake;
 pub mod protocol;
 /// Transport layer.
 pub mod transport;
