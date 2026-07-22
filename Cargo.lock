@@ -784,13 +784,16 @@ dependencies = [
 name = "koshi-ipc"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "interprocess",
  "koshi-core",
+ "koshi-storage",
  "libc",
  "serde",
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

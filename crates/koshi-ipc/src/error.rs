@@ -12,7 +12,12 @@ use thiserror::Error;
 /// address that fails its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy))
-/// is client-fatal too: no connection comes up at all. A frame
+/// is client-fatal too: no connection comes up at all, as is an endpoint
+/// file that is missing, unusable, or unwritable
+/// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable),
+/// [`EndpointFileWrite`](IpcError::EndpointFileWrite)): without it no caller
+/// can find the socket or the token. A frame
 /// that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)) is recoverable: the stream
 /// is still aligned on frame boundaries, so the connection can answer and
@@ -52,6 +57,18 @@ pub enum IpcError {
     /// A live listener already holds the address this process wants to bind.
     #[error("another process is already listening at {addr}")]
     SocketBusy { addr: String },
+    /// No endpoint file at the path: no running koshi has advertised a
+    /// control socket there.
+    #[error("no endpoint file at {path}")]
+    EndpointFileMissing { path: String },
+    /// An endpoint file that exists but could not be used: reading it
+    /// failed, or its bytes are not a readable endpoint file.
+    #[error("endpoint file {path} is unreadable: {detail}")]
+    EndpointFileUnreadable { path: String, detail: String },
+    /// Writing the endpoint file failed, so no caller can find this
+    /// session's socket.
+    #[error("endpoint file {path} could not be written: {detail}")]
+    EndpointFileWrite { path: String, detail: String },
 }
 
 impl DomainError for IpcError {
@@ -66,7 +83,10 @@ impl DomainError for IpcError {
             | IpcError::FrameTooLarge { .. }
             | IpcError::UntrustedSocket { .. }
             | IpcError::NoListener { .. }
-            | IpcError::SocketBusy { .. } => Severity::ClientFatal,
+            | IpcError::SocketBusy { .. }
+            | IpcError::EndpointFileMissing { .. }
+            | IpcError::EndpointFileUnreadable { .. }
+            | IpcError::EndpointFileWrite { .. } => Severity::ClientFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
     }

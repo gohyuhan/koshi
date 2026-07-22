@@ -1,8 +1,8 @@
 //! Tests for [`IpcError`]: its `Display` wording and its [`DomainError`]
-//! classification. Link, refused-frame, and socket-address-check errors are
-//! client-fatal — they tear down only the affected connection, never the
-//! session — while a malformed frame is recoverable because the stream stays
-//! aligned on frame boundaries.
+//! classification. Link, refused-frame, socket-address-check, and
+//! endpoint-file errors are client-fatal — they tear down only the affected
+//! connection, never the session — while a malformed frame is recoverable
+//! because the stream stays aligned on frame boundaries.
 
 use super::IpcError;
 use koshi_core::error::{DomainCategory, DomainError, Severity};
@@ -78,6 +78,41 @@ fn socket_busy_display_names_the_address() {
 }
 
 #[test]
+fn endpoint_file_missing_display_names_the_path() {
+    let err = IpcError::EndpointFileMissing {
+        path: "/run/koshi/session-abc.json".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "no endpoint file at /run/koshi/session-abc.json"
+    );
+}
+
+#[test]
+fn endpoint_file_unreadable_display_names_the_path_and_detail() {
+    let err = IpcError::EndpointFileUnreadable {
+        path: "/run/koshi/session-abc.json".to_string(),
+        detail: "expected value at line 1 column 1".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "endpoint file /run/koshi/session-abc.json is unreadable: expected value at line 1 column 1"
+    );
+}
+
+#[test]
+fn endpoint_file_write_display_names_the_path_and_detail() {
+    let err = IpcError::EndpointFileWrite {
+        path: "/run/koshi/session-abc.json".to_string(),
+        detail: "storage io error: permission denied".to_string(),
+    };
+    assert_eq!(
+        err.to_string(),
+        "endpoint file /run/koshi/session-abc.json could not be written: storage io error: permission denied"
+    );
+}
+
+#[test]
 fn every_ipc_error_is_in_the_ipc_domain() {
     assert_eq!(
         IpcError::Transport {
@@ -119,6 +154,56 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         }
         .category(),
         DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::EndpointFileMissing {
+            path: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::EndpointFileUnreadable {
+            path: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::EndpointFileWrite {
+            path: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+}
+
+#[test]
+fn endpoint_file_failures_are_client_fatal() {
+    assert_eq!(
+        IpcError::EndpointFileMissing {
+            path: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::EndpointFileUnreadable {
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::EndpointFileWrite {
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
     );
 }
 
