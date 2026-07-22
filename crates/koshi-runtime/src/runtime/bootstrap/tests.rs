@@ -1,6 +1,7 @@
 //! Tests for profile genesis: a `--profile` template opening its tabs and
 //! panes, focusing the pane the profile marks, and refusing a plugin pane.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
@@ -13,6 +14,7 @@ use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
+use crate::runtime::spawn_env::koshi_env;
 
 use super::{ProfileLaunchError, Server};
 
@@ -209,6 +211,56 @@ fn profile_launch_error_display_names_each_cause() {
         .to_string(),
         "a profile pane failed to start: failed to spawn pty: boom"
     );
+}
+
+#[test]
+fn bootstrap_local_injects_the_in_session_identity_env() {
+    let (mut rt, fake) = runtime();
+    let sid = SessionId::new();
+    let client = rt
+        .bootstrap_local(sid, viewport(), SystemTime::UNIX_EPOCH)
+        .expect("bootstrap");
+
+    // The root shell's spec carries the identity vars naming the session, the
+    // genesis client, and the root pane.
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let pane = tab.layout().leaf_panes()[0];
+    let expected = rt.default_shell_spec(
+        None,
+        koshi_env(
+            sid,
+            Some(client),
+            pane,
+            koshi_paths::runtime_dir().as_deref(),
+        ),
+    );
+    assert_eq!(fake.spawn_spec(pane).unwrap(), expected);
+}
+
+#[test]
+fn profile_panes_carry_the_in_session_identity_env() {
+    let (mut rt, fake) = runtime();
+    let tmpl = template("version 1\ntab {\n    horizontal {\n        pane\n        pane\n    }\n}");
+    let sid = SessionId::new();
+    let client = rt
+        .bootstrap_profile(sid, tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .expect("profile launches");
+
+    // Every pane's spec is the default shell plus the identity vars — the
+    // same session and client for all, each pane's own id for itself.
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    for pane in tab.layout().leaf_panes() {
+        let mut expected = rt.default_shell_spec(None, BTreeMap::new());
+        expected.env.extend(koshi_env(
+            sid,
+            Some(client),
+            pane,
+            koshi_paths::runtime_dir().as_deref(),
+        ));
+        assert_eq!(fake.spawn_spec(pane).unwrap(), expected, "pane {pane}");
+    }
 }
 
 #[test]

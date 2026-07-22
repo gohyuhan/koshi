@@ -885,9 +885,11 @@ dependencies = [
  "koshi-config",
  "koshi-core",
  "koshi-input",
+ "koshi-ipc",
  "koshi-layout",
  "koshi-observability",
  "koshi-pane",
+ "koshi-paths",
  "koshi-pty",
  "koshi-renderer",
  "koshi-session",
@@ -895,6 +897,7 @@ dependencies = [
  "koshi-test-support",
  "ratatui",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -6,7 +6,6 @@
 //! one tab holding one shell pane, viewed by one client, directly through the
 //! session-layer ops, then hands the pane's PTY to a forwarder like any other.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -25,6 +24,7 @@ use koshi_session::session::tab_ops;
 
 use crate::runtime::command::{pane_spawn_sizes, size_root_pane};
 use crate::runtime::render_schedule::InvalidationReason;
+use crate::runtime::spawn_env::koshi_env;
 use crate::server::Server;
 
 #[cfg(test)]
@@ -55,8 +55,17 @@ impl Server {
         let spawn_size =
             size_root_pane(pane_id, pane_viewport(viewport), self.effective_pane_min());
 
-        // Launch the shell first: on failure nothing is registered.
-        let spawn_spec = self.default_shell_spec(None, BTreeMap::new());
+        // Launch the shell first: on failure nothing is registered. The spec
+        // carries the pane's in-session identity vars in its env overlay.
+        let spawn_spec = self.default_shell_spec(
+            None,
+            koshi_env(
+                session_id,
+                Some(client_id),
+                pane_id,
+                koshi_paths::runtime_dir().as_deref(),
+            ),
+        );
         let handle = backend.spawn(pane_id, spawn_spec, spawn_size)?;
 
         // Assemble the session with one client viewing the tab we are about to
@@ -147,6 +156,10 @@ impl Server {
 
         // Spawn every pane before committing anything. On any failure, kill
         // what was already spawned so no orphan child outlives the launch.
+        // The client id is minted before the spawns so every pane's identity
+        // vars can name the client that will view the profile.
+        let client_id = ClientId::new();
+        let runtime_dir = koshi_paths::runtime_dir();
         let mut handles: Vec<(PaneId, PtyHandle, PtySize)> = Vec::new();
         let pane_min = self.effective_pane_min();
         for plan in &plans {
@@ -159,7 +172,14 @@ impl Server {
                     .find(|(id, _)| id == pane_id)
                     .map(|(_, size)| *size)
                     .expect("every planned pane id is a leaf of its own tab tree");
-                match backend.spawn(*pane_id, spawn.clone(), spawn_size) {
+                let mut spawn_spec = spawn.clone();
+                spawn_spec.env.extend(koshi_env(
+                    session_id,
+                    Some(client_id),
+                    *pane_id,
+                    runtime_dir.as_deref(),
+                ));
+                match backend.spawn(*pane_id, spawn_spec, spawn_size) {
                     Ok(handle) => handles.push((*pane_id, handle, spawn_size)),
                     Err(err) => {
                         // Group-kill each already-spawned pane so a profile
@@ -178,7 +198,6 @@ impl Server {
         // starts focused on.
         let focused_tab = template.focused_tab.min(plans.len().saturating_sub(1));
         let focused_tab_id = plans[focused_tab].tab_id;
-        let client_id = ClientId::new();
         let session_name = generate_name(NameKind::Session, |_| false);
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
         let client = Client::new(client_id, session_id, now, viewport, focused_tab_id);

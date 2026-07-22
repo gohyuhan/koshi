@@ -164,3 +164,39 @@ fn writing_into_a_missing_directory_is_endpoint_file_write() {
         other => panic!("expected EndpointFileWrite, got {other:?}"),
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn the_socket_addr_is_session_uuid_sock_inside_the_runtime_dir() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        socket_addr(Path::new("/run/koshi"), session),
+        "/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.sock"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_socket_addr_is_a_koshi_namespaced_pipe_name() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        socket_addr(Path::new(r"C:\unused"), session),
+        "koshi-session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    );
+}
+
+#[test]
+fn the_socket_addr_passes_the_socket_location_check() {
+    let dir = TempDir::new().expect("create temp dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restrict runtime dir");
+    }
+    let session = SessionId::new();
+    let addr = socket_addr(dir.path(), session);
+    crate::validate::validate_socket_addr(&addr, dir.path()).expect("validate socket addr");
+}

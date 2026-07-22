@@ -2851,14 +2851,22 @@ fn run_command_pane_spawns_and_records_the_command() {
     }
 
     // The command is spawned verbatim — save for koshi's terminal identity
-    // added to its environment — and recorded on the pane, which takes the
-    // default close-on-exit policy.
+    // and the in-session identity vars added to its environment — and
+    // recorded on the pane without the identity vars, taking the default
+    // close-on-exit policy.
     let new_pane = other_pane(&rt, sid, root);
-    let mut expected = spawn_spec();
-    expected.env = rt.terminal_identity_env(BTreeMap::new());
-    assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
+    let mut recorded = spawn_spec();
+    recorded.env = rt.terminal_identity_env(BTreeMap::new());
+    let mut launched = recorded.clone();
+    launched.env.extend(koshi_env(
+        sid,
+        Some(client_id),
+        new_pane,
+        koshi_paths::runtime_dir().as_deref(),
+    ));
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), launched);
     let record = rt.sessions[&sid].panes.get(new_pane).unwrap();
-    assert_eq!(record.command, Some(expected));
+    assert_eq!(record.command, Some(recorded));
     assert_eq!(record.exit_policy, PaneExitPolicy::CloseOnExit);
     // The new command pane is focused for the issuing client.
     assert_eq!(
@@ -3183,12 +3191,16 @@ fn new_pane_without_command_spawns_the_default_shell() {
     ));
 
     // command: None resolves to the platform default shell carrying koshi's
-    // terminal identity in its environment.
+    // terminal identity and the in-session identity vars in its environment.
     let new_pane = other_pane(&rt, sid, root);
-    assert_eq!(
-        fake.spawn_spec(new_pane).unwrap(),
-        rt.default_shell_spec(None, BTreeMap::new())
-    );
+    let mut expected = rt.default_shell_spec(None, BTreeMap::new());
+    expected.env.extend(koshi_env(
+        sid,
+        Some(client_id),
+        new_pane,
+        koshi_paths::runtime_dir().as_deref(),
+    ));
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
 }
 
 #[test]
@@ -3213,10 +3225,16 @@ fn new_pane_with_command_spawns_that_command() {
     ));
 
     // An explicit command is spawned verbatim, save for koshi's terminal
-    // identity added to its environment.
+    // identity and the in-session identity vars added to its environment.
     let new_pane = other_pane(&rt, sid, root);
     let mut expected = spawn_spec();
     expected.env = rt.terminal_identity_env(BTreeMap::new());
+    expected.env.extend(koshi_env(
+        sid,
+        Some(client_id),
+        new_pane,
+        koshi_paths::runtime_dir().as_deref(),
+    ));
     assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
 }
 
@@ -6240,6 +6258,43 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
         vec![PtySize { cols: 78, rows: 20 }]
     );
     assert_eq!(rt.pty_sizes[&new_pane], PtySize { cols: 78, rows: 20 });
+}
+
+#[test]
+fn new_tab_root_pane_carries_the_in_session_identity_env() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client_id = ClientId::new();
+    let tab_a = TabId::new();
+    let pane_a = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane_a);
+    add_tab(&mut session, tab_a, pane_a);
+    add_client(&mut session, client_id, tab_a, Some(pane_a));
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    rt.dispatch(envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewTab(NewTabArgs::default()),
+    ));
+
+    // The root pane's spec is the default shell plus the identity vars naming
+    // this session, the issuing client, and the root pane itself.
+    let session = &rt.sessions[&sid];
+    let new_tab = session
+        .tabs
+        .values()
+        .find(|tab| tab.id() != tab_a)
+        .expect("the created tab");
+    let new_pane = new_tab.layout().leaf_panes()[0];
+    let mut expected = rt.default_shell_spec(None, BTreeMap::new());
+    expected.env.extend(koshi_env(
+        sid,
+        Some(client_id),
+        new_pane,
+        koshi_paths::runtime_dir().as_deref(),
+    ));
+    assert_eq!(fake.spawn_spec(new_pane).unwrap(), expected);
 }
 
 #[test]

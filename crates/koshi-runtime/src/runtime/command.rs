@@ -23,7 +23,7 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::runtime::{
-    bus::EventBus, render_schedule::InvalidationReason, snapshot::solve_tab,
+    bus::EventBus, render_schedule::InvalidationReason, snapshot::solve_tab, spawn_env::koshi_env,
     transaction::TransactionScope,
 };
 use crate::server::Server;
