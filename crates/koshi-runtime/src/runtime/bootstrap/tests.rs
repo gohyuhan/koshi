@@ -226,15 +226,13 @@ fn bootstrap_local_injects_the_in_session_identity_env() {
     let session = rt.sessions.values().next().expect("one session");
     let tab = session.tabs.values().next().expect("one tab");
     let pane = tab.layout().leaf_panes()[0];
-    let expected = rt.default_shell_spec(
-        None,
-        koshi_env(
-            sid,
-            Some(client),
-            pane,
-            koshi_paths::runtime_dir().as_deref(),
-        ),
-    );
+    let mut expected = rt.default_shell_spec(None, BTreeMap::new());
+    expected.env.extend(koshi_env(
+        sid,
+        Some(client),
+        pane,
+        koshi_paths::runtime_dir().as_deref(),
+    ));
     assert_eq!(fake.spawn_spec(pane).unwrap(), expected);
 }
 

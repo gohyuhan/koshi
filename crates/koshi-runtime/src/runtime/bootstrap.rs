@@ -6,6 +6,7 @@
 //! one tab holding one shell pane, viewed by one client, directly through the
 //! session-layer ops, then hands the pane's PTY to a forwarder like any other.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -57,15 +58,13 @@ impl Server {
 
         // Launch the shell first: on failure nothing is registered. The spec
         // carries the pane's in-session identity vars in its env overlay.
-        let spawn_spec = self.default_shell_spec(
-            None,
-            koshi_env(
-                session_id,
-                Some(client_id),
-                pane_id,
-                koshi_paths::runtime_dir().as_deref(),
-            ),
-        );
+        let mut spawn_spec = self.default_shell_spec(None, BTreeMap::new());
+        spawn_spec.env.extend(koshi_env(
+            session_id,
+            Some(client_id),
+            pane_id,
+            koshi_paths::runtime_dir().as_deref(),
+        ));
         let handle = backend.spawn(pane_id, spawn_spec, spawn_size)?;
 
         // Assemble the session with one client viewing the tab we are about to
