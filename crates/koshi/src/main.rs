@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand};
 use koshi::error::CliError;
+use koshi::in_session::InSessionContext;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
 use koshi::updater;
@@ -30,8 +31,9 @@ fn main() -> ExitCode {
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
 /// `actions` query and the read-only `keys` queries render locally; the
-/// interactive launch runs the app; every other verb needs the IPC client
-/// this build does not carry.
+/// interactive launch runs the app; every other verb reads the in-session
+/// identity from the environment and then needs the IPC client this build
+/// does not carry.
 fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` introspects the static action table, so it renders locally
@@ -59,6 +61,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             detail: err.to_string(),
         });
     }
+
+    // Session verbs read the in-session identity first, so a broken pane
+    // environment reports itself rather than as a missing daemon.
+    let _in_session = InSessionContext::from_env()?;
 
     // The session verbs are served over IPC by the daemon; this build carries
     // no IPC client, so the parsed command cannot be sent.

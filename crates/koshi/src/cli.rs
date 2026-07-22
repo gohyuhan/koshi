@@ -661,7 +661,7 @@ fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
 /// Parse an entity id as koshi prints it (`<prefix>-<uuid>`) or as a bare
 /// UUID. A mismatched prefix does not strip, so an id of the wrong kind is
 /// rejected rather than silently accepted.
-fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, String> {
+pub(crate) fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, String> {
     let bare = value
         .strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix('-'))

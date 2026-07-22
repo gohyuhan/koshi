@@ -18,6 +18,10 @@ fn maps_each_error_class_to_its_exit_code() {
         CliExitCode::UsageOrConfig
     );
     assert_eq!(
+        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }),
+        CliExitCode::UsageOrConfig
+    );
+    assert_eq!(
         CliExitCode::from(&CliError::IpcUnavailable { detail: "x".into() }),
         CliExitCode::IpcUnavailable
     );
@@ -83,6 +87,10 @@ fn category_classifies_by_variant() {
         DomainCategory::Cli
     );
     assert_eq!(
+        CliError::InSessionEnv { detail: "x".into() }.category(),
+        DomainCategory::Cli
+    );
+    assert_eq!(
         CliError::IpcUnavailable { detail: "x".into() }.category(),
         DomainCategory::Ipc
     );
@@ -107,6 +115,10 @@ fn severity_is_recoverable_for_every_variant() {
     );
     assert_eq!(
         CliError::InvalidArgs { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::InSessionEnv { detail: "x".into() }.severity(),
         Severity::Recoverable
     );
     assert_eq!(
