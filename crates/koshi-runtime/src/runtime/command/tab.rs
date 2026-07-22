@@ -55,7 +55,7 @@ impl Server {
         let pane_min = self.effective_pane_min();
         // The root pane runs the default shell carrying `--cwd`. Built before the
         // session is borrowed so it can read the terminal config off `self`.
-        let spawn_spec = self.default_shell_spec(args.cwd.clone(), BTreeMap::new());
+        let mut spawn_spec = self.default_shell_spec(args.cwd.clone(), BTreeMap::new());
 
         let session = self
             .sessions
@@ -87,6 +87,12 @@ impl Server {
         });
 
         let launch_cwd = spawn_spec.cwd.clone();
+        spawn_spec.env.extend(koshi_env(
+            target.session_id,
+            Some(target.client_id),
+            new_pane_id,
+            koshi_paths::runtime_dir().as_deref(),
+        ));
 
         // Launch the child BEFORE committing any state. On failure nothing
         // was registered and no view moved, so the command rejects as if it

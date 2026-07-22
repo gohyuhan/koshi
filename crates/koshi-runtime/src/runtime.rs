@@ -24,6 +24,7 @@ pub mod scroll;
 pub mod selection;
 pub mod shutdown;
 pub mod snapshot;
+pub(crate) mod spawn_env;
 pub mod transaction;
 
 #[cfg(test)]

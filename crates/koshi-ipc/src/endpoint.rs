@@ -22,6 +22,35 @@ use serde::{Deserialize, Serialize};
 use crate::error::IpcError;
 use crate::protocol::ConnectionToken;
 
+/// The control-socket address a running `session` listens on: the string
+/// [`Connection::connect`](crate::transport::Connection::connect) takes and
+/// the [`EndpointFile`]'s `socket` field carries.
+///
+/// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside
+/// `runtime_dir` — the location [`validate_socket_addr`](crate::validate::validate_socket_addr)
+/// accepts. On Windows it is the pipe name `koshi-session-<uuid>`, inside the
+/// `koshi-` namespace that same check requires; a pipe has no filesystem
+/// path, so `runtime_dir` goes unused there.
+///
+/// Every consumer derives the address through here — the `KOSHI_SOCKET`
+/// variable injected into spawned panes today, the listener bind when it
+/// lands — so all of them always name the same place.
+#[must_use]
+pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
+    #[cfg(unix)]
+    {
+        runtime_dir
+            .join(format!("{session}.sock"))
+            .display()
+            .to_string()
+    }
+    #[cfg(windows)]
+    {
+        let _ = runtime_dir;
+        format!("koshi-{session}")
+    }
+}
+
 /// What the endpoint file holds.
 ///
 /// Decoding rejects any field it does not know, so a misspelled name is an

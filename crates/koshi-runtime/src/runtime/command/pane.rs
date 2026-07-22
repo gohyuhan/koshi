@@ -43,7 +43,7 @@ impl Server {
         // program, a bare new pane runs the configured default shell. Either way
         // it carries koshi's terminal identity, with an explicit command's own
         // env winning over it.
-        let spawn_spec = match &args.command {
+        let mut spawn_spec = match &args.command {
             Some(command) => {
                 let mut spec = command.clone();
                 if spec.cwd.is_none() {
@@ -120,6 +120,14 @@ impl Server {
         // with the process about where or what it started.
         let launch_cwd = spawn_spec.cwd.clone();
         let recorded_command = args.command.as_ref().map(|_| spawn_spec.clone());
+        // The in-session identity vars join the launched spec only, after the
+        // record above is taken; the record keeps the caller's own env.
+        spawn_spec.env.extend(koshi_env(
+            target.session_id,
+            designated,
+            new_pane_id,
+            koshi_paths::runtime_dir().as_deref(),
+        ));
 
         // Launch the child BEFORE committing any state. On failure nothing was
         // registered and no view moved, so the command rejects as if it never ran.
