@@ -521,7 +521,8 @@ fn write_to_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
 
     // Issued from inside `pane_a` with no explicit target: the captured issuing
     // pane is the target.
-    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let source =
+        CommandSource::in_session_cli(sid, Some(client_id), pane_a, PathBuf::from("/sock"));
     let env = envelope_from(
         source,
         Command::WriteToPane(WriteToPaneArgs {
@@ -1415,8 +1416,12 @@ fn in_session_cli_close_defaults_to_its_source_pane() {
     // No explicit pane: an in-session CLI closes the pane it was issued from.
     // The captured pane is the split one, so the root survives and inherits
     // focus — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused.
-    let source =
-        CommandSource::in_session_cli(session_id, client_id, new_pane, PathBuf::from("/sock"));
+    let source = CommandSource::in_session_cli(
+        session_id,
+        Some(client_id),
+        new_pane,
+        PathBuf::from("/sock"),
+    );
     let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -1447,7 +1452,7 @@ fn in_session_cli_close_defaults_to_its_source_pane() {
 }
 
 #[test]
-fn in_session_cli_with_missing_source_pane_is_not_found() {
+fn in_session_cli_with_missing_source_pane_is_gone() {
     let (mut rt, _tx) = new_runtime();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
@@ -1455,17 +1460,22 @@ fn in_session_cli_with_missing_source_pane_is_not_found() {
     add_client(&mut session, client_id, TabId::new(), None);
     rt.sessions.insert(session.id, session);
 
-    // The source pane has since closed; the stale source resolves to nothing.
-    let source =
-        CommandSource::in_session_cli(session_id, client_id, PaneId::new(), PathBuf::from("/sock"));
+    // The source pane has since closed; the command issued from it is refused
+    // before any target resolution.
+    let source = CommandSource::in_session_cli(
+        session_id,
+        Some(client_id),
+        PaneId::new(),
+        PathBuf::from("/sock"),
+    );
     let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::TargetNotFound,
-            help: None,
+            reason: RejectReason::TargetGone,
+            help: Some("source pane no longer exists".to_string()),
         }
     );
 }
@@ -2712,7 +2722,7 @@ fn focus_activation_reflows_the_expanded_member_pty() {
 }
 
 #[test]
-fn in_session_cli_source_pane_in_another_session_is_not_found() {
+fn in_session_cli_source_pane_in_another_session_is_gone() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let session_a = SessionId::new();
@@ -2722,13 +2732,282 @@ fn in_session_cli_source_pane_in_another_session_is_not_found() {
     add_client(&mut a, client_id, TabId::new(), None);
     rt.sessions.insert(a.id, a);
 
-    // The pane lives in a *different* session; scoped resolution must reject it.
+    // The pane lives in a *different* session; the acting session has no such
+    // source pane, so the command is refused before any target resolution.
     let mut b = bare_session(SessionId::new());
     add_pane(&mut b, pane_in_b);
     rt.sessions.insert(b.id, b);
 
+    let source = CommandSource::in_session_cli(
+        session_a,
+        Some(client_id),
+        pane_in_b,
+        PathBuf::from("/sock"),
+    );
+    let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetGone,
+            help: Some("source pane no longer exists".to_string()),
+        }
+    );
+}
+
+#[test]
+fn in_session_cli_pane_command_without_a_client_succeeds() {
+    let (mut rt, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    rt.sessions.insert(session_id, session);
+
+    // Grow a second pane; the split focuses it for the attached client.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, session_id, root);
+
+    // The issuing pane was spawned with no designated client. Closing it is
+    // pane-scoped, so no client is needed: the pane closes, and the attached
+    // client's focus falls back to the root — PaneClosing + PaneRemoved +
+    // LayoutChanged + PaneFocused.
+    let source = CommandSource::in_session_cli(session_id, None, new_pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
+    let command_id = env.id;
+    match rt.dispatch(env) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(emitted_events.len(), 4);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert!(rt.sessions[&session_id].panes.get(new_pane).is_none());
+}
+
+#[test]
+fn in_session_cli_pane_command_with_a_detached_client_succeeds() {
+    let (mut rt, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    add_client(&mut session, client_id, tab, Some(root));
+    rt.sessions.insert(session_id, session);
+
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::NewPane(NewPaneArgs::default()),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    let new_pane = other_pane(&rt, session_id, root);
+
+    // The client that spawned the pane is long gone (never attached here).
+    // The pane outlives it: a pane-scoped command from that pane still works.
+    let stranger = ClientId::new();
     let source =
-        CommandSource::in_session_cli(session_a, client_id, pane_in_b, PathBuf::from("/sock"));
+        CommandSource::in_session_cli(session_id, Some(stranger), new_pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert!(rt.sessions[&session_id].panes.get(new_pane).is_none());
+}
+
+#[test]
+fn in_session_cli_client_scoped_without_a_client_is_unauthorized() {
+    let (mut rt, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    rt.sessions.insert(session_id, session);
+
+    // Lock mode is one client's own state; a pane spawned with no designated
+    // client has no client to lock.
+    let source = CommandSource::in_session_cli(session_id, None, root, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command requires an attached client".to_string()),
+        }
+    );
+}
+
+#[test]
+fn in_session_cli_from_a_closing_pane_is_gone() {
+    let (mut rt, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    // The pane is mid-teardown: a command issued from it must not steer the
+    // session anymore.
+    session
+        .panes
+        .get_mut(root)
+        .expect("record")
+        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
+            since: SystemTime::now(),
+        })
+        .expect("spawning pane accepts a close request");
+    rt.sessions.insert(session_id, session);
+
+    let source = CommandSource::in_session_cli(session_id, None, root, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::RenamePane(RenamePaneArgs { pane: None }));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetGone,
+            help: Some("source pane no longer exists".to_string()),
+        }
+    );
+}
+
+#[test]
+fn in_session_cli_from_an_exited_pane_is_a_valid_source() {
+    let (mut rt, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let tab = TabId::new();
+    let root = PaneId::new();
+    let mut session = bare_session(session_id);
+    add_pane(&mut session, root);
+    add_tab(&mut session, tab, root);
+    // The pane's child ran and exited; its close policy keeps it on screen.
+    // A background child it left behind can still command from it.
+    {
+        let record = session.panes.get_mut(root).expect("record");
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
+            .expect("spawning pane starts");
+        record
+            .update_lifecycle(PaneLifecycleEvent::ProcessExited {
+                code: Some(0),
+                at: SystemTime::now(),
+            })
+            .expect("running pane exits");
+    }
+    rt.sessions.insert(session_id, session);
+
+    let source = CommandSource::in_session_cli(session_id, None, root, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::RenamePane(RenamePaneArgs { pane: None }));
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+}
+
+#[test]
+fn mouse_select_cannot_be_issued_from_the_cli() {
+    // The CLI has no mouse-select verb; the command is refused before any
+    // state is read, so even an empty runtime answers.
+    let (mut rt, _tx) = new_runtime();
+    let source = CommandSource::in_session_cli(
+        SessionId::new(),
+        Some(ClientId::new()),
+        PaneId::new(),
+        PathBuf::from("/sock"),
+    );
+    let env = envelope_from(source, Command::ToggleMouseSelect);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command cannot be issued from the CLI".to_string()),
+        }
+    );
+}
+
+#[test]
+fn copy_cannot_be_issued_from_the_cli() {
+    let (mut rt, _tx) = new_runtime();
+    let source = CommandSource::in_session_cli(
+        SessionId::new(),
+        Some(ClientId::new()),
+        PaneId::new(),
+        PathBuf::from("/sock"),
+    );
+    let env = envelope_from(
+        source,
+        Command::Visual(VisualCommand::Copy(CopyArgs {
+            target: CopyTarget::Osc52,
+        })),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command cannot be issued from the CLI".to_string()),
+        }
+    );
+}
+
+#[test]
+fn quit_cannot_be_issued_from_inside_a_pane() {
+    let (mut rt, _tx) = new_runtime();
+    let source = CommandSource::in_session_cli(
+        SessionId::new(),
+        Some(ClientId::new()),
+        PaneId::new(),
+        PathBuf::from("/sock"),
+    );
+    let env = envelope_from(source, Command::Quit);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::Unauthorized,
+            help: Some("command cannot be issued from the CLI".to_string()),
+        }
+    );
+    assert!(!rt.quit_requested());
+}
+
+#[test]
+fn quit_from_an_external_cli_is_accepted() {
+    // `kill-session` sends `Quit` from outside the session.
+    let (mut rt, _tx) = new_runtime();
+    let source = CommandSource::external_cli(None);
+    let env = envelope_from(source, Command::Quit);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert!(rt.quit_requested());
+}
+
+#[test]
+fn in_session_cli_with_an_unknown_session_is_not_found() {
+    // The envelope names a session this runtime does not run.
+    let (mut rt, _tx) = new_runtime();
+    let source = CommandSource::in_session_cli(
+        SessionId::new(),
+        Some(ClientId::new()),
+        PaneId::new(),
+        PathBuf::from("/sock"),
+    );
     let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = env.id;
     assert_eq!(
@@ -2946,30 +3225,35 @@ fn in_session_cli_session_id_is_authoritative_over_a_mismatched_client() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let claimed_session = SessionId::new();
+    let source_pane = PaneId::new();
+    let tab = TabId::new();
 
     // The envelope claims session A, but the client is attached to session B.
-    // Session A is looked up by its id and rejects the unattached client rather
-    // than silently acting on B.
-    rt.sessions
-        .insert(claimed_session, bare_session(claimed_session));
+    // Session A is looked up by its id, and a client-scoped command checks the
+    // client *there* — it is not attached to A, so the command is rejected
+    // rather than silently acting on B.
+    let mut a = bare_session(claimed_session);
+    add_pane(&mut a, source_pane);
+    add_tab(&mut a, tab, source_pane);
+    rt.sessions.insert(claimed_session, a);
     let mut b = bare_session(SessionId::new());
     add_client(&mut b, client_id, TabId::new(), None);
     rt.sessions.insert(b.id, b);
 
     let source = CommandSource::in_session_cli(
         claimed_session,
-        client_id,
-        PaneId::new(),
+        Some(client_id),
+        source_pane,
         PathBuf::from("/sock"),
     );
-    let env = envelope_from(source, Command::ClosePane(ClosePaneArgs::default()));
+    let env = envelope_from(source, Command::ToggleLockMode);
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::SourceClientStale,
-            help: None,
+            help: Some("run this command from an active Koshi client".to_string()),
         }
     );
 }
@@ -3093,7 +3377,7 @@ fn in_session_cli_tab_default_uses_the_source_pane_tab() {
     // CloseTab with no explicit tab — InSessionCli resolves via the tab
     // containing pane_a (tab A), not the client's active tab (tab B).
     let source =
-        CommandSource::in_session_cli(session_id, client_id, pane_a, PathBuf::from("/sock"));
+        CommandSource::in_session_cli(session_id, Some(client_id), pane_a, PathBuf::from("/sock"));
     let result = rt.dispatch(envelope_from(
         source,
         Command::CloseTab(CloseTabArgs::default()),
@@ -3110,7 +3394,7 @@ fn in_session_cli_tab_default_uses_the_source_pane_tab() {
 }
 
 #[test]
-fn in_session_cli_tab_default_with_removed_source_pane_is_not_found() {
+fn in_session_cli_tab_default_with_removed_source_pane_is_gone() {
     let (mut rt, _tx) = new_runtime();
     let client_id = ClientId::new();
     let session_id = SessionId::new();
@@ -3124,16 +3408,20 @@ fn in_session_cli_tab_default_with_removed_source_pane_is_not_found() {
 
     // The source pane_id doesn't exist in the registry (nor any tab layout).
     let stale_pane = PaneId::new();
-    let source =
-        CommandSource::in_session_cli(session_id, client_id, stale_pane, PathBuf::from("/sock"));
+    let source = CommandSource::in_session_cli(
+        session_id,
+        Some(client_id),
+        stale_pane,
+        PathBuf::from("/sock"),
+    );
     let env = envelope_from(source, Command::CloseTab(CloseTabArgs::default()));
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::TargetNotFound,
-            help: None,
+            reason: RejectReason::TargetGone,
+            help: Some("source pane no longer exists".to_string()),
         }
     );
 }
@@ -5859,7 +6147,7 @@ fn resize_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
 
     // Issued from inside root's pane with no explicit target: root grows
     // right by 3, so its neighbor A donates 3 columns.
-    let source = CommandSource::in_session_cli(sid, client_id, root, PathBuf::from("/sock"));
+    let source = CommandSource::in_session_cli(sid, Some(client_id), root, PathBuf::from("/sock"));
     let env = envelope_from(
         source,
         Command::ResizePane(ResizePaneArgs {
@@ -7336,7 +7624,7 @@ fn in_session_cli_move_tab_defaults_to_the_source_pane_tab() {
     // MoveTab with no explicit tab — InSessionCli resolves via the tab
     // containing pane_a (tab A), not the client's active tab (tab B).
     let source =
-        CommandSource::in_session_cli(session_id, client_id, pane_a, PathBuf::from("/sock"));
+        CommandSource::in_session_cli(session_id, Some(client_id), pane_a, PathBuf::from("/sock"));
     let result = rt.dispatch(envelope_from(
         source,
         Command::MoveTab(MoveTabArgs {
@@ -7471,7 +7759,8 @@ fn rename_pane_in_session_cli_defaults_to_the_issuing_pane() {
 
     // No explicit target from the in-session CLI: the pane the command was
     // issued from is renamed.
-    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let source =
+        CommandSource::in_session_cli(sid, Some(client_id), pane_a, PathBuf::from("/sock"));
     let result = rt.dispatch(envelope_from(
         source,
         Command::RenamePane(RenamePaneArgs { pane: None }),
@@ -7537,7 +7826,8 @@ fn rename_session_in_session_cli_defaults_to_the_issuing_session() {
     // No explicit target from the in-session CLI: the session the command
     // was issued inside gets a fresh generated name, even with other
     // sessions around.
-    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let source =
+        CommandSource::in_session_cli(sid, Some(client_id), pane_a, PathBuf::from("/sock"));
     let result = rt.dispatch(envelope_from(
         source,
         Command::RenameSession(RenameSessionArgs { session: None }),
@@ -7734,7 +8024,8 @@ fn rename_session_in_session_cli_on_a_stopping_session_is_rejected() {
     rt.sessions.insert(sid, session);
 
     // The issuer's own session is winding down: admission rejects the rename.
-    let source = CommandSource::in_session_cli(sid, client_id, pane_a, PathBuf::from("/sock"));
+    let source =
+        CommandSource::in_session_cli(sid, Some(client_id), pane_a, PathBuf::from("/sock"));
     let env = envelope_from(
         source,
         Command::RenameSession(RenameSessionArgs { session: None }),
@@ -8381,7 +8672,7 @@ fn toggle_fullscreen_from_the_issuing_pane_moves_the_acting_focus() {
 
     // Issued from inside root's pane while the client's focus is on the
     // split pane: root is promoted and the focus follows it.
-    let source = CommandSource::in_session_cli(sid, client_id, root, PathBuf::from("/sock"));
+    let source = CommandSource::in_session_cli(sid, Some(client_id), root, PathBuf::from("/sock"));
     let env = envelope_from(source, Command::TogglePaneFullscreen);
     match rt.dispatch(env) {
         CommandResult::Ok { emitted_events, .. } => {
@@ -8424,7 +8715,8 @@ fn toggle_fullscreen_on_an_unviewed_tab_is_rejected() {
 
     // Issued from inside the unviewed tab's pane: the toggle would resize
     // real PTYs against a viewport no client provides.
-    let source = CommandSource::in_session_cli(sid, client_id, pane_b, PathBuf::from("/sock"));
+    let source =
+        CommandSource::in_session_cli(sid, Some(client_id), pane_b, PathBuf::from("/sock"));
     let env = envelope_from(source, Command::TogglePaneFullscreen);
     let command_id = env.id;
     assert_eq!(

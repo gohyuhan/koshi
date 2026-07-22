@@ -592,8 +592,11 @@ pub enum CommandSource {
     InSessionCli {
         /// Session the issuing CLI process belongs to.
         session_id: SessionId,
-        /// Client owning the pane the command was issued from.
-        client_id: ClientId,
+        /// Client that asked for the pane when it was spawned; `None` when the
+        /// pane was created with no designated client (its shell then has no
+        /// `KOSHI_CLIENT_ID` to report). Pane- and session-scoped commands
+        /// work without one; client-scoped commands need an attached client.
+        client_id: Option<ClientId>,
         /// Pane the command was issued from.
         pane_id: PaneId,
         /// OS path of the runtime socket the command arrived on.
@@ -614,15 +617,17 @@ pub enum CommandSource {
 }
 
 impl CommandSource {
-    /// The client this source is attributed to, if any. `InSessionCli`,
-    /// `KeyBinding`, and `Mouse` name a client; `ExternalCli`, `Plugin`, and
-    /// `Internal` do not.
+    /// The client this source is attributed to, if any. `KeyBinding` and
+    /// `Mouse` always name a client; `InSessionCli` names one when the issuing
+    /// pane was spawned for a client; `ExternalCli`, `Plugin`, and `Internal`
+    /// never do.
     #[must_use]
     pub const fn client_id(&self) -> Option<ClientId> {
         match self {
-            CommandSource::KeyBinding { client_id }
-            | CommandSource::Mouse { client_id }
-            | CommandSource::InSessionCli { client_id, .. } => Some(*client_id),
+            CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => {
+                Some(*client_id)
+            }
+            CommandSource::InSessionCli { client_id, .. } => *client_id,
             CommandSource::ExternalCli { .. }
             | CommandSource::Plugin { .. }
             | CommandSource::Internal => None,
@@ -645,7 +650,7 @@ impl CommandSource {
     #[must_use]
     pub const fn in_session_cli(
         session_id: SessionId,
-        client_id: ClientId,
+        client_id: Option<ClientId>,
         pane_id: PaneId,
         socket_path: PathBuf,
     ) -> Self {
