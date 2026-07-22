@@ -89,13 +89,16 @@ fn pty_output_is_forwarded_into_the_inbox() {
     fake.push_output(pane_id, b"hi".to_vec()).expect("push");
 
     let event = recv_matching(&rt, |e| matches!(e, RuntimeEvent::PtyOutput { .. }));
-    assert_eq!(
-        event,
+    match event {
         RuntimeEvent::PtyOutput {
-            pane_id,
-            bytes: b"hi".to_vec(),
+            pane_id: received,
+            bytes,
+        } => {
+            assert_eq!(received, pane_id);
+            assert_eq!(bytes, b"hi");
         }
-    );
+        other => panic!("expected PtyOutput, got {other:?}"),
+    }
 }
 
 #[test]
@@ -208,13 +211,16 @@ fn trailing_output_is_forwarded_before_the_exit() {
         .inbox_rx()
         .recv_timeout(Duration::from_secs(2))
         .expect("first event");
-    assert_eq!(
-        first,
+    match first {
         RuntimeEvent::PtyOutput {
-            pane_id,
-            bytes: b"bye".to_vec(),
+            pane_id: received,
+            bytes,
+        } => {
+            assert_eq!(received, pane_id);
+            assert_eq!(bytes, b"bye");
         }
-    );
+        other => panic!("expected PtyOutput, got {other:?}"),
+    }
     let second = rt
         .inbox_rx()
         .recv_timeout(Duration::from_secs(2))

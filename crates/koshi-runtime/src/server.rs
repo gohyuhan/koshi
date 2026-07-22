@@ -32,7 +32,8 @@ use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
-    placeholder::{IpcServer, SnapshotProvider, Storage},
+    ipc_server::IpcServer,
+    placeholder::{SnapshotProvider, Storage},
     runtime::{
         bus::{EventBus, EventFilter},
         event::RuntimeEvent,
@@ -78,8 +79,9 @@ pub struct Server {
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
     storage: Arc<dyn Storage>,
-    /// Control-socket server, present once IPC is wired.
-    ipc_server: Option<IpcServer>,
+    /// Control-socket server, present once the session's socket is serving.
+    /// Shutdown takes it to stop accepting and withdraw the endpoint file.
+    pub(crate) ipc_server: Option<IpcServer>,
     /// Every action this process can perform, seeded with the built-in `core:`
     /// table and extended by plugins as they load. The dispatcher is its only
     /// writer.
@@ -111,9 +113,10 @@ pub struct Server {
     /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
     /// they can push [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`].
     pub(crate) inbox_tx: Sender<RuntimeEvent>,
-    /// Set once shutdown begins, so that — once IPC/plugin command intake
-    /// exists — newly-arriving commands will be rejected rather than mutate
-    /// state mid-teardown. One-way; no command-dispatch path checks it yet —
+    /// Set once shutdown begins. The event loop has already exited when it is
+    /// set, so no queued IPC/plugin command dispatches after it; the control
+    /// socket itself is stopped in the next shutdown stage. One-way; no
+    /// command-dispatch path checks it —
     /// [`is_draining`](Self::is_draining) exposes the raw flag today.
     pub(crate) draining: bool,
     /// True when an explicit quit chord requested zero-grace process teardown.
@@ -257,6 +260,11 @@ impl Server {
     /// Borrow the IPC server, if one is wired.
     pub fn ipc_server(&self) -> Option<&IpcServer> {
         self.ipc_server.as_ref()
+    }
+    /// Wire the serving control-socket server in, so shutdown stops it and
+    /// withdraws its endpoint file with the rest of teardown.
+    pub fn attach_ipc_server(&mut self, ipc_server: IpcServer) {
+        self.ipc_server = Some(ipc_server);
     }
     /// Borrow the action registry.
     pub fn action_registry(&self) -> &ActionRegistry {

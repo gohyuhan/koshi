@@ -1,9 +1,8 @@
-//! Construction and equality coverage for every [`RuntimeEvent`] variant.
+//! Construction coverage for every [`RuntimeEvent`] variant.
 
 use super::*;
 use koshi_core::command::{Command, CommandSource};
 use koshi_core::ids::CommandId;
-use koshi_core::key::{Key, ModFlags};
 use std::time::SystemTime;
 
 /// A deterministic, boundary-free envelope for the IPC/plugin variants.
@@ -66,43 +65,49 @@ fn resize_carries_its_client_and_size() {
 }
 
 #[test]
-fn ipc_and_plugin_carry_their_envelope() {
+fn ipc_carries_its_envelope_and_a_working_reply_channel() {
     let env = envelope();
-    let ipc = RuntimeEvent::Ipc(env.clone());
-    let plugin = RuntimeEvent::Plugin(env.clone());
-    let RuntimeEvent::Ipc(carried) = &ipc else {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let ipc = RuntimeEvent::Ipc {
+        envelope: env.clone(),
+        reply: reply_tx,
+    };
+    let RuntimeEvent::Ipc { envelope, reply } = &ipc else {
         panic!("expected Ipc");
     };
-    assert_eq!(carried, &env);
+    assert_eq!(envelope, &env);
+    reply
+        .send(CommandResult::Ok {
+            command_id: env.id,
+            emitted_events: Vec::new(),
+        })
+        .expect("send on the carried reply channel");
+    assert_eq!(
+        reply_rx.recv().expect("receive the reply"),
+        CommandResult::Ok {
+            command_id: env.id,
+            emitted_events: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn ipc_discovery_carries_a_working_reply_channel() {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let event = RuntimeEvent::IpcDiscovery { reply: reply_tx };
+    let RuntimeEvent::IpcDiscovery { reply } = &event else {
+        panic!("expected IpcDiscovery");
+    };
+    reply.send(None).expect("send on the carried reply channel");
+    assert_eq!(reply_rx.recv().expect("receive the reply"), None);
+}
+
+#[test]
+fn plugin_carries_its_envelope() {
+    let env = envelope();
+    let plugin = RuntimeEvent::Plugin(env.clone());
     let RuntimeEvent::Plugin(carried) = &plugin else {
         panic!("expected Plugin");
     };
     assert_eq!(carried, &env);
-}
-
-#[test]
-fn equal_payloads_compare_equal() {
-    let pane = PaneId::new();
-    assert_eq!(
-        RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: vec![1, 2, 3],
-        },
-        RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: vec![1, 2, 3],
-        },
-    );
-}
-
-#[test]
-fn distinct_variants_compare_unequal() {
-    let client = ClientId::new();
-    assert_ne!(
-        RuntimeEvent::Timer,
-        RuntimeEvent::KeyInput {
-            client_id: client,
-            chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
-        },
-    );
 }

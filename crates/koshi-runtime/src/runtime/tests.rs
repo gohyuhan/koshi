@@ -47,13 +47,13 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
     rt.park_pane_pty(pane, handle, PANE_SIZE);
 
     fake.push_output(pane, b"hi".to_vec()).expect("push");
-    assert_eq!(
-        rt.inbox_rx().recv_timeout(DEADLINE),
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: b"hi".to_vec(),
-        })
-    );
+    match rt.inbox_rx().recv_timeout(DEADLINE) {
+        Ok(RuntimeEvent::PtyOutput { pane_id, bytes }) => {
+            assert_eq!(pane_id, pane);
+            assert_eq!(bytes, b"hi");
+        }
+        other => panic!("expected PtyOutput, got {other:?}"),
+    }
 
     assert!(rt.has_active_panes());
 

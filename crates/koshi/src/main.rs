@@ -6,10 +6,11 @@ use clap::Parser;
 use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand};
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
+use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
 use koshi::updater;
-use koshi_core::command::CliExitCode;
+use koshi_core::command::{CliExitCode, CommandResult};
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -31,9 +32,10 @@ fn main() -> ExitCode {
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
 /// `actions` query and the read-only `keys` queries render locally; the
-/// interactive launch runs the app; every other verb reads the in-session
-/// identity from the environment and then needs the IPC client this build
-/// does not carry.
+/// interactive launch runs the app; the action verbs read the in-session
+/// identity from the environment and travel the session's control socket as
+/// commands. Run outside a session, or with a verb the socket does not serve
+/// yet, they report IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` introspects the static action table, so it renders locally
@@ -64,13 +66,31 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     // Session verbs read the in-session identity first, so a broken pane
     // environment reports itself rather than as a missing daemon.
-    let _in_session = InSessionContext::from_env()?;
+    let in_session = InSessionContext::from_env()?;
 
-    // The session verbs are served over IPC by the daemon; this build carries
-    // no IPC client, so the parsed command cannot be sent.
-    Err(CliError::IpcUnavailable {
-        detail: "no koshi daemon is reachable".to_string(),
-    })
+    let Some(context) = in_session else {
+        // External targeting (count rules, explicit --session/--tab/--pane)
+        // is served by its own resolution layer; this build routes only
+        // in-session commands.
+        return Err(CliError::IpcUnavailable {
+            detail: "no koshi daemon is reachable".to_string(),
+        });
+    };
+
+    // The action verbs travel the socket as commands; the remaining verbs
+    // (discovery listings, lifecycle) have their own serving layers.
+    let Some((_, command)) = cli.command.as_ref().and_then(CliCommand::to_action) else {
+        return Err(CliError::IpcUnavailable {
+            detail: "this command is not served over the control socket yet".to_string(),
+        });
+    };
+
+    match ipc_client::submit_in_session(&context, command)? {
+        CommandResult::Ok { .. } => Ok(()),
+        CommandResult::Rejected { reason, help, .. } => {
+            Err(CliError::CommandRejected { reason, help })
+        }
+    }
 }
 
 /// Serve a `koshi actions` query from the static action table: print the

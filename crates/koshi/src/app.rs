@@ -40,6 +40,7 @@ use koshi_pty::portable::PortablePtyBackend;
 use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::client::Client;
+use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -197,6 +198,25 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     }
     .inspect_err(|error| tracing::error!(%error, "could not start the session"))?;
     tracing::info!(session_id = %session_id, client_id = %client_id, "session started");
+
+    // Serve the control socket and advertise it with the endpoint file, so a
+    // `koshi` CLI in a second process can reach this session. The socket is a
+    // convenience on top of a working terminal: failing to serve it is logged
+    // and the session runs on without one.
+    match koshi_paths::runtime_dir() {
+        Some(runtime_dir) => match IpcServer::start(&runtime_dir, session_id, inbox_tx.clone()) {
+            Ok(ipc_server) => {
+                tracing::info!(addr = ipc_server.addr(), "control socket serving");
+                server.attach_ipc_server(ipc_server);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "control socket unavailable; session commands from other processes will not work");
+            }
+        },
+        None => tracing::warn!(
+            "no runtime directory found; session commands from other processes will not work"
+        ),
+    }
 
     // The client half: the view side of the process. It subscribes to the
     // server's events and holds the cleanup guard, since the outer terminal

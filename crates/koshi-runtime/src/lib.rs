@@ -10,6 +10,7 @@
 
 pub mod client;
 pub mod error;
+pub mod ipc_server;
 pub mod placeholder;
 pub mod runtime;
 pub mod server;

@@ -73,7 +73,7 @@ fn inbox_delivers_events_to_the_receiver() {
 
     tx.send(RuntimeEvent::Timer).expect("send to inbox");
 
-    assert_eq!(rt.inbox_rx().try_recv(), Ok(RuntimeEvent::Timer));
+    assert!(matches!(rt.inbox_rx().try_recv(), Ok(RuntimeEvent::Timer)));
 }
 
 #[test]

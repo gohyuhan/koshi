@@ -23,6 +23,21 @@ const PANE_SIZE: PtySize = PtySize { cols: 80, rows: 24 };
 /// well before it elapses.
 const DEADLINE: Duration = Duration::from_secs(5);
 
+/// Receive one inbox event within the deadline and assert it is exactly
+/// `PtyOutput` for `pane` carrying `bytes`.
+fn expect_pty_output(rx: &mpsc::Receiver<RuntimeEvent>, pane: PaneId, bytes: &[u8]) {
+    match rx.recv_timeout(DEADLINE) {
+        Ok(RuntimeEvent::PtyOutput {
+            pane_id,
+            bytes: received,
+        }) => {
+            assert_eq!(pane_id, pane);
+            assert_eq!(received, bytes);
+        }
+        other => panic!("expected PtyOutput, got {other:?}"),
+    }
+}
+
 /// A runtime sharing one fake backend, returned alongside it so a test can push
 /// output and exit through the backend. The sender keeps the inbox open.
 fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
@@ -77,20 +92,8 @@ fn child_output_chunks_reach_the_inbox_in_the_order_written() {
     fake.push_output(pane, b"second".to_vec()).expect("push");
 
     let rx = rt.inbox_rx();
-    assert_eq!(
-        rx.recv_timeout(DEADLINE),
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: b"first".to_vec(),
-        })
-    );
-    assert_eq!(
-        rx.recv_timeout(DEADLINE),
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: b"second".to_vec(),
-        })
-    );
+    expect_pty_output(rx, pane, b"first");
+    expect_pty_output(rx, pane, b"second");
 }
 
 #[test]
@@ -107,13 +110,7 @@ fn the_child_exit_is_forwarded_after_all_output_drains() {
         .expect("exit");
 
     let rx = rt.inbox_rx();
-    assert_eq!(
-        rx.recv_timeout(DEADLINE),
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: b"out".to_vec(),
-        })
-    );
+    expect_pty_output(rx, pane, b"out");
     match rx.recv_timeout(DEADLINE) {
         Ok(RuntimeEvent::ChildExit {
             pane_id,
@@ -142,13 +139,7 @@ fn the_exit_waits_until_output_reaches_end_of_file() {
         .expect("exit");
 
     let rx = rt.inbox_rx();
-    assert_eq!(
-        rx.recv_timeout(DEADLINE),
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: pane,
-            bytes: b"tail".to_vec(),
-        })
-    );
+    expect_pty_output(rx, pane, b"tail");
 
     fake.close_output(pane).expect("close");
     match rx.recv_timeout(DEADLINE) {
@@ -204,5 +195,5 @@ fn parking_a_drained_handle_records_the_pane_but_spawns_no_forwarder() {
     // With no forwarder consuming the backend's output, nothing reaches the
     // inbox.
     fake.push_output(pane, b"ignored".to_vec()).expect("push");
-    assert_eq!(rt.inbox_rx().try_recv(), Err(TryRecvError::Empty));
+    assert!(matches!(rt.inbox_rx().try_recv(), Err(TryRecvError::Empty)));
 }

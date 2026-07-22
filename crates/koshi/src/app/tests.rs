@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandSource};
+use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Point;
 use koshi_core::ids::{CommandId, PaneId, SessionId};
@@ -630,9 +630,20 @@ fn ipc_event_dispatches_the_command_and_continues() {
         Command::ToggleLockMode,
     );
 
+    let (reply_tx, reply_rx) = mpsc::channel();
     assert!(server
-        .handle_runtime_event(RuntimeEvent::Ipc(envelope))
+        .handle_runtime_event(RuntimeEvent::Ipc {
+            envelope,
+            reply: reply_tx,
+        })
         .is_continue());
+    assert!(
+        matches!(
+            reply_rx.try_recv().expect("the dispatcher replies"),
+            CommandResult::Ok { .. }
+        ),
+        "the toggle-lock command's result must ride back on the reply channel"
+    );
 
     assert_eq!(
         server.build_snapshot(client_id).unwrap().client.lock_mode,

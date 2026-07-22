@@ -2,8 +2,8 @@
 //!
 //! The event loop calls [`Server::shutdown`] once it exits. Explicit quit
 //! group-kills immediately; hangup or last-pane exit keeps graceful teardown.
-//! Stages 1–4 run here; stages 5 (restore
-//! the outer terminal) and 6 (flush logs) run after this returns, as the
+//! Stages 1–5 run here; stages 6 (restore
+//! the outer terminal) and 7 (flush logs) run after this returns, as the
 //! binary's cleanup guard and tracing guard drop in that order. The panic path
 //! does not come here — it takes the abrupt [`Server::kill_all_panes`].
 
@@ -18,22 +18,29 @@ use crate::server::Server;
 impl Server {
     /// Tear the process down in a fixed staged order:
     /// 1. enter draining mode (reject new IPC/plugin commands),
-    /// 2. notify plugins of imminent shutdown *(seam — no host yet)*,
-    /// 3. group-kill immediately for explicit quit, otherwise graceful kill,
-    /// 4. persist the session snapshot *(seam — no storage yet)*.
+    /// 2. stop the control socket and withdraw its endpoint file,
+    /// 3. notify plugins of imminent shutdown *(seam — no host yet)*,
+    /// 4. group-kill immediately for explicit quit, otherwise graceful kill,
+    /// 5. persist the session snapshot *(seam — no storage yet)*.
     ///
-    /// Stages 5–6 (restore terminal, flush logs) are left to the caller's
+    /// Stages 6–7 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
     pub fn shutdown(&mut self) {
         // Stage 1 — draining: reject any newly-arriving IPC/plugin command so
         // nothing mutates state mid-teardown.
         self.draining = true;
 
-        // Stage 2 — notify plugins of imminent shutdown.
+        // Stage 2 — stop answering the control socket and remove the socket
+        // and endpoint file, so nothing advertises a session that is ending.
+        if let Some(ipc_server) = self.ipc_server.take() {
+            ipc_server.shutdown();
+        }
+
+        // Stage 3 — notify plugins of imminent shutdown.
         // SEAM: no plugin host exists yet. When it lands, broadcast the
         // shutdown notice here, ahead of the kill, so plugins can flush.
 
-        // Stage 3 — explicit user quit is immediate; natural loop endings keep
+        // Stage 4 — explicit user quit is immediate; natural loop endings keep
         // the graceful process-group window. Both paths reap descendants.
         if self.immediate_shutdown {
             self.kill_all_panes();
@@ -41,13 +48,13 @@ impl Server {
             self.graceful_kill_all_panes();
         }
 
-        // Stage 4 — persist the session snapshot.
+        // Stage 5 — persist the session snapshot.
         // SEAM: storage is a no-op placeholder. When a real storage layer
         // lands, serialize each session here and write it under the data dir,
         // skipping gracefully when persistence is unavailable. Ordered after the
         // kill so it records the final session state.
 
-        // Stages 5 (restore terminal) and 6 (flush logs) run after this returns,
+        // Stages 6 (restore terminal) and 7 (flush logs) run after this returns,
         // as the caller's cleanup guard and tracing guard drop in that order.
     }
 
