@@ -13,11 +13,13 @@ use thiserror::Error;
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy))
 /// is client-fatal too: no connection comes up at all, as is an endpoint
-/// file that is missing, unusable, or unwritable
+/// file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable),
-/// [`EndpointFileWrite`](IpcError::EndpointFileWrite)): without it no caller
-/// can find the socket or the token. A frame
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)): that one
+/// caller cannot connect, and the session serves on. A failed endpoint-file
+/// write ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) is
+/// session-fatal: it happens in the session's own startup, and a session
+/// whose endpoint file never lands is one no caller can ever reach. A frame
 /// that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)) is recoverable: the stream
 /// is still aligned on frame boundaries, so the connection can answer and
@@ -65,8 +67,8 @@ pub enum IpcError {
     /// failed, or its bytes are not a readable endpoint file.
     #[error("endpoint file {path} is unreadable: {detail}")]
     EndpointFileUnreadable { path: String, detail: String },
-    /// Writing the endpoint file failed, so no caller can find this
-    /// session's socket.
+    /// Writing the endpoint file failed during session startup, so no
+    /// caller will ever find this session's socket.
     #[error("endpoint file {path} could not be written: {detail}")]
     EndpointFileWrite { path: String, detail: String },
 }
@@ -85,8 +87,8 @@ impl DomainError for IpcError {
             | IpcError::NoListener { .. }
             | IpcError::SocketBusy { .. }
             | IpcError::EndpointFileMissing { .. }
-            | IpcError::EndpointFileUnreadable { .. }
-            | IpcError::EndpointFileWrite { .. } => Severity::ClientFatal,
+            | IpcError::EndpointFileUnreadable { .. } => Severity::ClientFatal,
+            IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
     }

@@ -3,18 +3,10 @@
 //! mode of a fresh file, and the missing / unreadable / unwritable failure
 //! cases.
 
-use std::path::PathBuf;
-
+use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::*;
-
-/// A fresh directory to stand in for the runtime dir.
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("koshi-endpoint-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create dir");
-    dir
-}
 
 /// An endpoint file holding a fixed address and secret.
 fn endpoint() -> EndpointFile {
@@ -36,7 +28,8 @@ fn the_path_is_session_uuid_json_directly_inside_the_runtime_dir() {
 
 #[test]
 fn a_written_endpoint_file_reads_back_identical() {
-    let path = temp_dir("roundtrip").join("session-roundtrip.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-roundtrip.json");
     let original = endpoint();
 
     original.write(&path).expect("write endpoint file");
@@ -50,7 +43,8 @@ fn a_written_endpoint_file_reads_back_identical() {
 /// The file is how the CLI learns the secret, so it carries the real value.
 #[test]
 fn the_file_on_disk_carries_the_real_secret() {
-    let path = temp_dir("secret").join("session-secret.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-secret.json");
 
     endpoint().write(&path).expect("write endpoint file");
 
@@ -70,7 +64,8 @@ fn debug_prints_the_token_redacted() {
 
 #[test]
 fn rewriting_replaces_the_previous_content() {
-    let path = temp_dir("rewrite").join("session-rewrite.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-rewrite.json");
     endpoint().write(&path).expect("write first endpoint file");
     let second = EndpointFile {
         socket: "/run/koshi/session-def.sock".to_string(),
@@ -89,7 +84,8 @@ fn rewriting_replaces_the_previous_content() {
 #[test]
 fn a_fresh_endpoint_file_is_private() {
     use std::os::unix::fs::PermissionsExt;
-    let path = temp_dir("private").join("session-private.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-private.json");
 
     endpoint().write(&path).expect("write endpoint file");
 
@@ -103,7 +99,8 @@ fn a_fresh_endpoint_file_is_private() {
 
 #[test]
 fn reading_a_missing_file_is_endpoint_file_missing() {
-    let path = temp_dir("missing").join("session-none.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-none.json");
 
     match EndpointFile::read(&path) {
         Err(IpcError::EndpointFileMissing { path: reported }) => {
@@ -115,7 +112,8 @@ fn reading_a_missing_file_is_endpoint_file_missing() {
 
 #[test]
 fn reading_junk_bytes_is_endpoint_file_unreadable() {
-    let path = temp_dir("junk").join("session-junk.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-junk.json");
     std::fs::write(&path, b"not json").expect("write junk");
 
     match EndpointFile::read(&path) {
@@ -128,7 +126,8 @@ fn reading_junk_bytes_is_endpoint_file_unreadable() {
 
 #[test]
 fn a_file_with_an_unknown_field_is_unreadable() {
-    let path = temp_dir("unknown").join("session-unknown.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-unknown.json");
     std::fs::write(
         &path,
         r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","extra":1}"#,
@@ -143,7 +142,8 @@ fn a_file_with_an_unknown_field_is_unreadable() {
 
 #[test]
 fn a_file_missing_a_field_is_unreadable() {
-    let path = temp_dir("partial").join("session-partial.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("session-partial.json");
     std::fs::write(&path, r#"{"socket":"/run/koshi/session-abc.sock"}"#).expect("write file");
 
     match EndpointFile::read(&path) {
@@ -154,9 +154,8 @@ fn a_file_missing_a_field_is_unreadable() {
 
 #[test]
 fn writing_into_a_missing_directory_is_endpoint_file_write() {
-    let path = temp_dir("gone")
-        .join("no-such-subdir")
-        .join("session-x.json");
+    let dir = TempDir::new().expect("create temp dir");
+    let path = dir.path().join("no-such-subdir").join("session-x.json");
 
     match endpoint().write(&path) {
         Err(IpcError::EndpointFileWrite { path: reported, .. }) => {
