@@ -173,17 +173,6 @@ struct FocusPaneTarget {
     pane_id: PaneId,
 }
 
-/// The resolved default-pane context of a command that names no target: the
-/// acting session, the source's client (`None` for an in-session CLI whose
-/// pane was spawned with no designated client), and the pane the command acts
-/// on — an in-session CLI's issuing pane, else the client's focused pane. The
-/// `Ok` half of [`Server::resolve_default_pane`].
-struct DefaultPaneTarget {
-    session_id: SessionId,
-    client_id: Option<ClientId>,
-    pane_id: PaneId,
-}
-
 /// A resolved [`Command::NewTab`] target: the session the tab joins and the
 /// client that switches onto it. The `Ok` half of
 /// [`Server::resolve_new_tab_target`].
@@ -286,11 +275,14 @@ impl Server {
     }
 
     /// The client a command came from, for commands that act on that client's
-    /// own state and have no other target.
+    /// own state and can act on no other — a highlight belongs to the screen
+    /// that made it, so a source whose client is gone has nothing to act on
+    /// and gets [`RejectReason::SourceClientStale`] rather than the
+    /// sole-attached-client stand-in [`Server::resolve_acting_client`] applies.
     ///
-    /// [`Self::validate`] rejects such a command before any handler runs when
-    /// its source names no client, so reaching this with a clientless source
-    /// would mean the command escaped that gate.
+    /// This is the check itself, not an assertion about an earlier one:
+    /// [`Self::resolve_target`] calls it for the selection commands, and the
+    /// handlers call it again to get the id.
     fn issuing_client(source: &CommandSource) -> Result<ClientId, Rejection> {
         source
             .client_id()
@@ -471,9 +463,17 @@ impl Server {
     /// completes "no attached client …"; `ambiguous_noun` completes "… name a
     /// target client for …".
     ///
+    /// This answers which client should *view* something, and is separate from
+    /// [`Server::resolve_acting_client`], which answers which client a command
+    /// *acts on*: a session with no attached client cannot show a new tab
+    /// ([`RejectReason::InvalidState`]), while a command with no client to act
+    /// on came from a source whose client is gone
+    /// ([`RejectReason::SourceClientStale`]).
+    ///
     /// On a session with two clients,
-    /// `sole_attached_client(s, "whose focus could move", "the focus")` returns
-    /// `Err(TargetAmbiguous, "multiple clients; name a target client for the focus")`.
+    /// `sole_attached_client(s, "to view the new pane's tab", "the new pane")`
+    /// returns
+    /// `Err(TargetAmbiguous, "multiple clients; name a target client for the new pane")`.
     fn sole_attached_client<'a>(
         session: &'a Session,
         none_tail: &str,

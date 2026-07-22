@@ -6,10 +6,10 @@ impl Server {
     /// Route a [`Command::Visual`] sub-command to its handler.
     ///
     /// Every variant acts on the issuing client's own highlights — a highlight
-    /// belongs to one client, so there is no other client it could mean.
-    /// [`Self::validate`] has already confirmed the source names an attached
-    /// client (`Command::Visual` is in
-    /// [`requires_issuing_client`](Self::requires_issuing_client)).
+    /// belongs to one client, so there is no other client it could mean, and a
+    /// gone issuer takes its highlights with it rather than falling back to
+    /// another client ([`Self::issuing_client`]). [`Self::validate`] has
+    /// already confirmed the source names a client.
     pub(super) fn handle_visual(
         &mut self,
         command_id: CommandId,
