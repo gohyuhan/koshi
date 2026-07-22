@@ -31,6 +31,10 @@ pub enum CliError {
     /// A keybinding file dry-run found problems.
     #[error("keybinding file {path} failed validation")]
     InvalidKeymapFile { path: String },
+    /// The `KOSHI` marker is set but the rest of the in-session environment
+    /// is missing or malformed.
+    #[error("broken in-session environment: {detail}")]
+    InSessionEnv { detail: String },
     /// The runtime IPC endpoint could not be reached.
     #[error("IPC unavailable: {detail}")]
     IpcUnavailable { detail: String },
@@ -49,7 +53,8 @@ impl DomainError for CliError {
             | CliError::UnknownAction { .. }
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
-            | CliError::InvalidKeymapFile { .. } => DomainCategory::Cli,
+            | CliError::InvalidKeymapFile { .. }
+            | CliError::InSessionEnv { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
             CliError::Runtime { .. } | CliError::Update { .. } => DomainCategory::Session,
         }
@@ -71,7 +76,8 @@ impl From<&CliError> for CliExitCode {
             | CliError::UnknownAction { .. }
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
-            | CliError::InvalidKeymapFile { .. } => CliExitCode::UsageOrConfig,
+            | CliError::InvalidKeymapFile { .. }
+            | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
             CliError::Runtime { .. } | CliError::Update { .. } => CliExitCode::RuntimeAction,
         }

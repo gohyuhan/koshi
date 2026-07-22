@@ -13,6 +13,9 @@ pub mod config;
 /// CLI domain errors: unknown commands and invalid arguments.
 pub mod error;
 
+/// In-session detection: the `KOSHI_*` identity variables read at startup.
+pub mod in_session;
+
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 
