@@ -211,16 +211,15 @@ fn passing_validation_reaches_the_unimplemented_reject() {
 }
 
 #[test]
-fn client_scoped_command_without_a_client_is_unauthorized() {
+fn client_scoped_command_with_no_session_is_not_found() {
     let (mut rt, _tx) = new_runtime();
 
+    // A client-scoped command picks its client out of the acting session, so
+    // with no session to look in there is nothing to resolve.
     let commands = vec![
         Command::ToggleLockMode,
         Command::SetLockMode(LockModeArgs { locked: true }),
         Command::TogglePaneFullscreen,
-        Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
-            pane: PaneId::new(),
-        })),
     ];
 
     for command in commands {
@@ -230,11 +229,33 @@ fn client_scoped_command_without_a_client_is_unauthorized() {
             rt.dispatch(env),
             CommandResult::Rejected {
                 command_id,
-                reason: RejectReason::Unauthorized,
-                help: Some("command requires an attached client".to_string()),
+                reason: RejectReason::TargetNotFound,
+                help: Some("no session context".to_string()),
             }
         );
     }
+}
+
+#[test]
+fn selection_from_a_clientless_source_is_stale() {
+    let (mut rt, _tx) = new_runtime();
+
+    // A highlight belongs to the client that made it, so a source naming no
+    // client has no highlight to touch — never another client's.
+    let env = envelope(Command::Visual(VisualCommand::ClearSelection(
+        ClearSelectionArgs {
+            pane: PaneId::new(),
+        },
+    )));
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        }
+    );
 }
 
 #[test]
@@ -2529,13 +2550,13 @@ fn focus_from_a_clientless_source_with_two_clients_is_ambiguous() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetAmbiguous,
-            help: Some("multiple clients; name a target client for the focus".to_string()),
+            help: Some("several clients are attached; name the target client".to_string()),
         }
     );
 }
 
 #[test]
-fn focus_with_no_attached_client_at_all_is_invalid() {
+fn focus_with_no_attached_client_at_all_is_stale() {
     let (mut rt, _tx) = new_runtime();
     let tab_id = TabId::new();
     let pane = PaneId::new();
@@ -2559,8 +2580,8 @@ fn focus_with_no_attached_client_at_all_is_invalid() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("no attached client whose focus could move".to_string()),
+            reason: RejectReason::SourceClientStale,
+            help: Some("run this command from an active Koshi client".to_string()),
         }
     );
 }
@@ -2828,7 +2849,7 @@ fn in_session_cli_pane_command_with_a_detached_client_succeeds() {
 }
 
 #[test]
-fn in_session_cli_client_scoped_without_a_client_is_unauthorized() {
+fn in_session_cli_client_scoped_with_no_attached_client_is_stale() {
     let (mut rt, _tx) = new_runtime();
     let session_id = SessionId::new();
     let tab = TabId::new();
@@ -2838,8 +2859,8 @@ fn in_session_cli_client_scoped_without_a_client_is_unauthorized() {
     add_tab(&mut session, tab, root);
     rt.sessions.insert(session_id, session);
 
-    // Lock mode is one client's own state; a pane spawned with no designated
-    // client has no client to lock.
+    // Lock mode is one client's own state, and no client is attached to stand
+    // in for the one this pane never had.
     let source = CommandSource::in_session_cli(session_id, None, root, PathBuf::from("/sock"));
     let env = envelope_from(source, Command::ToggleLockMode);
     let command_id = env.id;
@@ -2847,8 +2868,8 @@ fn in_session_cli_client_scoped_without_a_client_is_unauthorized() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::Unauthorized,
-            help: Some("command requires an attached client".to_string()),
+            reason: RejectReason::SourceClientStale,
+            help: Some("run this command from an active Koshi client".to_string()),
         }
     );
 }
@@ -6794,14 +6815,14 @@ fn new_tab_external_source_with_two_clients_is_ambiguous() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetAmbiguous,
-            help: Some("multiple clients; name a target client for the new tab".to_string()),
+            help: Some("several clients are attached; name the target client".to_string()),
         }
     );
     assert!(fake.spawned_panes().is_empty());
 }
 
 #[test]
-fn new_tab_with_no_attached_client_is_invalid() {
+fn new_tab_with_no_attached_client_is_stale() {
     let (mut rt, fake, _tx) = new_runtime_with_fake();
     let tab_a = TabId::new();
     let pane_a = PaneId::new();
@@ -6822,8 +6843,8 @@ fn new_tab_with_no_attached_client_is_invalid() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("no attached client to switch onto the new tab".to_string()),
+            reason: RejectReason::SourceClientStale,
+            help: Some("run this command from an active Koshi client".to_string()),
         }
     );
     assert!(fake.spawned_panes().is_empty());
@@ -8401,13 +8422,13 @@ fn focus_tab_external_source_with_two_clients_is_ambiguous() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetAmbiguous,
-            help: Some("multiple clients; name a target client for the target tab".to_string()),
+            help: Some("several clients are attached; name the target client".to_string()),
         }
     );
 }
 
 #[test]
-fn focus_tab_with_no_attached_client_is_invalid() {
+fn focus_tab_with_no_attached_client_is_stale() {
     let (mut rt, _tx) = new_runtime();
     let tab_a = TabId::new();
     let pane_a = PaneId::new();
@@ -8431,8 +8452,8 @@ fn focus_tab_with_no_attached_client_is_invalid() {
         rt.dispatch(env),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("no attached client to switch onto the target tab".to_string()),
+            reason: RejectReason::SourceClientStale,
+            help: Some("run this command from an active Koshi client".to_string()),
         }
     );
 }
@@ -10423,4 +10444,290 @@ fn an_applied_command_writes_one_info_line_per_event_it_committed() {
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"input mode changed""#), "{out}");
     assert!(out.contains(r#""mode":"Locked""#), "{out}");
+}
+
+// --- Which client a client-scoped command lands on -------------------------
+//
+// A command like `koshi lock` acts on one client's own view. The client it
+// means is the one that issued it, while that client is still attached. When
+// the issuer is gone — or the pane was spawned with no designated client and
+// names none — the session's sole attached client stands in, because with one
+// window attached there is only one window the command could mean. Several
+// attached, or none, has no single answer and is refused.
+
+/// A session with one tab, one live pane, and no clients yet: the fixture the
+/// acting-client rules are exercised against. Returns the runtime, the keepalive
+/// sender, the session, the tab, and the pane.
+fn acting_client_fixture() -> (Server, mpsc::Sender<RuntimeEvent>, SessionId, TabId, PaneId) {
+    let (mut rt, tx) = new_runtime();
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+    (rt, tx, sid, tab, pane)
+}
+
+#[test]
+fn lock_from_a_pane_whose_client_detached_locks_the_sole_client() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let detached = ClientId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+
+    // The pane's own client is gone, but exactly one client is attached, so
+    // that one is the only window `koshi lock` could mean.
+    let source = CommandSource::in_session_cli(sid, Some(detached), pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, attached), LockMode::Locked);
+}
+
+#[test]
+fn lock_from_a_clientless_pane_locks_the_sole_client() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+
+    // A pane spawned with no designated client names none. It reads the same
+    // as a client that has gone: the sole attached client stands in.
+    let source = CommandSource::in_session_cli(sid, None, pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, attached), LockMode::Locked);
+}
+
+#[test]
+fn lock_from_a_detached_client_with_two_attached_is_ambiguous() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let first = ClientId::new();
+    let second = ClientId::new();
+    let detached = ClientId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, first, tab, Some(pane));
+    add_client(session, second, tab, Some(pane));
+
+    // Two windows are attached and the issuer is not one of them, so there is
+    // no single window to lock. Neither is guessed at.
+    let source = CommandSource::in_session_cli(sid, Some(detached), pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
+        }
+    );
+    assert_eq!(lock_mode_of(&rt, sid, first), LockMode::Normal);
+    assert_eq!(lock_mode_of(&rt, sid, second), LockMode::Normal);
+}
+
+#[test]
+fn lock_from_an_attached_client_ignores_the_sole_client_fallback() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let other = ClientId::new();
+    let issuer = ClientId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    // The issuer attaches second, so a rule that reached for whichever client
+    // came first would land on `other` and fail this test.
+    add_client(session, other, tab, Some(pane));
+    add_client(session, issuer, tab, Some(pane));
+
+    // The issuer is attached, so it is the answer outright — two clients being
+    // attached is only ambiguous when the issuer is not one of them.
+    let source = CommandSource::in_session_cli(sid, Some(issuer), pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, issuer), LockMode::Locked);
+    assert_eq!(lock_mode_of(&rt, sid, other), LockMode::Normal);
+}
+
+#[test]
+fn fullscreen_from_a_clientless_pane_zooms_the_sole_client() {
+    let (mut rt, _fake, _tx, sid, client_id, _root, pane_a, _size_a) = resize_fixture();
+    let tab = only_tab(&rt, sid);
+
+    // The zoom is per-client state; with one client attached, the pane the CLI
+    // was issued from fills that client's view.
+    let source = CommandSource::in_session_cli(sid, None, pane_a, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::TogglePaneFullscreen);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(
+        mode_of(&rt, sid, client_id, tab),
+        LayoutMode::Fullscreen { focused: pane_a }
+    );
+}
+
+#[test]
+fn focus_tab_from_a_detached_client_falls_back_to_the_sole_client() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let detached = ClientId::new();
+    let second_tab = TabId::new();
+    let second_pane = PaneId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+    add_pane(session, second_pane);
+    add_tab(session, second_tab, second_pane);
+
+    // A named-but-gone client falls back exactly as a source naming none does:
+    // the switch lands on the one attached window.
+    let source = CommandSource::in_session_cli(sid, Some(detached), pane, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(second_tab),
+            client: None,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(attached)
+            .expect("client")
+            .active_tab(),
+        second_tab
+    );
+}
+
+#[test]
+fn an_explicit_client_outranks_the_sole_client_fallback() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let issuer = ClientId::new();
+    let named = ClientId::new();
+    let second_tab = TabId::new();
+    let second_pane = PaneId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, issuer, tab, Some(pane));
+    add_client(session, named, tab, Some(pane));
+    add_pane(session, second_pane);
+    add_tab(session, second_tab, second_pane);
+
+    // `--client` names the window outright: the issuing client is attached and
+    // still does not win, and two attached clients are not ambiguous.
+    let source = CommandSource::in_session_cli(sid, Some(issuer), pane, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(second_tab),
+            client: Some(named),
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(named)
+            .expect("client")
+            .active_tab(),
+        second_tab
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(issuer)
+            .expect("client")
+            .active_tab(),
+        tab,
+        "the issuing client's own view does not move"
+    );
+}
+
+#[test]
+fn an_explicit_client_that_is_not_attached_never_falls_back() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let stranger = ClientId::new();
+    let second_tab = TabId::new();
+    let second_pane = PaneId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+    add_pane(session, second_pane);
+    add_tab(session, second_tab, second_pane);
+
+    // Naming a window that is not there is an error, not an invitation to pick
+    // the one that is: a command aimed at a specific client never lands on
+    // another one.
+    let source = CommandSource::in_session_cli(sid, None, pane, PathBuf::from("/sock"));
+    let env = envelope_from(
+        source,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(second_tab),
+            client: Some(stranger),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(attached)
+            .expect("client")
+            .active_tab(),
+        tab
+    );
+}
+
+#[test]
+fn fullscreen_from_a_pane_on_a_tab_nobody_views_is_refused() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let background_tab = TabId::new();
+    let background_pane = PaneId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+    add_pane(session, background_pane);
+    add_tab(session, background_tab, background_pane);
+
+    // The fallback client is a real client, but it is looking at another tab.
+    // Zooming changes what a client draws, and nobody draws this pane's tab, so
+    // there is no view to change and nothing is mutated.
+    let source = CommandSource::in_session_cli(sid, None, background_pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::TogglePaneFullscreen);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane's tab is not viewed by any client".to_string()),
+        }
+    );
+    assert_eq!(
+        mode_of(&rt, sid, attached, background_tab),
+        LayoutMode::Tiled
+    );
+}
+
+#[test]
+fn lock_from_a_pane_on_a_background_tab_still_locks_the_sole_client() {
+    let (mut rt, _tx, sid, tab, pane) = acting_client_fixture();
+    let attached = ClientId::new();
+    let background_tab = TabId::new();
+    let background_pane = PaneId::new();
+    let session = rt.sessions.get_mut(&sid).expect("session");
+    add_client(session, attached, tab, Some(pane));
+    add_pane(session, background_pane);
+    add_tab(session, background_tab, background_pane);
+
+    // Lock mode is the client's own state with no pane or tab in it, so which
+    // tab the issuing pane sits on does not matter.
+    let source = CommandSource::in_session_cli(sid, None, background_pane, PathBuf::from("/sock"));
+    let env = envelope_from(source, Command::ToggleLockMode);
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+    assert_eq!(lock_mode_of(&rt, sid, attached), LockMode::Locked);
 }

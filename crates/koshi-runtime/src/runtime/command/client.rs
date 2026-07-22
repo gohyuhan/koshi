@@ -241,16 +241,16 @@ impl Server {
     }
 
     /// The acting client's mutable record, for commands that act on the acting
-    /// client alone (the lock and mouse-select commands): the source must carry
-    /// a client id and that client must still be attached to the acting session.
+    /// client alone (the lock and mouse-select commands). The client is the one
+    /// [`Self::resolve_acting_client`] picks, so the record mutated here is the
+    /// same one [`Self::validate`] admitted the command against.
     fn acting_client_mut(
         &mut self,
         source: &CommandSource,
     ) -> Result<(ClientId, &mut Client), Rejection> {
-        let session_id = Self::require_session(self.acting_session(source)?)?.id;
-        let client_id = source
-            .client_id()
-            .ok_or_else(|| Rejection::bare(RejectReason::Unauthorized))?;
+        let acting = Self::require_session(self.acting_session(source)?)?;
+        let session_id = acting.id;
+        let client_id = Self::resolve_acting_client(source, acting)?;
         let session = self
             .sessions
             .get_mut(&session_id)
