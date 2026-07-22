@@ -1,6 +1,8 @@
 //! `koshi-ipc` — control channel: local socket/named pipe transport, versioned IPC
 //! messages, ownership checks, and CLI-to-session command forwarding.
 
+/// Endpoint file: how a running koshi advertises its socket and token.
+pub mod endpoint;
 /// Error types.
 pub mod error;
 /// Connection handshake checks.

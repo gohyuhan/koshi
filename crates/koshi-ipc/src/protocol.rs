@@ -29,9 +29,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
 ///
-/// Each running Koshi generates one and writes it to its endpoint file in the
-/// private runtime directory, so being able to read the value is itself the
-/// proof.
+/// Each running Koshi generates one and writes it to its
+/// [endpoint file](crate::endpoint::EndpointFile) in the private runtime
+/// directory, so being able to read the value is itself the proof.
 ///
 /// Two ways out of this type, and only two:
 ///
@@ -53,6 +53,23 @@ impl ConnectionToken {
     #[must_use]
     pub fn new(secret: impl Into<String>) -> Self {
         ConnectionToken(secret.into())
+    }
+
+    /// Generate a fresh secret: 32 bytes from the operating system's
+    /// cryptographic random source, written as 64 lowercase hex characters.
+    /// Every generated token has this one length.
+    #[must_use]
+    pub fn generate() -> Self {
+        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes)
+            .expect("every supported platform provides the system random source");
+        let mut secret = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            secret.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+            secret.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+        }
+        ConnectionToken(secret)
     }
 
     /// The secret itself, for writing it to the endpoint file.

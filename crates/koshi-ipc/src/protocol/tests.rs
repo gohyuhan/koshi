@@ -405,3 +405,21 @@ fn an_empty_token_is_not_equal_to_a_real_one() {
 fn expose_returns_the_secret_for_writing_it_to_the_endpoint_file() {
     assert_eq!(token().expose(), "k7QxSecret");
 }
+
+#[test]
+fn a_generated_token_is_64_lowercase_hex_characters() {
+    let token = ConnectionToken::generate();
+    let secret = token.expose();
+    assert_eq!(secret.len(), 64, "{secret}");
+    assert!(
+        secret
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{secret}"
+    );
+}
+
+#[test]
+fn two_generated_tokens_differ() {
+    assert_ne!(ConnectionToken::generate(), ConnectionToken::generate());
+}
