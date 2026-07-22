@@ -15,10 +15,12 @@
 //! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
 //! that crosses the IPC socket.
 
+use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use koshi_core::{
-    command::CommandEnvelope,
+    command::{CommandEnvelope, CommandResult},
+    discovery::SessionOverview,
     geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
     key::KeyChord,
@@ -32,7 +34,7 @@ use koshi_core::{
 /// (the per-pane PTY threads, the input reader, the IPC server, the plugin
 /// host, the timer); the dispatcher matches on the variant to decide what to
 /// mutate and which [`koshi_core::event::Event`] facts to emit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     /// Raw bytes a child process wrote to its PTY.
     PtyOutput {
@@ -107,8 +109,24 @@ pub enum RuntimeEvent {
         /// The pasted text, exactly as the outer terminal delivered it.
         text: String,
     },
-    /// A command delivered over the IPC socket, from external or in-session CLI.
-    Ipc(CommandEnvelope),
+    /// A command delivered over the IPC socket, from external or in-session
+    /// CLI. Carries the reply sender the connection thread waits on: the
+    /// dispatcher sends the command's result into it, and the connection
+    /// thread writes that result back over the socket.
+    Ipc {
+        /// The command as it arrived over the socket.
+        envelope: CommandEnvelope,
+        /// Where the dispatcher sends the command's result.
+        reply: Sender<CommandResult>,
+    },
+    /// A discovery request delivered over the IPC socket: the caller asks
+    /// this process to describe its session. Carries the reply sender the
+    /// connection thread waits on; the dispatcher answers with the overview
+    /// built from live state, or `None` when no session is running.
+    IpcDiscovery {
+        /// Where the dispatcher sends the overview.
+        reply: Sender<Option<SessionOverview>>,
+    },
     /// A capability-checked command issued by a plugin.
     Plugin(CommandEnvelope),
 }

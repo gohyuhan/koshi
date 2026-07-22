@@ -2,13 +2,12 @@
 //!
 //! [`CliError`](crate::error::CliError) enumerates the failure classes the
 //! `koshi` binary terminates on. The `From<&CliError> for CliExitCode` impl is
-//! the single
-//! error-to-exit-code table: usage → 2, IPC-unavailable → 4, runtime → 1.
-//! Success is exit 0, and a rejected dispatched command maps through
-//! [`CliExitCode::for_result`](koshi_core::command::CliExitCode::for_result).
+//! the single error-to-exit-code table: usage → 2, session-not-found → 3,
+//! IPC-unavailable → 4, runtime or rejected command → 1. Success is exit 0.
 
 use koshi_core::command::CliExitCode;
 use koshi_core::error::{DomainCategory, DomainError, Severity};
+use koshi_core::event::RejectReason;
 use thiserror::Error;
 
 /// A failure the `koshi` binary terminates on: a usage problem, an unreachable
@@ -38,12 +37,33 @@ pub enum CliError {
     /// The runtime IPC endpoint could not be reached.
     #[error("IPC unavailable: {detail}")]
     IpcUnavailable { detail: String },
+    /// The named (or in-session) session is not running: nothing advertises
+    /// its endpoint, or nothing listens behind the advertised socket.
+    #[error("session {session} is not running")]
+    SessionNotFound { session: String },
+    /// The session refused the dispatched command.
+    #[error("{}", rejection_message(*.reason, .help.as_deref()))]
+    CommandRejected {
+        /// Why the session rejected it.
+        reason: RejectReason,
+        /// The session's hint for resolving the rejection, when it sent one.
+        help: Option<String>,
+    },
     /// A runtime or action error surfaced while executing.
     #[error("{detail}")]
     Runtime { detail: String },
     /// A self-update check or install failed.
     #[error("update failed: {detail}")]
     Update { detail: String },
+}
+
+/// The stderr line for a rejected command: the rejection itself, then the
+/// session's help hint on its own line when one came back.
+fn rejection_message(reason: RejectReason, help: Option<&str>) -> String {
+    match help {
+        Some(help) => format!("{reason}\n  {help}"),
+        None => reason.to_string(),
+    }
 }
 
 impl DomainError for CliError {
@@ -56,7 +76,10 @@ impl DomainError for CliError {
             | CliError::InvalidKeymapFile { .. }
             | CliError::InSessionEnv { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
-            CliError::Runtime { .. } | CliError::Update { .. } => DomainCategory::Session,
+            CliError::SessionNotFound { .. }
+            | CliError::Runtime { .. }
+            | CliError::CommandRejected { .. }
+            | CliError::Update { .. } => DomainCategory::Session,
         }
     }
 
@@ -79,7 +102,10 @@ impl From<&CliError> for CliExitCode {
             | CliError::InvalidKeymapFile { .. }
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
-            CliError::Runtime { .. } | CliError::Update { .. } => CliExitCode::RuntimeAction,
+            CliError::SessionNotFound { .. } => CliExitCode::SessionNotFound,
+            CliError::Runtime { .. }
+            | CliError::CommandRejected { .. }
+            | CliError::Update { .. } => CliExitCode::RuntimeAction,
         }
     }
 }

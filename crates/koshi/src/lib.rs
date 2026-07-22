@@ -16,6 +16,10 @@ pub mod error;
 /// In-session detection: the `KOSHI_*` identity variables read at startup.
 pub mod in_session;
 
+/// The CLI side of the control socket: connect to a session's advertised
+/// endpoint, submit a command, and read back its result.
+pub mod ipc_client;
+
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 

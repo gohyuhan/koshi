@@ -29,6 +29,19 @@ fn maps_each_error_class_to_its_exit_code() {
         CliExitCode::from(&CliError::Runtime { detail: "x".into() }),
         CliExitCode::RuntimeAction
     );
+    assert_eq!(
+        CliExitCode::from(&CliError::SessionNotFound {
+            session: "session-x".into()
+        }),
+        CliExitCode::SessionNotFound
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::CommandRejected {
+            reason: RejectReason::Unauthorized,
+            help: None
+        }),
+        CliExitCode::RuntimeAction
+    );
 }
 
 #[test]
@@ -44,6 +57,48 @@ fn exit_codes_are_the_documented_numbers() {
     assert_eq!(
         CliExitCode::from(&CliError::Runtime { detail: "x".into() }).code(),
         1
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::SessionNotFound {
+            session: "session-x".into()
+        })
+        .code(),
+        3
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::CommandRejected {
+            reason: RejectReason::Unauthorized,
+            help: None
+        })
+        .code(),
+        1
+    );
+}
+
+#[test]
+fn a_rejected_command_renders_its_reason_and_help_line() {
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::Unauthorized,
+            help: Some("run this command from an active Koshi client".into()),
+        }
+        .to_string(),
+        "command not permitted\n  run this command from an active Koshi client"
+    );
+    assert_eq!(
+        CliError::CommandRejected {
+            reason: RejectReason::TargetGone,
+            help: None,
+        }
+        .to_string(),
+        "target no longer exists"
+    );
+    assert_eq!(
+        CliError::SessionNotFound {
+            session: "session-x".into()
+        }
+        .to_string(),
+        "session session-x is not running"
     );
 }
 

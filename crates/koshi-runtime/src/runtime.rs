@@ -11,6 +11,7 @@ pub mod bootstrap;
 pub mod bus;
 pub mod clipboard;
 pub mod command;
+pub mod discovery;
 pub mod driver;
 pub mod event;
 pub(crate) mod hints;

@@ -67,7 +67,16 @@ impl Server {
                 self.publish_events(&events);
             }
             RuntimeEvent::Timer => self.expire_key_sequences(Instant::now()),
-            RuntimeEvent::Ipc(envelope) | RuntimeEvent::Plugin(envelope) => {
+            RuntimeEvent::Ipc { envelope, reply } => {
+                let result = self.submit_command(envelope);
+                // A closed reply channel means the connection thread is gone;
+                // the command has already applied, so there is nothing to undo.
+                let _ = reply.send(result);
+            }
+            RuntimeEvent::IpcDiscovery { reply } => {
+                let _ = reply.send(self.build_overview());
+            }
+            RuntimeEvent::Plugin(envelope) => {
                 let _ = self.submit_command(envelope);
             }
         }
