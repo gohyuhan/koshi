@@ -142,6 +142,31 @@ fn a_refused_hello_leaves_the_gate_closed() {
 }
 
 #[test]
+fn a_good_hello_after_a_version_refusal_opens_the_gate() {
+    let mut gate = gate();
+
+    gate.check(&IpcRequestKind::Hello {
+        protocol_version: 2,
+        token: expected(),
+    })
+    .expect_err("the Hello is refused");
+    gate.check(&good_hello()).expect("the Hello is accepted");
+
+    assert_eq!(gate.check(&IpcRequestKind::Discovery), Ok(()));
+}
+
+#[test]
+fn a_good_hello_after_a_token_refusal_opens_the_gate() {
+    let mut gate = gate();
+
+    gate.check(&wrong_token_hello())
+        .expect_err("the Hello is refused");
+    gate.check(&good_hello()).expect("the Hello is accepted");
+
+    assert_eq!(gate.check(&IpcRequestKind::Discovery), Ok(()));
+}
+
+#[test]
 fn a_repeated_hello_on_an_open_gate_gets_the_same_answer() {
     let mut gate = gate();
 
