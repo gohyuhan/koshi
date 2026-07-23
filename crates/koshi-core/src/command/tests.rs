@@ -76,7 +76,6 @@ fn pane_commands_roundtrip() {
         target: FocusTarget::Direction(Direction::Left),
         client: None,
     }));
-    roundtrip(&Command::RenamePane(RenamePaneArgs { pane: None }));
 }
 
 #[test]
@@ -92,9 +91,6 @@ fn tab_and_session_commands_roundtrip() {
     roundtrip(&Command::MoveTab(MoveTabArgs {
         tab: None,
         index: 0,
-    }));
-    roundtrip(&Command::RenameSession(RenameSessionArgs {
-        session: Some(SessionId::new()),
     }));
 }
 
@@ -174,7 +170,6 @@ fn command_variant_names_are_canonical() {
         ),
         (Command::NewTab(NewTabArgs::default()), "NewTab"),
         (Command::CloseTab(CloseTabArgs::default()), "CloseTab"),
-        (Command::RenameTab(RenameTabArgs { tab: None }), "RenameTab"),
         (
             Command::FocusTab(FocusTabArgs {
                 target: TabTarget::Next,
@@ -229,23 +224,15 @@ fn command_variant_names_are_canonical() {
         ),
         (Command::TogglePaneFullscreen, "TogglePaneFullscreen"),
         (
-            Command::RenamePane(RenamePaneArgs { pane: None }),
-            "RenamePane",
-        ),
-        (
             Command::MoveTab(MoveTabArgs {
                 tab: None,
                 index: 0,
             }),
             "MoveTab",
         ),
-        (
-            Command::RenameSession(RenameSessionArgs { session: None }),
-            "RenameSession",
-        ),
         (Command::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 19);
+    assert_eq!(cases.len(), 16);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
@@ -323,10 +310,6 @@ fn command_kind_mirrors_command() {
             CommandKind::CloseTab,
         ),
         (
-            Command::RenameTab(RenameTabArgs { tab: None }),
-            CommandKind::RenameTab,
-        ),
-        (
             Command::FocusTab(FocusTabArgs {
                 target: TabTarget::Next,
                 client: None,
@@ -383,23 +366,15 @@ fn command_kind_mirrors_command() {
             CommandKind::TogglePaneFullscreen,
         ),
         (
-            Command::RenamePane(RenamePaneArgs { pane: None }),
-            CommandKind::RenamePane,
-        ),
-        (
             Command::MoveTab(MoveTabArgs {
                 tab: None,
                 index: 0,
             }),
             CommandKind::MoveTab,
         ),
-        (
-            Command::RenameSession(RenameSessionArgs { session: None }),
-            CommandKind::RenameSession,
-        ),
         (Command::Quit, CommandKind::Quit),
     ];
-    assert_eq!(cases.len(), 19);
+    assert_eq!(cases.len(), 16);
     for (command, kind) in &cases {
         assert_eq!(command.kind(), *kind);
         roundtrip(kind);

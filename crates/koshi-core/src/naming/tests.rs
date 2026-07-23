@@ -17,10 +17,9 @@ fn parts(name: &str) -> (String, String, String) {
 }
 
 #[test]
-fn prefix_tags_are_s_t_p() {
+fn prefix_tags_are_s_and_t() {
     assert_eq!(NameKind::Session.prefix(), "S");
     assert_eq!(NameKind::Tab.prefix(), "T");
-    assert_eq!(NameKind::Pane.prefix(), "P");
 }
 
 #[test]
@@ -47,14 +46,14 @@ fn start_zero_yields_the_first_combination() {
 }
 
 #[test]
-fn session_and_pane_kinds_tag_the_same_combination() {
+fn session_and_tab_kinds_tag_the_same_combination() {
     assert_eq!(
         generate_name_from(NameKind::Session, |_| false, 0),
         "S-swift-otter"
     );
     assert_eq!(
-        generate_name_from(NameKind::Pane, |_| false, 0),
-        "P-swift-otter"
+        generate_name_from(NameKind::Tab, |_| false, 0),
+        "T-swift-otter"
     );
 }
 

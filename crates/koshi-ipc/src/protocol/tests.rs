@@ -131,7 +131,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // and then fails to decode the answer, which reads to the user as a
     // session that is not running.
     //
-    // Shape as of protocol version 2. Round-trip tests cannot catch this:
+    // Shape as of protocol version 1. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
     // itself.
     assert_eq!(

@@ -106,8 +106,7 @@ Each level includes the ones below it, so `info` writes all three. The default
 doing, set `level "info"`.
 
 Log lines carry ids, never content. A copied selection is recorded as its byte
-count, not its text; a rename is recorded without the new name; what you type
-into a pane is never written at any level.
+count, not its text; what you type into a pane is never written at any level.
 
 ## `update`
 

@@ -638,15 +638,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         core_seed(
-            "rename-pane",
-            "Rename Pane",
-            "Assign a fresh generated name to the focused pane",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::RenamePane),
-            Available,
-        ),
-        core_seed(
             "write-to-pane",
             "Write To Pane",
             "Send text to a pane's shell, as if it had been typed there",
@@ -702,15 +693,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         core_seed(
-            "rename-tab",
-            "Rename Tab",
-            "Assign a fresh generated name to the focused tab",
-            Tab,
-            vec![TabTarget],
-            CoreCommand(CommandKind::RenameTab),
-            Available,
-        ),
-        core_seed(
             "move-tab",
             "Move Tab",
             "Move the focused tab to a new index",
@@ -720,15 +702,6 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
             Available,
         ),
         // --- Session ---
-        core_seed(
-            "rename-session",
-            "Rename Session",
-            "Assign a fresh generated name to the current session, or one named by id",
-            Global,
-            vec![Session],
-            CoreCommand(CommandKind::RenameSession),
-            Available,
-        ),
         core_seed(
             "quit",
             "Quit",

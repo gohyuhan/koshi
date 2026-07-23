@@ -6,6 +6,8 @@
 //! talking to a real terminal, so interactive behavior like line editing and
 //! colors works when koshi runs it.
 
+/// OS lookups about working directories and the machine's own name.
+pub mod cwd;
 mod env;
 
 /// Error types for PTY operations.

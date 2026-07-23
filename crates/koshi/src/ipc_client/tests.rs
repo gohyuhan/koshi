@@ -3,7 +3,7 @@
 
 use std::thread::JoinHandle;
 
-use koshi_core::command::ToggleLockModeArgs;
+use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode};
 use koshi_ipc::transport::Listener;
@@ -237,4 +237,42 @@ fn a_refused_hello_reports_ipc_unavailable() {
 
     server.join().expect("fake session exits");
     let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+// --- Send-time working-directory capture ------------------------------------
+
+#[test]
+fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
+    let captured = capture_cwd(Command::NewPane(NewPaneArgs::default()));
+    let Command::NewPane(args) = captured else {
+        panic!("the variant must not change");
+    };
+    assert_eq!(args.cwd, std::env::current_dir().ok());
+
+    let captured = capture_cwd(Command::NewTab(NewTabArgs::default()));
+    let Command::NewTab(args) = captured else {
+        panic!("the variant must not change");
+    };
+    assert_eq!(args.cwd, std::env::current_dir().ok());
+}
+
+#[test]
+fn an_explicit_directory_survives_the_capture() {
+    let command = Command::NewPane(NewPaneArgs {
+        cwd: Some(PathBuf::from("/explicit")),
+        ..NewPaneArgs::default()
+    });
+    let Command::NewPane(args) = capture_cwd(command) else {
+        panic!("the variant must not change");
+    };
+    assert_eq!(args.cwd, Some(PathBuf::from("/explicit")));
+}
+
+#[test]
+fn a_command_without_a_directory_field_is_untouched() {
+    assert_eq!(capture_cwd(Command::Quit), Command::Quit);
+    assert_eq!(
+        capture_cwd(Command::ToggleLockMode(ToggleLockModeArgs::default())),
+        Command::ToggleLockMode(ToggleLockModeArgs::default())
+    );
 }

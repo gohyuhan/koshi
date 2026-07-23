@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use koshi_core::event::{
     Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, TabClosed, TabCreated, TabFocused,
-    TabMoved, TabRenamed,
+    TabMoved,
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::tree::LayoutNode;
@@ -273,26 +273,6 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
     events.extend(close_and_refocus_tab(session, tab_id));
 
     events
-}
-
-/// Rename `tab_id`.
-///
-/// A no-op (no event) when the tab is unknown or the name is unchanged; tab
-/// names need not be unique — nothing resolves a tab by name. Layout and focus
-/// are untouched. Returns [`Event::TabRenamed`].
-#[must_use]
-pub fn rename_tab(session: &mut Session, tab_id: TabId, new_name: String) -> Vec<Event> {
-    let Some(tab) = session.tabs.get_mut(&tab_id) else {
-        return Vec::new();
-    };
-    if tab.name() == new_name {
-        return Vec::new(); // unchanged, nothing to emit
-    }
-    tab.update_name(new_name.clone());
-    vec![Event::TabRenamed(TabRenamed {
-        tab_id,
-        name: new_name,
-    })]
 }
 
 /// Point the client `client_id` at the tab named by `target`, resolved

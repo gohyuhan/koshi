@@ -82,11 +82,6 @@ impl Tab {
         &self.layout
     }
 
-    /// Rename this tab.
-    pub fn update_name(&mut self, name: String) {
-        self.name = name;
-    }
-
     /// Set this tab's display position. Callers keep positions a dense `0..n`
     /// across the session's tabs.
     pub fn update_index(&mut self, index: usize) {

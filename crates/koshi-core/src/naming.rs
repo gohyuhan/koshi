@@ -1,10 +1,10 @@
-//! Generated names for sessions, tabs, and panes.
+//! Generated names for sessions and tabs.
 //!
 //! Names are only ever system-generated — no command accepts caller text
-//! for one, at creation or rename. The runtime asks this module for every
-//! name it assigns. A generated name is
-//! `<TYPE>-<adjective>-<noun>`, where `TYPE` is a one-letter kind tag (`S`,
-//! `T`, or `P`) and the adjective and noun come from the same language's
+//! for one; a name is assigned at creation and never changes. The runtime
+//! asks this module for every name it assigns. A generated name is
+//! `<TYPE>-<adjective>-<noun>`, where `TYPE` is a one-letter kind tag (`S`
+//! or `T`) and the adjective and noun come from the same language's
 //! 50-entry word lists — English, Japanese, or Traditional Chinese — e.g.
 //! `T-swift-otter`, `T-しずか-りす`, or `T-快樂-書房`. A name never mixes
 //! languages. Names render at the UI layer (never inside a PTY grid), so the
@@ -27,8 +27,6 @@ pub enum NameKind {
     Session,
     /// A tab name, tagged `T`.
     Tab,
-    /// A pane name, tagged `P`.
-    Pane,
 }
 
 impl NameKind {
@@ -38,7 +36,6 @@ impl NameKind {
         match self {
             NameKind::Session => "S",
             NameKind::Tab => "T",
-            NameKind::Pane => "P",
         }
     }
 }

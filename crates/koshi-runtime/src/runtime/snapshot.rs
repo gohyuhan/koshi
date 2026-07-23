@@ -246,7 +246,7 @@ impl Server {
         // On the alternate screen a full-screen app is running: its OSC 0/1/2
         // title names the pane. On the primary screen the shell's OSC 7 cwd
         // (`~`-shortened) is the more useful name, with the OSC title as the
-        // fallback. An explicit `rename-pane` does not feed the rendered title.
+        // fallback.
         let title = match state.active_screen() {
             Screen::Alternate => state.title().map(str::to_owned),
             Screen::Primary => state

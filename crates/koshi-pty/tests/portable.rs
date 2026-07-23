@@ -102,6 +102,25 @@ fn spawn_streams_child_output() {
 }
 
 #[test]
+fn spawn_without_cwd_inherits_koshis_current_directory() {
+    let backend = PortablePtyBackend::new();
+    let handle = spawn_pane(&backend, spec("/bin/pwd", &[]));
+    let out = read_until(&handle, "\n", Duration::from_secs(5));
+    let child_cwd = PathBuf::from(out.trim())
+        .canonicalize()
+        .expect("child cwd exists");
+    let koshi_cwd = std::env::current_dir()
+        .expect("koshi cwd exists")
+        .canonicalize()
+        .expect("koshi cwd resolves");
+
+    assert_eq!(
+        child_cwd, koshi_cwd,
+        "a spawn without an explicit cwd must inherit koshi's cwd"
+    );
+}
+
+#[test]
 fn spawn_reports_clean_exit() {
     let backend = PortablePtyBackend::new();
     let handle = spawn_pane(&backend, spec("/bin/echo", &["bye"]));

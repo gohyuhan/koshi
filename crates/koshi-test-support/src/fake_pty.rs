@@ -14,6 +14,7 @@
 //! `trigger_child_exit`, and the `*s` query methods — is what tests assert on.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 
@@ -48,6 +49,9 @@ struct State {
     /// error instead of recording — drives the best-effort partial-failure reflow
     /// path (one sibling's resize failing must not drop the others').
     resize_error: Option<(PaneId, PtyError)>,
+    /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd); a pane
+    /// with no entry answers `None`, like a platform with no lookup.
+    live_cwds: HashMap<PaneId, PathBuf>,
 }
 
 /// An in-memory [`PtyBackend`] that records every call and lets the test drive
@@ -75,6 +79,16 @@ impl FakePtyBackend {
     /// (one sibling failing to resize must not drop the others').
     pub fn fail_resizes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().resize_error = Some((pane, error));
+    }
+
+    /// Make [`live_cwd`](Self::live_cwd) answer `cwd` for `pane`, modelling
+    /// the OS reporting that directory as the child's current one.
+    pub fn set_live_cwd(&self, pane: PaneId, cwd: impl Into<PathBuf>) {
+        self.state
+            .lock()
+            .unwrap()
+            .live_cwds
+            .insert(pane, cwd.into());
     }
 
     /// Deliver `bytes` as a chunk of child output on `pane`'s handle.
@@ -248,6 +262,12 @@ impl PtyBackend for FakePtyBackend {
             .ok_or(PtyError::UnknownPane { pane })?;
         record.kills.push(kill_policy);
         Ok(())
+    }
+
+    /// Answer the directory set via [`set_live_cwd`](Self::set_live_cwd), or
+    /// `None` when the test set nothing for the pane.
+    fn live_cwd(&self, pane: PaneId) -> Option<PathBuf> {
+        self.state.lock().unwrap().live_cwds.get(&pane).cloned()
     }
 }
 

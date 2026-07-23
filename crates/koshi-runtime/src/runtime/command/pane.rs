@@ -1,5 +1,5 @@
 //! Pane command handlers: create, close, resize, focus, fullscreen,
-//! rename, and raw input injection — plus the child-exit event path and the
+//! and raw input injection — plus the child-exit event path and the
 //! shared pane-removal bookkeeping.
 
 use super::*;
@@ -54,6 +54,11 @@ impl Server {
             }
             None => self.default_shell_spec(args.cwd.clone(), BTreeMap::new()),
         };
+        // No directory was asked for: the new pane opens where the pane it
+        // splits from currently is ([`Self::pane_live_cwd`]).
+        if spawn_spec.cwd.is_none() {
+            spawn_spec.cwd = self.pane_live_cwd(target.session_id, target.source_pane);
+        }
 
         let session = self
             .sessions
@@ -808,40 +813,6 @@ impl Server {
                 prior_pane,
             }));
         }
-
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
-    }
-
-    /// Handle [`Command::RenamePane`]: update the pane's display title.
-    ///
-    /// The target resolves like ClosePane/ResizePane — an explicit pane by a
-    /// global owner scan, else the issuing pane (in-session CLI) or the
-    /// source client's focused pane. The caller supplies no name — a gimmick
-    /// name is drawn from [`generate_name`], skipping every title already on
-    /// one of the owning session's panes (including the target's current
-    /// one, so the rename always changes it). The rename applies through
-    /// [`pane_ops::rename_pane`]. Titles resolve nothing, so layout, focus,
-    /// and PTYs are untouched.
-    pub(super) fn handle_rename_pane(
-        &mut self,
-        command_id: CommandId,
-        source: &CommandSource,
-        args: &RenamePaneArgs,
-    ) -> Result<CommandResult, Rejection> {
-        let acting = self.acting_session(source)?;
-        let target = self.resolve_pane_target(args.pane, source, acting)?;
-        let session = self
-            .sessions
-            .get_mut(&target.session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-        let new_name = generate_name(NameKind::Pane, |candidate| {
-            session
-                .panes
-                .list()
-                .any(|record| record.title.as_deref() == Some(candidate))
-        });
-
-        let events = pane_ops::rename_pane(session, target.pane_id, new_name);
 
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }

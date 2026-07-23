@@ -563,9 +563,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "next-tab",
         "plugin",
         "previous-tab",
-        "rename-pane",
-        "rename-session",
-        "rename-tab",
         "resize-pane",
         "run",
         "toggle-lock",
@@ -855,28 +852,6 @@ fn resize_pane_requires_a_direction() {
 }
 
 #[test]
-fn rename_pane_and_rename_tab_take_optional_targets() {
-    assert_eq!(
-        command(&["koshi", "rename-pane"]),
-        CliCommand::RenamePane { pane: None }
-    );
-    let pane_flag = format!("pane-{}", fixed_uuid());
-    assert_eq!(
-        command(&["koshi", "rename-pane", "--pane", &pane_flag]),
-        CliCommand::RenamePane {
-            pane: Some(PaneId::from_uuid(fixed_uuid())),
-        }
-    );
-    let tab_flag = format!("tab-{}", fixed_uuid());
-    assert_eq!(
-        command(&["koshi", "rename-tab", "--tab", &tab_flag]),
-        CliCommand::RenameTab {
-            tab: Some(TabId::from_uuid(fixed_uuid())),
-        }
-    );
-}
-
-#[test]
 fn input_parses_its_text_target_and_enter_flag() {
     assert_eq!(
         command(&["koshi", "input", "ls"]),
@@ -1105,28 +1080,6 @@ fn focus_pane_requires_a_pane_and_takes_an_optional_client() {
 }
 
 #[test]
-fn rename_session_takes_an_optional_session_ref() {
-    assert_eq!(
-        command(&["koshi", "rename-session"]),
-        CliCommand::RenameSession { session: None }
-    );
-    let session_flag = format!("session-{}", fixed_uuid());
-    assert_eq!(
-        command(&["koshi", "rename-session", "--session", &session_flag]),
-        CliCommand::RenameSession {
-            session: Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid()))),
-        }
-    );
-    // A value that does not read as a session id is taken as a session name.
-    assert_eq!(
-        command(&["koshi", "rename-session", "--session", "amber-fox"]),
-        CliCommand::RenameSession {
-            session: Some(SessionRef::Name("amber-fox".to_string())),
-        }
-    );
-}
-
-#[test]
 fn run_takes_its_command_after_the_separator() {
     assert_eq!(
         command(&["koshi", "run", "--", "htop", "-d", "5"]),
@@ -1265,9 +1218,6 @@ fn action_subcommands_map_to_their_exact_commands() {
     let pane_flag = format!("pane-{}", fixed_uuid());
     let tab = TabId::from_uuid(fixed_uuid());
     let tab_flag = format!("tab-{}", fixed_uuid());
-    let session = SessionId::from_uuid(fixed_uuid());
-    let session_flag = format!("session-{}", fixed_uuid());
-
     let cases: Vec<(Vec<&str>, &str, Command)> = vec![
         (
             vec!["koshi", "new-pane", "--direction", "right"],
@@ -1326,11 +1276,6 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::TogglePaneFullscreen,
         ),
         (
-            vec!["koshi", "rename-pane", "--pane", &pane_flag],
-            "rename-pane",
-            Command::RenamePane(RenamePaneArgs { pane: Some(pane) }),
-        ),
-        (
             vec!["koshi", "new-tab"],
             "new-tab",
             Command::NewTab(NewTabArgs {
@@ -1362,11 +1307,6 @@ fn action_subcommands_map_to_their_exact_commands() {
                 target: TabTarget::Prev,
                 client: None,
             }),
-        ),
-        (
-            vec!["koshi", "rename-tab"],
-            "rename-tab",
-            Command::RenameTab(RenameTabArgs { tab: None }),
         ),
         (
             vec!["koshi", "move-tab", "--index", "3", "--tab", &tab_flag],
@@ -1422,13 +1362,6 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::ToggleLockMode(ToggleLockModeArgs::default()),
         ),
         (
-            vec!["koshi", "rename-session", "--session", &session_flag],
-            "rename-session",
-            Command::RenameSession(RenameSessionArgs {
-                session: Some(session),
-            }),
-        ),
-        (
             vec!["koshi", "run", "--stacked", "--", "htop", "-d", "5"],
             "run",
             Command::RunCommandPane(RunCommandPaneArgs {
@@ -1471,12 +1404,10 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
         &["koshi", "close-pane"],
         &["koshi", "resize-pane", "--direction", "left"],
         &["koshi", "toggle-pane-fullscreen"],
-        &["koshi", "rename-pane"],
         &["koshi", "new-tab"],
         &["koshi", "close-tab"],
         &["koshi", "next-tab"],
         &["koshi", "previous-tab"],
-        &["koshi", "rename-tab"],
         &["koshi", "move-tab", "--index", "0"],
         &["koshi", "focus-tab", "--index", "0"],
         &[
@@ -1488,7 +1419,6 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
         &["koshi", "lock"],
         &["koshi", "unlock"],
         &["koshi", "toggle-lock"],
-        &["koshi", "rename-session"],
         &["koshi", "run", "--", "htop"],
     ];
 
@@ -1662,8 +1592,8 @@ fn a_session_value_that_is_not_an_id_parses_as_a_name() {
     // then fails at routing when no session bears it, not at parse time.
     let value = format!("sessions-{}", fixed_uuid());
     assert_eq!(
-        command(&["koshi", "rename-session", "--session", &value]),
-        CliCommand::RenameSession {
+        command(&["koshi", "new-tab", "--session", &value]),
+        CliCommand::NewTab {
             session: Some(SessionRef::Name(value)),
         }
     );

@@ -21,8 +21,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveTabArgs, NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs,
-    ResizePaneArgs, RunCommandPaneArgs, TabTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget,
+    ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -240,12 +240,6 @@ pub enum CliCommand {
     },
     /// Toggle fullscreen on the focused pane.
     TogglePaneFullscreen,
-    /// Re-roll a pane's generated name.
-    RenamePane {
-        /// Pane to rename; defaults to the focused pane.
-        #[arg(long, value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane: Option<PaneId>,
-    },
     /// Type text into a pane's shell, as if it had been typed there. The text
     /// is followed by Enter, so the shell runs it; `--no-enter` leaves it
     /// waiting at the prompt.
@@ -293,12 +287,6 @@ pub enum CliCommand {
         /// Client whose view switches; defaults to the issuing client.
         #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client: Option<ClientId>,
-    },
-    /// Re-roll a tab's generated name.
-    RenameTab {
-        /// Tab to rename; defaults to the focused tab.
-        #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
-        tab: Option<TabId>,
     },
     /// Move a tab to a new index.
     MoveTab {
@@ -362,12 +350,6 @@ pub enum CliCommand {
     Plugin,
     /// Download and install the latest koshi release.
     Update,
-    /// Re-roll a session's generated name.
-    RenameSession {
-        /// Session to rename, by id or name; defaults to the current session.
-        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
-        session: Option<SessionRef>,
-    },
     /// Introspect the action registry.
     Actions {
         /// What to introspect.
@@ -632,10 +614,6 @@ impl CliCommand {
             CliCommand::TogglePaneFullscreen => {
                 ("toggle-pane-fullscreen", Command::TogglePaneFullscreen)
             }
-            CliCommand::RenamePane { pane } => (
-                "rename-pane",
-                Command::RenamePane(RenamePaneArgs { pane: *pane }),
-            ),
             CliCommand::Input {
                 text,
                 pane,
@@ -681,10 +659,6 @@ impl CliCommand {
                     target: TabTarget::Prev,
                     client: *client,
                 }),
-            ),
-            CliCommand::RenameTab { tab } => (
-                "rename-tab",
-                Command::RenameTab(RenameTabArgs { tab: *tab }),
             ),
             CliCommand::MoveTab { index, tab } => (
                 "move-tab",
@@ -732,12 +706,6 @@ impl CliCommand {
             CliCommand::ToggleLock { client } => (
                 "toggle-lock",
                 Command::ToggleLockMode(ToggleLockModeArgs { client: *client }),
-            ),
-            CliCommand::RenameSession { session } => (
-                "rename-session",
-                Command::RenameSession(RenameSessionArgs {
-                    session: targets.session.or(session_ref_id(session)),
-                }),
             ),
             CliCommand::Run {
                 direction,
@@ -787,8 +755,7 @@ impl CliCommand {
             CliCommand::NewPane { session, .. }
             | CliCommand::Run { session, .. }
             | CliCommand::NewTab { session }
-            | CliCommand::CloseTab { session, .. }
-            | CliCommand::RenameSession { session } => session.as_ref(),
+            | CliCommand::CloseTab { session, .. } => session.as_ref(),
             _ => None,
         }
     }
@@ -815,7 +782,6 @@ impl CliCommand {
             | CliCommand::Run { pane, .. }
             | CliCommand::ClosePane { pane, .. }
             | CliCommand::ResizePane { pane, .. }
-            | CliCommand::RenamePane { pane }
             | CliCommand::Input { pane, .. } => *pane,
             CliCommand::FocusPane { pane, .. } => Some(*pane),
             _ => None,
@@ -847,15 +813,6 @@ impl CliCommand {
 fn tab_ref_id(tab: &Option<TabRef>) -> Option<TabId> {
     match tab {
         Some(TabRef::Id(id)) => Some(*id),
-        _ => None,
-    }
-}
-
-/// The id inside a `--session` flag given directly as one; a name (or no
-/// flag) yields `None` and needs the routing layer's lookup.
-fn session_ref_id(session: &Option<SessionRef>) -> Option<SessionId> {
-    match session {
-        Some(SessionRef::Id(id)) => Some(*id),
         _ => None,
     }
 }

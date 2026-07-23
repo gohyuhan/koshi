@@ -4,7 +4,7 @@
 //! insertions, and preserves pane state through serialization round-trips.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
@@ -55,9 +55,9 @@ fn inserting_a_duplicate_id_is_rejected_and_keeps_the_original() {
     let id = PaneId::new();
 
     let mut original = terminal_record(id);
-    original.title = Some("original".to_owned());
+    original.cwd = Some(PathBuf::from("/original"));
     let mut clash = terminal_record(id);
-    clash.title = Some("clash".to_owned());
+    clash.cwd = Some(PathBuf::from("/clash"));
 
     registry.insert(original).expect("first insert");
     let rejected = registry.insert(clash);
@@ -71,7 +71,10 @@ fn inserting_a_duplicate_id_is_rejected_and_keeps_the_original() {
     );
     // The first record is untouched — a rejected insert never overwrites.
     assert_eq!(registry.len(), 1);
-    assert_eq!(registry.get(id).unwrap().title.as_deref(), Some("original"));
+    assert_eq!(
+        registry.get(id).unwrap().cwd.as_deref(),
+        Some(Path::new("/original"))
+    );
 }
 
 #[test]
@@ -116,9 +119,12 @@ fn get_mut_edits_a_record_in_place() {
     let id = PaneId::new();
     registry.insert(terminal_record(id)).expect("insert");
 
-    registry.get_mut(id).expect("present").title = Some("renamed".to_owned());
+    registry.get_mut(id).expect("present").cwd = Some(PathBuf::from("/edited"));
 
-    assert_eq!(registry.get(id).unwrap().title.as_deref(), Some("renamed"));
+    assert_eq!(
+        registry.get(id).unwrap().cwd.as_deref(),
+        Some(Path::new("/edited"))
+    );
     assert_eq!(registry.get_mut(PaneId::new()), None);
 }
 
@@ -158,7 +164,6 @@ fn a_pane_record_survives_a_serde_round_trip() {
     env.insert("EDITOR".to_owned(), "nvim".to_owned());
 
     let mut record = PaneRecord::new(PaneId::new(), SystemTime::UNIX_EPOCH);
-    record.title = Some("editor".to_owned());
     record.command = Some(SpawnSpec {
         program: PathBuf::from("/bin/bash"),
         args: vec!["-l".to_owned()],

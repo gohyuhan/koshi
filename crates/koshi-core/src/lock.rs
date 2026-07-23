@@ -26,7 +26,7 @@ pub enum LockMode {
     /// Pane mode: keys manage panes — new, close, focus, and move — rather than
     /// reaching the focused pane.
     PaneMode,
-    /// Tab mode: keys manage tabs — new, close, rename, focus, and move.
+    /// Tab mode: keys manage tabs — new, close, focus, and move.
     TabMode,
     /// Scroll mode: keys navigate the focused pane's scrollback.
     ScrollMode,

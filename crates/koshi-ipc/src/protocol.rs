@@ -27,10 +27,9 @@ use subtle::ConstantTimeEq;
 ///
 /// Any change to the shape of a wire struct bumps this: the version is the
 /// only thing standing between two builds that no longer agree on the
-/// bytes. Version 2 carries `SessionOverview`'s tab records naming their
-/// session and its pane records dropping their solved rectangle, so a
-/// version-1 peer's overview no longer decodes here.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// bytes. The version stays 1 until the first release ships; from then on
+/// every wire-shape change bumps it in the same commit.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
@@ -43,7 +42,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**. They
 ///   exist for the endpoint file and the socket, which cannot work without it.
-///   `serde_json::to_string(&hello)` yields `{"protocol_version":2,
+///   `serde_json::to_string(&hello)` yields `{"protocol_version":1,
 ///   "token":"k7Qx…"}`, secret included.
 /// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.

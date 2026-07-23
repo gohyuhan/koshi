@@ -31,9 +31,8 @@ use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
-        NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
-        WriteToPaneArgs,
+        NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, SetSelectionArgs, TabTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -67,7 +66,6 @@ use koshi_session::session::{
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
     policy::EmptyTabPolicy,
-    session_ops,
     state::Session,
     tab_ops,
 };
@@ -219,7 +217,6 @@ impl Server {
                 self.handle_new_tab(command_id, &envelope.source, &args, envelope.issued_at)
             }
             Command::CloseTab(args) => self.handle_close_tab(command_id, &envelope.source, &args),
-            Command::RenameTab(args) => self.handle_rename_tab(command_id, &envelope.source, &args),
             Command::FocusTab(args) => self.handle_focus_tab(command_id, &envelope.source, &args),
             Command::WriteToPane(args) => {
                 self.handle_write_to_pane(command_id, &envelope.source, &args)
@@ -248,13 +245,7 @@ impl Server {
             Command::TogglePaneFullscreen => {
                 self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
             }
-            Command::RenamePane(args) => {
-                self.handle_rename_pane(command_id, &envelope.source, &args)
-            }
             Command::MoveTab(args) => self.handle_move_tab(command_id, &envelope.source, &args),
-            Command::RenameSession(args) => {
-                self.handle_rename_session(command_id, &envelope.source, &args)
-            }
         };
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
@@ -415,37 +406,26 @@ impl Server {
         }
     }
 
-    /// Handle [`Command::RenameSession`]: assign the session a fresh
-    /// generated display name.
-    ///
-    /// The target is the explicit `session` argument, else the source's own
-    /// session context ([`Self::resolve_session_target`]). The caller
-    /// supplies no name — a gimmick name is drawn from
-    /// [`generate_name`], skipping every name already on a session
-    /// (including the target's current one, so the rename always changes
-    /// it). The rename applies through [`session_ops::rename_session`];
-    /// tabs, layout, focus, and PTYs are untouched.
-    fn handle_rename_session(
-        &mut self,
-        command_id: CommandId,
-        source: &CommandSource,
-        args: &RenameSessionArgs,
-    ) -> Result<CommandResult, Rejection> {
-        let acting = self.acting_session(source)?;
-        let session_id = self.resolve_session_target(args.session, source, acting)?;
-        let new_name = generate_name(NameKind::Session, |candidate| {
-            self.sessions
-                .values()
-                .any(|session| session.name == candidate)
-        });
-        let session = self
-            .sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-
-        let events = session_ops::rename_session(session, new_name);
-
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+    /// The live working directory of `pane`, best answer first: the shell's
+    /// own OSC 7 report (when it names this machine), then the OS's answer
+    /// for the child process, then the directory the pane was spawned in.
+    /// `None` when nothing knows — a spawn using this then inherits koshi's
+    /// own directory. Every answer is already at hand or one non-blocking
+    /// OS call, so asking never delays the spawn.
+    pub(super) fn pane_live_cwd(&self, session_id: SessionId, pane: PaneId) -> Option<PathBuf> {
+        if let Some(reported) = self
+            .terminal_engines
+            .get(&pane)
+            .and_then(|engine| engine.state().current_cwd())
+        {
+            if is_local_host(reported.host()) {
+                return Some(reported.path().to_path_buf());
+            }
+        }
+        if let Some(cwd) = self.pty_backend().live_cwd(pane) {
+            return Some(cwd);
+        }
+        self.sessions.get(&session_id)?.panes.get(pane)?.cwd.clone()
     }
 
     /// Handle [`Command::Quit`]: mark the process for immediate teardown.
@@ -675,6 +655,26 @@ impl Server {
             }
         }
     }
+}
+
+/// Whether an OSC 7 report's host names this machine: an empty authority,
+/// `localhost`, a loopback address, or the machine's own hostname. A report
+/// from any other host came from a shell running elsewhere (over SSH), and
+/// its directory does not exist here.
+fn is_local_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return true;
+    };
+    // The URI form brackets an IPv6 literal (`file://[::1]/…`); sloppy shell
+    // hooks write it bare. Both mean this machine.
+    if host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+    {
+        return true;
+    }
+    koshi_pty::cwd::local_hostname().is_some_and(|name| name.eq_ignore_ascii_case(host))
 }
 
 mod client;

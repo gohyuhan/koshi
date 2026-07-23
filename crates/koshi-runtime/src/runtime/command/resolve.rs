@@ -109,18 +109,15 @@ impl Server {
                 | Command::ClosePane(_)
                 | Command::ResizePane(_)
                 | Command::TogglePaneFullscreen
-                | Command::RenamePane(_)
                 | Command::WriteToPane(_)
                 | Command::RunCommandPane(_)
                 | Command::NewTab(_)
                 | Command::CloseTab(_)
-                | Command::RenameTab(_)
                 | Command::MoveTab(_)
                 | Command::FocusTab(_)
                 | Command::FocusPane(_)
                 | Command::SetLockMode(_)
                 | Command::ToggleLockMode(_)
-                | Command::RenameSession(_)
         );
         match source {
             CommandSource::InSessionCli { .. } => cli_verb,
@@ -245,9 +242,6 @@ impl Server {
             Command::WriteToPane(args) => self
                 .resolve_pane_target(args.pane, source, session)
                 .map(drop),
-            Command::RenamePane(args) => self
-                .resolve_pane_target(args.pane, source, session)
-                .map(drop),
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
@@ -281,9 +275,6 @@ impl Server {
             Command::CloseTab(args) => self
                 .resolve_tab_or_active(args.tab, source, session)
                 .map(drop),
-            Command::RenameTab(args) => self
-                .resolve_tab_or_active(args.tab, source, session)
-                .map(drop),
             Command::MoveTab(args) => self
                 .resolve_tab_or_active(args.tab, source, session)
                 .map(drop),
@@ -293,9 +284,6 @@ impl Server {
             Command::NewTab(args) => Self::resolve_new_tab_target(args, source, session).map(drop),
             Command::RunCommandPane(args) => self
                 .resolve_new_pane_source(&Self::run_command_new_pane_args(args), source, session)
-                .map(drop),
-            Command::RenameSession(args) => self
-                .resolve_session_target(args.session, source, session)
                 .map(drop),
             Command::Plugin(_) | Command::Quit => Ok(()),
         }
@@ -811,54 +799,6 @@ impl Server {
     /// session-scoped command has no session context to resolve within.
     pub(super) fn require_session(session: Option<&Session>) -> Result<&Session, Rejection> {
         session.ok_or_else(|| Rejection::new(RejectReason::TargetNotFound, "no session context"))
-    }
-
-    /// Resolve a [`Command::RenameSession`] to its target session. Shared by
-    /// validation and [`Self::handle_rename_session`] so both apply one
-    /// contract.
-    ///
-    /// The target is the explicit `session` argument when set — an id
-    /// matching no session is [`RejectReason::TargetNotFound`], never a
-    /// fallback. With no explicit target the source's own session context is
-    /// used — the session the in-session CLI runs inside, the one an
-    /// external CLI named on its envelope, or the keybinding issuer's
-    /// session; any other source (mouse, plugin, internal, external with no
-    /// session) is [`RejectReason::InvalidState`] — it must name a session.
-    /// A resolved session that is winding down is
-    /// [`RejectReason::InvalidState`], so a target named by id cannot slip
-    /// past the session admission check.
-    pub(super) fn resolve_session_target(
-        &self,
-        explicit: Option<SessionId>,
-        source: &CommandSource,
-        acting: Option<&Session>,
-    ) -> Result<SessionId, Rejection> {
-        let session = match explicit {
-            Some(session_id) => self
-                .sessions
-                .get(&session_id)
-                .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?,
-            None => match source {
-                CommandSource::InSessionCli { .. }
-                | CommandSource::ExternalCli {
-                    session_id: Some(_),
-                }
-                | CommandSource::KeyBinding { .. } => Self::require_session(acting)?,
-                _ => {
-                    return Err(Rejection::new(
-                        RejectReason::InvalidState,
-                        "name a target session",
-                    ))
-                }
-            },
-        };
-        if Self::is_winding_down(session) {
-            return Err(Rejection::new(
-                RejectReason::InvalidState,
-                "session is stopping",
-            ));
-        }
-        Ok(session.id)
     }
 
     /// Confirm `tab` exists in `session`.

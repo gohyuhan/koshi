@@ -3,6 +3,7 @@
 //! A PTY (pseudo-terminal) is the OS-level channel a spawned shell or program
 //! runs inside; it makes the program behave as if attached to a real terminal.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use koshi_core::{
@@ -35,6 +36,10 @@ pub trait PtyBackend: Send + Sync {
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError>;
     /// Terminate a pane's child according to `kill_policy`.
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError>;
+    /// The live working directory of `pane`'s child, asked from the OS
+    /// (Linux `/proc/<pid>/cwd`, macOS `proc_pidinfo`). `None` when the pane
+    /// has no live child or the platform has no lookup (Windows).
+    fn live_cwd(&self, pane: PaneId) -> Option<PathBuf>;
 }
 
 /// The read side of one spawned pane: its id and the channels the backend

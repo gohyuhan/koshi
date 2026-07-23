@@ -40,8 +40,7 @@ use std::path::PathBuf;
 use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-    RunCommandPaneArgs, TabTarget, ToggleLockModeArgs,
+    NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget, ToggleLockModeArgs,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -292,7 +291,6 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("focus-pane-up", ActionArgs::None) => focus_toward(Direction::Up),
         ("focus-pane-right", ActionArgs::None) => focus_toward(Direction::Right),
         ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
-        ("rename-pane", ActionArgs::None) => Command::RenamePane(RenamePaneArgs { pane: None }),
 
         // --- Tabs ---
         ("new-tab", ActionArgs::None) => Command::NewTab(NewTabArgs::default()),
@@ -305,12 +303,6 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             target: TabTarget::Prev,
             client: None,
         }),
-        ("rename-tab", ActionArgs::None) => Command::RenameTab(RenameTabArgs { tab: None }),
-
-        // --- Session ---
-        ("rename-session", ActionArgs::None) => {
-            Command::RenameSession(RenameSessionArgs { session: None })
-        }
 
         // --- Quit ---
         ("quit", ActionArgs::None) => Command::Quit,
