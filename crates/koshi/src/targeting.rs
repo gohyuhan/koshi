@@ -19,12 +19,16 @@
 //! Ambiguity is always an error, never a guess: two sessions sharing a name,
 //! or two running sessions with no flag, both refuse with a hint instead of
 //! picking one.
+//!
+//! The probing itself is [`crate::discovery`]'s, the same code the listing
+//! verbs use, so a session that is gone is swept here too.
 
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 
 use crate::cli::{CliCommand, ResolvedTargets, SessionRef, TabRef};
+use crate::discovery::{self, Discovered};
 use crate::error::CliError;
 use crate::in_session::InSessionContext;
 use crate::ipc_client;
@@ -67,10 +71,8 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
         if stays_home {
             let tab = match command.target_tab() {
                 Some(tab_ref @ TabRef::Name(_)) => {
-                    let overview = ipc_client::fetch_overview(
-                        &ipc_client::runtime_dir()?,
-                        context.session_id,
-                    )?;
+                    let overview =
+                        discovery::fetch_one(&ipc_client::runtime_dir()?, context.session_id)?;
                     Some(resolve_tab(&overview, tab_ref)?)
                 }
                 _ => None,
@@ -82,15 +84,11 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
     // An explicit `--session <id>` names its endpoint directly, so only that
     // session is asked. Anything else needs the whole picture — a name, an
     // owner lookup, or the count rule — so every advertised session is
-    // probed; one nobody answers is skipped (its stale files are swept by
-    // the listing verbs, not here).
+    // probed; one nobody answers is skipped and its leftovers swept.
     let runtime_dir = ipc_client::runtime_dir()?;
-    let overviews: Vec<SessionOverview> = match command.target_session() {
-        Some(SessionRef::Id(id)) => vec![ipc_client::fetch_overview(&runtime_dir, *id)?],
-        _ => ipc_client::advertised_sessions(&runtime_dir)
-            .into_iter()
-            .filter_map(|session_id| ipc_client::fetch_overview(&runtime_dir, session_id).ok())
-            .collect(),
+    let found = match command.target_session() {
+        Some(SessionRef::Id(id)) => Discovered::of(discovery::fetch_one(&runtime_dir, *id)?),
+        _ => discovery::fetch_all(&runtime_dir),
     };
 
     let overview = pick_session(
@@ -98,7 +96,7 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
         command.target_pane(),
         command.target_tab(),
         command.target_client(),
-        &overviews,
+        &found,
     )?;
     let tab = command
         .target_tab()
@@ -124,21 +122,25 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
 /// `--client`, else the count rule (one running session is the default).
 /// Whatever picked it, every explicitly named pane and client must then
 /// belong to the picked session — a mismatch refuses rather than retargets.
+///
+/// Every branch that would answer "nowhere" or "there is only this one"
+/// needs a complete census: with a running session unasked
+/// ([`Discovered::is_complete`]), the command is refused rather than aimed at
+/// whichever session did answer.
 fn pick_session<'a>(
     session: Option<&SessionRef>,
     pane: Option<PaneId>,
     tab: Option<&TabRef>,
     client: Option<ClientId>,
-    overviews: &'a [SessionOverview],
+    found: &'a Discovered,
 ) -> Result<&'a SessionOverview, CliError> {
+    let overviews = found.sessions.as_slice();
     let picked = if let Some(session_ref) = session {
         match session_ref {
             SessionRef::Id(id) => overviews
                 .iter()
                 .find(|overview| overview.session.id == *id)
-                .ok_or_else(|| CliError::SessionNotFound {
-                    session: id.to_string(),
-                })?,
+                .ok_or_else(|| found.no_such_session(&id.to_string()))?,
             SessionRef::Name(name) => {
                 let mut matches = overviews
                     .iter()
@@ -151,11 +153,7 @@ fn pick_session<'a>(
                             format!("several sessions are named `{name}`; use the session id"),
                         ))
                     }
-                    (None, _) => {
-                        return Err(CliError::SessionNotFound {
-                            session: name.clone(),
-                        })
-                    }
+                    (None, _) => return Err(found.no_such_session(name)),
                 }
             }
         }
@@ -163,14 +161,9 @@ fn pick_session<'a>(
         overviews
             .iter()
             .find(|overview| overview.panes.iter().any(|pane| pane.id == pane_id))
-            .ok_or_else(|| {
-                rejected(
-                    RejectReason::TargetNotFound,
-                    format!("pane {pane_id} is not in any running session"),
-                )
-            })?
+            .ok_or_else(|| found.missing("pane", &pane_id.to_string()))?
     } else if let Some(tab_ref) = tab {
-        pick_session_by_tab(tab_ref, overviews)?
+        pick_session_by_tab(tab_ref, found)?
     } else if let Some(client_id) = client {
         overviews
             .iter()
@@ -180,16 +173,10 @@ fn pick_session<'a>(
                     .iter()
                     .any(|attached| attached.id == client_id)
             })
-            .ok_or_else(|| {
-                rejected(
-                    RejectReason::TargetNotFound,
-                    format!("client {client_id} is not attached to any running session"),
-                )
-            })?
+            .ok_or_else(|| found.missing("client", &client_id.to_string()))?
     } else {
         let mut running = overviews.iter();
         match (running.next(), running.next()) {
-            (Some(only), None) => only,
             (Some(_), Some(_)) => {
                 return Err(rejected(
                     RejectReason::TargetAmbiguous,
@@ -197,7 +184,15 @@ fn pick_session<'a>(
                         .to_string(),
                 ))
             }
-            (None, _) => return Err(CliError::NoSessions),
+            // The count rule only holds over a complete census: one session
+            // answering while another stayed silent is not "exactly one".
+            (Some(only), None) if found.is_complete() => only,
+            (None, _) if found.is_complete() => return Err(CliError::NoSessions),
+            _ => {
+                return Err(found.unanswered(
+                    "cannot tell which session to target; name one with --session <name-or-id>",
+                ))
+            }
         }
     };
 
@@ -235,20 +230,17 @@ fn pick_session<'a>(
 /// id or `--session`.
 fn pick_session_by_tab<'a>(
     tab_ref: &TabRef,
-    overviews: &'a [SessionOverview],
+    found: &'a Discovered,
 ) -> Result<&'a SessionOverview, CliError> {
     match tab_ref {
-        TabRef::Id(tab_id) => overviews
+        TabRef::Id(tab_id) => found
+            .sessions
             .iter()
             .find(|overview| overview.tabs.iter().any(|tab| tab.id == *tab_id))
-            .ok_or_else(|| {
-                rejected(
-                    RejectReason::TargetNotFound,
-                    format!("tab {tab_id} is not in any running session"),
-                )
-            }),
+            .ok_or_else(|| found.missing("tab", &tab_id.to_string())),
         TabRef::Name(name) => {
-            let mut owners = overviews
+            let mut owners = found
+                .sessions
                 .iter()
                 .filter(|overview| overview.tabs.iter().any(|tab| tab.name == *name));
             match (owners.next(), owners.next()) {
@@ -259,10 +251,7 @@ fn pick_session_by_tab<'a>(
                         "several sessions have a tab named `{name}`; use the tab id or --session"
                     ),
                 )),
-                (None, _) => Err(rejected(
-                    RejectReason::TargetNotFound,
-                    format!("no running session has a tab named `{name}`"),
-                )),
+                (None, _) => Err(found.missing("tab named", &format!("`{name}`"))),
             }
         }
     }

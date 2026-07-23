@@ -66,6 +66,7 @@ fn bootstrapped_session_reports_its_exact_rows() {
     let pane_id = tab.layout().leaf_panes()[0];
     assert_eq!(overview.tabs.len(), 1);
     assert_eq!(overview.tabs[0].id, tab.id());
+    assert_eq!(overview.tabs[0].session_id, session_id);
     assert_eq!(overview.tabs[0].name, tab.name());
     assert_eq!(overview.tabs[0].index, 0);
     assert_eq!(overview.tabs[0].active_pane, Some(pane_id));
@@ -77,7 +78,6 @@ fn bootstrapped_session_reports_its_exact_rows() {
     assert_eq!(overview.panes[0].session_id, session_id);
     assert_eq!(overview.panes[0].state, PaneState::Running);
     assert_eq!(overview.panes[0].focused_by_clients, vec![client_id]);
-    assert_eq!(overview.panes[0].layout_rect, None);
 
     assert_eq!(overview.clients.len(), 1);
     assert_eq!(overview.clients[0].id, client_id);

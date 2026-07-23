@@ -1,11 +1,10 @@
 //! Read-only discovery snapshots answering the list and inspect queries.
 //!
-//! Each `*Info` struct is the serializable answer to one discovery query
-//! (`list-sessions`, `list-tabs`, `list-panes`, `list-clients`, and the
-//! `inspect` forms): the runtime builds them from live state and the CLI
-//! renders them as a table or JSON. Every struct carries the stable ids
-//! printed by Koshi, usable directly as explicit `--session`/`--tab`/
-//! `--pane`/`--client` targets.
+//! Each `*Info` struct describes one entity from live runtime state. An
+//! `inspect` query renders one of them in full; a `list-*` query keeps the
+//! ids and names off them and prints one row per entity. Every struct
+//! carries the stable ids printed by Koshi, usable directly as explicit
+//! `--session`/`--tab`/`--pane`/`--client` targets.
 //!
 //! [`SessionOverview`] gathers all four into one picture of a session, so a
 //! caller asking across process boundaries makes one request and filters the
@@ -19,11 +18,12 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::geometry::{Rect, Size};
+use crate::geometry::Size;
 use crate::ids::{ClientId, PaneId, SessionId, TabId};
 use crate::lock::LockMode;
 
-/// One session as reported by `list-sessions` and `inspect session`.
+/// One session, as `inspect session` reports it and `list-sessions` rows
+/// are drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     /// Stable session id.
@@ -38,11 +38,14 @@ pub struct SessionInfo {
     pub pane_count: usize,
 }
 
-/// One tab as reported by `list-tabs` and `inspect tab`.
+/// One tab, as `inspect tab` reports it and `list-tabs` rows are drawn
+/// from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabInfo {
     /// Stable tab id.
     pub id: TabId,
+    /// The session holding the tab.
+    pub session_id: SessionId,
     /// The tab's generated display name.
     pub name: String,
     /// The tab's position in the tab bar, zero-based.
@@ -71,7 +74,8 @@ pub enum PaneState {
     Closing,
 }
 
-/// One pane as reported by `list-panes` and `inspect pane`.
+/// One pane, as `inspect pane` reports it and `list-panes` rows are drawn
+/// from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
     /// Stable pane id.
@@ -93,12 +97,10 @@ pub struct PaneInfo {
     pub state: PaneState,
     /// Ids of the clients whose focus is on this pane.
     pub focused_by_clients: Vec<ClientId>,
-    /// The pane's solved rectangle within its tab; `None` when the layout
-    /// has no room for the pane at the tab's current size.
-    pub layout_rect: Option<Rect>,
 }
 
-/// One attached client as reported by `list-clients` and `inspect client`.
+/// One attached client, as `inspect client` reports it and `list-clients`
+/// rows are drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientInfo {
     /// Stable client id.

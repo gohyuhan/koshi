@@ -204,7 +204,6 @@ fn flagless_subcommands_parse_to_their_variants() {
             "list-panes",
             CliCommand::ListPanes {
                 session: None,
-                tab: None,
                 format: FormatArg::Table,
             },
         ),
@@ -352,15 +351,23 @@ fn list_tabs_parses_a_typed_session_and_a_format() {
 }
 
 #[test]
-fn list_panes_parses_a_tab_filter() {
-    let tab = format!("tab-{}", fixed_uuid());
+fn list_panes_parses_a_session_filter() {
+    let session = format!("session-{}", fixed_uuid());
     assert_eq!(
-        parse(&["koshi", "list-panes", "--tab", &tab]).command,
+        parse(&["koshi", "list-panes", "--session", &session]).command,
         Some(CliCommand::ListPanes {
-            session: None,
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+            session: Some(SessionId::from_uuid(fixed_uuid())),
             format: FormatArg::Table,
         })
+    );
+}
+
+#[test]
+fn list_panes_takes_no_tab_filter() {
+    let tab = format!("tab-{}", fixed_uuid());
+    assert_eq!(
+        parse_err(&["koshi", "list-panes", "--tab", &tab]).kind(),
+        ErrorKind::UnknownArgument
     );
 }
 

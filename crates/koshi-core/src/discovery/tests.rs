@@ -35,7 +35,6 @@ fn pane_info(cwd: Option<PathBuf>) -> PaneInfo {
         command: None,
         state: PaneState::Running,
         focused_by_clients: Vec::new(),
-        layout_rect: None,
     }
 }
 

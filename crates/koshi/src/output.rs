@@ -5,12 +5,13 @@
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
-//! lines. JSON output is the serde form of the [`koshi_core::discovery`]
-//! structs and this module's summary/detail structs — a JSON array for a
-//! list, a JSON object for a single item — and is the stable scripting
-//! surface. In table cells an absent value prints as `-`, an id list prints
-//! as its count (full ids are in the JSON form), and a timestamp prints as
-//! whole seconds since the Unix epoch.
+//! lines. JSON output is the serde form of the rendered structs — the
+//! [`crate::discovery`] listing rows, the [`koshi_core::discovery`] records
+//! an `inspect` reports, and this module's own summary/detail structs — a
+//! JSON array for a list, a JSON object for a single item, and the stable
+//! scripting surface. In table cells an absent value prints as `-`, an id
+//! list prints as its count (full ids are in the JSON form), and a timestamp
+//! prints as whole seconds since the Unix epoch.
 
 use std::time::SystemTime;
 
@@ -19,10 +20,11 @@ use koshi_core::action::{
     TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
-use koshi_core::geometry::{Rect, Size};
+use koshi_core::geometry::Size;
 use serde::Serialize;
 
 use crate::cli::{FormatArg, ScopeArg};
+use crate::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
 
 /// The pretty-printed JSON form of `value`, ending in a newline.
 fn json<T: Serialize>(value: &T) -> String {
