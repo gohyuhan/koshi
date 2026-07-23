@@ -74,34 +74,132 @@ pub struct ClientRow {
     pub session_name: String,
 }
 
-/// Every running session's overview, sorted by session name and then id so
-/// two runs of the same listing print the same order.
+/// What one sweep of the runtime directory found: every session that
+/// answered, plus how many running sessions could not be asked.
 ///
-/// A session that is gone contributes no rows, and [`fetch_one`] has already
-/// swept what it left behind. A session that is listening but cannot finish
-/// the exchange also contributes no rows, and says so on stderr so its
-/// absence is not silent.
+/// The unasked count is what keeps an answer honest. "No running session has
+/// pane X" and "there is exactly one session, so it is the default" are both
+/// claims about *every* running session — with one of them unasked, neither
+/// can be made, so the paths that would make them report the unasked session
+/// instead. A session that is gone is not unasked: it answered by not being
+/// there.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    /// The sessions that answered, sorted by name and then id so two runs of
+    /// the same query print the same order.
+    pub sessions: Vec<SessionOverview>,
+    /// How many running sessions were listening but could not answer.
+    pub unasked: usize,
+}
+
+impl Discovered {
+    /// One session, asked directly and answered — a complete census of the
+    /// only session the query is about.
+    #[must_use]
+    pub fn of(overview: SessionOverview) -> Discovered {
+        Discovered {
+            sessions: vec![overview],
+            unasked: 0,
+        }
+    }
+
+    /// Whether every running session answered, so a negative answer is the
+    /// truth rather than a gap.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unasked == 0
+    }
+
+    /// The failure for a target that none of the answering sessions holds:
+    /// genuinely not found when every session answered, otherwise a report
+    /// that one of them could not be asked.
+    pub(crate) fn missing(&self, kind: &str, id: &str) -> CliError {
+        if self.is_complete() {
+            CliError::CommandRejected {
+                reason: RejectReason::TargetNotFound,
+                help: Some(format!("no running session has {kind} {id}")),
+            }
+        } else {
+            self.unanswered(&format!(
+                "{kind} {id} is in none of the sessions that answered"
+            ))
+        }
+    }
+
+    /// The failure for a `--session` no answering session matched: not
+    /// running when every session answered, otherwise a report that one
+    /// could not be asked.
+    pub(crate) fn no_such_session(&self, session: &str) -> CliError {
+        if self.is_complete() {
+            CliError::SessionNotFound {
+                session: session.to_string(),
+            }
+        } else {
+            self.unanswered(&format!(
+                "`{session}` is not among the sessions that answered"
+            ))
+        }
+    }
+
+    /// The failure a listing ends with when it could not see everything, or
+    /// `None` when it could.
+    ///
+    /// A listing prints the rows it has either way — partial output beats no
+    /// output — but a caller reading only stdout and the exit code would
+    /// take those rows for the whole picture, so the exit code carries the
+    /// gap: `koshi list-panes` with one session unable to answer prints the
+    /// other sessions' panes and still exits 4.
+    #[must_use]
+    pub fn incomplete_listing(&self) -> Option<CliError> {
+        if self.is_complete() {
+            None
+        } else {
+            Some(self.unanswered("this listing is incomplete"))
+        }
+    }
+
+    /// A failure that names how many sessions went unasked, so an incomplete
+    /// answer never reads as a definite one.
+    pub(crate) fn unanswered(&self, detail: &str) -> CliError {
+        let sessions = if self.unasked == 1 {
+            "1 running session did not answer".to_string()
+        } else {
+            format!("{} running sessions did not answer", self.unasked)
+        };
+        CliError::IpcUnavailable {
+            detail: format!("{detail} ({sessions})"),
+        }
+    }
+}
+
+/// Ask every session the runtime directory advertises to describe itself.
+///
+/// A session that is gone contributes no rows and is not counted as unasked
+/// — [`fetch_one`] has already swept what it left behind. A session that is
+/// listening but cannot finish the exchange contributes no rows either, says
+/// so on stderr, and is counted, so a caller can tell a real "not there"
+/// from "could not check".
 #[must_use]
-pub fn fetch_all(runtime_dir: &Path) -> Vec<SessionOverview> {
-    let mut overviews: Vec<SessionOverview> = ipc_client::advertised_sessions(runtime_dir)
-        .into_iter()
-        .filter_map(|session_id| match fetch_one(runtime_dir, session_id) {
-            Ok(overview) => Some(overview),
+pub fn fetch_all(runtime_dir: &Path) -> Discovered {
+    let mut found = Discovered::default();
+    for session_id in ipc_client::advertised_sessions(runtime_dir) {
+        match fetch_one(runtime_dir, session_id) {
+            Ok(overview) => found.sessions.push(overview),
             // Gone: swept by `fetch_one`, and it simply has no rows.
-            Err(CliError::SessionNotFound { .. }) => None,
+            Err(CliError::SessionNotFound { .. }) => {}
             Err(error) => {
                 eprintln!("koshi: session {session_id} did not answer: {error}");
-                None
+                found.unasked += 1;
             }
-        })
-        .collect();
-    overviews.sort_by(|a, b| {
+        }
+    }
+    found.sessions.sort_by(|a, b| {
         a.session
             .name
             .cmp(&b.session.name)
             .then(a.session.id.cmp(&b.session.id))
     });
-    overviews
+    found
 }
 
 /// Ask the one session `session_id` to describe itself, sweeping what it
@@ -201,57 +299,46 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
 }
 
 /// The session `session_id` names, in full, wherever it is running.
-pub fn find_session(
-    overviews: &[SessionOverview],
-    session_id: SessionId,
-) -> Result<SessionInfo, CliError> {
-    overviews
+pub fn find_session(found: &Discovered, session_id: SessionId) -> Result<SessionInfo, CliError> {
+    found
+        .sessions
         .iter()
         .find(|overview| overview.session.id == session_id)
         .map(|overview| overview.session.clone())
-        .ok_or_else(|| not_found("session", &session_id.to_string()))
+        .ok_or_else(|| found.missing("session", &session_id.to_string()))
 }
 
 /// The tab `tab_id` names, in full, wherever it is running.
-pub fn find_tab(overviews: &[SessionOverview], tab_id: TabId) -> Result<TabInfo, CliError> {
-    overviews
+pub fn find_tab(found: &Discovered, tab_id: TabId) -> Result<TabInfo, CliError> {
+    found
+        .sessions
         .iter()
         .flat_map(|overview| overview.tabs.iter())
         .find(|tab| tab.id == tab_id)
         .cloned()
-        .ok_or_else(|| not_found("tab", &tab_id.to_string()))
+        .ok_or_else(|| found.missing("tab", &tab_id.to_string()))
 }
 
 /// The pane `pane_id` names, in full, wherever it is running.
-pub fn find_pane(overviews: &[SessionOverview], pane_id: PaneId) -> Result<PaneInfo, CliError> {
-    overviews
+pub fn find_pane(found: &Discovered, pane_id: PaneId) -> Result<PaneInfo, CliError> {
+    found
+        .sessions
         .iter()
         .flat_map(|overview| overview.panes.iter())
         .find(|pane| pane.id == pane_id)
         .cloned()
-        .ok_or_else(|| not_found("pane", &pane_id.to_string()))
+        .ok_or_else(|| found.missing("pane", &pane_id.to_string()))
 }
 
 /// The client `client_id` names, in full, wherever it is attached.
-pub fn find_client(
-    overviews: &[SessionOverview],
-    client_id: ClientId,
-) -> Result<ClientInfo, CliError> {
-    overviews
+pub fn find_client(found: &Discovered, client_id: ClientId) -> Result<ClientInfo, CliError> {
+    found
+        .sessions
         .iter()
         .flat_map(|overview| overview.clients.iter())
         .find(|client| client.id == client_id)
         .cloned()
-        .ok_or_else(|| not_found("client", &client_id.to_string()))
-}
-
-/// An `inspect` miss, shaped like a session's own rejection so it prints and
-/// exits the same way a refused target does.
-fn not_found(kind: &str, id: &str) -> CliError {
-    CliError::CommandRejected {
-        reason: RejectReason::TargetNotFound,
-        help: Some(format!("no running session has {kind} {id}")),
-    }
+        .ok_or_else(|| found.missing("client", &client_id.to_string()))
 }
 
 #[cfg(test)]

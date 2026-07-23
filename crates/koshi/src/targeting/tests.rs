@@ -72,6 +72,24 @@ fn overview(
     }
 }
 
+/// A census where every running session answered — the normal case, and the
+/// only one in which a "nowhere" or count-rule answer is trustworthy.
+fn census<const N: usize>(overviews: [SessionOverview; N]) -> Discovered {
+    Discovered {
+        sessions: overviews.to_vec(),
+        unasked: 0,
+    }
+}
+
+/// A census missing `unasked` sessions: they are running and listening, but
+/// none of them could be asked what they hold.
+fn partial<const N: usize>(overviews: [SessionOverview; N], unasked: usize) -> Discovered {
+    Discovered {
+        sessions: overviews.to_vec(),
+        unasked,
+    }
+}
+
 /// The rejection reason inside a `CommandRejected`, or a panic naming what
 /// came back instead.
 fn rejection_reason(error: &CliError) -> RejectReason {
@@ -85,23 +103,82 @@ fn rejection_reason(error: &CliError) -> RejectReason {
 fn sole_running_session_is_the_default() {
     let session = SessionId::new();
     let tab = TabId::new();
-    let overviews = [overview("amber-fox", session, &[(tab, "one")], &[], &[])];
+    let overviews = census([overview("amber-fox", session, &[(tab, "one")], &[], &[])]);
     let picked = pick_session(None, None, None, None, &overviews).expect("sole session");
     assert_eq!(picked.session.id, session);
 }
 
 #[test]
 fn no_running_session_reports_no_sessions() {
-    let error = pick_session(None, None, None, None, &[]).expect_err("nothing to target");
+    let error = pick_session(None, None, None, None, &census([])).expect_err("nothing to target");
     assert!(matches!(error, CliError::NoSessions));
 }
 
 #[test]
+fn a_sole_answering_session_is_not_the_default_while_another_is_unasked() {
+    // One session answered, one is running but could not be asked. Acting on
+    // the one that answered would aim the command at a session the user may
+    // not have meant, so it refuses instead.
+    let overviews = partial([overview("amber-fox", SessionId::new(), &[], &[], &[])], 1);
+    let error = pick_session(None, None, None, None, &overviews).expect_err("census incomplete");
+    assert!(
+        matches!(&error, CliError::IpcUnavailable { detail }
+            if detail == "cannot tell which session to target; name one with \
+                          --session <name-or-id> (1 running session did not answer)"),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn no_answer_at_all_is_not_reported_as_no_sessions() {
+    // The only running session could not be asked: "no koshi session is
+    // running" would be false.
+    let error = pick_session(None, None, None, None, &partial([], 1)).expect_err("census empty");
+    assert!(
+        matches!(error, CliError::IpcUnavailable { .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn an_unasked_session_does_not_turn_an_explicit_target_into_not_found() {
+    let overviews = partial([overview("amber-fox", SessionId::new(), &[], &[], &[])], 1);
+    let error = pick_session(None, Some(PaneId::new()), None, None, &overviews)
+        .expect_err("the pane may be in the session that stayed silent");
+    assert!(
+        matches!(error, CliError::IpcUnavailable { .. }),
+        "got {error:?}"
+    );
+
+    let name = SessionRef::Name("blue-owl".to_string());
+    let error = pick_session(Some(&name), None, None, None, &overviews)
+        .expect_err("the name may belong to the session that stayed silent");
+    assert!(
+        matches!(error, CliError::IpcUnavailable { .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn two_answering_sessions_stay_ambiguous_even_with_one_unasked() {
+    // Naming a session is the fix either way, so the actionable message wins.
+    let overviews = partial(
+        [
+            overview("amber-fox", SessionId::new(), &[], &[], &[]),
+            overview("blue-owl", SessionId::new(), &[], &[], &[]),
+        ],
+        1,
+    );
+    let error = pick_session(None, None, None, None, &overviews).expect_err("ambiguous");
+    assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
+}
+
+#[test]
 fn two_running_sessions_demand_the_session_flag() {
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("blue-owl", SessionId::new(), &[], &[], &[]),
-    ];
+    ]);
     let error = pick_session(None, None, None, None, &overviews).expect_err("ambiguous");
     assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
 }
@@ -109,10 +186,10 @@ fn two_running_sessions_demand_the_session_flag() {
 #[test]
 fn session_name_matches_exactly_one() {
     let target = SessionId::new();
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("blue-owl", target, &[], &[], &[]),
-    ];
+    ]);
     let name = SessionRef::Name("blue-owl".to_string());
     let picked = pick_session(Some(&name), None, None, None, &overviews).expect("unique name");
     assert_eq!(picked.session.id, target);
@@ -120,7 +197,7 @@ fn session_name_matches_exactly_one() {
 
 #[test]
 fn unknown_session_name_is_not_running() {
-    let overviews = [overview("amber-fox", SessionId::new(), &[], &[], &[])];
+    let overviews = census([overview("amber-fox", SessionId::new(), &[], &[], &[])]);
     let name = SessionRef::Name("blue-owl".to_string());
     let error = pick_session(Some(&name), None, None, None, &overviews).expect_err("no match");
     assert!(
@@ -131,10 +208,10 @@ fn unknown_session_name_is_not_running() {
 
 #[test]
 fn duplicate_session_name_is_ambiguous() {
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
-    ];
+    ]);
     let name = SessionRef::Name("amber-fox".to_string());
     let error = pick_session(Some(&name), None, None, None, &overviews).expect_err("two match");
     assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
@@ -142,7 +219,7 @@ fn duplicate_session_name_is_ambiguous() {
 
 #[test]
 fn session_id_not_advertised_is_not_running() {
-    let overviews = [overview("amber-fox", SessionId::new(), &[], &[], &[])];
+    let overviews = census([overview("amber-fox", SessionId::new(), &[], &[], &[])]);
     let missing = SessionId::new();
     let id = SessionRef::Id(missing);
     let error = pick_session(Some(&id), None, None, None, &overviews).expect_err("not running");
@@ -157,17 +234,17 @@ fn explicit_pane_picks_its_owning_session() {
     let target = SessionId::new();
     let tab = TabId::new();
     let pane = PaneId::new();
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("blue-owl", target, &[(tab, "one")], &[(pane, tab)], &[]),
-    ];
+    ]);
     let picked = pick_session(None, Some(pane), None, None, &overviews).expect("owner found");
     assert_eq!(picked.session.id, target);
 }
 
 #[test]
 fn pane_in_no_session_is_not_found() {
-    let overviews = [overview("amber-fox", SessionId::new(), &[], &[], &[])];
+    let overviews = census([overview("amber-fox", SessionId::new(), &[], &[], &[])]);
     let error =
         pick_session(None, Some(PaneId::new()), None, None, &overviews).expect_err("nowhere");
     assert_eq!(rejection_reason(&error), RejectReason::TargetNotFound);
@@ -178,7 +255,7 @@ fn explicit_session_with_a_pane_from_another_session_refuses() {
     let named = SessionId::new();
     let other_tab = TabId::new();
     let foreign_pane = PaneId::new();
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", named, &[], &[], &[]),
         overview(
             "blue-owl",
@@ -187,7 +264,7 @@ fn explicit_session_with_a_pane_from_another_session_refuses() {
             &[(foreign_pane, other_tab)],
             &[],
         ),
-    ];
+    ]);
     let name = SessionRef::Name("amber-fox".to_string());
     let error = pick_session(Some(&name), Some(foreign_pane), None, None, &overviews)
         .expect_err("mismatch never retargets");
@@ -199,10 +276,10 @@ fn explicit_client_picks_its_session() {
     let target = SessionId::new();
     let tab = TabId::new();
     let client = ClientId::new();
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("blue-owl", target, &[(tab, "one")], &[], &[client]),
-    ];
+    ]);
     let picked = pick_session(None, None, None, Some(client), &overviews).expect("owner found");
     assert_eq!(picked.session.id, target);
 }
@@ -210,13 +287,13 @@ fn explicit_client_picks_its_session() {
 #[test]
 fn detached_client_is_not_found_anywhere() {
     let tab = TabId::new();
-    let overviews = [overview(
+    let overviews = census([overview(
         "amber-fox",
         SessionId::new(),
         &[(tab, "one")],
         &[],
         &[],
-    )];
+    )]);
     let error = pick_session(None, None, None, Some(ClientId::new()), &overviews)
         .expect_err("attached only");
     assert_eq!(rejection_reason(&error), RejectReason::TargetNotFound);
@@ -226,10 +303,10 @@ fn detached_client_is_not_found_anywhere() {
 fn tab_id_picks_its_owning_session() {
     let target = SessionId::new();
     let tab = TabId::new();
-    let overviews = [
+    let overviews = census([
         overview("amber-fox", SessionId::new(), &[], &[], &[]),
         overview("blue-owl", target, &[(tab, "one")], &[], &[]),
-    ];
+    ]);
     let tab_ref = TabRef::Id(tab);
     let picked = pick_session(None, None, Some(&tab_ref), None, &overviews).expect("owner found");
     assert_eq!(picked.session.id, target);
@@ -237,7 +314,7 @@ fn tab_id_picks_its_owning_session() {
 
 #[test]
 fn tab_name_owned_by_two_sessions_is_ambiguous() {
-    let overviews = [
+    let overviews = census([
         overview(
             "amber-fox",
             SessionId::new(),
@@ -252,7 +329,7 @@ fn tab_name_owned_by_two_sessions_is_ambiguous() {
             &[],
             &[],
         ),
-    ];
+    ]);
     let tab_ref = TabRef::Name("logs".to_string());
     let error = pick_session(None, None, Some(&tab_ref), None, &overviews).expect_err("two owners");
     assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);

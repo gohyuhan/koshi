@@ -9,6 +9,9 @@ use koshi_core::ids::CommandId;
 
 use super::*;
 
+/// A protocol version that is not this build's, whatever this build's is.
+const OTHER_VERSION: u32 = PROTOCOL_VERSION + 1;
+
 /// The token this Koshi expects, as the gate under test holds it.
 fn expected() -> ConnectionToken {
     ConnectionToken::new("k7QxSecret")
@@ -74,7 +77,7 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
 #[test]
 fn a_hello_with_a_wrong_version_is_refused_naming_both_versions() {
     let hello = IpcRequestKind::Hello {
-        protocol_version: 2,
+        protocol_version: OTHER_VERSION,
         token: expected(),
     };
 
@@ -82,7 +85,10 @@ fn a_hello_with_a_wrong_version_is_refused_naming_both_versions() {
         gate().check(&hello),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
-            message: "the caller speaks protocol version 2, this Koshi speaks 1".to_string(),
+            message: format!(
+                "the caller speaks protocol version {OTHER_VERSION}, \
+                 this Koshi speaks {PROTOCOL_VERSION}"
+            ),
         })
     );
 }
@@ -90,7 +96,7 @@ fn a_hello_with_a_wrong_version_is_refused_naming_both_versions() {
 #[test]
 fn a_hello_with_a_wrong_version_and_a_wrong_token_is_refused_for_the_version() {
     let hello = IpcRequestKind::Hello {
-        protocol_version: 2,
+        protocol_version: OTHER_VERSION,
         token: ConnectionToken::new("wrongToken"),
     };
 
@@ -98,7 +104,10 @@ fn a_hello_with_a_wrong_version_and_a_wrong_token_is_refused_for_the_version() {
         gate().check(&hello),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
-            message: "the caller speaks protocol version 2, this Koshi speaks 1".to_string(),
+            message: format!(
+                "the caller speaks protocol version {OTHER_VERSION}, \
+                 this Koshi speaks {PROTOCOL_VERSION}"
+            ),
         })
     );
 }
@@ -146,7 +155,7 @@ fn a_good_hello_after_a_version_refusal_opens_the_gate() {
     let mut gate = gate();
 
     gate.check(&IpcRequestKind::Hello {
-        protocol_version: 2,
+        protocol_version: OTHER_VERSION,
         token: expected(),
     })
     .expect_err("the Hello is refused");

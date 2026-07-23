@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use koshi::cli::{ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets};
-use koshi::discovery;
+use koshi::discovery::{self, Discovered};
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
@@ -157,44 +157,61 @@ fn discovery_session(command: &CliCommand) -> Option<SessionId> {
 /// A scoped query asks one session and reports it as not running when
 /// nothing answers; an unscoped one spans every session, so nothing running
 /// is an empty answer — the header row alone — not an error.
+///
+/// A listing claims to be the whole picture, so it prints its rows and then
+/// reports a session that could not answer as a failure. An `inspect` claims
+/// one entity: finding it proves it exists whatever the other sessions would
+/// have said, so a successful one is a success.
 fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
-    let overviews = match discovery_session(command) {
-        Some(session_id) => vec![discovery::fetch_one(&runtime_dir, session_id)?],
+    let found = match discovery_session(command) {
+        Some(session_id) => Discovered::of(discovery::fetch_one(&runtime_dir, session_id)?),
         None => discovery::fetch_all(&runtime_dir),
     };
+    let sessions = found.sessions.as_slice();
 
     let rendered = match command {
         CliCommand::ListSessions { format } => {
-            output::render_sessions(&discovery::session_rows(&overviews), *format)
+            output::render_sessions(&discovery::session_rows(sessions), *format)
         }
         CliCommand::ListTabs { format, .. } => {
-            output::render_tabs(&discovery::tab_rows(&overviews), *format)
+            output::render_tabs(&discovery::tab_rows(sessions), *format)
         }
         CliCommand::ListPanes { format, .. } => {
-            output::render_panes(&discovery::pane_rows(&overviews), *format)
+            output::render_panes(&discovery::pane_rows(sessions), *format)
         }
         CliCommand::ListClients { format, .. } => {
-            output::render_clients(&discovery::client_rows(&overviews), *format)
+            output::render_clients(&discovery::client_rows(sessions), *format)
         }
         CliCommand::Inspect { target } => match target {
             InspectTarget::Session { session, format } => {
-                output::render_session(&discovery::find_session(&overviews, *session)?, *format)
+                output::render_session(&discovery::find_session(&found, *session)?, *format)
             }
             InspectTarget::Tab { tab, format } => {
-                output::render_tab(&discovery::find_tab(&overviews, *tab)?, *format)
+                output::render_tab(&discovery::find_tab(&found, *tab)?, *format)
             }
             InspectTarget::Pane { pane, format } => {
-                output::render_pane(&discovery::find_pane(&overviews, *pane)?, *format)
+                output::render_pane(&discovery::find_pane(&found, *pane)?, *format)
             }
             InspectTarget::Client { client, format } => {
-                output::render_client(&discovery::find_client(&overviews, *client)?, *format)
+                output::render_client(&discovery::find_client(&found, *client)?, *format)
             }
         },
         _ => unreachable!("checked to be a discovery query above"),
     };
     print!("{rendered}");
-    Ok(())
+
+    let listing = matches!(
+        command,
+        CliCommand::ListSessions { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
+    );
+    match found.incomplete_listing() {
+        Some(error) if listing => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// Serve a `koshi actions` query from the static action table: print the

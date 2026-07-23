@@ -25,6 +25,23 @@ fn test_runtime_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// A census where every running session answered.
+fn census(overviews: Vec<SessionOverview>) -> Discovered {
+    Discovered {
+        sessions: overviews,
+        unasked: 0,
+    }
+}
+
+/// A census missing `unasked` sessions: running and listening, but unable to
+/// say what they hold.
+fn partial(overviews: Vec<SessionOverview>, unasked: usize) -> Discovered {
+    Discovered {
+        sessions: overviews,
+        unasked,
+    }
+}
+
 /// Advertise `session` at `runtime_dir` with `socket` as its address.
 fn advertise(runtime_dir: &Path, session: SessionId, socket: String) -> PathBuf {
     let path = EndpointFile::path(runtime_dir, session);
@@ -231,31 +248,34 @@ fn client_rows_name_the_session_they_are_attached_to() {
 
 #[test]
 fn inspect_finds_an_entity_in_the_second_session() {
-    let overviews = vec![
+    let found = census(vec![
         overview("quiet-lake", &[("editor", 1)]),
         overview("amber-fox", &[("shell", 1)]),
-    ];
-    let pane = &overviews[1].panes[0];
-    assert_eq!(find_pane(&overviews, pane.id).expect("pane found"), *pane);
+    ]);
+    let second = &found.sessions[1];
     assert_eq!(
-        find_tab(&overviews, overviews[1].tabs[0].id).expect("tab found"),
-        overviews[1].tabs[0]
+        find_pane(&found, second.panes[0].id).expect("pane found"),
+        second.panes[0]
     );
     assert_eq!(
-        find_client(&overviews, overviews[1].clients[0].id).expect("client found"),
-        overviews[1].clients[0]
+        find_tab(&found, second.tabs[0].id).expect("tab found"),
+        second.tabs[0]
     );
     assert_eq!(
-        find_session(&overviews, overviews[1].session.id).expect("session found"),
-        overviews[1].session
+        find_client(&found, second.clients[0].id).expect("client found"),
+        second.clients[0]
+    );
+    assert_eq!(
+        find_session(&found, second.session.id).expect("session found"),
+        second.session
     );
 }
 
 #[test]
 fn inspecting_an_unknown_pane_reports_the_target_as_not_found() {
-    let overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    let found = census(vec![overview("quiet-lake", &[("editor", 1)])]);
     let missing = PaneId::new();
-    let error = find_pane(&overviews, missing).expect_err("no such pane");
+    let error = find_pane(&found, missing).expect_err("no such pane");
     match error {
         CliError::CommandRejected { reason, help } => {
             assert_eq!(reason, RejectReason::TargetNotFound);
@@ -266,9 +286,52 @@ fn inspecting_an_unknown_pane_reports_the_target_as_not_found() {
 }
 
 #[test]
+fn inspecting_with_a_session_unasked_reports_the_gap_not_a_miss() {
+    // One session answered and one could not be asked: the pane may well be
+    // in the session that stayed silent, so "not found" would be a guess.
+    let found = partial(vec![overview("quiet-lake", &[("editor", 1)])], 1);
+    let missing = PaneId::new();
+    let error = find_pane(&found, missing).expect_err("the census is incomplete");
+    match error {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            format!(
+                "pane {missing} is in none of the sessions that answered \
+                 (1 running session did not answer)"
+            )
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn a_complete_listing_reports_no_gap() {
+    assert!(census(vec![overview("quiet-lake", &[("editor", 1)])])
+        .incomplete_listing()
+        .is_none());
+}
+
+#[test]
+fn a_listing_missing_a_session_reports_the_gap() {
+    // The rows still print; the exit code is what says they are not all of
+    // them, since a script reads stdout and the exit code, not stderr.
+    let found = partial(vec![overview("quiet-lake", &[("editor", 1)])], 2);
+    match found
+        .incomplete_listing()
+        .expect("the census is incomplete")
+    {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            "this listing is incomplete (2 running sessions did not answer)"
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn fetching_all_from_an_empty_runtime_dir_answers_no_sessions() {
     let dir = test_runtime_dir("empty");
-    assert!(fetch_all(&dir).is_empty());
+    assert!(fetch_all(&dir).sessions.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -279,7 +342,7 @@ fn an_endpoint_nobody_listens_behind_is_swept() {
     let socket = koshi_ipc::endpoint::socket_addr(&dir, session_id);
     let endpoint_path = advertise(&dir, session_id, socket.clone());
 
-    assert!(fetch_all(&dir).is_empty());
+    assert!(fetch_all(&dir).sessions.is_empty());
     assert!(
         !endpoint_path.exists(),
         "the endpoint file of a session that is gone is removed"
@@ -307,7 +370,7 @@ fn a_listening_endpoint_survives_a_failed_exchange() {
         let _ = listener.accept();
     });
 
-    assert!(fetch_all(&dir).is_empty());
+    assert!(fetch_all(&dir).sessions.is_empty());
     serving
         .join()
         .expect("the stand-in session thread finishes");
@@ -330,14 +393,15 @@ fn two_running_sessions_merge_into_one_listing() {
     let first = serve_overview(&dir, quiet);
     let second = serve_overview(&dir, amber);
 
-    let overviews = fetch_all(&dir);
+    let found = fetch_all(&dir);
     first.join().expect("the first stand-in session finishes");
     second.join().expect("the second stand-in session finishes");
+    assert!(found.is_complete(), "both sessions answered");
 
     // Sorted by session name, so `amber-fox` comes before `quiet-lake`
     // whatever order the runtime directory listed the endpoint files in.
     assert_eq!(
-        session_rows(&overviews),
+        session_rows(&found.sessions),
         vec![
             SessionRow {
                 id: amber_id,
@@ -349,7 +413,7 @@ fn two_running_sessions_merge_into_one_listing() {
             },
         ]
     );
-    let panes = pane_rows(&overviews);
+    let panes = pane_rows(&found.sessions);
     assert_eq!(
         panes
             .iter()

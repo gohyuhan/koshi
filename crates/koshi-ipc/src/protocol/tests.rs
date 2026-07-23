@@ -3,12 +3,15 @@
 //! not know is refused, and the connection token neither prints nor compares
 //! carelessly.
 
+use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
-use koshi_core::discovery::SessionInfo;
+use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -46,6 +49,58 @@ fn overview() -> SessionOverview {
     }
 }
 
+/// An overview of a session with one tab, one pane in it, and one attached
+/// client, at fixed ids and times, so its encoding is byte-stable.
+fn populated_overview() -> SessionOverview {
+    let session_id = SessionId::from_uuid(fixed_uuid());
+    let tab_id = TabId::from_uuid(fixed_uuid());
+    let pane_id = PaneId::from_uuid(fixed_uuid());
+    let client_id = ClientId::from_uuid(fixed_uuid());
+    let at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+    SessionOverview {
+        session: SessionInfo {
+            id: session_id,
+            name: "quiet-lake".to_string(),
+            created_at: at,
+            attached_clients: vec![client_id],
+            pane_count: 1,
+        },
+        tabs: vec![TabInfo {
+            id: tab_id,
+            session_id,
+            name: "editor".to_string(),
+            index: 0,
+            active_pane: Some(pane_id),
+            pane_count: 1,
+        }],
+        panes: vec![PaneInfo {
+            id: pane_id,
+            tab_id,
+            session_id,
+            title: Some("vim".to_string()),
+            cwd: Some(PathBuf::from("/home/user")),
+            command: None,
+            state: PaneState::Running,
+            focused_by_clients: vec![client_id],
+        }],
+        clients: vec![ClientInfo {
+            id: client_id,
+            session_id,
+            attached_at: at,
+            viewport_size: Size { cols: 80, rows: 24 },
+            active_tab: tab_id,
+            focused_pane: Some(pane_id),
+            lock_state: LockMode::Normal,
+        }],
+    }
+}
+
+/// The one UUID every fixed id above uses.
+fn fixed_uuid() -> uuid::Uuid {
+    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
+}
+
 /// Encode `message` and decode it back.
 fn round_trip<T: Serialize + DeserializeOwned>(message: &T) -> T {
     let encoded = serde_json::to_string(message).expect("message encodes");
@@ -62,6 +117,82 @@ fn tag_of(value: &serde_json::Value) -> String {
     assert_eq!(fields.len(), 1, "expected exactly one tag in {value}");
 
     fields.keys().next().expect("one key").clone()
+}
+
+#[test]
+fn the_overview_wire_shape_belongs_to_this_protocol_version() {
+    // Every field of every struct a `Discovery` answer carries, pinned.
+    //
+    // Two builds only understand each other's bytes when they agree on this
+    // shape, and the version in the Hello is the only thing that catches a
+    // pair that does not. So a change here is a change to the wire: add,
+    // remove, or rename anything below and `PROTOCOL_VERSION` goes up in the
+    // same commit — otherwise a build at the old shape passes the handshake
+    // and then fails to decode the answer, which reads to the user as a
+    // session that is not running.
+    //
+    // Shape as of protocol version 2. Round-trip tests cannot catch this:
+    // one build encoding and decoding its own structs always agrees with
+    // itself.
+    assert_eq!(
+        serde_json::to_value(populated_overview()).expect("overview encodes"),
+        json!({
+            "session": {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "name": "quiet-lake",
+                "created_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
+                "attached_clients": ["00000000-0000-0000-0000-000000000001"],
+                "pane_count": 1
+            },
+            "tabs": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "name": "editor",
+                "index": 0,
+                "active_pane": "00000000-0000-0000-0000-000000000001",
+                "pane_count": 1
+            }],
+            "panes": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "tab_id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "title": "vim",
+                "cwd": "/home/user",
+                "command": null,
+                "state": "running",
+                "focused_by_clients": ["00000000-0000-0000-0000-000000000001"]
+            }],
+            "clients": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
+                "viewport_size": { "cols": 80, "rows": 24 },
+                "active_tab": "00000000-0000-0000-0000-000000000001",
+                "focused_pane": "00000000-0000-0000-0000-000000000001",
+                "lock_state": "Normal"
+            }]
+        })
+    );
+}
+
+#[test]
+fn an_overview_missing_a_field_this_version_needs_is_refused() {
+    // What a version-1 session's answer looks like here: its tab records
+    // carry no `session_id`. Decoding must fail rather than fill in a
+    // default, so the mismatch surfaces instead of producing tab rows that
+    // claim to belong to no session.
+    let mut encoded = serde_json::to_value(populated_overview()).expect("overview encodes");
+    encoded["tabs"][0]
+        .as_object_mut()
+        .expect("a tab encodes as an object")
+        .remove("session_id");
+
+    let decoded: Result<SessionOverview, _> = serde_json::from_value(encoded);
+    let error = decoded.expect_err("a tab without its session is not this version's shape");
+    assert!(
+        error.to_string().contains("missing field `session_id`"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
