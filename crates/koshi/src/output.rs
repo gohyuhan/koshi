@@ -1,7 +1,8 @@
-//! Rendering for read-only query answers: discovery (`list-*`, `inspect`),
-//! action introspection (`actions list`, `actions explain`), and keymap
-//! introspection (the `keys` queries). Each prints as aligned columns
-//! (`--format table`, the default) or JSON (`--format json`).
+//! Rendering for CLI answers: created ids from applied commands, discovery
+//! (`list-*`, `inspect`), action introspection (`actions list`, `actions
+//! explain`), and keymap introspection (the `keys` queries). Read-only
+//! queries print as aligned columns (`--format table`, the default) or JSON
+//! (`--format json`).
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
@@ -85,10 +86,12 @@ fn fields(headers: &[&str], row: Vec<String>) -> String {
 }
 
 mod actions;
+mod command;
 mod entities;
 mod keys;
 
 pub use actions::*;
+pub use command::*;
 pub use entities::*;
 pub use keys::*;
 

@@ -27,7 +27,6 @@ fn sample_event_has_canonical_fields_and_redacts_token() {
         tab_id = "tab-1",
         pane_id = "pane-1",
         command_id = "cmd-1",
-        event_id = "evt-1",
         plugin_id = "plugin-1",
         subscriber_id = "sub-1",
         env = %redacted_env_field(&env),

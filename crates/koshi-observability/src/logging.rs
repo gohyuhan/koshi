@@ -75,13 +75,12 @@ pub mod event_log;
 /// The canonical field names every cross-cutting log line should carry. They are
 /// correlation IDs — the join keys for tracing one event back to its cause across
 /// panes, commands, and plugins — not descriptions of state or activity.
-pub const CANONICAL_FIELDS: [&str; 8] = [
+pub const CANONICAL_FIELDS: [&str; 7] = [
     "session_id",
     "client_id",
     "tab_id",
     "pane_id",
     "command_id",
-    "event_id",
     "plugin_id",
     "subscriber_id",
 ];

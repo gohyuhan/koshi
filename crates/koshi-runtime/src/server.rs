@@ -69,7 +69,7 @@ pub struct Server {
     pub(crate) pty_handles: HashMap<PaneId, PtyHandle>,
     /// The last size each live pane's PTY was set to, keyed by pane id. Kept in
     /// sync by every path that resizes a PTY, so a reflow can resize (and emit
-    /// [`Event::PtyResized`](koshi_core::event::Event::PtyResized)) only for panes
+    /// [`Event::PtyResized`] only for panes
     /// whose size actually changed — never re-solving to a stale reference.
     pub(crate) pty_sizes: HashMap<PaneId, PtySize>,
     /// Event fan-out hub: every emitted [`Event`] is delivered to each

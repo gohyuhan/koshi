@@ -13,9 +13,9 @@
 //! No raw OS handles, no `&mut` references, and command identity is never a
 //! free-form `String`.
 
-use crate::event::RejectReason;
+use crate::event::{Event, RejectReason};
 use crate::geometry::Direction;
-use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId, TabId};
+use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
 use crate::process::SpawnSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -794,7 +794,7 @@ pub enum CommandResult {
         /// Id of the command that was applied.
         command_id: CommandId,
         /// Events the command produced, in emission order.
-        emitted_events: Vec<EventId>,
+        emitted_events: Vec<Event>,
     },
     /// The command was rejected and applied nothing.
     Rejected {

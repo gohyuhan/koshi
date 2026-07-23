@@ -4,8 +4,8 @@
 //! discriminants are stable, and ensuring command envelopes validate client IDs.
 
 use super::*;
-use crate::event::RejectReason;
-use crate::ids::{ClientId, CommandId, EventId, PaneId, PluginId, SessionId};
+use crate::event::{Event, RejectReason};
+use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
@@ -622,7 +622,7 @@ fn reject_reason_roundtrips() {
 fn command_result_roundtrips() {
     roundtrip(&CommandResult::Ok {
         command_id: CommandId::new(),
-        emitted_events: vec![EventId::new(), EventId::new()],
+        emitted_events: vec![Event::Quit, Event::Quit],
     });
     roundtrip(&CommandResult::Rejected {
         command_id: CommandId::new(),

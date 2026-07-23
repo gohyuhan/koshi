@@ -1,9 +1,7 @@
 //! Tests for [`TransactionScope`]: the buffer accumulates events in emission
 //! order, and `commit` seals the batch into an applied result with one freshly
-//! minted event id per buffered event, keyed to the command, delivering the
+//! returned event per buffered event, keyed to the command, delivering the
 //! batch to the bus's subscribers.
-
-use std::collections::HashSet;
 
 use koshi_core::command::CommandResult;
 use koshi_core::event::{Event, LayoutChanged, TabCreated, TabFocused};
@@ -47,7 +45,7 @@ fn emit_appends_in_call_order() {
 }
 
 #[test]
-fn commit_mints_one_unique_id_per_event_keyed_to_the_command() {
+fn commit_returns_every_event_in_order_keyed_to_the_command() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
@@ -61,9 +59,13 @@ fn commit_mints_one_unique_id_per_event_keyed_to_the_command() {
             emitted_events,
         } => {
             assert_eq!(applied, command_id);
-            assert_eq!(emitted_events.len(), 2);
-            let unique: HashSet<_> = emitted_events.iter().collect();
-            assert_eq!(unique.len(), 2);
+            assert_eq!(
+                emitted_events,
+                vec![
+                    Event::TabCreated(TabCreated { tab_id: tab }),
+                    Event::LayoutChanged(LayoutChanged { tab_id: tab }),
+                ]
+            );
         }
         CommandResult::Rejected { .. } => panic!("commit must apply, never reject"),
     }
@@ -146,11 +148,16 @@ fn two_scopes_commit_independently_with_no_shared_state() {
             assert_eq!(applied_b, command_b);
             assert_eq!(events_a.len(), 1);
             assert_eq!(events_b.len(), 2);
-            let all_ids: HashSet<_> = events_a.iter().chain(events_b.iter()).collect();
             assert_eq!(
-                all_ids.len(),
-                3,
-                "every minted id across both scopes is unique"
+                events_a,
+                vec![Event::TabCreated(TabCreated { tab_id: tab_a })]
+            );
+            assert_eq!(
+                events_b,
+                vec![
+                    Event::TabCreated(TabCreated { tab_id: tab_b }),
+                    Event::LayoutChanged(LayoutChanged { tab_id: tab_b }),
+                ]
             );
         }
         _ => panic!("commit must apply, never reject"),
