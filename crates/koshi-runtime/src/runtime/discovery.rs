@@ -31,6 +31,7 @@ impl Server {
             .iter()
             .map(|tab| TabInfo {
                 id: tab.id(),
+                session_id: session.id,
                 name: tab.name().to_string(),
                 index: tab.index(),
                 active_pane: tab.focus_mru().first().copied(),
@@ -101,10 +102,6 @@ fn pane_infos(session: &Session, tabs: &[&Tab]) -> Vec<PaneInfo> {
                 command: record.command.as_ref().map(spawn_argv),
                 state,
                 focused_by_clients,
-                // The solved per-tab content rectangles land with the
-                // discovery listing verbs; until then no rectangle is
-                // reported.
-                layout_rect: None,
             });
         }
     }

@@ -37,6 +37,7 @@ fn overview(
             .enumerate()
             .map(|(index, (id, tab_name))| TabInfo {
                 id: *id,
+                session_id: session,
                 name: (*tab_name).to_string(),
                 index,
                 active_pane: None,
@@ -54,7 +55,6 @@ fn overview(
                 command: None,
                 state: PaneState::Running,
                 focused_by_clients: Vec::new(),
-                layout_rect: None,
             })
             .collect(),
         clients: clients

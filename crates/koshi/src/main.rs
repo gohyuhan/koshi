@@ -3,7 +3,8 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand, ResolvedTargets};
+use koshi::cli::{ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets};
+use koshi::discovery;
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
@@ -12,6 +13,7 @@ use koshi::output;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, CommandResult};
+use koshi_core::ids::SessionId;
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -33,8 +35,9 @@ fn main() -> ExitCode {
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
 /// `actions` query and the read-only `keys` queries render locally; the
-/// interactive launch runs the app; the action verbs travel a session's
-/// control socket as commands. Inside a pane they go to the pane's own
+/// discovery queries render what the running sessions report about
+/// themselves; the interactive launch runs the app; the action verbs travel
+/// a session's control socket as commands. Inside a pane they go to the pane's own
 /// session; outside one, the routing layer picks the target session from the
 /// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
 /// the only running session. A verb the socket does not serve yet reports
@@ -56,6 +59,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // `update` runs locally: it talks to GitHub and the local filesystem,
         // not the session daemon.
         return updater::run_update_command();
+    }
+
+    if let Some(command) = cli.command.as_ref().filter(|command| is_discovery(command)) {
+        // The discovery queries read every running session's state and render
+        // locally; they dispatch no command, so they never enter the routing
+        // layer the action verbs use.
+        return run_discovery(command);
     }
 
     if cli.is_interactive_launch() {
@@ -111,6 +121,80 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Err(CliError::CommandRejected { reason, help })
         }
     }
+}
+
+/// Whether `command` is a discovery query: a `list-*` verb or an `inspect`
+/// form.
+fn is_discovery(command: &CliCommand) -> bool {
+    matches!(
+        command,
+        CliCommand::ListSessions { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
+            | CliCommand::Inspect { .. }
+    )
+}
+
+/// The one session a discovery query is scoped to: a listing's `--session`
+/// flag, or the session an `inspect session` names. Every other query spans
+/// all running sessions.
+fn discovery_session(command: &CliCommand) -> Option<SessionId> {
+    match command {
+        CliCommand::ListTabs { session, .. }
+        | CliCommand::ListPanes { session, .. }
+        | CliCommand::ListClients { session, .. } => *session,
+        CliCommand::Inspect {
+            target: InspectTarget::Session { session, .. },
+        } => Some(*session),
+        _ => None,
+    }
+}
+
+/// Serve a discovery query from live state: probe the running sessions the
+/// query is scoped to, keep the rows it asked for, and print them.
+///
+/// A scoped query asks one session and reports it as not running when
+/// nothing answers; an unscoped one spans every session, so nothing running
+/// is an empty answer — the header row alone — not an error.
+fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
+    let runtime_dir = ipc_client::runtime_dir()?;
+    let overviews = match discovery_session(command) {
+        Some(session_id) => vec![discovery::fetch_one(&runtime_dir, session_id)?],
+        None => discovery::fetch_all(&runtime_dir),
+    };
+
+    let rendered = match command {
+        CliCommand::ListSessions { format } => {
+            output::render_sessions(&discovery::session_rows(&overviews), *format)
+        }
+        CliCommand::ListTabs { format, .. } => {
+            output::render_tabs(&discovery::tab_rows(&overviews), *format)
+        }
+        CliCommand::ListPanes { format, .. } => {
+            output::render_panes(&discovery::pane_rows(&overviews), *format)
+        }
+        CliCommand::ListClients { format, .. } => {
+            output::render_clients(&discovery::client_rows(&overviews), *format)
+        }
+        CliCommand::Inspect { target } => match target {
+            InspectTarget::Session { session, format } => {
+                output::render_session(&discovery::find_session(&overviews, *session)?, *format)
+            }
+            InspectTarget::Tab { tab, format } => {
+                output::render_tab(&discovery::find_tab(&overviews, *tab)?, *format)
+            }
+            InspectTarget::Pane { pane, format } => {
+                output::render_pane(&discovery::find_pane(&overviews, *pane)?, *format)
+            }
+            InspectTarget::Client { client, format } => {
+                output::render_client(&discovery::find_client(&overviews, *client)?, *format)
+            }
+        },
+        _ => unreachable!("checked to be a discovery query above"),
+    };
+    print!("{rendered}");
+    Ok(())
 }
 
 /// Serve a `koshi actions` query from the static action table: print the

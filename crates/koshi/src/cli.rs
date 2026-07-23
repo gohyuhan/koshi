@@ -380,30 +380,27 @@ pub enum CliCommand {
         #[command(subcommand)]
         target: InspectTarget,
     },
-    /// List tabs in a session.
+    /// List tabs across every running session.
     ListTabs {
-        /// Session to list; defaults to the only running session.
+        /// Narrow the listing to one session.
         #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
         session: Option<SessionId>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
-    /// List panes in a session.
+    /// List panes across every running session.
     ListPanes {
-        /// Session to list; defaults to the only running session.
+        /// Narrow the listing to one session.
         #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
         session: Option<SessionId>,
-        /// Limit the listing to one tab.
-        #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
-        tab: Option<TabId>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
-    /// List clients attached to a session.
+    /// List clients attached across every running session.
     ListClients {
-        /// Session to list; defaults to the only running session.
+        /// Narrow the listing to one session.
         #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
         session: Option<SessionId>,
         /// Output format.

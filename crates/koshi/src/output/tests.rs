@@ -10,7 +10,7 @@ use koshi_core::action::{
     core_action_seeds, ActionHandlerRef, ActionRef, ActionScope, ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
@@ -43,6 +43,7 @@ fn session_info() -> SessionInfo {
 fn tab_info() -> TabInfo {
     TabInfo {
         id: TabId::from_uuid(fixed_uuid()),
+        session_id: SessionId::from_uuid(fixed_uuid()),
         name: "amber-fox".to_string(),
         index: 1,
         active_pane: Some(PaneId::from_uuid(fixed_uuid())),
@@ -60,10 +61,41 @@ fn pane_info() -> PaneInfo {
         command: Some(vec!["htop".to_string(), "--tree".to_string()]),
         state: PaneState::Running,
         focused_by_clients: vec![ClientId::from_uuid(fixed_uuid())],
-        layout_rect: Some(Rect {
-            origin: Point { x: 0, y: 1 },
-            size: Size { cols: 80, rows: 23 },
-        }),
+    }
+}
+
+fn session_row() -> SessionRow {
+    SessionRow {
+        id: SessionId::from_uuid(fixed_uuid()),
+        name: "quiet-lake".to_string(),
+    }
+}
+
+fn tab_row() -> TabRow {
+    TabRow {
+        id: TabId::from_uuid(fixed_uuid()),
+        name: "amber-fox".to_string(),
+        session: SessionId::from_uuid(fixed_uuid()),
+        session_name: "quiet-lake".to_string(),
+    }
+}
+
+fn pane_row() -> PaneRow {
+    PaneRow {
+        id: PaneId::from_uuid(fixed_uuid()),
+        name: Some("htop".to_string()),
+        tab: TabId::from_uuid(fixed_uuid()),
+        tab_name: "amber-fox".to_string(),
+        session: SessionId::from_uuid(fixed_uuid()),
+        session_name: "quiet-lake".to_string(),
+    }
+}
+
+fn client_row() -> ClientRow {
+    ClientRow {
+        id: ClientId::from_uuid(fixed_uuid()),
+        session: SessionId::from_uuid(fixed_uuid()),
+        session_name: "quiet-lake".to_string(),
     }
 }
 
@@ -103,27 +135,78 @@ fn session_json_schema_is_stable() {
 }
 
 #[test]
-fn session_list_json_is_an_array() {
-    let rendered = render_sessions(&[session_info()], FormatArg::Json);
-    assert!(rendered.starts_with("[\n"), "not an array: {rendered}");
-    assert_eq!(
-        rendered.trim_end(),
-        format!(
-            "[\n{}\n]",
-            render_session(&session_info(), FormatArg::Json)
-                .trim_end()
-                .lines()
-                .map(|line| format!("  {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+fn session_list_json_is_an_array_of_id_and_name() {
+    let expected = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "name": "quiet-lake"
+  }
+]
+"#;
+    assert_eq!(render_sessions(&[session_row()], FormatArg::Json), expected);
+}
+
+#[test]
+fn tab_list_json_carries_the_owning_session() {
+    let expected = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "name": "amber-fox",
+    "session": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake"
+  }
+]
+"#;
+    assert_eq!(render_tabs(&[tab_row()], FormatArg::Json), expected);
+}
+
+#[test]
+fn pane_list_json_carries_the_whole_id_chain() {
+    let expected = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "name": "htop",
+    "tab": "00000000-0000-0000-0000-000000000001",
+    "tab_name": "amber-fox",
+    "session": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake"
+  }
+]
+"#;
+    assert_eq!(render_panes(&[pane_row()], FormatArg::Json), expected);
+}
+
+#[test]
+fn an_untitled_pane_lists_a_null_name_in_json() {
+    let pane = PaneRow {
+        name: None,
+        ..pane_row()
+    };
+    let rendered = render_panes(&[pane], FormatArg::Json);
+    assert!(
+        rendered.contains("\"name\": null,"),
+        "unexpected name form: {rendered}"
     );
+}
+
+#[test]
+fn client_list_json_carries_the_owning_session() {
+    let expected = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "session": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake"
+  }
+]
+"#;
+    assert_eq!(render_clients(&[client_row()], FormatArg::Json), expected);
 }
 
 #[test]
 fn tab_json_schema_is_stable() {
     let expected = r#"{
   "id": "00000000-0000-0000-0000-000000000001",
+  "session_id": "00000000-0000-0000-0000-000000000001",
   "name": "amber-fox",
   "index": 1,
   "active_pane": "00000000-0000-0000-0000-000000000001",
@@ -148,17 +231,7 @@ fn pane_json_schema_is_stable() {
   "state": "running",
   "focused_by_clients": [
     "00000000-0000-0000-0000-000000000001"
-  ],
-  "layout_rect": {
-    "origin": {
-      "x": 0,
-      "y": 1
-    },
-    "size": {
-      "cols": 80,
-      "rows": 23
-    }
-  }
+  ]
 }
 "#;
     assert_eq!(render_pane(&pane_info(), FormatArg::Json), expected);
@@ -181,17 +254,7 @@ fn non_utf8_cwd_renders_lossily_in_json() {
   "state": "running",
   "focused_by_clients": [
     "00000000-0000-0000-0000-000000000001"
-  ],
-  "layout_rect": {
-    "origin": {
-      "x": 0,
-      "y": 1
-    },
-    "size": {
-      "cols": 80,
-      "rows": 23
-    }
-  }
+  ]
 }
 "#;
     assert_eq!(render_pane(&pane, FormatArg::Json), expected);
@@ -252,39 +315,58 @@ fn client_json_schema_is_stable() {
 #[test]
 fn session_table_aligns_columns() {
     let expected = "\
-id                                            name        created_at  clients  panes
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234        1        3
+id                                            name
+session-00000000-0000-0000-0000-000000000001  quiet-lake
 ";
     assert_eq!(
-        render_sessions(&[session_info()], FormatArg::Table),
+        render_sessions(&[session_row()], FormatArg::Table),
         expected
     );
 }
 
 #[test]
 fn empty_list_table_is_just_the_header() {
+    assert_eq!(render_sessions(&[], FormatArg::Table), "id  name\n");
+}
+
+#[test]
+fn tab_table_names_the_owning_session() {
+    let expected = "\
+id                                        name       session                                       session_name
+tab-00000000-0000-0000-0000-000000000001  amber-fox  session-00000000-0000-0000-0000-000000000001  quiet-lake
+";
+    assert_eq!(render_tabs(&[tab_row()], FormatArg::Table), expected);
+}
+
+#[test]
+fn pane_table_names_the_owning_tab_and_session() {
+    let expected = "\
+id                                         name  tab                                       tab_name   session                                       session_name
+pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000000000001  amber-fox  session-00000000-0000-0000-0000-000000000001  quiet-lake
+";
+    assert_eq!(render_panes(&[pane_row()], FormatArg::Table), expected);
+}
+
+#[test]
+fn an_untitled_pane_lists_a_dash_for_its_name() {
+    let pane = PaneRow {
+        name: None,
+        ..pane_row()
+    };
+    let rendered = render_panes(&[pane], FormatArg::Table);
+    let row = rendered.lines().nth(1).expect("one data row");
+    let cells: Vec<&str> = row.split_whitespace().collect();
     assert_eq!(
-        render_sessions(&[], FormatArg::Table),
-        "id  name  created_at  clients  panes\n"
+        cells,
+        vec![
+            "pane-00000000-0000-0000-0000-000000000001",
+            "-",
+            "tab-00000000-0000-0000-0000-000000000001",
+            "amber-fox",
+            "session-00000000-0000-0000-0000-000000000001",
+            "quiet-lake",
+        ]
     );
-}
-
-#[test]
-fn tab_table_renders_the_active_pane_id() {
-    let expected = "\
-id                                        name       index  active_pane                                panes
-tab-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
-";
-    assert_eq!(render_tabs(&[tab_info()], FormatArg::Table), expected);
-}
-
-#[test]
-fn pane_table_renders_command_state_and_rect() {
-    let expected = "\
-id                                         tab                                       session                                       title  cwd         command      state    focused_by  rect
-pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1           80x23@0,1
-";
-    assert_eq!(render_panes(&[pane_info()], FormatArg::Table), expected);
 }
 
 #[test]
@@ -293,24 +375,20 @@ fn absent_values_render_as_dashes() {
     pane.title = None;
     pane.cwd = None;
     pane.command = None;
-    pane.layout_rect = None;
     pane.state = PaneState::Exited { code: None };
-    let rendered = render_panes(&[pane], FormatArg::Table);
-    let row = rendered.lines().nth(1).expect("one data row");
-    let cells: Vec<&str> = row.split_whitespace().collect();
+    let rendered = render_pane(&pane, FormatArg::Table);
     assert_eq!(
-        cells,
-        vec![
-            "pane-00000000-0000-0000-0000-000000000001",
-            "tab-00000000-0000-0000-0000-000000000001",
-            "session-00000000-0000-0000-0000-000000000001",
-            "-",
-            "-",
-            "-",
-            "exited(-)",
-            "1",
-            "-",
-        ]
+        rendered,
+        "\
+id: pane-00000000-0000-0000-0000-000000000001
+tab: tab-00000000-0000-0000-0000-000000000001
+session: session-00000000-0000-0000-0000-000000000001
+title: -
+cwd: -
+command: -
+state: exited(-)
+focused_by: 1
+"
     );
 }
 
@@ -1025,6 +1103,7 @@ panes: 3
 fn tab_inspect_renders_as_field_lines() {
     let expected = "\
 id: tab-00000000-0000-0000-0000-000000000001
+session: session-00000000-0000-0000-0000-000000000001
 name: amber-fox
 index: 1
 active_pane: pane-00000000-0000-0000-0000-000000000001
@@ -1044,27 +1123,25 @@ cwd: /home/user
 command: htop --tree
 state: running
 focused_by: 1
-rect: 80x23@0,1
 ";
     assert_eq!(render_pane(&pane_info(), FormatArg::Table), expected);
 }
 
 #[test]
 fn client_list_table_widens_columns_to_the_widest_row() {
-    // Two clients, one with a focused pane and one without, so the
-    // `focused_pane` column widens from the header to the pane-id width and
-    // the shorter cells pad out to match.
-    let focused = ClientInfo {
-        focused_pane: Some(PaneId::from_uuid(fixed_uuid())),
-        ..client_info()
+    // Two clients in differently named sessions, so the `session_name`
+    // column widens to the longer name and the shorter cell pads out.
+    let longer = ClientRow {
+        session_name: "wandering-heron".to_string(),
+        ..client_row()
     };
     let expected = "\
-id                                           session                                       attached_at  viewport  active_tab                                focused_pane                               lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  -                                          Normal
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  pane-00000000-0000-0000-0000-000000000001  Normal
+id                                           session                                       session_name
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  quiet-lake
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  wandering-heron
 ";
     assert_eq!(
-        render_clients(&[client_info(), focused], FormatArg::Table),
+        render_clients(&[client_row(), longer], FormatArg::Table),
         expected
     );
 }
@@ -1073,7 +1150,7 @@ client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000
 fn empty_client_list_table_is_just_the_header() {
     assert_eq!(
         render_clients(&[], FormatArg::Table),
-        "id  session  attached_at  viewport  active_tab  focused_pane  lock\n"
+        "id  session  session_name\n"
     );
 }
 
