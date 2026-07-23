@@ -3,12 +3,13 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand};
+use koshi::cli::{ActionsCommand, Cli, CliCommand, KeysCommand, ResolvedTargets};
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, CommandResult};
 
@@ -32,10 +33,12 @@ fn main() -> ExitCode {
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
 /// `actions` query and the read-only `keys` queries render locally; the
-/// interactive launch runs the app; the action verbs read the in-session
-/// identity from the environment and travel the session's control socket as
-/// commands. Run outside a session, or with a verb the socket does not serve
-/// yet, they report IPC unavailable.
+/// interactive launch runs the app; the action verbs travel a session's
+/// control socket as commands. Inside a pane they go to the pane's own
+/// session; outside one, the routing layer picks the target session from the
+/// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
+/// the only running session. A verb the socket does not serve yet reports
+/// IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` introspects the static action table, so it renders locally
@@ -68,24 +71,41 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // environment reports itself rather than as a missing daemon.
     let in_session = InSessionContext::from_env()?;
 
-    let Some(context) = in_session else {
-        // External targeting (count rules, explicit --session/--tab/--pane)
-        // is served by its own resolution layer; this build routes only
-        // in-session commands.
-        return Err(CliError::IpcUnavailable {
-            detail: "no koshi daemon is reachable".to_string(),
-        });
-    };
-
-    // The action verbs travel the socket as commands; the remaining verbs
-    // (discovery listings, lifecycle) have their own serving layers.
-    let Some((_, command)) = cli.command.as_ref().and_then(CliCommand::to_action) else {
+    // The action verbs travel a socket as commands; the remaining verbs
+    // (discovery listings, lifecycle) have their own serving layers. The
+    // probe with default targets only asks "is this an action verb" — the
+    // real command is built after routing resolves the targets.
+    let is_action = cli
+        .command
+        .as_ref()
+        .is_some_and(|command| command.to_action(&ResolvedTargets::default()).is_some());
+    if !is_action {
         return Err(CliError::IpcUnavailable {
             detail: "this command is not served over the control socket yet".to_string(),
         });
+    }
+    let cli_command = cli
+        .command
+        .as_ref()
+        .expect("an action verb is always a parsed subcommand");
+
+    let result = match targeting::route(cli_command, in_session.as_ref())? {
+        Route::InSession(targets) => {
+            let context = in_session.expect("an in-session route needs the pane identity");
+            let (_, command) = cli_command
+                .to_action(&targets)
+                .expect("checked to be an action verb above");
+            ipc_client::submit_in_session(&context, command)?
+        }
+        Route::External { session, targets } => {
+            let (_, command) = cli_command
+                .to_action(&targets)
+                .expect("checked to be an action verb above");
+            ipc_client::submit_external(session, command)?
+        }
     };
 
-    match ipc_client::submit_in_session(&context, command)? {
+    match result {
         CommandResult::Ok { .. } => Ok(()),
         CommandResult::Rejected { reason, help, .. } => {
             Err(CliError::CommandRejected { reason, help })

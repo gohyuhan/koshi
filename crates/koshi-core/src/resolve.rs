@@ -41,7 +41,7 @@ use crate::action::{ActionHandlerRef, ActionRef, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-    RunCommandPaneArgs, TabTarget,
+    RunCommandPaneArgs, TabTarget, ToggleLockModeArgs,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -270,6 +270,7 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("new-pane-right", ActionArgs::None) => new_pane_toward(Direction::Right),
         ("new-pane-stacked", ActionArgs::None) => Command::NewPane(NewPaneArgs {
             source: None,
+            tab: None,
             direction: None,
             stacked: true,
             cwd: None,
@@ -315,9 +316,17 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("quit", ActionArgs::None) => Command::Quit,
 
         // --- Lock ---
-        ("toggle-lock", ActionArgs::None) => Command::ToggleLockMode,
-        ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: true }),
-        ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs { locked: false }),
+        ("toggle-lock", ActionArgs::None) => {
+            Command::ToggleLockMode(ToggleLockModeArgs { client: None })
+        }
+        ("lock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
+            locked: true,
+            client: None,
+        }),
+        ("unlock", ActionArgs::None) => Command::SetLockMode(LockModeArgs {
+            locked: false,
+            client: None,
+        }),
 
         // --- Mouse select ---
         ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
@@ -344,8 +353,10 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             },
             cwd: None,
             source: None,
+            tab: None,
             direction: *direction,
             stacked: *stacked,
+            client: None,
         }),
 
         _ => {
@@ -362,6 +373,7 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
 fn new_pane_toward(direction: Direction) -> Command {
     Command::NewPane(NewPaneArgs {
         source: None,
+        tab: None,
         direction: Some(direction),
         stacked: false,
         cwd: None,

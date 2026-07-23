@@ -41,6 +41,10 @@ pub enum CliError {
     /// its endpoint, or nothing listens behind the advertised socket.
     #[error("session {session} is not running")]
     SessionNotFound { session: String },
+    /// No running koshi advertises any session, so there is nothing for an
+    /// external command to target.
+    #[error("no koshi session is running")]
+    NoSessions,
     /// The session refused the dispatched command.
     #[error("{}", rejection_message(*.reason, .help.as_deref()))]
     CommandRejected {
@@ -77,6 +81,7 @@ impl DomainError for CliError {
             | CliError::InSessionEnv { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
             CliError::SessionNotFound { .. }
+            | CliError::NoSessions
             | CliError::Runtime { .. }
             | CliError::CommandRejected { .. }
             | CliError::Update { .. } => DomainCategory::Session,
@@ -102,7 +107,7 @@ impl From<&CliError> for CliExitCode {
             | CliError::InvalidKeymapFile { .. }
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
-            CliError::SessionNotFound { .. } => CliExitCode::SessionNotFound,
+            CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,
             CliError::Runtime { .. }
             | CliError::CommandRejected { .. }
             | CliError::Update { .. } => CliExitCode::RuntimeAction,

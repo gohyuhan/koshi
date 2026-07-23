@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
+};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Point;
 use koshi_core::ids::{CommandId, PaneId, SessionId};
@@ -627,7 +629,7 @@ fn ipc_event_dispatches_the_command_and_continues() {
         CommandId::new(),
         CommandSource::KeyBinding { client_id },
         SystemTime::now(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     );
 
     let (reply_tx, reply_rx) = mpsc::channel();

@@ -91,7 +91,7 @@ impl Server {
             )),
             (None, _) => Err(Rejection::new(
                 RejectReason::SourceClientStale,
-                "run this command from an active Koshi client",
+                "no client is attached to the session",
             )),
         }
     }
@@ -119,7 +119,7 @@ impl Server {
                 | Command::FocusTab(_)
                 | Command::FocusPane(_)
                 | Command::SetLockMode(_)
-                | Command::ToggleLockMode
+                | Command::ToggleLockMode(_)
                 | Command::RenameSession(_)
         );
         match source {
@@ -132,13 +132,14 @@ impl Server {
         }
     }
 
-    /// Whether `command` acts on one client's own view state (lock mode,
-    /// mouse-select, zoom) and carries no other target, so
+    /// Whether `command` acts on one client's own view state (mouse-select,
+    /// zoom) and carries no other target, so
     /// [`Self::resolve_acting_client`] alone decides which client it lands on.
     ///
-    /// [`Command::FocusPane`], [`Command::FocusTab`], and [`Command::NewTab`]
-    /// are absent because they also accept an explicit `client` argument that
-    /// outranks the source; their resolvers call the same helper for the rest.
+    /// [`Command::FocusPane`], [`Command::FocusTab`], [`Command::NewTab`],
+    /// [`Command::SetLockMode`], and [`Command::ToggleLockMode`] are absent
+    /// because they also accept an explicit `client` argument that outranks
+    /// the source; their resolvers call the same helper for the rest.
     /// [`Command::Visual`] is absent for the opposite reason: a highlight
     /// belongs to the client that made it, so a gone issuer means the target
     /// is gone, never another client's screen ([`Self::issuing_client`]).
@@ -147,10 +148,7 @@ impl Server {
     pub(super) fn is_client_scoped(command: &Command) -> bool {
         matches!(
             command,
-            Command::ToggleLockMode
-                | Command::SetLockMode(_)
-                | Command::ToggleMouseSelect
-                | Command::TogglePaneFullscreen
+            Command::ToggleMouseSelect | Command::TogglePaneFullscreen
         )
     }
 
@@ -253,12 +251,19 @@ impl Server {
             Command::NewPane(args) => self
                 .resolve_new_pane_source(args, source, session)
                 .map(drop),
-            // Lock mode and mouse-select are client-scoped: the acting client
-            // resolved by the client-scoped check in `validate` is the whole
-            // target — no pane or tab to resolve.
-            Command::ToggleLockMode | Command::SetLockMode(_) | Command::ToggleMouseSelect => {
-                Ok(())
+            // Lock mode targets a client alone: the explicit `client` argument
+            // when set, else the acting client — no pane or tab to resolve.
+            Command::SetLockMode(args) => {
+                Self::resolve_view_client(args.client, source, Self::require_session(session)?)
+                    .map(drop)
             }
+            Command::ToggleLockMode(args) => {
+                Self::resolve_view_client(args.client, source, Self::require_session(session)?)
+                    .map(drop)
+            }
+            // Mouse-select is client-scoped: the acting client resolved by the
+            // client-scoped check in `validate` is the whole target.
+            Command::ToggleMouseSelect => Ok(()),
             // A highlight command names its own pane, so there is no default to
             // resolve: the pane it names is the pane it means, and its handler
             // confirms that one still exists. Falling back to the focused pane
@@ -303,17 +308,20 @@ impl Server {
     ///
     /// An explicit `--pane` is global: the new pane joins whatever session owns
     /// that pane, focused for the acting client only when that client is
-    /// attached there. With no `--pane`, the source defaults within the acting
-    /// session — an in-session CLI's captured pane, or any other client's
-    /// focused pane.
+    /// attached there. An explicit `--tab` (with no `--pane`) picks the tab
+    /// within the acting session and anchors the split on that tab's most
+    /// recently focused pane ([`Self::tab_anchor_pane`]). With neither, the
+    /// source defaults within the acting session — an in-session CLI's
+    /// captured pane, or the acting client's focused pane.
     pub(super) fn resolve_new_pane_source(
         &self,
         args: &NewPaneArgs,
         source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<NewPaneTarget, Rejection> {
-        match args.source {
-            Some(source_pane) => {
+        match (args.source, args.tab) {
+            // A source pane wins outright: its own tab is the receiving tab.
+            (Some(source_pane), _) => {
                 let owner = self
                     .session_for_pane(source_pane)
                     .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
@@ -334,13 +342,29 @@ impl Server {
                     focus_client,
                 })
             }
+            // An explicit tab picks where the pane lands; the split anchors on
+            // that tab's most recently focused pane. The issuer becomes the
+            // focus client only while still attached to the acting session.
+            (None, Some(tab_id)) => {
+                let session = Self::require_session(session)?;
+                let source_pane = Self::tab_anchor_pane(session, tab_id)?;
+                let focus_client = source
+                    .client_id()
+                    .filter(|client_id| session.clients.get(*client_id).is_some());
+                Ok(NewPaneTarget {
+                    session_id: session.id,
+                    source_pane,
+                    tab_id,
+                    focus_client,
+                })
+            }
             // With no explicit source the default-pane resolution is exactly
             // [`Self::resolve_pane_target`]'s: the in-session CLI's captured
-            // pane, else the issuing client's focused pane. The issuer becomes
+            // pane, else the acting client's focused pane. The issuer becomes
             // the focus client only while still attached to the owning session
             // — an in-session CLI whose client is gone still splits its pane,
             // it just focuses the new pane for nobody.
-            None => {
+            (None, None) => {
                 let target = self.resolve_pane_target(None, source, session)?;
                 let focus_client = source.client_id().filter(|client_id| {
                     self.sessions
@@ -363,9 +387,11 @@ impl Server {
     /// An explicit pane target is global: its owning session is found by
     /// registry membership, and a winding-down owner rejects. Without one, the
     /// in-session CLI targets the pane it was issued from, and any other
-    /// source targets the issuing client's focused pane in its active tab —
-    /// resolved through the shared defensive helpers, so a stale focus entry
-    /// is rejected, never acted on.
+    /// source targets the acting client's focused pane in its active tab —
+    /// the issuer while attached, else the session's sole attached client
+    /// ([`Self::resolve_acting_client`]), so an external CLI acts exactly
+    /// where a keypress on that client would. Resolved through the shared
+    /// defensive helpers, so a stale focus entry is rejected, never acted on.
     pub(super) fn resolve_pane_target(
         &self,
         pane: Option<PaneId>,
@@ -405,12 +431,7 @@ impl Server {
                         })
                     }
                     _ => {
-                        let client_id = source.client_id().ok_or_else(|| {
-                            Rejection::new(
-                                RejectReason::TargetNotFound,
-                                "no target and no focused pane to default to",
-                            )
-                        })?;
+                        let client_id = Self::resolve_acting_client(source, session)?;
                         let tab_id = session
                             .clients
                             .get(client_id)
@@ -435,6 +456,25 @@ impl Server {
             .values()
             .find(|tab| tab.layout().contains_pane(pane))
             .map(|tab| tab.id())
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))
+    }
+
+    /// The pane a tab-addressed `new-pane` splits: the tab's most recently
+    /// focused pane, or — until anything in the tab has been focused — its
+    /// first pane in layout order. [`RejectReason::TargetNotFound`] when the
+    /// tab is gone.
+    pub(super) fn tab_anchor_pane(session: &Session, tab_id: TabId) -> Result<PaneId, Rejection> {
+        let tab = session
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
+        if let Some(&pane) = tab.focus_mru().first() {
+            return Ok(pane);
+        }
+        tab.layout()
+            .leaf_panes()
+            .first()
+            .copied()
             .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))
     }
 
@@ -641,9 +681,11 @@ impl Server {
     /// Resolve an explicit tab target within the acting session, or the default
     /// tab when none is given. An in-session CLI defaults to the tab containing
     /// its source `pane_id` (the command targets the source pane's context, even
-    /// if the client has since switched tabs); any other client source defaults
-    /// to its live `active_tab`. Fails with [`RejectReason::TargetNotFound`]
-    /// when there is no session/client context or the tab is gone.
+    /// if the client has since switched tabs); any other source defaults to the
+    /// acting client's live `active_tab` ([`Self::resolve_acting_client`] — the
+    /// issuer while attached, else the session's sole attached client). Fails
+    /// with [`RejectReason::TargetNotFound`] when there is no session context
+    /// or the tab is gone.
     pub(super) fn resolve_tab_or_active(
         &self,
         tab: Option<TabId>,
@@ -660,12 +702,7 @@ impl Server {
                 if let CommandSource::InSessionCli { pane_id, .. } = source {
                     return Self::require_tab_containing_pane(session, *pane_id);
                 }
-                let client_id = source.client_id().ok_or_else(|| {
-                    Rejection::new(
-                        RejectReason::TargetNotFound,
-                        "no tab target and no active tab to default to",
-                    )
-                })?;
+                let client_id = Self::resolve_acting_client(source, session)?;
                 let client = session
                     .clients
                     .get(client_id)

@@ -20,7 +20,9 @@ where
 
 #[test]
 fn unit_commands_roundtrip() {
-    roundtrip(&Command::ToggleLockMode);
+    roundtrip(&Command::ToggleLockMode(ToggleLockModeArgs {
+        client: Some(ClientId::new()),
+    }));
     roundtrip(&Command::TogglePaneFullscreen);
     roundtrip(&Command::Quit);
 }
@@ -57,8 +59,10 @@ fn pane_commands_roundtrip() {
         },
         cwd: None,
         source: Some(PaneId::new()),
+        tab: Some(TabId::new()),
         direction: Some(Direction::Down),
         stacked: false,
+        client: Some(ClientId::new()),
     }));
     roundtrip(&Command::FocusPane(FocusPaneArgs {
         target: FocusTarget::Pane(PaneId::new()),
@@ -182,9 +186,15 @@ fn command_variant_names_are_canonical() {
             Command::WriteToPane(WriteToPaneArgs::default()),
             "WriteToPane",
         ),
-        (Command::ToggleLockMode, "ToggleLockMode"),
         (
-            Command::SetLockMode(LockModeArgs { locked: true }),
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+            "ToggleLockMode",
+        ),
+        (
+            Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None,
+            }),
             "SetLockMode",
         ),
         (
@@ -198,8 +208,10 @@ fn command_variant_names_are_canonical() {
                 },
                 cwd: None,
                 source: None,
+                tab: None,
                 direction: None,
                 stacked: false,
+                client: None,
             }),
             "RunCommandPane",
         ),
@@ -325,9 +337,15 @@ fn command_kind_mirrors_command() {
             Command::WriteToPane(WriteToPaneArgs::default()),
             CommandKind::WriteToPane,
         ),
-        (Command::ToggleLockMode, CommandKind::ToggleLockMode),
         (
-            Command::SetLockMode(LockModeArgs { locked: true }),
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+            CommandKind::ToggleLockMode,
+        ),
+        (
+            Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None,
+            }),
             CommandKind::SetLockMode,
         ),
         (
@@ -341,8 +359,10 @@ fn command_kind_mirrors_command() {
                 },
                 cwd: None,
                 source: None,
+                tab: None,
                 direction: None,
                 stacked: false,
+                client: None,
             }),
             CommandKind::RunCommandPane,
         ),
@@ -432,7 +452,7 @@ fn command_envelope_roundtrips() {
             socket_path: PathBuf::from("/run/koshi/session.sock"),
         },
         fixed_time(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
 }
 
@@ -511,7 +531,7 @@ fn envelope_from_a_clientless_in_session_cli_carries_no_client() {
             PathBuf::from("/run/koshi/session.sock"),
         ),
         fixed_time(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     );
     assert_eq!(env.client_id, None);
     assert!(env.validate().is_ok());
@@ -531,7 +551,7 @@ fn deserialize_rejects_a_forged_client_on_a_clientless_in_session_cli() {
         ),
         client_id: Some(ClientId::new()),
         issued_at: fixed_time(),
-        command: Command::ToggleLockMode,
+        command: Command::ToggleLockMode(ToggleLockModeArgs::default()),
     };
     let json = serde_json::to_string(&forged).expect("serialize");
     let decoded: Result<CommandEnvelope, _> = serde_json::from_str(&json);
@@ -546,7 +566,7 @@ fn deserialize_rejects_client_id_mismatch() {
         source: CommandSource::Internal,
         client_id: Some(ClientId::new()),
         issued_at: fixed_time(),
-        command: Command::ToggleLockMode,
+        command: Command::ToggleLockMode(ToggleLockModeArgs::default()),
     };
     let json = serde_json::to_string(&forged).expect("serialize");
     let decoded: Result<CommandEnvelope, _> = serde_json::from_str(&json);
@@ -562,7 +582,7 @@ fn validate_rejects_client_id_mismatch() {
         },
         client_id: Some(ClientId::new()), // a different client than the source
         issued_at: fixed_time(),
-        command: Command::ToggleLockMode,
+        command: Command::ToggleLockMode(ToggleLockModeArgs::default()),
     };
     assert_eq!(
         forged.validate(),
@@ -576,7 +596,7 @@ fn validate_accepts_consistent_envelope() {
         CommandId::new(),
         CommandSource::Internal,
         fixed_time(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     );
     assert!(env.validate().is_ok());
 }
@@ -600,7 +620,7 @@ fn deserialize_rejects_a_missing_client_id_when_the_source_names_one() {
             client_id: ClientId::new(),
         },
         fixed_time(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     );
     let mut value = serde_json::to_value(&valid).expect("serialize");
     value["client_id"] = serde_json::Value::Null;

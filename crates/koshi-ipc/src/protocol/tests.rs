@@ -5,7 +5,7 @@
 
 use std::time::{Duration, UNIX_EPOCH};
 
-use koshi_core::command::{Command, CommandSource};
+use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::discovery::SessionInfo;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{CommandId, SessionId};
@@ -26,7 +26,7 @@ fn envelope() -> CommandEnvelope {
         CommandId::new(),
         CommandSource::ExternalCli { session_id: None },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
 }
 
