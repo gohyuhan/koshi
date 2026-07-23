@@ -218,11 +218,6 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::TogglePaneFullscreen,
         ),
         (
-            "rename-pane",
-            ActionArgs::None,
-            Command::RenamePane(RenamePaneArgs { pane: None }),
-        ),
-        (
             "new-tab",
             ActionArgs::None,
             Command::NewTab(NewTabArgs::default()),
@@ -247,16 +242,6 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
                 target: TabTarget::Prev,
                 client: None,
             }),
-        ),
-        (
-            "rename-tab",
-            ActionArgs::None,
-            Command::RenameTab(RenameTabArgs { tab: None }),
-        ),
-        (
-            "rename-session",
-            ActionArgs::None,
-            Command::RenameSession(RenameSessionArgs { session: None }),
         ),
         ("quit", ActionArgs::None, Command::Quit),
         (

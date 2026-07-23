@@ -40,8 +40,6 @@ pub enum Command {
     NewTab(NewTabArgs),
     /// Close a tab (defaults to the focused one).
     CloseTab(CloseTabArgs),
-    /// Rename a tab.
-    RenameTab(RenameTabArgs),
     /// Move focus to a tab; next/prev/index all resolve to this.
     FocusTab(FocusTabArgs),
     /// Write raw bytes into a pane's input.
@@ -62,12 +60,8 @@ pub enum Command {
     Plugin(PluginCommand),
     /// Toggle fullscreen for the focused pane.
     TogglePaneFullscreen,
-    /// Rename a pane.
-    RenamePane(RenamePaneArgs),
     /// Move a tab to a new index.
     MoveTab(MoveTabArgs),
-    /// Rename the current session.
-    RenameSession(RenameSessionArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
 }
@@ -96,8 +90,6 @@ pub enum CommandKind {
     NewTab,
     /// Discriminant of [`Command::CloseTab`].
     CloseTab,
-    /// Discriminant of [`Command::RenameTab`].
-    RenameTab,
     /// Discriminant of [`Command::FocusTab`].
     FocusTab,
     /// Discriminant of [`Command::WriteToPane`].
@@ -116,12 +108,8 @@ pub enum CommandKind {
     Plugin,
     /// Discriminant of [`Command::TogglePaneFullscreen`].
     TogglePaneFullscreen,
-    /// Discriminant of [`Command::RenamePane`].
-    RenamePane,
     /// Discriminant of [`Command::MoveTab`].
     MoveTab,
-    /// Discriminant of [`Command::RenameSession`].
-    RenameSession,
     /// Discriminant of [`Command::Quit`].
     Quit,
 }
@@ -137,7 +125,6 @@ impl Command {
             Command::FocusPane(_) => CommandKind::FocusPane,
             Command::NewTab(_) => CommandKind::NewTab,
             Command::CloseTab(_) => CommandKind::CloseTab,
-            Command::RenameTab(_) => CommandKind::RenameTab,
             Command::FocusTab(_) => CommandKind::FocusTab,
             Command::WriteToPane(_) => CommandKind::WriteToPane,
             Command::ToggleLockMode(_) => CommandKind::ToggleLockMode,
@@ -147,9 +134,7 @@ impl Command {
             Command::Visual(_) => CommandKind::Visual,
             Command::Plugin(_) => CommandKind::Plugin,
             Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
-            Command::RenamePane(_) => CommandKind::RenamePane,
             Command::MoveTab(_) => CommandKind::MoveTab,
-            Command::RenameSession(_) => CommandKind::RenameSession,
             Command::Quit => CommandKind::Quit,
         }
     }
@@ -264,14 +249,6 @@ pub struct CloseTabArgs {
     pub tree: bool,
 }
 
-/// Arguments for [`Command::RenameTab`]. The new name is not supplied by the
-/// caller — the runtime assigns a freshly generated one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenameTabArgs {
-    /// Tab to rename; `None` renames the focused tab.
-    pub tab: Option<TabId>,
-}
-
 /// Where [`Command::FocusTab`] should move focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabTarget {
@@ -349,14 +326,6 @@ pub struct RunCommandPaneArgs {
     pub client: Option<ClientId>,
 }
 
-/// Arguments for [`Command::RenamePane`]. The new name is not supplied by the
-/// caller — the runtime assigns a freshly generated one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenamePaneArgs {
-    /// Pane to rename; `None` renames the focused pane.
-    pub pane: Option<PaneId>,
-}
-
 /// Arguments for [`Command::MoveTab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveTabArgs {
@@ -364,14 +333,6 @@ pub struct MoveTabArgs {
     pub tab: Option<TabId>,
     /// Destination zero-based index.
     pub index: usize,
-}
-
-/// Arguments for [`Command::RenameSession`]. The new name is not supplied by
-/// the caller — the runtime assigns a freshly generated one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenameSessionArgs {
-    /// Session to rename; `None` targets the source's own session context.
-    pub session: Option<SessionId>,
 }
 
 /// Selection and copy commands — the commands of visual mode.

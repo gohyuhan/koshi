@@ -51,7 +51,7 @@ pub struct TabRow {
 pub struct PaneRow {
     /// Stable pane id.
     pub id: PaneId,
-    /// The pane's title, once the child or a rename has set one.
+    /// The pane's title, once the child has set one.
     pub name: Option<String>,
     /// The tab holding the pane.
     pub tab: TabId,

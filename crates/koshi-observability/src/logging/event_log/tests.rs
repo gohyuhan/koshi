@@ -11,9 +11,8 @@ use koshi_core::command::CopyTarget;
 use koshi_core::event::{
     CommandRejected, ConfigReloadFailed, ConfigReloaded, Copied, EventClass, InputMode,
     InputModeChanged, KeybindingMatched, MouseScrolled, PaneClosing, PaneCreated,
-    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneRenamed, PaneTyped, PluginInstalled,
-    PluginLoadFailed, PtyResized, RejectReason, SessionRenamed, SubscriberLagged, TabRenamed,
-    TypedPayload,
+    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneTyped, PluginInstalled,
+    PluginLoadFailed, PtyResized, RejectReason, SubscriberLagged, TypedPayload,
 };
 use koshi_core::geometry::Point;
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
@@ -173,40 +172,6 @@ fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"input mode changed""#), "{out}");
     assert!(out.contains(r#""mode":"Locked""#), "{out}");
-}
-
-// A rename is worth recording, but the new name never is: a pane title can be
-// set by the program running inside the pane, so it is content.
-#[test]
-fn a_rename_is_logged_without_ever_writing_the_new_name() {
-    let out = captured(&[
-        Event::PaneRenamed(PaneRenamed {
-            pane_id: PaneId::new(),
-            name: "secret-project".to_string(),
-        }),
-        Event::TabRenamed(TabRenamed {
-            tab_id: TabId::new(),
-            name: "~/clients/acme".to_string(),
-        }),
-        Event::SessionRenamed(SessionRenamed {
-            session_id: SessionId::new(),
-            old_name: "amused-otter".to_string(),
-            new_name: "merger-docs".to_string(),
-        }),
-    ]);
-
-    assert_eq!(out.lines().count(), 3, "expected three lines: {out}");
-    for name in [
-        "secret-project",
-        "~/clients/acme",
-        "merger-docs",
-        "amused-otter",
-    ] {
-        assert!(
-            !out.contains(name),
-            "name `{name}` leaked into the log: {out}"
-        );
-    }
 }
 
 // The model rule, held as a test: an event is a fact koshi anticipated, so it

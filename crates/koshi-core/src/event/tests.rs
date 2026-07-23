@@ -62,24 +62,11 @@ fn lifecycle_events_roundtrip() {
 }
 
 #[test]
-fn rename_move_suppression_and_reload_events_roundtrip() {
-    roundtrip(&Event::PaneRenamed(PaneRenamed {
-        pane_id: PaneId::new(),
-        name: "logs".to_string(),
-    }));
+fn move_suppression_and_reload_events_roundtrip() {
     roundtrip(&Event::TabMoved(TabMoved {
         tab_id: TabId::new(),
         old_index: 0,
         new_index: 2,
-    }));
-    roundtrip(&Event::TabRenamed(TabRenamed {
-        tab_id: TabId::new(),
-        name: "work".to_string(),
-    }));
-    roundtrip(&Event::SessionRenamed(SessionRenamed {
-        session_id: SessionId::new(),
-        old_name: "default".to_string(),
-        new_name: "main".to_string(),
     }));
     roundtrip(&Event::PaneSuppressed(PaneSuppressed {
         pane_id: PaneId::new(),
@@ -432,34 +419,12 @@ fn event_variant_names_are_canonical() {
             "TabFocused",
         ),
         (
-            Event::PaneRenamed(PaneRenamed {
-                pane_id: PaneId::new(),
-                name: "logs".to_string(),
-            }),
-            "PaneRenamed",
-        ),
-        (
             Event::TabMoved(TabMoved {
                 tab_id: TabId::new(),
                 old_index: 0,
                 new_index: 1,
             }),
             "TabMoved",
-        ),
-        (
-            Event::TabRenamed(TabRenamed {
-                tab_id: TabId::new(),
-                name: "work".to_string(),
-            }),
-            "TabRenamed",
-        ),
-        (
-            Event::SessionRenamed(SessionRenamed {
-                session_id: SessionId::new(),
-                old_name: "default".to_string(),
-                new_name: "main".to_string(),
-            }),
-            "SessionRenamed",
         ),
         (
             Event::PaneSuppressed(PaneSuppressed {
@@ -634,7 +599,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 40);
+    assert_eq!(cases.len(), 37);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
         assert_eq!(&value.name(), name);

@@ -21,7 +21,6 @@ fn a_new_record_starts_spawning_with_empty_metadata() {
     assert_eq!(record.id(), id);
     assert_eq!(record.kind(), &PaneKind::Terminal);
     assert_eq!(record.lifecycle(), &PaneLifecycle::Spawning);
-    assert_eq!(record.title, None);
     assert_eq!(record.command, None);
     assert_eq!(record.cwd, None);
     assert_eq!(record.close_policy, PaneClosePolicy::default());

@@ -98,19 +98,6 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
 }
 
 #[test]
-fn renaming_a_tab_changes_only_its_name() {
-    let root = PaneId::new();
-    let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, root);
-
-    tab.update_name("logs".to_owned());
-
-    assert_eq!(tab.name(), "logs");
-    // Position and layout are untouched by a rename.
-    assert_eq!(tab.index(), 0);
-    assert_eq!(*tab.layout(), LayoutNode::Pane(root));
-}
-
-#[test]
 fn a_tab_index_can_be_reassigned() {
     let mut tab = Tab::new(TabId::new(), "code".to_owned(), 0, PaneId::new());
 

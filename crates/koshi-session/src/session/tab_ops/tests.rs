@@ -1,10 +1,10 @@
-//! Tests for tab operations: creation, deletion, renaming, focus, and reordering.
+//! Tests for tab operations: creation, deletion, focus, and reordering.
 //!
 //! This module provides fixtures (helper functions) to construct test sessions,
 //! tabs, clients, and panes, and exercises the tab operation functions
-//! ([`commit_new_tab`], [`close_tab`], [`rename_tab`], [`focus_tab`],
-//! [`move_tab`]) with various state configurations to verify correct event
-//! emission and state transitions.
+//! ([`commit_new_tab`], [`close_tab`], [`focus_tab`], [`move_tab`]) with
+//! various state configurations to verify correct event emission and state
+//! transitions.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -17,8 +17,7 @@ use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
 use super::{
-    close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, rename_tab, ProfileTab,
-    TabTarget,
+    close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, ProfileTab, TabTarget,
 };
 use crate::client::{Client, ClientRegistry};
 use crate::error::SessionConsistencyError;
@@ -325,7 +324,6 @@ fn commit_new_tab_records_the_spec_on_the_root_pane() {
     );
 
     let record = session.panes.get(new_pane_id).unwrap();
-    assert_eq!(record.title, None);
     assert_eq!(record.cwd, Some(PathBuf::from("/srv")));
     assert_eq!(record.command, None);
 }
@@ -444,43 +442,6 @@ fn closing_the_last_tab_quits() {
 fn closing_an_unknown_tab_is_a_noop() {
     let mut session = session_with(vec![], vec![]);
     let events = close_tab(&mut session, TabId::new());
-    assert!(events.is_empty());
-}
-
-// --- rename_tab ------------------------------------------------------------
-
-#[test]
-fn rename_tab_changes_the_name_and_preserves_layout() {
-    let a = TabId::new();
-    let (l, r) = (PaneId::new(), PaneId::new());
-    let mut session = session_with(vec![two_pane_tab(a, l, r, 0)], vec![l, r]);
-    let layout_before = session.tabs[&a].layout().clone();
-
-    let events = rename_tab(&mut session, a, "build".to_owned());
-
-    assert_eq!(session.tabs[&a].name(), "build");
-    assert_eq!(*session.tabs[&a].layout(), layout_before);
-    assert!(
-        matches!(events.as_slice(), [Event::TabRenamed(t)] if t.tab_id == a && t.name == "build")
-    );
-}
-
-#[test]
-fn renaming_to_the_same_name_is_a_noop() {
-    let a = TabId::new();
-    let pa = PaneId::new();
-    let mut session = session_with(vec![single_pane_tab(a, pa, 0)], vec![pa]);
-
-    // single_pane_tab names it "code".
-    let events = rename_tab(&mut session, a, "code".to_owned());
-
-    assert!(events.is_empty());
-}
-
-#[test]
-fn renaming_an_unknown_tab_is_a_noop() {
-    let mut session = session_with(vec![], vec![]);
-    let events = rename_tab(&mut session, TabId::new(), "x".to_owned());
     assert!(events.is_empty());
 }
 

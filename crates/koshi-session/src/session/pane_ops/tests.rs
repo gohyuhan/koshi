@@ -6,14 +6,13 @@
 //! layout tree, the registered pane, and the client's focus. Fit preflight and
 //! source resolution belong to the runtime (which builds the candidate and
 //! spawns before committing), so they are covered by the runtime's tests, not
-//! here. [`rename_pane`] tests assert the title write and the emitted event;
-//! name generation is likewise the runtime's.
+//! here.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, PaneRenamed, TabFocused};
+use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ShellKind, SpawnSpec};
@@ -23,7 +22,7 @@ use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
-use super::{commit_new_pane, rename_pane, NewPaneSpec};
+use super::{commit_new_pane, NewPaneSpec};
 use crate::client::{Client, ClientRegistry};
 use crate::session::state::{Session, Tab};
 
@@ -294,7 +293,6 @@ fn commit_records_name_cwd_and_command_on_the_new_pane() {
         SystemTime::UNIX_EPOCH,
     );
     let record = session.panes.get(new_id).expect("record");
-    assert_eq!(record.title, None);
     assert_eq!(record.cwd.as_deref(), Some(cwd.as_path()));
     assert_eq!(record.command.as_ref(), Some(&command));
 }
@@ -423,68 +421,4 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
         LayoutMode::Fullscreen { focused: source },
         "the other client's zoom is not disturbed by someone else's split"
     );
-}
-
-#[test]
-fn rename_pane_sets_the_title_and_emits() {
-    let (mut session, _tab, pane, _client) = session_one_pane();
-    assert_eq!(session.panes.get(pane).expect("pane").title, None);
-
-    let events = rename_pane(&mut session, pane, "build-watch".to_string());
-
-    assert_eq!(
-        events,
-        vec![Event::PaneRenamed(PaneRenamed {
-            pane_id: pane,
-            name: "build-watch".to_string(),
-        })]
-    );
-    assert_eq!(
-        session.panes.get(pane).expect("pane").title,
-        Some("build-watch".to_string())
-    );
-}
-
-#[test]
-fn rename_pane_overwrites_an_existing_title() {
-    let (mut session, _tab, pane, _client) = session_one_pane();
-    let _ = rename_pane(&mut session, pane, "old".to_string());
-
-    let events = rename_pane(&mut session, pane, "new".to_string());
-
-    assert_eq!(
-        events,
-        vec![Event::PaneRenamed(PaneRenamed {
-            pane_id: pane,
-            name: "new".to_string(),
-        })]
-    );
-    assert_eq!(
-        session.panes.get(pane).expect("pane").title,
-        Some("new".to_string())
-    );
-}
-
-#[test]
-fn rename_pane_to_its_current_title_is_a_no_op() {
-    let (mut session, _tab, pane, _client) = session_one_pane();
-    let _ = rename_pane(&mut session, pane, "same".to_string());
-
-    let events = rename_pane(&mut session, pane, "same".to_string());
-
-    assert_eq!(events, Vec::new());
-    assert_eq!(
-        session.panes.get(pane).expect("pane").title,
-        Some("same".to_string())
-    );
-}
-
-#[test]
-fn rename_pane_for_an_unknown_pane_is_a_no_op() {
-    let (mut session, _tab, pane, _client) = session_one_pane();
-
-    let events = rename_pane(&mut session, PaneId::new(), "ghost".to_string());
-
-    assert_eq!(events, Vec::new());
-    assert_eq!(session.panes.get(pane).expect("pane").title, None);
 }

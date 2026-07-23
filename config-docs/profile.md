@@ -49,6 +49,10 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `env "NAME" "VALUE"` | An environment variable for this pane (repeatable). | ≥ 0.1.0 |
 | `focus` | Start with this pane focused. One per tab. | ≥ 0.1.0 |
 
+Omitting `cwd` inherits the directory where koshi was launched. Example:
+launch from `/home/me/proj` + `pane` results in that pane starting in
+`/home/me/proj`. An explicit `cwd "/srv/app"` still wins.
+
 ## Sizing (only inside `horizontal` / `vertical`)
 
 Each child of a split may carry sizing. Without any, children share the space

@@ -55,8 +55,6 @@ pub struct PaneRecord {
     /// What backs the pane (terminal or plugin surface). Fixed at creation so a
     /// pane's diagnostics domain never changes underneath it.
     kind: PaneKind,
-    /// The pane's display title, if set by the child or explicitly assigned.
-    pub title: Option<String>,
     /// The process this pane was spawned to run, if any.
     pub command: Option<SpawnSpec>,
     /// Working directory the pane started in, when known.
@@ -90,7 +88,6 @@ impl PaneRecord {
         Self {
             id,
             kind,
-            title: None,
             command: None,
             cwd: None,
             close_policy: PaneClosePolicy::default(),

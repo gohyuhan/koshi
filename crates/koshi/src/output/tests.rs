@@ -667,21 +667,21 @@ examples: core:new-tab, koshi new-tab
 }
 
 #[test]
-fn explain_rename_session_reports_global_scope_and_session_target() {
-    // `rename-session` is seeded with `ActionScope::Global` and
-    // `TargetKind::Session`, neither of which any other explain test
-    // exercises end-to-end.
+fn explain_quit_reports_its_client_scope_and_both_target_kinds() {
+    // `quit` is seeded with `ActionScope::Client` and both `ClientTarget`
+    // and `Session` targets, so it exercises the session target label no
+    // other explain test covers end-to-end.
     let expected = "\
-action: core:rename-session
-display_name: Rename Session
-description: Assign a fresh generated name to the current session, or one named by id
-scope: global
-targets: session
-command: RenameSession
-examples: core:rename-session, koshi rename-session
+action: core:quit
+display_name: Quit
+description: Quit koshi, ending every pane's process immediately
+scope: client
+targets: client, session
+command: Quit
+examples: core:quit
 ";
     assert_eq!(
-        render_action_explain("rename-session", FormatArg::Table),
+        render_action_explain("quit", FormatArg::Table),
         Some(expected.to_string())
     );
 }

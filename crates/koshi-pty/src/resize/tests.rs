@@ -77,6 +77,10 @@ impl PtyBackend for RecordingBackend {
     fn kill(&self, _pane: PaneId, _kill_policy: KillPolicy) -> Result<(), PtyError> {
         unreachable!("resize tests never kill")
     }
+
+    fn live_cwd(&self, _pane: PaneId) -> Option<std::path::PathBuf> {
+        unreachable!("resize tests never ask for a cwd")
+    }
 }
 
 #[test]

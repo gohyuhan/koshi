@@ -166,8 +166,15 @@ impl PtyBackend for PortablePtyBackend {
         for a in &spec.args {
             cmd.arg(a);
         }
-        if let Some(cwd) = &spec.cwd {
-            cmd.cwd(cwd);
+        // Resolve cwd before launch: an explicit path wins; an absent path
+        // inherits koshi's process cwd, matching `SpawnSpec`'s contract.
+        match &spec.cwd {
+            Some(cwd) => cmd.cwd(cwd),
+            None => {
+                if let Ok(cwd) = std::env::current_dir() {
+                    cmd.cwd(cwd);
+                }
+            }
         }
 
         //    ...including the environment. `CommandBuilder` is deliberately NOT
@@ -399,6 +406,16 @@ impl PtyBackend for PortablePtyBackend {
         let _ = entry.watcher.join();
 
         Ok(())
+    }
+    fn live_cwd(&self, pane: PaneId) -> Option<std::path::PathBuf> {
+        let panes = self.panes.lock().unwrap();
+        let entry = panes.get(&pane)?;
+        // A reaped leader's PID can already belong to an unrelated process,
+        // and its directory would be a stranger's answer.
+        if entry.exited.load(Ordering::SeqCst) {
+            return None;
+        }
+        crate::cwd::process_cwd(entry.killer.pid())
     }
 }
 

@@ -57,14 +57,8 @@ pub enum Event {
     TabClosed(TabClosed),
     /// Focus moved to a tab.
     TabFocused(TabFocused),
-    /// A pane's display name changed.
-    PaneRenamed(PaneRenamed),
     /// A tab moved to a new index.
     TabMoved(TabMoved),
-    /// A tab's display name changed.
-    TabRenamed(TabRenamed),
-    /// The session display name changed.
-    SessionRenamed(SessionRenamed),
     /// A pane became invisible because the terminal is too small.
     PaneSuppressed(PaneSuppressed),
     /// A suppressed pane became visible again after a resize.
@@ -158,10 +152,7 @@ impl Event {
             Event::TabCreated(_) => "TabCreated",
             Event::TabClosed(_) => "TabClosed",
             Event::TabFocused(_) => "TabFocused",
-            Event::PaneRenamed(_) => "PaneRenamed",
             Event::TabMoved(_) => "TabMoved",
-            Event::TabRenamed(_) => "TabRenamed",
-            Event::SessionRenamed(_) => "SessionRenamed",
             Event::PaneSuppressed(_) => "PaneSuppressed",
             Event::PaneResumed(_) => "PaneResumed",
             Event::TerminalTooSmallEntered(_) => "TerminalTooSmallEntered",
@@ -295,15 +286,6 @@ pub struct TabFocused {
     pub prior_tab: TabId,
 }
 
-/// Payload for [`Event::PaneRenamed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneRenamed {
-    /// The renamed pane.
-    pub pane_id: PaneId,
-    /// The pane's new display name.
-    pub name: String,
-}
-
 /// Payload for [`Event::TabMoved`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabMoved {
@@ -313,26 +295,6 @@ pub struct TabMoved {
     pub old_index: usize,
     /// The tab's new zero-based index.
     pub new_index: usize,
-}
-
-/// Payload for [`Event::TabRenamed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TabRenamed {
-    /// The renamed tab.
-    pub tab_id: TabId,
-    /// The tab's new display name.
-    pub name: String,
-}
-
-/// Payload for [`Event::SessionRenamed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRenamed {
-    /// The renamed session.
-    pub session_id: SessionId,
-    /// The session's previous display name.
-    pub old_name: String,
-    /// The session's new display name.
-    pub new_name: String,
 }
 
 /// Payload for [`Event::PaneSuppressed`].

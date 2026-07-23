@@ -49,7 +49,7 @@ bundled in.
 - 🗂️ **Stacked Panes** — put several panes in one slot and flip between them, instead of shrinking everything
 - 🔍 **Fullscreen Zoom** — blow one pane up to the whole tab and back, without losing the layout
 - 📐 **Resize** — nudge a pane border one character at a time by key, or drag it with the mouse
-- 📑 **Tabs** — create, close, rename, and cycle tabs; the tab bar scrolls when it runs out of room
+- 📑 **Tabs** — create, close, and cycle tabs; the tab bar scrolls when it runs out of room
 - ⌨️ **Multi-key Shortcuts** — chained keys (`<C-p> n`), a leader key you pick, a hint bar showing what comes next, and clash detection
 - 🔒 **Lock Mode** — send every key straight to the program in the pane, so koshi's own shortcuts stop stealing them
 - 🖱️ **Mouse Support** — click to focus, drag borders to resize, scroll each pane, double-click and drag to select
@@ -86,7 +86,9 @@ Launch koshi:
 koshi
 ```
 
-That opens one tab with one pane running your shell.
+That opens one tab with one pane running your shell in the directory where you
+launched koshi. Example: `/work/demo` + `koshi` starts the first pane in
+`/work/demo`.
 
 Open a saved layout instead:
 
@@ -117,8 +119,8 @@ held down. Change the leader once and they all move together.
 Run `koshi keys list` to see the shortcuts actually in effect, and
 `koshi actions list` for everything you can bind.
 
-Some actions ship without a default key — stacked panes, renaming a pane or a
-tab, plain close-pane. Bind them yourself in `keybinding.kdl`.
+Some actions ship without a default key — stacked panes, plain close-pane.
+Bind them yourself in `keybinding.kdl`.
 
 ## Configuration
 
@@ -185,7 +187,7 @@ here changes a shortcut, since the file is the only place they are set.
 First release. What it covers:
 
 - Split panes, stacked panes, fullscreen zoom, and border resize
-- Tabs: create, close, rename, cycle
+- Tabs: create, close, cycle
 - Terminal behavior: true color, text styles, full-screen programs, wide characters, per-pane scrollback
 - Multi-key shortcuts with a leader key, a hint bar, and clash detection
 - Lock mode to pass every key through to the program in the pane

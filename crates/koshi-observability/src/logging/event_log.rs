@@ -68,9 +68,6 @@ pub fn log_event(event: &Event) {
                 "pane focused"
             );
         }
-        Event::PaneRenamed(payload) => {
-            tracing::info!(pane_id = %payload.pane_id, "pane renamed");
-        }
         Event::TabCreated(payload) => {
             tracing::info!(tab_id = %payload.tab_id, "tab created");
         }
@@ -91,12 +88,6 @@ pub fn log_event(event: &Event) {
                 new_index = payload.new_index,
                 "tab moved"
             );
-        }
-        Event::TabRenamed(payload) => {
-            tracing::info!(tab_id = %payload.tab_id, "tab renamed");
-        }
-        Event::SessionRenamed(payload) => {
-            tracing::info!(session_id = %payload.session_id, "session renamed");
         }
 
         // --- whole-screen visibility: edge-triggered, so at most a couple of

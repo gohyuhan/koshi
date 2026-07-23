@@ -87,14 +87,35 @@ fn submit_external_via_runtime_dir(
     submit_envelope(&endpoint, session_id, source, command)
 }
 
+/// Fill a pane-creating command's unset working directory with this CLI
+/// process's own, captured here at send time: the CLI inherited it from the
+/// shell it was typed in, so the new pane opens where the command was run.
+/// A command that already names a directory is left alone, and every other
+/// command carries none.
+fn capture_cwd(command: Command) -> Command {
+    let mut command = command;
+    let cwd = match &mut command {
+        Command::NewPane(args) => &mut args.cwd,
+        Command::NewTab(args) => &mut args.cwd,
+        Command::RunCommandPane(args) => &mut args.cwd,
+        _ => return command,
+    };
+    if cwd.is_none() {
+        *cwd = std::env::current_dir().ok();
+    }
+    command
+}
+
 /// One command submission over `endpoint`: connect, pipeline Hello and the
-/// enveloped command, read both replies in order.
+/// enveloped command, read both replies in order. A pane-creating command
+/// with no directory of its own gets this process's ([`capture_cwd`]).
 fn submit_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
     source: CommandSource,
     command: Command,
 ) -> Result<CommandResult, CliError> {
+    let command = capture_cwd(command);
     let envelope = CommandEnvelope::new(CommandId::new(), source, SystemTime::now(), command);
     let request = IpcRequest {
         request_id: 2,

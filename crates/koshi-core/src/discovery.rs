@@ -84,7 +84,7 @@ pub struct PaneInfo {
     pub tab_id: TabId,
     /// The session holding the pane.
     pub session_id: SessionId,
-    /// The pane's display title, once the child or a rename has set one.
+    /// The pane's display title, once the child has set one.
     pub title: Option<String>,
     /// Working directory the pane started in, when known. Serializes as
     /// the path's lossy UTF-8 string.

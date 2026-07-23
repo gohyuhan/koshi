@@ -7,11 +7,16 @@
 //! given. The dispatcher thread builds it, so every field reads the same
 //! state a command would.
 
+use std::collections::HashMap;
+
 use koshi_core::discovery::{
     ClientInfo, PaneInfo, PaneState, SessionInfo, SessionOverview, TabInfo,
 };
+use koshi_core::ids::PaneId;
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_session::session::state::{Session, Tab};
+
+use koshi_terminal::engine::TerminalEngine;
 
 use crate::server::Server;
 
@@ -39,7 +44,7 @@ impl Server {
             })
             .collect();
 
-        let panes = pane_infos(session, &tabs);
+        let panes = pane_infos(session, &tabs, &self.terminal_engines);
 
         let clients: Vec<ClientInfo> = session
             .clients
@@ -72,8 +77,13 @@ impl Server {
 
 /// One [`PaneInfo`] row per registered pane, in the tab-bar order of the tabs
 /// holding them and layout order within each tab. A pane whose lifecycle is
-/// `Removed` has already left every layout tree, so it produces no row.
-fn pane_infos(session: &Session, tabs: &[&Tab]) -> Vec<PaneInfo> {
+/// `Removed` has already left every layout tree, so it produces no row. The
+/// title is the pane terminal's OSC 0/1/2 title, once the child has set one.
+fn pane_infos(
+    session: &Session,
+    tabs: &[&Tab],
+    engines: &HashMap<PaneId, TerminalEngine>,
+) -> Vec<PaneInfo> {
     let mut infos = Vec::with_capacity(session.panes.len());
     for tab in tabs {
         for pane_id in tab.layout().leaf_panes() {
@@ -97,7 +107,9 @@ fn pane_infos(session: &Session, tabs: &[&Tab]) -> Vec<PaneInfo> {
                 id: pane_id,
                 tab_id: tab.id(),
                 session_id: session.id,
-                title: record.title.clone(),
+                title: engines
+                    .get(&pane_id)
+                    .and_then(|engine| engine.state().title().map(str::to_owned)),
                 cwd: record.cwd.clone(),
                 command: record.command.as_ref().map(spawn_argv),
                 state,
