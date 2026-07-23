@@ -176,7 +176,7 @@ impl Server {
         events
     }
 
-    /// Handle [`Command::ToggleLockMode`]: flip the acting client between
+    /// Handle [`Command::ToggleLockMode`]: flip the target client between
     /// pass-through [`LockMode::Locked`] and [`LockMode::Normal`].
     ///
     /// A client already locked unlocks; a client in any other mode locks. The
@@ -185,14 +185,15 @@ impl Server {
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
+        args: &ToggleLockModeArgs,
     ) -> Result<CommandResult, Rejection> {
-        self.set_lock_mode(command_id, source, |current| match current {
+        self.set_lock_mode(command_id, source, args.client, |current| match current {
             LockMode::Locked => LockMode::Normal,
             _ => LockMode::Locked,
         })
     }
 
-    /// Handle [`Command::SetLockMode`]: set the acting client to
+    /// Handle [`Command::SetLockMode`]: set the target client to
     /// [`LockMode::Locked`] when `args.locked`, else [`LockMode::Normal`].
     ///
     /// Setting the mode the client already holds is a no-op: applied, zero
@@ -208,23 +209,25 @@ impl Server {
         } else {
             LockMode::Normal
         };
-        self.set_lock_mode(command_id, source, move |_| next)
+        self.set_lock_mode(command_id, source, args.client, move |_| next)
     }
 
-    /// Set the acting client's [`LockMode`], emitting [`Event::InputModeChanged`]
+    /// Set the target client's [`LockMode`], emitting [`Event::InputModeChanged`]
     /// only when it changes. `resolve` maps the client's current mode to the
     /// next one, so the toggle and the explicit set share one path.
     ///
-    /// Lock mode is client-scoped: the target is the acting client alone — no
-    /// pane is resolved, so a client with no focused pane still locks. Nothing
-    /// in the layout, focus, or any PTY changes; a no-op change mutates nothing.
+    /// Lock mode targets a client alone — the explicit `client` argument when
+    /// set, else the acting client — no pane is resolved, so a client with no
+    /// focused pane still locks. Nothing in the layout, focus, or any PTY
+    /// changes; a no-op change mutates nothing.
     fn set_lock_mode(
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
+        explicit: Option<ClientId>,
         resolve: impl FnOnce(LockMode) -> LockMode,
     ) -> Result<CommandResult, Rejection> {
-        let (client_id, client) = self.acting_client_mut(source)?;
+        let (client_id, client) = self.acting_client_mut(source, explicit)?;
 
         let current = client.lock_mode();
         let next = resolve(current);
@@ -240,17 +243,19 @@ impl Server {
         Ok(scope.commit(command_id, &mut self.event_bus))
     }
 
-    /// The acting client's mutable record, for commands that act on the acting
-    /// client alone (the lock and mouse-select commands). The client is the one
-    /// [`Self::resolve_acting_client`] picks, so the record mutated here is the
-    /// same one [`Self::validate`] admitted the command against.
+    /// The target client's mutable record, for commands that act on one
+    /// client alone (the lock and mouse-select commands). The client is the
+    /// one [`Self::resolve_view_client`] picks — the explicit target when
+    /// given, else the acting client — so the record mutated here is the same
+    /// one [`Self::validate`] admitted the command against.
     fn acting_client_mut(
         &mut self,
         source: &CommandSource,
+        explicit: Option<ClientId>,
     ) -> Result<(ClientId, &mut Client), Rejection> {
         let acting = Self::require_session(self.acting_session(source)?)?;
         let session_id = acting.id;
-        let client_id = Self::resolve_acting_client(source, acting)?;
+        let client_id = Self::resolve_view_client(explicit, source, acting)?;
         let session = self
             .sessions
             .get_mut(&session_id)
@@ -276,7 +281,7 @@ impl Server {
         command_id: CommandId,
         source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let (_, client) = self.acting_client_mut(source)?;
+        let (_, client) = self.acting_client_mut(source, None)?;
         client.toggle_mouse_select();
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);

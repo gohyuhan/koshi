@@ -25,7 +25,7 @@ fn command(argv: &[&str]) -> CliCommand {
 /// The `(action, command)` pair the subcommand of `argv` maps to.
 fn action_of(argv: &[&str]) -> (ActionRef, Command) {
     command(argv)
-        .to_action()
+        .to_action(&ResolvedTargets::default())
         .expect("argv must map to an action")
 }
 
@@ -185,12 +185,12 @@ fn kill_session_rejects_a_second_positional() {
 fn flagless_subcommands_parse_to_their_variants() {
     let cases: &[(&str, CliCommand)] = &[
         ("toggle-pane-fullscreen", CliCommand::TogglePaneFullscreen),
-        ("new-tab", CliCommand::NewTab),
+        ("new-tab", CliCommand::NewTab { session: None }),
         ("next-tab", CliCommand::NextTab { client: None }),
         ("previous-tab", CliCommand::PreviousTab { client: None }),
-        ("lock", CliCommand::Lock),
-        ("unlock", CliCommand::Unlock),
-        ("toggle-lock", CliCommand::ToggleLock),
+        ("lock", CliCommand::Lock { client: None }),
+        ("unlock", CliCommand::Unlock { client: None }),
+        ("toggle-lock", CliCommand::ToggleLock { client: None }),
         ("config", CliCommand::Config),
         ("plugin", CliCommand::Plugin),
         (
@@ -325,7 +325,7 @@ fn keys_queries_map_to_no_action() {
         vec!["koshi", "keys", "conflicts"],
         vec!["koshi", "keys", "validate", "f.kdl"],
     ] {
-        assert_eq!(command(&argv).to_action(), None);
+        assert_eq!(command(&argv).to_action(&ResolvedTargets::default()), None);
     }
 }
 
@@ -619,6 +619,9 @@ fn new_pane_parses_bare_and_with_every_flag() {
             direction: None,
             stacked: false,
             pane: None,
+            session: None,
+            tab: None,
+            client: None,
         }
     );
     let pane_flag = format!("pane-{}", fixed_uuid());
@@ -635,6 +638,9 @@ fn new_pane_parses_bare_and_with_every_flag() {
             direction: Some(DirectionArg::Right),
             stacked: false,
             pane: Some(PaneId::from_uuid(fixed_uuid())),
+            session: None,
+            tab: None,
+            client: None,
         }
     );
     assert_eq!(
@@ -643,6 +649,9 @@ fn new_pane_parses_bare_and_with_every_flag() {
             direction: None,
             stacked: true,
             pane: None,
+            session: None,
+            tab: None,
+            client: None,
         }
     );
 }
@@ -652,6 +661,100 @@ fn new_pane_direction_and_stacked_conflict() {
     let err = parse_err(&["koshi", "new-pane", "--direction", "left", "--stacked"]);
     assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn new_pane_parses_session_tab_and_client_targets() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    assert_eq!(
+        command(&[
+            "koshi",
+            "new-pane",
+            "--session",
+            "amber-fox",
+            "--tab",
+            "logs",
+            "--client",
+            &client_flag
+        ]),
+        CliCommand::NewPane {
+            direction: None,
+            stacked: false,
+            pane: None,
+            session: Some(SessionRef::Name("amber-fox".to_string())),
+            tab: Some(TabRef::Name("logs".to_string())),
+            client: Some(ClientId::from_uuid(fixed_uuid())),
+        }
+    );
+}
+
+#[test]
+fn new_pane_tab_given_as_an_id_reaches_the_command_without_a_lookup() {
+    // A `--tab` id needs no session lookup: `to_action` with no resolved
+    // targets still carries it into the command's `tab` field.
+    let tab_flag = format!("tab-{}", fixed_uuid());
+    let (_, mapped) = action_of(&["koshi", "new-pane", "--tab", &tab_flag]);
+    assert_eq!(
+        mapped,
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+            direction: None,
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
+        })
+    );
+}
+
+#[test]
+fn new_pane_pane_and_tab_conflict() {
+    let pane_flag = format!("pane-{}", fixed_uuid());
+    let err = parse_err(&["koshi", "new-pane", "--pane", &pane_flag, "--tab", "logs"]);
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn lock_verbs_take_an_optional_client() {
+    let client_flag = format!("client-{}", fixed_uuid());
+    let client = Some(ClientId::from_uuid(fixed_uuid()));
+    assert_eq!(
+        command(&["koshi", "lock", "--client", &client_flag]),
+        CliCommand::Lock { client }
+    );
+    let (_, mapped) = action_of(&["koshi", "lock", "--client", &client_flag]);
+    assert_eq!(
+        mapped,
+        Command::SetLockMode(LockModeArgs {
+            locked: true,
+            client,
+        })
+    );
+    let (_, mapped) = action_of(&["koshi", "unlock", "--client", &client_flag]);
+    assert_eq!(
+        mapped,
+        Command::SetLockMode(LockModeArgs {
+            locked: false,
+            client,
+        })
+    );
+    let (_, mapped) = action_of(&["koshi", "toggle-lock", "--client", &client_flag]);
+    assert_eq!(
+        mapped,
+        Command::ToggleLockMode(ToggleLockModeArgs { client })
+    );
+}
+
+#[test]
+fn new_tab_takes_an_optional_session() {
+    assert_eq!(
+        command(&["koshi", "new-tab", "--session", "amber-fox"]),
+        CliCommand::NewTab {
+            session: Some(SessionRef::Name("amber-fox".to_string())),
+        }
+    );
 }
 
 #[test]
@@ -675,6 +778,7 @@ fn every_direction_value_parses_to_its_core_direction() {
             mapped,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(*expected),
                 stacked: false,
                 cwd: None,
@@ -857,8 +961,18 @@ fn close_tab_parses_target_and_force() {
     assert_eq!(
         command(&["koshi", "close-tab", "--tab", &tab_flag, "--force"]),
         CliCommand::CloseTab {
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+            tab: Some(TabRef::Id(TabId::from_uuid(fixed_uuid()))),
+            session: None,
             force: true,
+        }
+    );
+    // A value that does not read as a tab id is taken as a tab name.
+    assert_eq!(
+        command(&["koshi", "close-tab", "--tab", "logs"]),
+        CliCommand::CloseTab {
+            tab: Some(TabRef::Name("logs".to_string())),
+            session: None,
+            force: false,
         }
     );
 }
@@ -984,7 +1098,7 @@ fn focus_pane_requires_a_pane_and_takes_an_optional_client() {
 }
 
 #[test]
-fn rename_session_takes_an_optional_session_id() {
+fn rename_session_takes_an_optional_session_ref() {
     assert_eq!(
         command(&["koshi", "rename-session"]),
         CliCommand::RenameSession { session: None }
@@ -993,7 +1107,14 @@ fn rename_session_takes_an_optional_session_id() {
     assert_eq!(
         command(&["koshi", "rename-session", "--session", &session_flag]),
         CliCommand::RenameSession {
-            session: Some(SessionId::from_uuid(fixed_uuid())),
+            session: Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid()))),
+        }
+    );
+    // A value that does not read as a session id is taken as a session name.
+    assert_eq!(
+        command(&["koshi", "rename-session", "--session", "amber-fox"]),
+        CliCommand::RenameSession {
+            session: Some(SessionRef::Name("amber-fox".to_string())),
         }
     );
 }
@@ -1006,6 +1127,9 @@ fn run_takes_its_command_after_the_separator() {
             direction: None,
             stacked: false,
             pane: None,
+            session: None,
+            tab: None,
+            client: None,
             command: vec!["htop".to_string(), "-d".to_string(), "5".to_string()],
         }
     );
@@ -1015,6 +1139,9 @@ fn run_takes_its_command_after_the_separator() {
             direction: Some(DirectionArg::Down),
             stacked: false,
             pane: None,
+            session: None,
+            tab: None,
+            client: None,
             command: vec!["htop".to_string()],
         }
     );
@@ -1029,6 +1156,9 @@ fn run_takes_an_optional_source_pane() {
             direction: None,
             stacked: false,
             pane: Some(PaneId::from_uuid(fixed_uuid())),
+            session: None,
+            tab: None,
+            client: None,
             command: vec!["htop".to_string()],
         }
     );
@@ -1047,8 +1177,10 @@ fn run_takes_an_optional_source_pane() {
             },
             cwd: None,
             source: Some(PaneId::from_uuid(fixed_uuid())),
+            tab: None,
             direction: None,
             stacked: false,
+            client: None,
         })
     );
 }
@@ -1135,6 +1267,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             "new-pane",
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(Direction::Right),
                 stacked: false,
                 cwd: None,
@@ -1147,6 +1280,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             "new-pane",
             Command::NewPane(NewPaneArgs {
                 source: Some(pane),
+                tab: None,
                 direction: None,
                 stacked: true,
                 cwd: None,
@@ -1262,17 +1396,23 @@ fn action_subcommands_map_to_their_exact_commands() {
         (
             vec!["koshi", "lock"],
             "lock",
-            Command::SetLockMode(LockModeArgs { locked: true }),
+            Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None,
+            }),
         ),
         (
             vec!["koshi", "unlock"],
             "unlock",
-            Command::SetLockMode(LockModeArgs { locked: false }),
+            Command::SetLockMode(LockModeArgs {
+                locked: false,
+                client: None,
+            }),
         ),
         (
             vec!["koshi", "toggle-lock"],
             "toggle-lock",
-            Command::ToggleLockMode,
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
         ),
         (
             vec!["koshi", "rename-session", "--session", &session_flag],
@@ -1294,8 +1434,10 @@ fn action_subcommands_map_to_their_exact_commands() {
                 },
                 cwd: None,
                 source: None,
+                tab: None,
                 direction: None,
                 stacked: true,
+                client: None,
             }),
         ),
     ];
@@ -1378,7 +1520,11 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "keys", "list"],
     ];
     for argv in argvs {
-        assert_eq!(command(argv).to_action(), None, "for {argv:?}");
+        assert_eq!(
+            command(argv).to_action(&ResolvedTargets::default()),
+            None,
+            "for {argv:?}"
+        );
     }
 }
 
@@ -1493,13 +1639,27 @@ fn an_id_with_only_the_prefix_and_a_dash_is_rejected() {
 
 #[test]
 fn a_prefix_collision_without_a_separating_dash_is_rejected() {
-    // "sessions-<uuid>" strips as far as "session" (a true prefix of
-    // "sessions"), leaving "s-<uuid>" — which does not start with '-', so the
-    // dash-strip fails and the whole original string is tried as a bare UUID,
-    // which it is not.
-    let value = format!("sessions-{}", fixed_uuid());
-    let err = parse_err(&["koshi", "rename-session", "--session", &value]);
+    // "panes-<uuid>" strips as far as "pane" (a true prefix of "panes"),
+    // leaving "s-<uuid>" — which does not start with '-', so the dash-strip
+    // fails and the whole original string is tried as a bare UUID, which it
+    // is not.
+    let value = format!("panes-{}", fixed_uuid());
+    let err = parse_err(&["koshi", "close-pane", "--pane", &value]);
     assert_eq!(err.kind(), ErrorKind::ValueValidation);
+}
+
+#[test]
+fn a_session_value_that_is_not_an_id_parses_as_a_name() {
+    // `--session` takes a name or an id, so a value that does not read as an
+    // id — here a mistyped "sessions-" prefix — is kept whole as a name; it
+    // then fails at routing when no session bears it, not at parse time.
+    let value = format!("sessions-{}", fixed_uuid());
+    assert_eq!(
+        command(&["koshi", "rename-session", "--session", &value]),
+        CliCommand::RenameSession {
+            session: Some(SessionRef::Name(value)),
+        }
+    );
 }
 
 #[test]
@@ -1534,6 +1694,9 @@ fn run_accepts_an_empty_program_token() {
             direction: None,
             stacked: false,
             pane: None,
+            session: None,
+            tab: None,
+            client: None,
             command: vec![String::new()],
         }
     );
@@ -1550,8 +1713,10 @@ fn run_accepts_an_empty_program_token() {
             },
             cwd: None,
             source: None,
+            tab: None,
             direction: None,
             stacked: false,
+            client: None,
         })
     );
 }

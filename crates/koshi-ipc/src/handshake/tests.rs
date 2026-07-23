@@ -4,7 +4,7 @@
 
 use std::time::{Duration, UNIX_EPOCH};
 
-use koshi_core::command::{Command, CommandEnvelope, CommandSource};
+use koshi_core::command::{Command, CommandEnvelope, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
 
 use super::*;
@@ -41,7 +41,7 @@ fn submit_command() -> IpcRequestKind {
         CommandId::new(),
         CommandSource::ExternalCli { session_id: None },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )))
 }
 

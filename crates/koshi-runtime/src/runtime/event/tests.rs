@@ -1,7 +1,7 @@
 //! Construction coverage for every [`RuntimeEvent`] variant.
 
 use super::*;
-use koshi_core::command::{Command, CommandSource};
+use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
 use std::time::SystemTime;
 
@@ -11,7 +11,7 @@ fn envelope() -> CommandEnvelope {
         CommandId::new(),
         CommandSource::Internal,
         SystemTime::UNIX_EPOCH,
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
 }
 

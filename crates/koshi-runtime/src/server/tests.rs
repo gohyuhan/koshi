@@ -7,7 +7,7 @@
 use std::sync::mpsc;
 use std::time::SystemTime;
 
-use koshi_core::command::{Command, CommandSource};
+use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::event::{InputMode, InputModeChanged};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{CommandId, TabId};
@@ -170,7 +170,7 @@ fn submit_command_dispatches_against_live_state() {
         command_id,
         CommandSource::KeyBinding { client_id },
         SystemTime::now(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
 
     match result {
@@ -206,7 +206,7 @@ fn a_subscriber_receives_the_events_a_command_emits() {
         CommandId::new(),
         CommandSource::KeyBinding { client_id },
         SystemTime::now(),
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
 
     assert_eq!(

@@ -32,7 +32,8 @@ use koshi_core::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
         NewPaneArgs, NewTabArgs, RenamePaneArgs, RenameSessionArgs, RenameTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, SetSelectionArgs, TabTarget, VisualCommand, WriteToPaneArgs,
+        RunCommandPaneArgs, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
+        WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
@@ -223,7 +224,9 @@ impl Server {
             Command::WriteToPane(args) => {
                 self.handle_write_to_pane(command_id, &envelope.source, &args)
             }
-            Command::ToggleLockMode => self.handle_toggle_lock_mode(command_id, &envelope.source),
+            Command::ToggleLockMode(args) => {
+                self.handle_toggle_lock_mode(command_id, &envelope.source, &args)
+            }
             Command::SetLockMode(args) => {
                 self.handle_set_lock_mode(command_id, &envelope.source, &args)
             }
@@ -403,11 +406,12 @@ impl Server {
     fn run_command_new_pane_args(args: &RunCommandPaneArgs) -> NewPaneArgs {
         NewPaneArgs {
             source: args.source,
+            tab: args.tab,
             direction: args.direction,
             stacked: args.stacked,
             cwd: args.cwd.clone(),
             command: Some(args.command.clone()),
-            client: None,
+            client: args.client,
         }
     }
 

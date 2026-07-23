@@ -119,8 +119,10 @@ fn a_command_pane_reports_its_argv_program_first() {
             command: spec,
             cwd: None,
             source: Some(root_pane),
+            tab: None,
             direction: Some(Direction::Right),
             stacked: false,
+            client: None,
         }),
     );
     let result = runtime.submit_command(envelope);

@@ -46,8 +46,8 @@ pub enum Command {
     FocusTab(FocusTabArgs),
     /// Write raw bytes into a pane's input.
     WriteToPane(WriteToPaneArgs),
-    /// Toggle the lock (pass-through) mode of the focused pane.
-    ToggleLockMode,
+    /// Toggle the target client's lock (pass-through) mode.
+    ToggleLockMode(ToggleLockModeArgs),
     /// Set the lock mode explicitly.
     SetLockMode(LockModeArgs),
     /// Toggle whether the acting client grabs the mouse for text selection,
@@ -140,7 +140,7 @@ impl Command {
             Command::RenameTab(_) => CommandKind::RenameTab,
             Command::FocusTab(_) => CommandKind::FocusTab,
             Command::WriteToPane(_) => CommandKind::WriteToPane,
-            Command::ToggleLockMode => CommandKind::ToggleLockMode,
+            Command::ToggleLockMode(_) => CommandKind::ToggleLockMode,
             Command::SetLockMode(_) => CommandKind::SetLockMode,
             Command::ToggleMouseSelect => CommandKind::ToggleMouseSelect,
             Command::RunCommandPane(_) => CommandKind::RunCommandPane,
@@ -164,6 +164,12 @@ impl Command {
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
+    /// Tab the new pane joins when no source pane names one: the split
+    /// anchor becomes that tab's most recently focused pane (its first pane
+    /// in layout order until one is focused). Ignored when `source` is set —
+    /// a source pane's own tab wins.
+    #[serde(default)]
+    pub tab: Option<TabId>,
     /// Split direction; `None` uses the runtime's default split direction,
     /// which the layout config seeds. Unused when `stacked` is set — a stack
     /// has no direction.
@@ -301,8 +307,21 @@ pub struct WriteToPaneArgs {
 /// Arguments for [`Command::SetLockMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockModeArgs {
-    /// Whether the pane should be locked (input passed through verbatim).
+    /// Whether the client should be locked (input passed through verbatim).
     pub locked: bool,
+    /// Client whose lock mode changes; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
+    #[serde(default)]
+    pub client: Option<ClientId>,
+}
+
+/// Arguments for [`Command::ToggleLockMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ToggleLockModeArgs {
+    /// Client whose lock mode flips; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
+    #[serde(default)]
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::RunCommandPane`]. The pane's display name is not
@@ -315,11 +334,19 @@ pub struct RunCommandPaneArgs {
     pub cwd: Option<PathBuf>,
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
+    /// Tab the new pane joins when no source pane names one; resolved by the
+    /// same rules as [`NewPaneArgs::tab`].
+    #[serde(default)]
+    pub tab: Option<TabId>,
     /// Split direction for the new pane; `None` defaults to a rightward
     /// split. Unused when `stacked` is set — a stack has no direction.
     pub direction: Option<Direction>,
     /// Stack the new pane onto the source pane instead of splitting space.
     pub stacked: bool,
+    /// Client to show the new pane on; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
+    #[serde(default)]
+    pub client: Option<ClientId>,
 }
 
 /// Arguments for [`Command::RenamePane`]. The new name is not supplied by the
@@ -571,9 +598,10 @@ pub struct ReloadPluginArgs {
 /// Where a command came from. The runtime uses this to resolve focus context,
 /// enforce permissions, and attribute diagnostics.
 ///
-/// `ExternalCli` carries only an optional session target: an external command
-/// with no explicit target is rejected for current-pane operations and never
-/// falls back to the focused pane. `Plugin` and `Internal` have no associated
+/// `ExternalCli` carries only an optional session target: an external
+/// command with no explicit target acts through the session's acting client
+/// (its sole attached client) — with several clients attached and none named
+/// it is rejected, never guessed. `Plugin` and `Internal` have no associated
 /// client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
@@ -602,7 +630,8 @@ pub enum CommandSource {
         /// OS path of the runtime socket the command arrived on.
         socket_path: PathBuf,
     },
-    /// An external CLI invocation, optionally naming a target session.
+    /// An external CLI invocation — a `koshi` command typed outside any
+    /// pane — optionally naming a target session.
     ExternalCli {
         /// Explicit target session; `None` means no session was resolved.
         session_id: Option<SessionId>,

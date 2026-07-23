@@ -260,6 +260,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
     let new_pane_cmd = |direction: Direction| {
         Command::NewPane(NewPaneArgs {
             source: None,
+            tab: None,
             direction: Some(direction),
             stacked: false,
             cwd: None,
@@ -274,7 +275,10 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-l>",
             "lock",
             ActionArgs::None,
-            Ok(Command::SetLockMode(LockModeArgs { locked: true })),
+            Ok(Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None,
+            })),
         ),
         row(
             "normal",
@@ -434,7 +438,10 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-l>",
             "unlock",
             ActionArgs::None,
-            Ok(Command::SetLockMode(LockModeArgs { locked: false })),
+            Ok(Command::SetLockMode(LockModeArgs {
+                locked: false,
+                client: None,
+            })),
         ),
         row(
             "locked",

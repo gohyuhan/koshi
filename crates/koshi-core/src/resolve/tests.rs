@@ -70,6 +70,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(Direction::Left),
                 stacked: false,
                 cwd: None,
@@ -82,6 +83,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(Direction::Down),
                 stacked: false,
                 cwd: None,
@@ -94,6 +96,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(Direction::Up),
                 stacked: false,
                 cwd: None,
@@ -106,6 +109,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: Some(Direction::Right),
                 stacked: false,
                 cwd: None,
@@ -118,6 +122,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::NewPane(NewPaneArgs {
                 source: None,
+                tab: None,
                 direction: None,
                 stacked: true,
                 cwd: None,
@@ -254,16 +259,26 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::RenameSession(RenameSessionArgs { session: None }),
         ),
         ("quit", ActionArgs::None, Command::Quit),
-        ("toggle-lock", ActionArgs::None, Command::ToggleLockMode),
+        (
+            "toggle-lock",
+            ActionArgs::None,
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        ),
         (
             "lock",
             ActionArgs::None,
-            Command::SetLockMode(LockModeArgs { locked: true }),
+            Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None,
+            }),
         ),
         (
             "unlock",
             ActionArgs::None,
-            Command::SetLockMode(LockModeArgs { locked: false }),
+            Command::SetLockMode(LockModeArgs {
+                locked: false,
+                client: None,
+            }),
         ),
         ("mouse-select", ActionArgs::None, Command::ToggleMouseSelect),
         (
@@ -278,8 +293,10 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
                 command: spawn_spec(),
                 cwd: None,
                 source: None,
+                tab: None,
                 direction: Some(Direction::Down),
                 stacked: false,
+                client: None,
             }),
         ),
     ]
@@ -548,7 +565,10 @@ fn a_sequence_resolves_each_step_in_order() {
         resolve_action(&macro_ref, &ActionArgs::None, &registry),
         Ok(DispatchPlan::Sequence(vec![
             DispatchPlan::Command(Command::NewPane(NewPaneArgs::default())),
-            DispatchPlan::Command(Command::SetLockMode(LockModeArgs { locked: true })),
+            DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
+                locked: true,
+                client: None
+            })),
         ]))
     );
 }
@@ -623,7 +643,10 @@ fn a_chain_of_exactly_max_depth_sequences_resolves() {
     assert_eq!(
         plan,
         DispatchPlan::Sequence(vec![DispatchPlan::Command(Command::SetLockMode(
-            LockModeArgs { locked: true }
+            LockModeArgs {
+                locked: true,
+                client: None
+            }
         ))])
     );
 }

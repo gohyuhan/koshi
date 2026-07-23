@@ -23,6 +23,10 @@ pub mod ipc_client;
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 
+/// Which running session a command goes to: in-session fast path, explicit
+/// `--session`/`--tab`/`--pane`/`--client` targets, and the count rule.
+pub mod targeting;
+
 /// The offline keymap view served by the `koshi keys` queries: the user's
 /// keybinding file folded onto the built-in defaults, conflict-checked and
 /// merged.

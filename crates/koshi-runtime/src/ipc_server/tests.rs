@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
+};
 use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_core::ids::{CommandId, SessionId};
 
@@ -73,7 +75,7 @@ fn envelope() -> CommandEnvelope {
         CommandId::new(),
         CommandSource::Internal,
         SystemTime::UNIX_EPOCH,
-        Command::ToggleLockMode,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
 }
 

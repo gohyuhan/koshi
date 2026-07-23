@@ -3,6 +3,7 @@
 
 use std::thread::JoinHandle;
 
+use koshi_core::command::ToggleLockModeArgs;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode};
 use koshi_ipc::transport::Listener;
@@ -109,7 +110,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                     IpcResult::CommandResult(CommandResult::Rejected {
                         command_id: envelope.id,
                         reason: koshi_core::event::RejectReason::Unauthorized,
-                        help: Some("run this command from an active Koshi client".to_string()),
+                        help: Some("no client is attached to the session".to_string()),
                     }),
                 );
             }
@@ -133,8 +134,12 @@ fn a_submitted_command_comes_back_applied() {
     let session = SessionId::new();
     let server = fake_session(&runtime_dir, session, Script::AcceptAndApply);
 
-    let result = submit_via_runtime_dir(&runtime_dir, &context(session), Command::ToggleLockMode)
-        .expect("the exchange succeeds");
+    let result = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the exchange succeeds");
     assert!(matches!(result, CommandResult::Ok { .. }));
 
     server.join().expect("fake session exits");
@@ -147,15 +152,19 @@ fn a_rejected_command_comes_back_with_reason_and_help() {
     let session = SessionId::new();
     let server = fake_session(&runtime_dir, session, Script::RejectCommand);
 
-    let result = submit_via_runtime_dir(&runtime_dir, &context(session), Command::ToggleLockMode)
-        .expect("the exchange succeeds even when the command is rejected");
+    let result = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the exchange succeeds even when the command is rejected");
     let CommandResult::Rejected { reason, help, .. } = result else {
         panic!("expected the rejection to ride back, got {result:?}");
     };
     assert_eq!(reason, koshi_core::event::RejectReason::Unauthorized);
     assert_eq!(
         help.as_deref(),
-        Some("run this command from an active Koshi client"),
+        Some("no client is attached to the session"),
     );
 
     server.join().expect("fake session exits");
@@ -167,8 +176,12 @@ fn a_missing_endpoint_file_reports_the_session_not_running() {
     let runtime_dir = test_runtime_dir("no-endpoint");
     let session = SessionId::new();
 
-    let error = submit_via_runtime_dir(&runtime_dir, &context(session), Command::ToggleLockMode)
-        .expect_err("no endpoint file exists");
+    let error = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("no endpoint file exists");
     assert!(
         matches!(&error, CliError::SessionNotFound { session: named } if *named == session.to_string()),
         "expected SessionNotFound, got {error:?}",
@@ -188,8 +201,12 @@ fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
     .write(&EndpointFile::path(&runtime_dir, session))
     .expect("write endpoint file");
 
-    let error = submit_via_runtime_dir(&runtime_dir, &context(session), Command::ToggleLockMode)
-        .expect_err("nothing listens behind the endpoint");
+    let error = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("nothing listens behind the endpoint");
     assert!(
         matches!(&error, CliError::SessionNotFound { session: named } if *named == session.to_string()),
         "expected SessionNotFound, got {error:?}",
@@ -204,8 +221,12 @@ fn a_refused_hello_reports_ipc_unavailable() {
     let session = SessionId::new();
     let server = fake_session(&runtime_dir, session, Script::RefuseHello);
 
-    let error = submit_via_runtime_dir(&runtime_dir, &context(session), Command::ToggleLockMode)
-        .expect_err("the hello is refused");
+    let error = submit_via_runtime_dir(
+        &runtime_dir,
+        &context(session),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("the hello is refused");
     assert!(
         matches!(
             &error,

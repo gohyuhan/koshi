@@ -965,6 +965,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         client_a,
         Command::NewPane(NewPaneArgs {
             source: Some(first),
+            tab: None,
             direction: None,
             stacked: true,
             cwd: None,
