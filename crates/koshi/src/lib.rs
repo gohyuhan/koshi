@@ -24,6 +24,9 @@ pub mod in_session;
 /// endpoint, submit a command, and read back its result.
 pub mod ipc_client;
 
+/// Process-level session commands that work without an attached pane.
+pub mod session_control;
+
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;
 

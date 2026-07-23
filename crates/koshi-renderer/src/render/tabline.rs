@@ -15,7 +15,7 @@ mod tests;
 /// fit are dropped whole, and a `◀` or `▶` marks the side they went off.
 ///
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
-/// same solve [`crate::hit_test`] reads, so the tab a click lands on is the tab
+/// same solve [`crate::hit_test()`] reads, so the tab a click lands on is the tab
 /// that was drawn there.
 pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
     // The row is koshi-owned chrome: reset it first so no letterbox fill or
@@ -65,7 +65,7 @@ pub(crate) const TABLINE_ARROW_WIDTH: u16 = 1;
 /// The tabline's solved geometry for one frame: the two anchored block widths,
 /// the windowed run of visible tabs, and the scroll arrows framing it.
 ///
-/// [`draw_tabline`] paints from it and [`crate::hit_test`] maps a click to a tab
+/// [`draw_tabline`] paints from it and [`crate::hit_test()`] maps a click to a tab
 /// or arrow with it, so the drawn positions and the hit-tested ones cannot
 /// drift apart — they are the same solve.
 pub(crate) struct TablineLayout {

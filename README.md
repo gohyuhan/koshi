@@ -154,6 +154,50 @@ into `themes/`: [themes-example/](themes-example/).
 | `koshi` | Start koshi with one tab and one shell pane |
 | `koshi --profile <NAME>` | Start with the saved layout in `profile/<NAME>.kdl` |
 
+### Sessions and discovery
+
+Discovery commands accept `--format table` (default) or `--format json`.
+
+| Command | Does |
+|---|---|
+| `koshi list-sessions` | List every running session |
+| `koshi kill-session [NAME]` | End the named session, or the only running one |
+| `koshi list-tabs [--session <SESSION_ID>]` | List tabs across running sessions |
+| `koshi list-panes [--session <SESSION_ID>]` | List panes across running sessions |
+| `koshi list-clients [--session <SESSION_ID>]` | List attached clients |
+| `koshi inspect session <SESSION_ID>` | Show one session |
+| `koshi inspect tab <TAB_ID>` | Show one tab |
+| `koshi inspect pane <PANE_ID>` | Show one pane |
+| `koshi inspect client <CLIENT_ID>` | Show one client |
+
+### Pane and tab control
+
+Inside koshi, omitted targets mean the current pane, tab, client, or session.
+Outside koshi, name a target; with one running session, koshi may use it.
+
+| Command | Does |
+|---|---|
+| `koshi new-pane [--direction right\|down\|left\|up] [--stacked]` | Open a shell pane |
+| `koshi run [pane options] -- <COMMAND>...` | Open a pane running one command |
+| `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
+| `koshi resize-pane --direction <DIRECTION> [--size <CELLS>]` | Move one pane border |
+| `koshi focus-pane --pane <PANE_ID> [--client <CLIENT_ID>]` | Focus a pane |
+| `koshi toggle-pane-fullscreen` | Toggle the focused pane's fullscreen view |
+| `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Type text into a pane |
+| `koshi new-tab [--session <NAME_OR_ID>]` | Open a tab with one shell pane |
+| `koshi close-tab [--tab <NAME_OR_ID>] [--force]` | Close a tab |
+| `koshi next-tab [--client <CLIENT_ID>]` | Focus the next tab |
+| `koshi previous-tab [--client <CLIENT_ID>]` | Focus the previous tab |
+| `koshi focus-tab (--index <INDEX>\|--tab <TAB_ID>)` | Focus a tab |
+| `koshi move-tab --index <INDEX> [--tab <TAB_ID>]` | Move a tab |
+| `koshi lock [--client <CLIENT_ID>]` | Send keys straight to the pane |
+| `koshi unlock [--client <CLIENT_ID>]` | Restore koshi shortcuts |
+| `koshi toggle-lock [--client <CLIENT_ID>]` | Toggle locked input |
+
+Successful create commands print what they made. `new-pane` and `run` print one
+`[PANE ID]: pane-…` line. `new-tab` prints `[TAB ID]: tab-…`, then its root
+`[PANE ID]: pane-…`.
+
 ### Shortcuts
 
 Every one of these takes `--format table` (default) or `--format json`. They all
@@ -179,6 +223,8 @@ here changes a shortcut, since the file is the only place they are set.
 | Command | Does |
 |---|---|
 | `koshi update` | Check for a newer koshi and install it |
+
+Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 
 ## Changelog
 

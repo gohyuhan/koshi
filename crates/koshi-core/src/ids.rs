@@ -8,7 +8,7 @@
 //! (e.g. `pane-0192f0c1-…`). No `From<&str>` parsing is provided — IDs are
 //! either generated (`new`) or wrapped from an existing UUID (`from_uuid`).
 //!
-//! The eight types below share the same shape: a wrapped [`Uuid`], a `new`
+//! The seven types below share the same shape: a wrapped [`Uuid`], a `new`
 //! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
 //! existing one, an `as_uuid` accessor, and a `Display` impl that prefixes the
 //! id with its entity name.
@@ -230,42 +230,6 @@ impl Default for CommandId {
 impl fmt::Display for CommandId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "command-{}", self.0)
-    }
-}
-
-/// Identifies an emitted event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct EventId(Uuid);
-
-impl EventId {
-    /// Generate a new time-ordered identifier (UUIDv7).
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Wrap an existing UUID without generating a new one.
-    #[must_use]
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    /// Borrow the underlying UUID.
-    #[must_use]
-    pub fn as_uuid(&self) -> &Uuid {
-        &self.0
-    }
-}
-
-impl Default for EventId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for EventId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "event-{}", self.0)
     }
 }
 

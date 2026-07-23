@@ -3,9 +3,9 @@
 //!
 //! A handler emits events into a [`TransactionScope`] as it mutates runtime
 //! state, then [`TransactionScope::commit`] consumes the scope and turns the
-//! batch into a [`CommandResult::Ok`], minting one [`EventId`] per event. A
-//! scope dropped without committing reports nothing, so a handler that fails
-//! partway leaves no events behind.
+//! batch into a [`CommandResult::Ok`] containing the same ordered [`Event`]s.
+//! A scope dropped without committing reports nothing, so a handler that
+//! fails partway leaves no events behind.
 //!
 //! Sealing is also where each event becomes a log line, via
 //! [`koshi_observability::logging::event_log::log_event`], and where the batch
@@ -14,11 +14,7 @@
 //! an uncommitted scope delivers nothing for the same reason it reports
 //! nothing.
 
-use koshi_core::{
-    command::CommandResult,
-    event::Event,
-    ids::{CommandId, EventId},
-};
+use koshi_core::{command::CommandResult, event::Event, ids::CommandId};
 use koshi_observability::logging::event_log::log_event;
 
 use crate::runtime::bus::EventBus;
@@ -50,18 +46,17 @@ impl TransactionScope {
     }
 
     /// Consume the scope and seal its batch: write each buffered event to the
-    /// log, deliver it to every subscriber on `bus`, mint one [`EventId`] per
-    /// event, and report them as an applied [`CommandResult::Ok`] keyed to
-    /// `command_id`. The events keep their emission order.
+    /// log, deliver it to every subscriber on `bus`, and report the same
+    /// ordered events as an applied [`CommandResult::Ok`] keyed to
+    /// `command_id`.
     #[must_use]
     pub fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
         let emitted_events = self
             .events
-            .iter()
-            .map(|event| {
+            .into_iter()
+            .inspect(|event| {
                 log_event(event);
                 bus.publish(event);
-                EventId::new()
             })
             .collect();
         CommandResult::Ok {

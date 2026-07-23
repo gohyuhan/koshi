@@ -49,8 +49,8 @@ pub struct NewPaneSpec {
 /// `new_pane_id` — so this only commits state (and, because the child is already
 /// live, registers the pane `Running`).
 /// This is the single place a new pane's session state is committed: no session
-/// field is written for `NewPane` outside this op. `spec` carries the title, cwd,
-/// and command recorded on the new pane so a later restore or respawn can recover
+/// field is written for `NewPane` outside this op. `spec` carries the cwd and
+/// command recorded on the new pane so a later restore or respawn can recover
 /// the request; `created_at` is supplied by the caller so the timestamp crosses
 /// the IPC boundary intact and tests stay deterministic.
 ///

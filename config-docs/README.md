@@ -10,6 +10,8 @@ runs on its built-in defaults.
 | `keybinding.kdl` | Key bindings and the modes they live in | [keybinding.md](keybinding.md) |
 | `profile/<name>.kdl` | A saved session layout: tabs, panes, commands, opened with `koshi --profile <name>` | [profile.md](profile.md) |
 
+Command-line reference: [cli.md](cli.md).
+
 ## Where the files go
 
 koshi looks in one config directory. The two top-level files sit directly in

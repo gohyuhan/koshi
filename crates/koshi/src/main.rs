@@ -10,6 +10,7 @@ use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::session_control;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, CommandResult};
@@ -68,6 +69,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return run_discovery(command);
     }
 
+    if let Some(CliCommand::KillSession { session }) = &cli.command {
+        return finish_command(session_control::kill_session(session.as_deref())?);
+    }
+
     if cli.is_interactive_launch() {
         // Offer a newer release before entering raw mode, so the prompt is a
         // plain stdin read; failures never block the launch.
@@ -115,8 +120,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
     };
 
+    finish_command(result)
+}
+
+/// Print an applied command's created ids, or surface its rejection.
+fn finish_command(result: CommandResult) -> Result<(), CliError> {
     match result {
-        CommandResult::Ok { .. } => Ok(()),
+        CommandResult::Ok { emitted_events, .. } => {
+            print!("{}", output::render_created_events(&emitted_events));
+            Ok(())
+        }
         CommandResult::Rejected { reason, help, .. } => {
             Err(CliError::CommandRejected { reason, help })
         }

@@ -77,7 +77,7 @@ fn submit_via_runtime_dir(
 
 /// [`submit_external`] against an explicit runtime directory: the whole
 /// exchange, with the endpoint lookup rooted where the caller says.
-fn submit_external_via_runtime_dir(
+pub(crate) fn submit_external_via_runtime_dir(
     runtime_dir: &Path,
     session_id: SessionId,
     command: Command,
