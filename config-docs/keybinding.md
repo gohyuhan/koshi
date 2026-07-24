@@ -1,7 +1,7 @@
 # `keybinding.kdl` — key bindings
 
-Your key bindings, folded on top of the built-in ones. A binding you set wins
-over the default for the same key; keys you do not mention keep their defaults.
+User bindings are applied over built-in bindings. A user binding wins for the
+same key. Unchanged keys keep built-in actions.
 
 **Where it goes:** directly in the config directory —
 `~/.config/koshi/keybinding.kdl` on Linux,
@@ -9,10 +9,8 @@ over the default for the same key; keys you do not mention keep their defaults.
 `%APPDATA%\koshi\config\keybinding.kdl` on Windows. See
 [README](README.md#where-the-files-go).
 
-**If anything is wrong: the whole file is dropped** back to the built-in keymap
-(all-or-nothing), so a mistake never leaves you with a half-working keymap. Run
-`koshi keys conflicts` to see what a rejected file tripped on, and
-`koshi keys list` to see the keymap actually in effect.
+**Any error drops the whole file.** `koshi keys conflicts` reports problems.
+`koshi keys list` prints the active keymap.
 
 ## Top-level settings
 
@@ -29,19 +27,14 @@ once beside the `mode` blocks.
 
 ## Key grammar
 
-Keys use an angle grammar: a modifier + key in angle brackets, chained with
-spaces for a multi-key shortcut.
+Keys use angle brackets. Spaces join keys into a sequence.
 
 - `<C-t>` — Ctrl+t. Modifiers: `C` Ctrl, `A` Alt, `S` Shift.
 - `<Tab>`, `<CR>`, `<Esc>`, `<BS>` — named keys. A bare word like `Tab` is read
   as one chord *per character* (`T`, `a`, `b`), so always bracket named keys.
-- `<leader>p` — the leader, then `p`. `<leader>` resolves against the `leader`
-  setting: a **modifier run** like `"C-"` merges into the next key, so
-  `<leader>p` is `<C-p>` — one press; a **chord** like `"<Space>"` becomes a
-  prefix, so `<leader>p` is `<Space>` then `p` — two presses. Rebind `leader`
-  and every `<leader>` binding moves with it — **including koshi's own
-  defaults**, which are written with `<leader>` (see the example). Explicit
-  chords like `<A-f>` are *not* the leader and never move.
+- `<leader>p` — leader plus `p`. Leader `"C-"` makes `<C-p>`. Leader
+  `"<Space>"` makes `<Space>` then `p`. Explicit keys such as `<A-f>` do not
+  move when the leader changes.
 
 ## `mode` blocks
 
@@ -58,12 +51,8 @@ Run `koshi actions list` to see every action name you can bind to.
 
 ## Full example
 
-This is koshi's **complete default keymap**, written exactly as koshi ships it —
-the leader-relative bindings use `<leader>`, so changing `leader` moves them all
-at once. With the default `leader "C-"`, `<leader>p n` **is** `<C-p> n`; set
-`leader "A-"` and it becomes `<A-p> n`. `bind` and `remove` both accept
-`<leader>`. `<C-l>` (the reserved lock/unlock) and `<A-f>` are explicit — they
-never move. Run `koshi keys list` to see the resolved keymap.
+Complete built-in keymap. `<leader>` bindings follow the configured leader.
+`<C-l>`, `<A-f>`, Tab, and Shift+Tab stay fixed.
 
 ```kdl
 // keybinding.kdl — the complete default keymap.

@@ -1,13 +1,12 @@
 # koshi configuration
 
-koshi reads four kinds of KDL file. Each file is optional — with none of them,
-koshi runs on its built-in defaults. Every file that exists must start with a
-supported `version`.
+Koshi reads four optional KDL file types. With none present, built-in defaults
+apply. Every present file must declare a supported `version`.
 
 | File | What it sets | Reference |
 |---|---|---|
-| `koshi.kdl` | App settings: which theme, scrollback, mouse, split direction, terminal, updates | [koshi.md](koshi.md) |
-| `themes/<name>.kdl` | Chrome colors (borders, tab ribbon, accents), selected by `koshi.kdl`'s `theme "<name>"` | [theme.md](theme.md) |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, and update settings | [koshi.md](koshi.md) |
+| `themes/<name>.kdl` | Interface colors selected by `theme "<name>"` | [theme.md](theme.md) |
 | `keybinding.kdl` | Key bindings and the modes they live in | [keybinding.md](keybinding.md) |
 | `profile/<name>.kdl` | A saved session layout: tabs, panes, commands, opened with `koshi --profile <name>` | [profile.md](profile.md) |
 
@@ -15,9 +14,8 @@ Command-line reference: [cli.md](cli.md).
 
 ## Where the files go
 
-koshi looks in one config directory. The two top-level files sit directly in
-it; themes and profiles sit in their own subdirectories, one file per theme and
-one per profile.
+The two top-level files sit in the config directory. Themes and profiles use
+their own subdirectories.
 
 | Platform | Config directory |
 |---|---|
@@ -25,9 +23,7 @@ one per profile.
 | macOS | `~/Library/Application Support/koshi` |
 | Windows | `%APPDATA%\koshi\config` |
 
-The location is fixed per platform — koshi reads no environment variable to
-relocate its config. On Linux the usual `XDG_CONFIG_HOME` moves the base, since
-that is the OS's own base-directory rule.
+Koshi has no config-path override. Linux still follows `XDG_CONFIG_HOME`.
 
 So a full config directory looks like:
 
@@ -43,12 +39,9 @@ So a full config directory looks like:
         writing.kdl
 ```
 
-Only one theme is in effect at a time — the one `koshi.kdl` names with
-`theme "<name>"`. The others just sit there until you switch.
+`koshi.kdl` selects one theme with `theme "<name>"`.
 
-You do not have to write a theme yourself: [`themes-example/`](../themes-example/)
-ships 25 ready-made ones (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé
-Pine, Solarized and more) to copy into `themes/`.
+[`themes-example/`](../themes-example/) contains 25 themes ready to copy.
 
 ## Versions and migration
 
@@ -59,40 +52,29 @@ starting at 1, and no child block:
 version 1
 ```
 
-`koshi config check` validates every present `koshi.kdl`, `keybinding.kdl`,
-`themes/*.kdl`, and `profile/*.kdl` without changing them. A missing version,
-bad KDL, bad value, unknown key, or unsupported version makes the check fail.
-Each matching path must be a regular file. The check reports all file-read and
-schema errors it can find in one run. A symbolic link to a regular file is
-allowed; migration updates its target and keeps the link.
+`koshi config check` validates every present known file without changing it.
+Missing versions, bad KDL, bad values, unknown keys, and unsupported versions
+fail the check. Errors from all files are reported together.
 
-`koshi config migrate` first validates every present file. It then moves each
-old file through every version in order: version 1 to 2, then 2 to 3, until it
-reaches the newest schema this Koshi supports. Every step is checked before the
-next step starts. A bad old file or missing step stops migration before any
-config file is written.
+`koshi config migrate` validates every file before writing. It applies each
+registered version step in order and validates after each step. Invalid input
+or a missing step stops migration before any file is written.
 
-Migration helps a valid old file adopt a valid new shape. It does not repair a
-file that was already wrong. Each changed file is replaced atomically, so a
-reader sees the whole old file or the whole new file, never half a write. Koshi
-never runs migration during startup; only this command changes config files.
+Current schema version is `1`, so valid version `1` files are reported as
+current and stay unchanged. Migration does not repair invalid config and never
+runs during startup.
 
-Files are replaced one at a time. If a later write fails, the error lists every
-earlier file that finished migration. It also says the failing file may contain
-the migrated data, because a durability check can fail after its atomic replace.
+Changed files use atomic replacement, one file at a time. Config symlinks stay;
+their regular-file targets change. A write error lists earlier completed files
+and marks the failed file as possibly changed.
 
 ## When a file has a mistake
 
-- **`koshi.kdl` and `themes/<name>.kdl` are field-partial.** One bad field (a
-  typo, the wrong kind of value) is skipped — that setting keeps its default —
-  and every other field in the file still applies. koshi logs which field it
-  skipped.
-- **`keybinding.kdl` and `profile/<name>.kdl` are all-or-nothing.** Any error
-  in the file drops the *whole* file back to defaults, because a half-applied
-  keymap or a half-built layout (some panes spawned, some silently missing) is
-  worse than a clean fallback.
+- **`koshi.kdl` and themes are field-partial.** A bad field keeps its default;
+  other valid fields still apply. Koshi logs each skipped field.
+- **Keybindings and profiles are all-or-nothing.** Any error drops the whole
+  file.
 - **Unknown keys name the nearest valid key.** `min-col 2` results in
   ``did you mean `min-cols`?``. `koshi config check` treats that typo as an
   error even though normal startup can keep the other field-partial settings.
-- **A theme koshi cannot find or parse** falls back to the built-in `default`
-  theme, with the reason logged. The rest of `koshi.kdl` still applies.
+- **A missing or invalid theme** uses built-in `default` colors and logs why.

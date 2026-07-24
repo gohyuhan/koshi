@@ -6,66 +6,116 @@
   <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/github/v/release/gohyuhan/koshi?style=for-the-badge" alt="Release">
   <img src="https://img.shields.io/github/license/gohyuhan/koshi?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/github/actions/workflow/status/gohyuhan/koshi/ci.yaml?style=for-the-badge&label=CI" alt="CI">
+  <img src="https://img.shields.io/github/actions/workflow/status/gohyuhan/koshi/release.yml?style=for-the-badge&label=Release" alt="Release">
 </p>
 
 <p align="center">
-  <strong>A terminal multiplexer in Rust — split panes and tabs in one terminal window.</strong><br>
+  <strong>A fast terminal multiplexer for panes, tabs, and keyboard-first workflows.</strong>
 </p>
 
 # koshi
 
-> ⚠️ **koshi is in active development.** The author uses it as a daily driver,
-> so it changes often — commands, config fields, keybindings, and defaults can
-> all shift between commits. Expect that to keep being true.
+Koshi runs panes and tabs inside one terminal window. Each pane has its own
+process, terminal screen, and scrollback.
 
 ## Requirements
 
-- A terminal emulator that supports **true color** and **256 colors** (any modern one does)
-- **Linux** or **macOS**; Windows is targeted but far less exercised
-- **Rust 1.96+** — you build from source, there are no binaries yet
+- Linux, macOS, or Windows
+- x86-64 or ARM64
+- A terminal with true color and 256-color support
+- Rust 1.96 to build from source
 
 ## Description
 
-koshi is a terminal multiplexer: it runs inside one real terminal window and
-gives you many independent terminals inside it. Each pane owns its own shell,
-its own screen, and its own scrollback. Panes tile inside a tab, and tabs sit
-inside one session.
+Koshi is a terminal multiplexer for running several shells and programs inside
+one terminal window. It handles pane layouts, tabs, terminal emulation,
+scrollback, keyboard shortcuts, mouse input, and process cleanup.
 
-To the terminal you launched it from, koshi is one program. To every shell it
-starts, koshi *is* the terminal — it handles colors, cursor movement, and mouse
-input itself, which is why programs like `vim`, `htop`, and `less` work normally
-inside a pane.
+## Why Koshi?
 
-## Why koshi?
-
-koshi tries to keep its core small — tabs, panes, layout, and lock mode — and
-leave the rest out of the binary. No Git panels, dashboards, or launchers
-bundled in.
+Koshi keeps the core focused on terminal work. Panes, tabs, layouts,
+keybindings, themes, and saved sessions are built in. App settings stay in
+small KDL files, and shell commands can control a running session.
 
 ## Features
 
-- 🪟 **Split Panes** — split any pane left, right, up, or down; the panes fill the tab, with no gaps left behind
-- 🗂️ **Stacked Panes** — put several panes in one slot and flip between them, instead of shrinking everything
-- 🔍 **Fullscreen Zoom** — blow one pane up to the whole tab and back, without losing the layout
-- 📐 **Resize** — nudge a pane border one character at a time by key, or drag it with the mouse
-- 📑 **Tabs** — create, close, and cycle tabs; the tab bar scrolls when it runs out of room
-- ⌨️ **Multi-key Shortcuts** — chained keys (`<C-p> n`), a leader key you pick, a hint bar showing what comes next, and clash detection
-- 🔒 **Lock Mode** — send every key straight to the program in the pane, so koshi's own shortcuts stop stealing them
-- 🖱️ **Mouse Support** — click to focus, drag borders to resize, scroll each pane, double-click and drag to select
-- 📋 **Copy to Clipboard** — select with the mouse and copy to your real clipboard, working over SSH too
-- 🎯 **Mouse Select Mode** — take the mouse back from a full-screen program that is using it, so you can select text
-- 📜 **Per-pane History** — each pane keeps its own scrollback and its own place in it
-- 🧾 **Terminal Behavior** — true color, bold and italics, full-screen programs, wide characters like CJK and emoji, box drawing
-- 🎨 **Themes** — 25 ready-made config examples included (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé Pine, Solarized, and more)
-- ⚙️ **Simple Config Files** — app settings, themes, shortcuts, and saved layouts, each in its own readable file
-- 💾 **Saved Layouts** — save a set of tabs, panes, and the commands they run, then open the lot with one flag
-- 🪵 **Logging** — optional log file per session, plain text or JSON, recording ids and never your content
-- 🌍 **Cross-platform** — koshi targets Linux, macOS, and Windows; it is developed on macOS and CI currently builds and tests on Linux only
+- 🪟 **Split panes** — open panes left, right, up, or down; layouts fill the tab.
+- 🗂️ **Stacked panes** — place several panes in one slot and switch the expanded pane.
+- 🔍 **Fullscreen pane** — fill the tab with one pane and restore the prior layout.
+- 📐 **Resize** — move borders by keyboard or drag them with the mouse.
+- 📑 **Tabs** — create, close, move, and switch tabs.
+- ⌨️ **Multi-key shortcuts** — use key sequences, a configurable leader, hints, and conflict checks.
+- 🔒 **Lock mode** — send keys directly to the active program.
+- 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text.
+- 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
+- 🎯 **Mouse selection mode** — select text while a program owns mouse input.
+- 📜 **Per-pane history** — keep separate scrollback and scroll positions.
+- 🧾 **Terminal support** — true color, text styles, alternate screens, CJK, emoji, and box drawing.
+- 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
+- ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
+- 💾 **Saved layouts** — start tabs, panes, commands, directories, and environment values from a profile.
+- 🪵 **Logging** — write optional per-session text or JSON logs without terminal content.
+- 🌍 **Cross-platform** — run on Linux, macOS, or Windows; CI tests all three.
 
 ## Installation
 
-> 🚧 **Coming soon.**
+### Linux
+
+```bash
+curl --proto "=https" --tlsv1.2 -sSfL \
+  https://github.com/gohyuhan/koshi/releases/latest/download/install.sh | bash
+```
+
+### macOS
+
+Install with the release script:
+
+```bash
+curl --proto "=https" --tlsv1.2 -sSfL \
+  https://github.com/gohyuhan/koshi/releases/latest/download/install.sh | bash
+```
+
+Or install with Homebrew:
+
+```bash
+brew install gohyuhan/koshi/koshi
+```
+
+Homebrew adds the Koshi tap during installation. Upgrade Koshi with the other
+outdated packages:
+
+```bash
+brew update
+brew upgrade
+```
+
+Or upgrade only Koshi:
+
+```bash
+brew upgrade koshi
+```
+
+### Windows
+
+Install with PowerShell:
+
+```powershell
+powershell -c "irm https://github.com/gohyuhan/koshi/releases/latest/download/install.ps1 | iex"
+```
+
+Or install with Scoop:
+
+```powershell
+scoop bucket add koshi https://github.com/gohyuhan/scoop-koshi
+scoop install koshi/koshi
+```
+
+Upgrade Koshi after refreshing Scoop:
+
+```powershell
+scoop update
+scoop update koshi
+```
 
 ### Build from source
 
@@ -73,24 +123,103 @@ bundled in.
 git clone https://github.com/gohyuhan/koshi.git
 cd koshi
 cargo build --release
-
-# the binary lands here
 ./target/release/koshi
 ```
 
-## Quick Start
+## Uninstall and clean removal
 
-Launch koshi:
+Exit every Koshi session before removing files.
+
+### Linux
+
+Remove a script-installed binary:
+
+```bash
+sudo rm -f /usr/local/bin/koshi
+```
+
+Remove all Koshi config, logs, update state, cached data, and runtime files:
+
+```bash
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/koshi"
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/koshi"
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/koshi"
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/koshi"
+
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  rm -rf "$XDG_RUNTIME_DIR/koshi"
+fi
+```
+
+### macOS
+
+For a script install:
+
+```bash
+sudo rm -f /usr/local/bin/koshi
+```
+
+For a Homebrew install:
+
+```bash
+brew uninstall --force koshi
+brew untap gohyuhan/koshi
+```
+
+Remove all Koshi config, logs, update state, cache, and runtime files:
+
+```bash
+rm -rf "$HOME/Library/Application Support/koshi"
+rm -rf "$HOME/Library/Caches/koshi"
+```
+
+### Windows
+
+For a Scoop install:
+
+```powershell
+scoop uninstall koshi
+scoop bucket rm koshi
+scoop cache rm "koshi*"
+```
+
+For a PowerShell-script install, remove the PATH entry and install directory:
+
+```powershell
+$InstallDir = Join-Path $env:LOCALAPPDATA "koshi"
+$UserPath = [Environment]::GetEnvironmentVariable(
+    "Path",
+    [EnvironmentVariableTarget]::User
+)
+$CleanPath = (($UserPath -split ";") | Where-Object {
+    $_ -and $_ -ne $InstallDir
+}) -join ";"
+[Environment]::SetEnvironmentVariable(
+    "Path",
+    $CleanPath,
+    [EnvironmentVariableTarget]::User
+)
+Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Remove all remaining Koshi config, logs, update state, cache, and runtime files:
+
+```powershell
+Remove-Item (Join-Path $env:APPDATA "koshi") `
+  -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:LOCALAPPDATA "koshi") `
+  -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+## Quick start
+
+Open one tab with one shell pane:
 
 ```bash
 koshi
 ```
 
-That opens one tab with one pane running your shell in the directory where you
-launched koshi. Example: `/work/demo` + `koshi` starts the first pane in
-`/work/demo`.
-
-Open a saved layout instead:
+Open a saved layout:
 
 ```bash
 koshi --profile dev
@@ -98,155 +227,146 @@ koshi --profile dev
 
 ### Default keybindings
 
-The leader key is **Ctrl** by default, so the shortcuts below start with `Ctrl`
-held down. Change the leader once and they all move together.
+The default leader is Ctrl.
 
-| Keys | Does |
+| Keys | Action |
 |---|---|
-| `<C-p> n` | New pane (default direction) |
-| `<C-p> h` / `j` / `k` / `l` | New pane left / down / up / right |
-| `<C-p> x` | Close the pane and everything it started |
-| `<C-p> ←` `↓` `↑` `→` | Move focus to the neighbouring pane |
-| `<C-s> ←` `↓` `↑` `→` | Move this pane's border one cell |
-| `<C-t> n` | New tab |
+| `<C-p> n` | Open pane using configured direction |
+| `<C-p> h` / `j` / `k` / `l` | Open pane left / down / up / right |
+| `<C-p> x` | Close pane and its process tree |
+| `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
+| `<C-s> ←` / `↓` / `↑` / `→` | Move pane border one cell |
+| `<C-t> n` | Open tab |
 | `<C-t> x` | Close tab |
 | `Tab` / `Shift+Tab` | Next / previous tab |
-| `Alt+f` | Toggle fullscreen on the focused pane |
-| `<C-g>` | Toggle mouse select mode |
-| `<C-l>` | Lock / unlock (keys pass straight to the program) |
+| `Alt+f` | Toggle pane fullscreen |
+| `<C-g>` | Toggle mouse selection |
+| `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
 
-Run `koshi keys list` to see the shortcuts actually in effect, and
-`koshi actions list` for everything you can bind.
-
-Some actions ship without a default key — stacked panes, plain close-pane.
-Bind them yourself in `keybinding.kdl`.
+`koshi keys list` prints the active keymap. `koshi actions list` prints actions
+that can be bound.
 
 ## Configuration
 
-koshi reads four kinds of [KDL](https://kdl.dev) file, all optional. With none
-of them, koshi runs on its built-in defaults. A file that exists must declare
+Koshi uses four optional KDL file types. Each present file must declare
 `version 1`.
 
-| File | Sets |
+| File | Contents |
 |---|---|
-| `koshi.kdl` | App settings: theme, scrollback, mouse, split direction, logging, updates |
-| `themes/<name>.kdl` | Colors for borders, tab bar, and accents |
-| `keybinding.kdl` | Shortcuts and the modes they live in |
-| `profile/<name>.kdl` | A saved layout: tabs, panes, and the commands they run |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, and update settings |
+| `themes/<name>.kdl` | Koshi interface colors |
+| `keybinding.kdl` | Keybindings and input modes |
+| `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, and environment values |
 
-They live in one directory per platform:
+Config directories:
 
-| Platform | Config directory |
+| Platform | Path |
 |---|---|
 | Linux | `~/.config/koshi` |
 | macOS | `~/Library/Application Support/koshi` |
 | Windows | `%APPDATA%\koshi\config` |
 
-Full reference: [config-docs/](config-docs/README.md). Ready-made themes to copy
-into `themes/`: [themes-example/](themes-example/).
+Available config commands:
 
-`koshi config path` prints this directory. `koshi config explain <KEY>` shows a
-setting's file and default. `koshi config check` validates every config file.
-`koshi config migrate` validates all files, then moves valid old schemas
-forward one version at a time.
+| Command | Result |
+|---|---|
+| `koshi config path` | Print config directory |
+| `koshi config explain <KEY>` | Print one setting's file, default, and meaning |
+| `koshi config check` | Validate every known config file |
+| `koshi config migrate` | Validate files and apply registered schema updates |
 
-## CLI Reference
+Current schema version is `1`. Migration leaves valid version `1` files
+unchanged.
+
+Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
+[themes-example/](themes-example/).
+
+## CLI reference
 
 ### Launching
 
-| Command | Does |
+| Command | Result |
 |---|---|
-| `koshi` | Start koshi with one tab and one shell pane |
-| `koshi --profile <NAME>` | Start with the saved layout in `profile/<NAME>.kdl` |
+| `koshi` | Start one session with one tab and shell pane |
+| `koshi --profile <NAME>` | Start with `profile/<NAME>.kdl` |
 
 ### Sessions and discovery
 
-Discovery commands accept `--format table` (default) or `--format json`.
+List and inspect commands accept `--format table` or `--format json`.
 
-| Command | Does |
+| Command | Result |
 |---|---|
-| `koshi list-sessions` | List every running session |
-| `koshi kill-session [NAME]` | End the named session, or the only running one |
-| `koshi list-tabs [--session <SESSION_ID>]` | List tabs across running sessions |
-| `koshi list-panes [--session <SESSION_ID>]` | List panes across running sessions |
+| `koshi list-sessions` | List running sessions |
+| `koshi kill-session [NAME]` | End the named session, or the only running session |
+| `koshi list-tabs [--session <SESSION_ID>]` | List tabs |
+| `koshi list-panes [--session <SESSION_ID>]` | List panes |
 | `koshi list-clients [--session <SESSION_ID>]` | List attached clients |
 | `koshi inspect session <SESSION_ID>` | Show one session |
 | `koshi inspect tab <TAB_ID>` | Show one tab |
 | `koshi inspect pane <PANE_ID>` | Show one pane |
 | `koshi inspect client <CLIENT_ID>` | Show one client |
 
-### Pane and tab control
+### Panes
 
-Inside koshi, omitted targets mean the current pane, tab, client, or session.
-Outside koshi, name a target; with one running session, koshi may use it.
+Inside Koshi, omitted targets use the current session, tab, pane, or client.
+Outside Koshi, give a target unless exactly one running session can be chosen.
 
-| Command | Does |
+| Command | Result |
 |---|---|
-| `koshi new-pane [--direction right\|down\|left\|up] [--stacked]` | Open a shell pane |
-| `koshi run [pane options] -- <COMMAND>...` | Open a pane running one command |
+| `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <TAB>] [--session <SESSION>] [--client <CLIENT_ID>]` | Open a shell pane |
+| `koshi run [new-pane options] -- <COMMAND>...` | Open a pane running one command |
 | `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
-| `koshi resize-pane --direction <DIRECTION> [--size <CELLS>]` | Move one pane border |
+| `koshi resize-pane --direction <DIRECTION> [--size <CELLS>] [--pane <PANE_ID>]` | Move one pane border |
 | `koshi focus-pane --pane <PANE_ID> [--client <CLIENT_ID>]` | Focus a pane |
 | `koshi toggle-pane-fullscreen` | Toggle the focused pane's fullscreen view |
-| `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Type text into a pane |
+| `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Send text to a pane |
+
+### Tabs
+
+| Command | Result |
+|---|---|
 | `koshi new-tab [--session <NAME_OR_ID>]` | Open a tab with one shell pane |
-| `koshi close-tab [--tab <NAME_OR_ID>] [--force]` | Close a tab |
+| `koshi close-tab [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--force]` | Close a tab |
 | `koshi next-tab [--client <CLIENT_ID>]` | Focus the next tab |
 | `koshi previous-tab [--client <CLIENT_ID>]` | Focus the previous tab |
-| `koshi focus-tab (--index <INDEX>\|--tab <TAB_ID>)` | Focus a tab |
-| `koshi move-tab --index <INDEX> [--tab <TAB_ID>]` | Move a tab |
-| `koshi lock [--client <CLIENT_ID>]` | Send keys straight to the pane |
-| `koshi unlock [--client <CLIENT_ID>]` | Restore koshi shortcuts |
+| `koshi focus-tab (--index <INDEX>\|--tab <TAB_ID>) [--client <CLIENT_ID>]` | Focus one tab |
+| `koshi move-tab --index <INDEX> [--tab <TAB_ID>]` | Move one tab |
+
+Create commands print created ids. `new-pane` and `run` print one pane id.
+`new-tab` prints its tab id and root pane id.
+
+### Input lock
+
+| Command | Result |
+|---|---|
+| `koshi lock [--client <CLIENT_ID>]` | Send keys directly to the pane |
+| `koshi unlock [--client <CLIENT_ID>]` | Restore Koshi shortcuts |
 | `koshi toggle-lock [--client <CLIENT_ID>]` | Toggle locked input |
 
-Successful create commands print what they made. `new-pane` and `run` print one
-`[PANE ID]: pane-…` line. `new-tab` prints `[TAB ID]: tab-…`, then its root
-`[PANE ID]: pane-…`.
+### Actions and shortcuts
 
-### Shortcuts
-
-Every one of these takes `--format table` (default) or `--format json`. They all
-read the built-in shortcuts with your `keybinding.kdl` folded on top; nothing
-here changes a shortcut, since the file is the only place they are set.
-
-| Command | Does |
+| Command | Result |
 |---|---|
-| `koshi keys list [--mode <MODE>] [--scope default\|user]` | The shortcuts actually in effect |
-| `koshi keys describe "<KEY_SEQUENCE>"` | What a key sequence does and which file set it |
-| `koshi keys conflicts` | Clashing shortcuts, ones that can never fire, and warnings |
-| `koshi keys validate <PATH>` | Check a shortcut file without applying it |
-
-### Actions
-
-| Command | Does |
-|---|---|
-| `koshi actions list [--format table\|json]` | Everything you can bind, and where it applies |
-| `koshi actions explain <ACTION> [--format table\|json]` | One action: where it applies, what it can aim at, examples |
+| `koshi actions list [--format table\|json]` | List supported bindable actions |
+| `koshi actions explain <ACTION> [--format table\|json]` | Explain one action and its targets |
+| `koshi keys list [--mode <MODE>] [--scope default\|user]` | List active shortcuts |
+| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source |
+| `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
+| `koshi keys validate <PATH>` | Check a keybinding file without applying it |
 
 ### Updating
 
-| Command | Does |
+| Command | Result |
 |---|---|
-| `koshi update` | Check for a newer koshi and install it |
+| `koshi update` | Check for and install a newer release |
 
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 
 ## Changelog
 
-### [v0.1.0] — coming soon
-
-First release. What it covers:
-
-- Split panes, stacked panes, fullscreen zoom, and border resize
-- Tabs: create, close, cycle
-- Terminal behavior: true color, text styles, full-screen programs, wide characters, per-pane scrollback
-- Multi-key shortcuts with a leader key, a hint bar, and clash detection
-- Lock mode to pass every key through to the program in the pane
-- Mouse: click, drag to resize, scroll, select, and copy to the clipboard
-- Config files for settings, themes, shortcuts, and saved layouts, with 25 themes included
-- Optional logging and self-update
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details
+MIT License. See [LICENSE](LICENSE).
