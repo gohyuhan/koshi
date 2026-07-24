@@ -3,8 +3,8 @@
 //!
 //! The keybinding file is the whole keybindings section, one file. Top-level
 //! setting nodes (`chord-timeout-ms 500`, `which-key-delay-ms 400`,
-//! `max-chord-depth 4`, `leader "<C-p>"`, `unlock-alternative "<A-u>"`, an
-//! optional `version 1`) sit beside `mode "name"` blocks holding the
+//! `max-chord-depth 4`, `leader "<C-p>"`, `unlock-alternative "<A-u>"`, a
+//! required `version 1`) sit beside `mode "name"` blocks holding the
 //! bindings: `bind "<C-y>" "core:new-tab"` maps a key sequence to a full
 //! action reference, and `remove "<Tab>"` clears the key in that mode, voiding
 //! whatever a lower layer bound on it. Named keys need their brackets — a bare
@@ -41,6 +41,7 @@ use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
 use crate::parser::parse_kdl;
+use crate::parser::unknown_key;
 use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
@@ -167,15 +168,24 @@ impl Walker<'_> {
                 other => {
                     self.error(
                         node.span(),
-                        format!(
-                            "unknown node `{other}`; expected a setting \
-                             (`chord-timeout-ms`, `which-key-delay-ms`, \
-                             `max-chord-depth`, `leader`, `unlock-alternative`, \
-                             `version`) or a `mode` block"
+                        unknown_key(
+                            other,
+                            &[
+                                "version",
+                                "chord-timeout-ms",
+                                "which-key-delay-ms",
+                                "max-chord-depth",
+                                "leader",
+                                "unlock-alternative",
+                                "mode",
+                            ],
                         ),
                     );
                 }
             }
+        }
+        if !seen.contains("version") {
+            self.error(doc.span(), "keybinding file must declare `version`");
         }
 
         // `<leader>` in a bind resolves against this file's own leader when
@@ -277,12 +287,7 @@ impl Walker<'_> {
                     "bind" => self.bind(child, leader, &mut keys),
                     "remove" => self.remove(child, leader, &mut removed),
                     other => {
-                        self.error(
-                            child.span(),
-                            format!(
-                                "unknown node `{other}` in `mode`; expected `bind` or `remove`"
-                            ),
-                        );
+                        self.error(child.span(), unknown_key(other, &["bind", "remove"]));
                     }
                 }
             }

@@ -26,6 +26,7 @@
 //! # Example
 //! A `koshi.kdl` of
 //! ```kdl
+//! version 1
 //! theme "midnight"
 //! scrollback {
 //!     max-lines 50000
@@ -52,7 +53,8 @@ use crate::layer::{
     PartialUpdateConfig,
 };
 use crate::parser::{
-    parse_kdl, value_bool, value_integer, value_nonempty_string, value_string, value_u16, value_u32,
+    parse_kdl, unknown_key, value_bool, value_integer, value_nonempty_string, value_string,
+    value_u16, value_u32,
 };
 use crate::types::WheelScroll;
 
@@ -94,8 +96,8 @@ pub struct AppConfigFile {
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `source` is not valid KDL, and
-/// [`ConfigError::Validation`] for a schema version newer than this build, a
-/// duplicate `update` section, or a bad value in the strict `update` section.
+/// [`ConfigError::Validation`] for a missing, duplicate, zero, or newer schema
+/// version, a duplicate `update` section, or a bad strict-update value.
 pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, ConfigError> {
     let doc = parse_kdl(path, source)?;
     let mut partial = PartialKoshiConfig::default();
@@ -117,6 +119,9 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
         }
         match name {
             "version" => {
+                if node.children().is_some() {
+                    return Err(validation("version", "`version` takes no children"));
+                }
                 let found = read_u32(node, "version")?;
                 check_version(found).map_err(|diagnostic| ConfigError::Validation {
                     key: "version".to_string(),
@@ -130,7 +135,7 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
                 Ok(name) => theme = Some(name),
                 Err(detail) => warnings.push(format!("ignored `theme`: {detail}")),
             },
-            "update" => partial.update = Some(parse_update(node)?),
+            "update" => partial.update = Some(parse_update(node, &mut warnings)?),
             "pane" => partial.pane = Some(parse_pane(node, &mut warnings)),
             "scrollback" => partial.scrollback = Some(parse_scrollback(node, &mut warnings)),
             "layout" => partial.layout = Some(parse_layout_defaults(node, &mut warnings)),
@@ -138,10 +143,11 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
             "copy" => partial.copy = Some(parse_copy(node, &mut warnings)),
             "terminal" => partial.terminal = Some(parse_terminal(node, &mut warnings)),
             "logging" => partial.logging = Some(parse_logging(node, &mut warnings)),
-            // Unknown top-level sections — a newer build's, or `plugins` until a
-            // plugin host exists to consume it — are ignored, not rejected.
-            _ => {}
+            other => warnings.push(format!("ignored {}", unknown_key(other, SECTIONS))),
         }
+    }
+    if !seen.contains("version") {
+        return Err(validation("version", "file must declare `version`"));
     }
     Ok(AppConfigFile {
         layer: partial,
@@ -151,8 +157,11 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
 }
 
 /// Reads the strict `update { … }` block: any bad field fails the whole parse
-/// so the update loader can fail closed. Unknown fields are ignored.
-fn parse_update(node: &KdlNode) -> Result<PartialUpdateConfig, ConfigError> {
+/// so the update loader can fail closed. Unknown fields become warnings.
+fn parse_update(
+    node: &KdlNode,
+    warnings: &mut Vec<String>,
+) -> Result<PartialUpdateConfig, ConfigError> {
     let mut update = PartialUpdateConfig::default();
     let Some(children) = node.children() else {
         return Ok(update);
@@ -165,7 +174,17 @@ fn parse_update(node: &KdlNode) -> Result<PartialUpdateConfig, ConfigError> {
                 update.check_interval_days = Some(read_u32(child, key)?);
             }
             "allow-prerelease" => update.allow_prerelease = Some(read_bool(child, key)?),
-            _ => {}
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("update.{other}"),
+                    &[
+                        "update.auto-check",
+                        "update.check-interval-days",
+                        "update.allow-prerelease",
+                    ],
+                )
+            )),
         }
     }
     Ok(update)
@@ -182,7 +201,13 @@ fn parse_pane(node: &KdlNode, warnings: &mut Vec<String>) -> PartialPaneConfig {
         match key {
             "min-cols" => set(&mut cfg.min_cols, value_u16(child), "pane", key, warnings),
             "min-rows" => set(&mut cfg.min_rows, value_u16(child), "pane", key, warnings),
-            other => warnings.push(format!("ignored unknown `pane.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("pane.{other}"),
+                    &["pane.min-cols", "pane.min-rows"],
+                )
+            )),
         }
     }
     cfg
@@ -218,7 +243,17 @@ fn parse_scrollback(node: &KdlNode, warnings: &mut Vec<String>) -> PartialScroll
                 key,
                 warnings,
             ),
-            other => warnings.push(format!("ignored unknown `scrollback.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("scrollback.{other}"),
+                    &[
+                        "scrollback.max-lines",
+                        "scrollback.max-bytes",
+                        "scrollback.scroll-on-input",
+                    ],
+                )
+            )),
         }
     }
     cfg
@@ -240,7 +275,10 @@ fn parse_layout_defaults(node: &KdlNode, warnings: &mut Vec<String>) -> PartialL
                 key,
                 warnings,
             ),
-            other => warnings.push(format!("ignored unknown `layout.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(&format!("layout.{other}"), &["layout.new-pane-direction"],)
+            )),
         }
     }
     cfg
@@ -270,7 +308,13 @@ fn parse_mouse(node: &KdlNode, warnings: &mut Vec<String>) -> PartialMouseConfig
                 warnings,
             ),
             "wheel" => set(&mut cfg.wheel, value_wheel(child), "mouse", key, warnings),
-            other => warnings.push(format!("ignored unknown `mouse.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("mouse.{other}"),
+                    &["mouse.border-resize", "mouse.scroll-lines", "mouse.wheel",],
+                )
+            )),
         }
     }
     cfg
@@ -292,7 +336,10 @@ fn parse_copy(node: &KdlNode, warnings: &mut Vec<String>) -> PartialCopyConfig {
                 key,
                 warnings,
             ),
-            other => warnings.push(format!("ignored unknown `copy.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(&format!("copy.{other}"), &["copy.trim-trailing-whitespace"],)
+            )),
         }
     }
     cfg
@@ -335,7 +382,17 @@ fn parse_terminal(node: &KdlNode, warnings: &mut Vec<String>) -> PartialTerminal
                 key,
                 warnings,
             ),
-            other => warnings.push(format!("ignored unknown `terminal.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("terminal.{other}"),
+                    &[
+                        "terminal.term",
+                        "terminal.colorterm",
+                        "terminal.default-shell",
+                    ],
+                )
+            )),
         }
     }
     cfg
@@ -371,7 +428,13 @@ fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingCo
                 key,
                 warnings,
             ),
-            other => warnings.push(format!("ignored unknown `logging.{other}`")),
+            other => warnings.push(format!(
+                "ignored {}",
+                unknown_key(
+                    &format!("logging.{other}"),
+                    &["logging.enabled", "logging.level", "logging.format"],
+                )
+            )),
         }
     }
     cfg

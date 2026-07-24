@@ -2,16 +2,17 @@
 
 The main settings file: which color theme to use, scrollback size, mouse
 behavior, the default split direction, what koshi advertises to child programs,
-and the self-update check. Every setting is optional and falls back to the
-default shown below.
+and the self-update check. `version` is required. Every other setting is
+optional and falls back to the default shown below.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `%APPDATA%\koshi\config\koshi.kdl` on Windows. See [README](README.md#where-the-files-go).
 
-**If a field is wrong:** it is skipped (keeps its default) and koshi logs it;
-every other field still applies. The one exception is the `update` section,
-which is stricter — see its note below.
+**If a field is wrong:** normal startup skips it (keeps its default) and logs
+it; every other field still applies. Unknown keys also name the nearest valid
+key. `koshi config check` and `migrate` reject any such warning. The one
+exception is the `update` section, which is stricter — see its note below.
 
 Settings are grouped into sections. Each section is a block; each field inside
 it is one node with one value. `theme` is the one setting that stands on its
@@ -123,8 +124,8 @@ network call and a typo must never silently turn it back on.
 ## Full example
 
 This is **every** `koshi.kdl` field, set to its **default** value — copy it as a
-complete baseline and change what you like. Every section and every field is
-optional; deleting any line just restores that default.
+complete baseline and change what you like. Keep `version`; deleting any other
+field restores its default.
 
 ```kdl
 // koshi.kdl — the complete default configuration.

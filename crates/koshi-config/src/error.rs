@@ -6,8 +6,8 @@
 //! parse error that keeps the original KDL source text and the byte span of
 //! the failure, so it can be pretty-printed with a caret pointing at the bad
 //! line; it flattens down into a plain [`ConfigError::Parse`] once it joins
-//! the aggregate. [`ConfigVersionDiagnostic`] reports that a config file
-//! declares a schema version newer than this build understands.
+//! the aggregate. [`ConfigVersionDiagnostic`] reports zero or a schema version
+//! newer than this build understands.
 //! [`ColorParseError`] reports a theme color value that is not valid
 //! `#RRGGBB` hex.
 
@@ -105,31 +105,38 @@ impl From<ConfigParseDiagnostic> for ConfigError {
     }
 }
 
-/// A config declaring a schema version newer than this build understands.
-/// Rendered as a full diagnostic with a stable code and a fix suggestion. An
-/// older or equal version is not an error — migration upgrades older files.
+/// A config schema version that cannot be used by this build.
 #[derive(Debug, Error, Diagnostic)]
-#[error("config schema version {found} is newer than this koshi supports ({supported})")]
-#[diagnostic(
-    code(koshi::config::version),
-    help("upgrade koshi to a build that understands this config")
-)]
-pub struct ConfigVersionDiagnostic {
-    /// The version declared in the config file.
-    pub found: u32,
-    /// The newest schema version this build supports.
-    pub supported: u32,
+pub enum ConfigVersionDiagnostic {
+    /// Schema versions start at one.
+    #[error("config schema version must be at least 1")]
+    #[diagnostic(code(koshi::config::version))]
+    TooOld,
+    /// The file comes from a newer Koshi schema.
+    #[error("config schema version {found} is newer than this koshi supports ({supported})")]
+    #[diagnostic(
+        code(koshi::config::version),
+        help("upgrade koshi to a build that understands this config")
+    )]
+    TooNew {
+        /// The version declared in the config file.
+        found: u32,
+        /// The newest schema version this build supports.
+        supported: u32,
+    },
 }
 
 /// Checks a config's declared schema `version` against [`SCHEMA_VERSION`]. An
-/// equal or older version is accepted, since migration upgrades older files.
+/// older supported version is accepted, since migration upgrades it.
 ///
 /// # Errors
-/// Returns a [`ConfigVersionDiagnostic`] when `found` is newer than
+/// Returns a [`ConfigVersionDiagnostic`] when `found` is zero or newer than
 /// [`SCHEMA_VERSION`].
 pub fn check_version(found: u32) -> Result<(), ConfigVersionDiagnostic> {
-    if found > SCHEMA_VERSION {
-        Err(ConfigVersionDiagnostic {
+    if found == 0 {
+        Err(ConfigVersionDiagnostic::TooOld)
+    } else if found > SCHEMA_VERSION {
+        Err(ConfigVersionDiagnostic::TooNew {
             found,
             supported: SCHEMA_VERSION,
         })

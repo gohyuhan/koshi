@@ -10,6 +10,9 @@ pub mod cli;
 /// Reading the config files at startup into override layers for the runtime.
 pub mod config;
 
+/// Local config path, explanation, validation, and migration commands.
+pub mod config_command;
+
 /// Answering the discovery queries across every running koshi: probe each
 /// advertised session, sweep the ones that are gone, build listing rows.
 pub mod discovery;

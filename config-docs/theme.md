@@ -40,9 +40,9 @@ The theme's name **is** its file name — `themes/midnight.kdl` is the theme
 **If a color is wrong:** it is skipped (keeps its default) and koshi logs it;
 every other color still applies.
 
-The file is the theme itself — no wrapping block, just an optional `version`
-and a `colors` block. Every color is a `#RRGGBB` hex string (the leading `#` is
-optional).
+The file is the theme itself — no wrapping block, just a required `version`
+and an optional `colors` block. Every color is a `#RRGGBB` hex string (the
+leading `#` is optional).
 
 ## `colors`
 

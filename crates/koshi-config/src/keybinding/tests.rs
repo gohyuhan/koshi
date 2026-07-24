@@ -10,7 +10,15 @@ use super::*;
 
 /// Parses `source` as a keybinding file at a fixed test path.
 fn parse(source: &str) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
-    parse_keybindings(Path::new("keybinding.kdl"), source)
+    let source = if source
+        .lines()
+        .any(|line| line.trim_start().starts_with("version "))
+    {
+        source.to_string()
+    } else {
+        format!("version 1\n{source}")
+    };
+    parse_keybindings(Path::new("keybinding.kdl"), &source)
 }
 
 /// Parses `source`, expecting schema violations, and returns their messages.
@@ -38,9 +46,23 @@ fn seq2(first: KeyChord, second: KeyChord) -> KeySequence {
 }
 
 #[test]
-fn empty_file_yields_the_empty_partial() {
+fn version_only_file_yields_the_empty_partial() {
     let partial = parse("").expect("empty file is a valid empty layer");
     assert_eq!(partial, PartialKeybindingsConfig::default());
+}
+
+#[test]
+fn missing_version_is_rejected() {
+    assert_eq!(
+        match parse_keybindings(Path::new("keybinding.kdl"), "") {
+            Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message().to_string())
+                .collect::<Vec<_>>(),
+            result => panic!("expected missing-version error, got {result:?}"),
+        },
+        vec!["keybinding file must declare `version`".to_string()]
+    );
 }
 
 #[test]
@@ -268,17 +290,13 @@ fn duplicate_setting_node_is_rejected() {
 #[test]
 fn unknown_top_level_node_is_rejected() {
     let msgs = messages("keybindings { }");
-    assert_eq!(msgs.len(), 1);
-    assert!(msgs[0].starts_with("unknown node `keybindings`"));
+    assert_eq!(msgs, ["unknown key `keybindings`; did you mean `version`?"]);
 }
 
 #[test]
 fn unknown_node_inside_mode_is_rejected() {
     let msgs = messages(r#"mode "normal" { unbind "<Tab>" }"#);
-    assert_eq!(
-        msgs,
-        ["unknown node `unbind` in `mode`; expected `bind` or `remove`"]
-    );
+    assert_eq!(msgs, ["unknown key `unbind`; did you mean `bind`?"]);
 }
 
 #[test]

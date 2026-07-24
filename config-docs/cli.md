@@ -11,6 +11,28 @@ flag and accepted value.
 | `koshi --profile <NAME>` | Open `profile/<NAME>.kdl` |
 | `koshi update` | Check for and install the latest release |
 
+## Configuration
+
+| Command | Result |
+|---|---|
+| `koshi config path` | Print the config directory for this platform |
+| `koshi config explain <KEY>` | Show one file-qualified key's file, default, and meaning |
+| `koshi config check` | Validate every present config file without changing it |
+| `koshi config migrate` | Validate all files, then move old schemas to the newest supported version |
+
+Explain keys include their file kind: `koshi.pane.min-cols`,
+`keybinding.chord-timeout-ms`, `theme.colors.accent`, and `profile.version`.
+An unknown key exits 2 and suggests the nearest known key.
+
+`check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, every
+`themes/*.kdl`, and every `profile/*.kdl`. Migration does not repair bad KDL or
+bad fields. Example: valid version 1 + current version 3 results in 1 → 2 → 3;
+invalid version 1 stops with no config file written.
+
+Each matching config path must be a regular file. Both commands report all
+read and schema errors found before migration writes anything. A symbolic link
+to a regular file stays a link; migration updates its target.
+
 ## Choosing a target
 
 Inside a koshi pane, an omitted target means that pane's session and current

@@ -88,3 +88,32 @@ pub(crate) fn value_u16(node: &KdlNode) -> Result<u16, String> {
 pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
     u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
 }
+
+/// Names the nearest allowed key for an unknown config key.
+#[must_use]
+pub fn unknown_key(key: &str, allowed: &[&str]) -> String {
+    let nearest = allowed
+        .iter()
+        .min_by_key(|candidate| edit_distance(key, candidate))
+        .expect("every config key set is non-empty");
+    format!("unknown key `{key}`; did you mean `{nearest}`?")
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=right.chars().count()).collect();
+    let mut current = vec![0; previous.len()];
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            current[right_index + 1] = if left_char == right_char {
+                previous[right_index]
+            } else {
+                1 + previous[right_index]
+                    .min(current[right_index])
+                    .min(previous[right_index + 1])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.chars().count()]
+}

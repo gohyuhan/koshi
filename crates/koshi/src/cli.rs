@@ -166,9 +166,8 @@ pub enum FormatArg {
 /// verbs) carry typed target and `--format` arguments; their answers are
 /// rendered by [`crate::output`]. `actions` introspects the action registry
 /// through its `list`/`explain` subcommands, and `keys` introspects the
-/// keymap through its own subcommand tree. The remaining verbs (`config`,
-/// `plugin`) are declared bare so the full grammar is visible in `--help`;
-/// each gains its argument surface with the work that implements it.
+/// keymap through its own subcommand tree. `config` validates and migrates
+/// files locally. `plugin` remains bare until its argument surface is built.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// Create a new session (its name is system-generated).
@@ -344,8 +343,12 @@ pub enum CliCommand {
         #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client: Option<ClientId>,
     },
-    /// Inspect and validate configuration.
-    Config,
+    /// Inspect, validate, and migrate configuration.
+    Config {
+        /// What to do with the config.
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Manage plugins.
     Plugin,
     /// Download and install the latest koshi release.
@@ -423,6 +426,22 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: KeysCommand,
     },
+}
+
+/// Local config operations.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum ConfigCommand {
+    /// Print the platform config directory.
+    Path,
+    /// Explain one file-qualified config key.
+    Explain {
+        /// Key to explain, such as `koshi.pane.min-cols`.
+        key: String,
+    },
+    /// Validate every known config file without changing it.
+    Check,
+    /// Validate then migrate every known config file.
+    Migrate,
 }
 
 /// Which keymap layer authored a binding, as typed on the command line. A
@@ -566,9 +585,8 @@ impl CliCommand {
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
-    /// discovery and introspection queries (`inspect`, the `list-*` verbs,
-    /// `actions`, and `keys`, all rendered locally), and the verbs whose
-    /// argument surfaces are not built yet (`config`, `plugin`).
+    /// discovery and local queries (`inspect`, the `list-*` verbs, `actions`,
+    /// `keys`, and `config`), plus `plugin`, whose arguments are not built.
     #[must_use]
     pub fn to_action(&self, targets: &ResolvedTargets) -> Option<(ActionRef, Command)> {
         let (name, command) = match self {
@@ -731,7 +749,7 @@ impl CliCommand {
             | CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
             | CliCommand::Doctor
-            | CliCommand::Config
+            | CliCommand::Config { .. }
             | CliCommand::Plugin
             | CliCommand::Update
             | CliCommand::Actions { .. }
