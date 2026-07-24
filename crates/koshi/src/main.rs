@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use koshi::cli::{ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets};
+use koshi::config_command;
 use koshi::discovery::{self, Discovered};
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
@@ -54,6 +55,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // Every keys verb is a read-only query folding the user's keybinding
         // file onto the built-in defaults locally.
         return run_keys_query(command);
+    }
+
+    if let Some(CliCommand::Config { command }) = &cli.command {
+        return config_command::run(command);
     }
 
     if let Some(CliCommand::Update) = &cli.command {

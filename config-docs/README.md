@@ -1,7 +1,8 @@
 # koshi configuration
 
-koshi reads four kinds of KDL file. Each is optional — with none of them, koshi
-runs on its built-in defaults.
+koshi reads four kinds of KDL file. Each file is optional — with none of them,
+koshi runs on its built-in defaults. Every file that exists must start with a
+supported `version`.
 
 | File | What it sets | Reference |
 |---|---|---|
@@ -49,15 +50,36 @@ You do not have to write a theme yourself: [`themes-example/`](../themes-example
 ships 25 ready-made ones (Dracula, Gruvbox, Nord, Catppuccin, Tokyo Night, Rosé
 Pine, Solarized and more) to copy into `themes/`.
 
-## Versions
+## Versions and migration
 
-Every field table has a **Since** column: the lowest koshi version that
-understands that field. A field newer than your koshi is simply ignored, so a
-config written for a newer koshi still works on an older one (minus the newer
-fields). Every field so far has been here since **0.1.0**, the first release.
+Every file must declare one top-level `version` with one integer argument,
+starting at 1, and no child block:
 
-A file may declare its own `version` (an integer). koshi rejects a file whose
-version is newer than the running build understands, and otherwise ignores it.
+```kdl
+version 1
+```
+
+`koshi config check` validates every present `koshi.kdl`, `keybinding.kdl`,
+`themes/*.kdl`, and `profile/*.kdl` without changing them. A missing version,
+bad KDL, bad value, unknown key, or unsupported version makes the check fail.
+Each matching path must be a regular file. The check reports all file-read and
+schema errors it can find in one run. A symbolic link to a regular file is
+allowed; migration updates its target and keeps the link.
+
+`koshi config migrate` first validates every present file. It then moves each
+old file through every version in order: version 1 to 2, then 2 to 3, until it
+reaches the newest schema this Koshi supports. Every step is checked before the
+next step starts. A bad old file or missing step stops migration before any
+config file is written.
+
+Migration helps a valid old file adopt a valid new shape. It does not repair a
+file that was already wrong. Each changed file is replaced atomically, so a
+reader sees the whole old file or the whole new file, never half a write. Koshi
+never runs migration during startup; only this command changes config files.
+
+Files are replaced one at a time. If a later write fails, the error lists every
+earlier file that finished migration. It also says the failing file may contain
+the migrated data, because a durability check can fail after its atomic replace.
 
 ## When a file has a mistake
 
@@ -69,5 +91,8 @@ version is newer than the running build understands, and otherwise ignores it.
   in the file drops the *whole* file back to defaults, because a half-applied
   keymap or a half-built layout (some panes spawned, some silently missing) is
   worse than a clean fallback.
+- **Unknown keys name the nearest valid key.** `min-col 2` results in
+  ``did you mean `min-cols`?``. `koshi config check` treats that typo as an
+  error even though normal startup can keep the other field-partial settings.
 - **A theme koshi cannot find or parse** falls back to the built-in `default`
   theme, with the reason logged. The rest of `koshi.kdl` still applies.

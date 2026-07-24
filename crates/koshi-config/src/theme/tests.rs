@@ -10,7 +10,27 @@ use super::parse_theme;
 
 /// Parses `source` as a theme file, panicking on error.
 fn parse(source: &str) -> (PartialThemeConfig, Vec<String>) {
-    parse_theme(Path::new("themes/midnight.kdl"), source).expect("valid theme")
+    let source = if source
+        .lines()
+        .any(|line| line.trim_start().starts_with("version "))
+    {
+        source.to_string()
+    } else {
+        format!("version 1\n{source}")
+    };
+    parse_theme(Path::new("themes/midnight.kdl"), &source).expect("valid theme")
+}
+
+#[test]
+fn missing_version_is_a_validation_error() {
+    let error = parse_theme(Path::new("themes/midnight.kdl"), "colors {}")
+        .expect_err("version is required");
+
+    let ConfigError::Validation { key, detail } = error else {
+        panic!("expected version validation error, got {error:?}");
+    };
+    assert_eq!(key, "version");
+    assert_eq!(detail, "file must declare `version`");
 }
 
 #[test]
@@ -79,7 +99,9 @@ fn an_unknown_color_role_warns() {
     let (_, warnings) = parse("colors {\n    foreground \"#ffffff\"\n}");
     assert_eq!(
         warnings,
-        vec!["ignored unknown `colors.foreground`".to_string()]
+        vec![
+            "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?".to_string()
+        ]
     );
 }
 
@@ -97,6 +119,18 @@ fn a_newer_schema_version_is_rejected() {
     let error = parse_theme(Path::new("themes/midnight.kdl"), "version 999")
         .expect_err("version newer than this build");
     assert!(matches!(error, ConfigError::Validation { key, .. } if key == "version"));
+}
+
+#[test]
+fn a_version_with_children_is_rejected() {
+    let error = parse_theme(Path::new("themes/midnight.kdl"), "version 1 {}")
+        .expect_err("version children rejected");
+
+    let ConfigError::Validation { key, detail } = error else {
+        panic!("expected version validation error, got {error:?}");
+    };
+    assert_eq!(key, "version");
+    assert_eq!(detail, "`version` takes no children");
 }
 
 #[test]
@@ -140,16 +174,19 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
 }
 
 #[test]
-fn a_name_node_is_ignored_like_any_other_unknown_top_level_node() {
+fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
     // The theme's name comes from its file name, so a `name` node in the file
-    // is not part of the schema and is passed over in silence.
+    // is not part of the schema.
     let (theme, warnings) = parse("name \"solarized\"\ncolors {\n    accent \"#ffffff\"\n}");
     assert_eq!(theme.name, None);
     assert_eq!(
         theme.colors.expect("colors present").accent,
         Some(RgbColor::new(0xff, 0xff, 0xff))
     );
-    assert!(warnings.is_empty());
+    assert_eq!(
+        warnings,
+        ["ignored unknown key `name`; did you mean `colors`?"]
+    );
 }
 
 #[test]

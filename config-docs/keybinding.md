@@ -16,7 +16,8 @@ over the default for the same key; keys you do not mention keep their defaults.
 
 ## Top-level settings
 
-All optional, each at most once, sitting beside the `mode` blocks.
+`version` is required. Every other setting is optional and may appear at most
+once beside the `mode` blocks.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

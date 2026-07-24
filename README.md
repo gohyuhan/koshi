@@ -125,7 +125,8 @@ Bind them yourself in `keybinding.kdl`.
 ## Configuration
 
 koshi reads four kinds of [KDL](https://kdl.dev) file, all optional. With none
-of them, koshi runs on its built-in defaults.
+of them, koshi runs on its built-in defaults. A file that exists must declare
+`version 1`.
 
 | File | Sets |
 |---|---|
@@ -144,6 +145,11 @@ They live in one directory per platform:
 
 Full reference: [config-docs/](config-docs/README.md). Ready-made themes to copy
 into `themes/`: [themes-example/](themes-example/).
+
+`koshi config path` prints this directory. `koshi config explain <KEY>` shows a
+setting's file and default. `koshi config check` validates every config file.
+`koshi config migrate` validates all files, then moves valid old schemas
+forward one version at a time.
 
 ## CLI Reference
 

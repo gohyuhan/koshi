@@ -18,6 +18,10 @@ fn maps_each_error_class_to_its_exit_code() {
         CliExitCode::UsageOrConfig
     );
     assert_eq!(
+        CliExitCode::from(&CliError::Config { detail: "x".into() }),
+        CliExitCode::UsageOrConfig
+    );
+    assert_eq!(
         CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }),
         CliExitCode::UsageOrConfig
     );
@@ -48,6 +52,10 @@ fn maps_each_error_class_to_its_exit_code() {
 fn exit_codes_are_the_documented_numbers() {
     assert_eq!(
         CliExitCode::from(&CliError::InvalidArgs { detail: "x".into() }).code(),
+        2
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::Config { detail: "x".into() }).code(),
         2
     );
     assert_eq!(
@@ -125,6 +133,13 @@ fn messages_render_without_a_koshi_prefix() {
         .to_string(),
         "boom"
     );
+    assert_eq!(
+        CliError::Config {
+            detail: "bad key".into()
+        }
+        .to_string(),
+        "config failed: bad key"
+    );
 }
 
 #[test]
@@ -139,6 +154,10 @@ fn category_classifies_by_variant() {
     );
     assert_eq!(
         CliError::InvalidArgs { detail: "x".into() }.category(),
+        DomainCategory::Cli
+    );
+    assert_eq!(
+        CliError::Config { detail: "x".into() }.category(),
         DomainCategory::Cli
     );
     assert_eq!(
@@ -170,6 +189,10 @@ fn severity_is_recoverable_for_every_variant() {
     );
     assert_eq!(
         CliError::InvalidArgs { detail: "x".into() }.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(
+        CliError::Config { detail: "x".into() }.severity(),
         Severity::Recoverable
     );
     assert_eq!(

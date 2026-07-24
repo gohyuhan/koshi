@@ -21,6 +21,7 @@ shell.
 koshi starts a single shell instead, because a half-built layout — some panes
 spawned, some silently missing — is worse than a clean fallback. A profile that
 names a profile which does not exist also falls back to a single shell.
+`koshi config check` validates every saved profile before launch.
 
 > **Plugin panes are not supported yet.** A profile that uses a `plugin` pane
 > cannot launch (there is no plugin host to fill it) and falls back to a single

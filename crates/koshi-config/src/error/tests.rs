@@ -12,16 +12,22 @@ fn current_version_is_accepted() {
 }
 
 #[test]
-fn older_version_is_accepted() {
-    // Older files are not an error here — migration upgrades them.
-    assert!(check_version(SCHEMA_VERSION - 1).is_ok());
+fn version_zero_is_rejected() {
+    let error = check_version(0).expect_err("zero version must fail");
+    assert_eq!(
+        error.to_string(),
+        "config schema version must be at least 1"
+    );
 }
 
 #[test]
 fn newer_version_is_rejected() {
     let err = check_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
-    assert_eq!(err.found, SCHEMA_VERSION + 1);
-    assert_eq!(err.supported, SCHEMA_VERSION);
+    let ConfigVersionDiagnostic::TooNew { found, supported } = err else {
+        panic!("expected newer-version error, got {err:?}");
+    };
+    assert_eq!(found, SCHEMA_VERSION + 1);
+    assert_eq!(supported, SCHEMA_VERSION);
 }
 
 #[test]

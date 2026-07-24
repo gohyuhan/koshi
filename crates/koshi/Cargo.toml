@@ -27,6 +27,7 @@ koshi-paths = { version = "0.1.0", path = "../koshi-paths" }
 koshi-pty = { version = "0.1.0", path = "../koshi-pty" }
 koshi-renderer = { version = "0.1.0", path = "../koshi-renderer" }
 koshi-runtime = { version = "0.1.0", path = "../koshi-runtime" }
+koshi-storage = { version = "0.1.0", path = "../koshi-storage" }
 tracing = "0.1.44"
 clap = { version = "4.6.1", features = ["derive"] }
 uuid = "1.23.4"

@@ -25,14 +25,40 @@ fn parse_with_warnings(source: &str) -> (PartialKoshiConfig, Vec<String>) {
 /// Parses `source` as `koshi.kdl` whole — layer, theme name, and warnings —
 /// panicking on error.
 fn parse_file(source: &str) -> AppConfigFile {
-    parse_app_config(Path::new("koshi.kdl"), source).expect("valid config")
+    let source = current_source(source);
+    parse_app_config(Path::new("koshi.kdl"), &source).expect("valid config")
+}
+
+fn current_source(source: &str) -> String {
+    if source
+        .lines()
+        .any(|line| line.trim_start().starts_with("version "))
+    {
+        source.to_string()
+    } else if let Some(source) = source.strip_prefix('\u{feff}') {
+        format!("\u{feff}version 1\n{source}")
+    } else {
+        format!("version 1\n{source}")
+    }
 }
 
 #[test]
-fn empty_source_sets_no_layer() {
+fn version_only_source_sets_no_layer() {
     let file = parse_file("");
     assert_eq!(file.layer.update, None);
     assert_eq!(file.theme, None);
+}
+
+#[test]
+fn missing_version_is_a_validation_error() {
+    let error =
+        parse_app_config(Path::new("koshi.kdl"), "pane {}").expect_err("version is required");
+
+    let ConfigError::Validation { key, detail } = error else {
+        panic!("expected version validation error, got {error:?}");
+    };
+    assert_eq!(key, "version");
+    assert_eq!(detail, "file must declare `version`");
 }
 
 #[test]
@@ -142,23 +168,27 @@ fn empty_update_block_sets_an_all_none_section() {
 }
 
 #[test]
-fn an_unknown_top_level_node_is_ignored() {
+fn an_unknown_top_level_node_warns_with_a_suggestion() {
     let (layer, warnings) = parse_with_warnings("frobnicate {\n    whatever 5\n}");
     assert_eq!(layer.update, None);
     assert_eq!(layer.mouse, None);
-    assert!(
-        warnings.is_empty(),
-        "an unknown section is silent, not a warning"
+    assert_eq!(
+        warnings,
+        vec!["ignored unknown key `frobnicate`; did you mean `update`?".to_string()]
     );
 }
 
 #[test]
-fn unknown_field_inside_update_is_ignored() {
-    let update = parse("update {\n    auto-check #true\n    frequency 5\n}")
-        .update
-        .expect("update section present");
+fn unknown_field_inside_update_warns() {
+    let (layer, warnings) =
+        parse_with_warnings("update {\n    auto-check #true\n    frequency 5\n}");
+    let update = layer.update.expect("update section present");
     assert_eq!(update.auto_check, Some(true));
     assert_eq!(update.check_interval_days, None);
+    assert_eq!(
+        warnings,
+        ["ignored unknown key `update.frequency`; did you mean `update.auto-check`?"]
+    );
 }
 
 #[test]
@@ -244,6 +274,18 @@ fn a_duplicate_version_is_a_hard_error() {
     )
     .expect_err("duplicate version rejected");
     assert!(matches!(error, ConfigError::Validation { key, .. } if key == "version"));
+}
+
+#[test]
+fn a_version_with_children_is_a_validation_error() {
+    let error = parse_app_config(Path::new("koshi.kdl"), "version 1 {}")
+        .expect_err("version children rejected");
+
+    let ConfigError::Validation { key, detail } = error else {
+        panic!("expected version validation error, got {error:?}");
+    };
+    assert_eq!(key, "version");
+    assert_eq!(detail, "`version` takes no children");
 }
 
 #[test]
@@ -481,7 +523,10 @@ fn an_unknown_field_in_a_section_warns() {
     let (_, warnings) = parse_with_warnings("scrollback {\n    frequency 5\n}");
     assert_eq!(
         warnings,
-        vec!["ignored unknown `scrollback.frequency`".to_string()]
+        vec![
+            "ignored unknown key `scrollback.frequency`; did you mean `scrollback.max-lines`?"
+                .to_string()
+        ]
     );
 }
 

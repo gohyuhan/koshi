@@ -18,6 +18,7 @@ pub mod key_sequence;
 pub mod keybinding;
 pub mod keymap_merge;
 pub mod layer;
+pub mod migration;
 pub mod parser;
 pub mod profile;
 pub mod theme;

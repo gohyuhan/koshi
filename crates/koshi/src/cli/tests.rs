@@ -191,7 +191,6 @@ fn flagless_subcommands_parse_to_their_variants() {
         ("lock", CliCommand::Lock { client: None }),
         ("unlock", CliCommand::Unlock { client: None }),
         ("toggle-lock", CliCommand::ToggleLock { client: None }),
-        ("config", CliCommand::Config),
         ("plugin", CliCommand::Plugin),
         (
             "list-tabs",
@@ -218,6 +217,44 @@ fn flagless_subcommands_parse_to_their_variants() {
     for (name, expected) in cases {
         assert_eq!(parse(&["koshi", name]).command.as_ref(), Some(expected));
     }
+}
+
+#[test]
+fn config_subcommands_parse_without_a_default_command() {
+    assert_eq!(
+        parse(&["koshi", "config", "path"]).command,
+        Some(CliCommand::Config {
+            command: ConfigCommand::Path,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "config", "explain", "koshi.pane.min-cols"]).command,
+        Some(CliCommand::Config {
+            command: ConfigCommand::Explain {
+                key: "koshi.pane.min-cols".to_string(),
+            },
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "config", "check"]).command,
+        Some(CliCommand::Config {
+            command: ConfigCommand::Check,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "config", "migrate"]).command,
+        Some(CliCommand::Config {
+            command: ConfigCommand::Migrate,
+        })
+    );
+    assert_eq!(
+        parse_err(&["koshi", "config"]).kind(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    assert_eq!(
+        parse_err(&["koshi", "config", "default"]).kind(),
+        ErrorKind::InvalidSubcommand
+    );
 }
 
 // --- Keys subcommands ---
@@ -1442,7 +1479,7 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "list-sessions"],
         &["koshi", "kill-session"],
         &["koshi", "doctor"],
-        &["koshi", "config"],
+        &["koshi", "config", "path"],
         &["koshi", "plugin"],
         &["koshi", "actions", "list"],
         &[

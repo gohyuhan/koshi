@@ -201,12 +201,12 @@ fn validate_file_reports_parse_failures_and_clean_files() {
     let bad = dir.join("koshi-keymap-test-bad.kdl");
     std::fs::write(
         &good,
-        "mode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
+        "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
     )
     .expect("write");
     std::fs::write(
         &bad,
-        "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
+        "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
     )
     .expect("write");
 

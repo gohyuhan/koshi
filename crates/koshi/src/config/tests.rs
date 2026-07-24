@@ -152,7 +152,7 @@ fn a_selected_theme_is_read_from_the_themes_directory_and_named_after_its_file()
     write_theme(
         dir.path(),
         "midnight",
-        "colors {\n    accent \"#f5c2ff\"\n}\n",
+        "version 1\ncolors {\n    accent \"#f5c2ff\"\n}\n",
     );
     let mut warnings = Vec::new();
     let layer = load_theme(dir.path(), "midnight", &mut warnings).expect("theme loads");
@@ -227,14 +227,14 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
     let path = write_theme(
         dir.path(),
         "midnight",
-        "colors {\n    foreground \"#ffffff\"\n}\n",
+        "version 1\ncolors {\n    foreground \"#ffffff\"\n}\n",
     );
     let mut warnings = Vec::new();
     assert!(load_theme(dir.path(), "midnight", &mut warnings).is_some());
     assert_eq!(
         warnings,
         vec![format!(
-            "{}: ignored unknown `colors.foreground`",
+            "{}: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
             path.display()
         )]
     );
@@ -335,7 +335,7 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
     let path = dir.path().join("keybinding.kdl");
     std::fs::write(
         &path,
-        "mode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
+        "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
     )
     .expect("write");
     let mut warnings = Vec::new();

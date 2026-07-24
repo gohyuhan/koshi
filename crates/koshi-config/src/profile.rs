@@ -32,7 +32,7 @@ use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
 use crate::error::{check_version, ConfigParseDiagnostic};
-use crate::parser::parse_kdl;
+use crate::parser::{parse_kdl, unknown_key};
 
 #[cfg(test)]
 mod tests;
@@ -230,10 +230,7 @@ impl Walker<'_> {
                         }
                     }
                 }
-                other => self.error(
-                    node.span(),
-                    format!("unknown node `{other}`; a profile holds `version` and `tab` nodes"),
-                ),
+                other => self.error(node.span(), unknown_key(other, &["version", "tab"])),
             }
         }
         if !version_seen {
@@ -249,7 +246,7 @@ impl Walker<'_> {
         })
     }
 
-    /// Validates the `version` node: one integer argument, nothing else,
+    /// Validates the `version` node: one integer at least one, nothing else,
     /// no newer than this build's schema.
     fn version(&mut self, node: &KdlNode) {
         if node.children().is_some() {
@@ -322,9 +319,16 @@ impl Walker<'_> {
                     }
                     other => self.error(
                         child.span(),
-                        format!(
-                            "unknown node `{other}` in `tab`; expected `focus` or a layout \
-                             node (`pane`, `plugin`, `horizontal`, `vertical`, `stack`)"
+                        unknown_key(
+                            &format!("tab.{other}"),
+                            &[
+                                "tab.focus",
+                                "tab.pane",
+                                "tab.plugin",
+                                "tab.horizontal",
+                                "tab.vertical",
+                                "tab.stack",
+                            ],
                         ),
                     ),
                 }
@@ -421,13 +425,22 @@ impl Walker<'_> {
                     "env" => self.env(child, &mut env),
                     _ => {
                         if !self.leaf_config(child, context, &mut leaf) {
+                            let key = format!("pane.{}", child.name().value());
                             self.error(
                                 child.span(),
-                                format!(
-                                    "unknown node `{}` in `pane`; expected `command`, `cwd`, \
-                                     `env`, `size`, `weight`, `min`, `preferred`, `focus`, or \
-                                     `expanded`",
-                                    child.name().value()
+                                unknown_key(
+                                    &key,
+                                    &[
+                                        "pane.command",
+                                        "pane.cwd",
+                                        "pane.env",
+                                        "pane.size",
+                                        "pane.weight",
+                                        "pane.min",
+                                        "pane.preferred",
+                                        "pane.focus",
+                                        "pane.expanded",
+                                    ],
                                 ),
                             );
                         }
@@ -470,12 +483,19 @@ impl Walker<'_> {
         if let Some(children) = node.children() {
             for child in children.nodes() {
                 if !self.leaf_config(child, context, &mut leaf) {
+                    let key = format!("plugin.{}", child.name().value());
                     self.error(
                         child.span(),
-                        format!(
-                            "unknown node `{}` in `plugin`; expected `size`, `weight`, `min`, \
-                             `preferred`, `focus`, or `expanded`",
-                            child.name().value()
+                        unknown_key(
+                            &key,
+                            &[
+                                "plugin.size",
+                                "plugin.weight",
+                                "plugin.min",
+                                "plugin.preferred",
+                                "plugin.focus",
+                                "plugin.expanded",
+                            ],
                         ),
                     );
                 }
@@ -513,12 +533,22 @@ impl Walker<'_> {
                 } else if self.sizing_config(child, &mut sizing) {
                     // recorded into `sizing`
                 } else {
+                    let key = format!("{name}.{child_name}");
                     self.error(
                         child.span(),
-                        format!(
-                            "unknown node `{child_name}` in `{name}`; expected a layout node \
-                             (`pane`, `plugin`, `horizontal`, `vertical`, `stack`) or sizing \
-                             (`size`, `weight`, `min`, `preferred`)"
+                        unknown_key(
+                            &key,
+                            &[
+                                &format!("{name}.pane"),
+                                &format!("{name}.plugin"),
+                                &format!("{name}.horizontal"),
+                                &format!("{name}.vertical"),
+                                &format!("{name}.stack"),
+                                &format!("{name}.size"),
+                                &format!("{name}.weight"),
+                                &format!("{name}.min"),
+                                &format!("{name}.preferred"),
+                            ],
                         ),
                     );
                 }
@@ -588,9 +618,16 @@ impl Walker<'_> {
                 } else {
                     self.error(
                         child.span(),
-                        format!(
-                            "unknown node `{child_name}` in `stack`; expected `pane`, \
-                             `plugin`, or sizing (`size`, `weight`, `min`, `preferred`)"
+                        unknown_key(
+                            &format!("stack.{child_name}"),
+                            &[
+                                "stack.pane",
+                                "stack.plugin",
+                                "stack.size",
+                                "stack.weight",
+                                "stack.min",
+                                "stack.preferred",
+                            ],
                         ),
                     );
                 }

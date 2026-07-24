@@ -722,6 +722,7 @@ dependencies = [
  "koshi-pty",
  "koshi-renderer",
  "koshi-runtime",
+ "koshi-storage",
  "koshi-terminal",
  "koshi-test-support",
  "ratatui",

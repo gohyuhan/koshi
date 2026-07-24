@@ -30,6 +30,9 @@ pub enum CliError {
     /// A keybinding file dry-run found problems.
     #[error("keybinding file {path} failed validation")]
     InvalidKeymapFile { path: String },
+    /// A config command could not read, validate, explain, or migrate config.
+    #[error("config failed: {detail}")]
+    Config { detail: String },
     /// The `KOSHI` marker is set but the rest of the in-session environment
     /// is missing or malformed.
     #[error("broken in-session environment: {detail}")]
@@ -78,6 +81,7 @@ impl DomainError for CliError {
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
             | CliError::InvalidKeymapFile { .. }
+            | CliError::Config { .. }
             | CliError::InSessionEnv { .. } => DomainCategory::Cli,
             CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
             CliError::SessionNotFound { .. }
@@ -105,6 +109,7 @@ impl From<&CliError> for CliExitCode {
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
             | CliError::InvalidKeymapFile { .. }
+            | CliError::Config { .. }
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
             CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,

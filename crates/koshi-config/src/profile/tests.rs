@@ -294,7 +294,10 @@ fn focus_on_first_stack_member_without_expanded_is_allowed() {
 
 #[test]
 fn older_version_is_accepted() {
-    assert!(parse("version 0\ntab { pane }").is_ok());
+    assert_eq!(
+        messages("version 0\ntab { pane }"),
+        ["config schema version must be at least 1"]
+    );
 }
 
 #[test]
@@ -483,7 +486,7 @@ fn missing_tabs_is_reported() {
 fn unknown_top_level_node_is_reported() {
     assert_eq!(
         messages("version 1\npane\ntab { pane }"),
-        ["unknown node `pane`; a profile holds `version` and `tab` nodes"]
+        ["unknown key `pane`; did you mean `tab`?"]
     );
 }
 
@@ -550,10 +553,7 @@ fn duplicate_pane_focus_marker_is_reported() {
 fn unknown_node_in_tab_is_reported() {
     assert_eq!(
         messages("version 1\ntab { theme \"dark\"; pane }"),
-        [
-            "unknown node `theme` in `tab`; expected `focus` or a layout node (`pane`, \
-             `plugin`, `horizontal`, `vertical`, `stack`)"
-        ]
+        ["unknown key `tab.theme`; did you mean `tab.pane`?"]
     );
 }
 
@@ -604,11 +604,7 @@ fn stack_arguments_are_reported() {
 fn unknown_node_in_split_is_reported() {
     assert_eq!(
         messages("version 1\ntab { vertical { border 2; pane; pane } }"),
-        [
-            "unknown node `border` in `vertical`; expected a layout node (`pane`, `plugin`, \
-             `horizontal`, `vertical`, `stack`) or sizing (`size`, `weight`, `min`, \
-             `preferred`)"
-        ]
+        ["unknown key `vertical.border`; did you mean `vertical.pane`?"]
     );
 }
 
@@ -616,10 +612,7 @@ fn unknown_node_in_split_is_reported() {
 fn unknown_node_in_stack_is_reported() {
     assert_eq!(
         messages("version 1\ntab { stack { focus; pane; pane } }"),
-        [
-            "unknown node `focus` in `stack`; expected `pane`, `plugin`, or sizing (`size`, \
-             `weight`, `min`, `preferred`)"
-        ]
+        ["unknown key `stack.focus`; did you mean `stack.pane`?"]
     );
 }
 
@@ -1045,10 +1038,7 @@ fn empty_cwd_is_reported() {
 fn unknown_pane_config_is_reported() {
     assert_eq!(
         messages("version 1\ntab { pane { colour \"red\" } }"),
-        [
-            "unknown node `colour` in `pane`; expected `command`, `cwd`, `env`, `size`, \
-             `weight`, `min`, `preferred`, `focus`, or `expanded`"
-        ]
+        ["unknown key `pane.colour`; did you mean `pane.focus`?"]
     );
 }
 
@@ -1080,10 +1070,7 @@ fn plugin_with_extra_arguments_is_reported() {
 fn command_inside_plugin_is_reported() {
     assert_eq!(
         messages("version 1\ntab { horizontal { plugin \"files\" { command \"ls\" }; pane } }"),
-        [
-            "unknown node `command` in `plugin`; expected `size`, `weight`, `min`, \
-             `preferred`, `focus`, or `expanded`"
-        ]
+        ["unknown key `plugin.command`; did you mean `plugin.min`?"]
     );
 }
 
