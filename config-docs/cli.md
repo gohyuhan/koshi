@@ -33,6 +33,9 @@ Each matching config path must be a regular file. Both commands report all
 read and schema errors found before migration writes anything. A symbolic link
 to a regular file stays a link; migration updates its target.
 
+Migration replaces files one at a time. If a write fails, the error lists files
+already migrated and says the failing file may also contain migrated data.
+
 ## Choosing a target
 
 Inside a koshi pane, an omitted target means that pane's session and current

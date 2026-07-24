@@ -4,7 +4,8 @@
 //! `keybinding.kdl`, `themes/*.kdl`, and `profile/*.kdl`. Validation reads
 //! every present regular file and reports all read and schema errors together.
 //! Migration keeps config symlinks, validates every result in memory, then
-//! atomically replaces each changed file or symlink target.
+//! atomically replaces each changed file or symlink target. A write failure
+//! names files already migrated and marks the failing file as possibly changed.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -14,7 +15,7 @@ use koshi_config::migration::{
     migrate_config, validate_config, ConfigFileKind, MigratedConfig, MigrationError,
 };
 use koshi_config::parser::unknown_key;
-use koshi_storage::atomic::write_atomic;
+use koshi_storage::{atomic::write_atomic, error::StorageError};
 
 use crate::cli::ConfigCommand;
 use crate::error::CliError;
@@ -324,7 +325,7 @@ fn run_in_dir(command: &ConfigCommand, dir: &Path) -> Result<String, CliError> {
         ConfigCommand::Path => Ok(format!("{}\n", dir.display())),
         ConfigCommand::Explain { key } => explain(key),
         ConfigCommand::Check => check(dir),
-        ConfigCommand::Migrate => migrate_in_dir_with(dir, migrate_config),
+        ConfigCommand::Migrate => migrate_in_dir_with(dir, migrate_config, write_atomic),
     }
 }
 
@@ -374,7 +375,11 @@ fn check(dir: &Path) -> Result<String, CliError> {
 
 type MigrateFn = fn(ConfigFileKind, &Path, &str) -> Result<MigratedConfig, MigrationError>;
 
-fn migrate_in_dir_with(dir: &Path, migrate: MigrateFn) -> Result<String, CliError> {
+fn migrate_in_dir_with(
+    dir: &Path,
+    migrate: MigrateFn,
+    mut write: impl FnMut(&Path, &[u8]) -> Result<(), StorageError>,
+) -> Result<String, CliError> {
     let loaded = read_files(dir);
     let mut planned = Vec::with_capacity(loaded.files.len());
     let mut errors = loaded.errors;
@@ -394,26 +399,33 @@ fn migrate_in_dir_with(dir: &Path, migrate: MigrateFn) -> Result<String, CliErro
     }
 
     let mut lines = Vec::with_capacity(planned.len());
+    let mut completed = Vec::new();
     for (path, write_path, result) in planned {
-        if result.changed {
-            write_atomic(&write_path, result.source.as_bytes()).map_err(|error| {
-                CliError::Config {
-                    detail: format!("replace {}: {error}", path.display()),
+        let line = if result.changed {
+            if let Err(error) = write(&write_path, result.source.as_bytes()) {
+                let mut detail = format!(
+                    "migration write failed for {}: {error}\n{} may already contain migrated data; check it before retrying",
+                    path.display(),
+                    path.display()
+                );
+                if !completed.is_empty() {
+                    detail.push_str("\nfiles already migrated before this failure:\n");
+                    detail.push_str(&completed.join("\n"));
                 }
-            })?;
-            lines.push(format!(
+                return Err(CliError::Config { detail });
+            }
+            let line = format!(
                 "{}: migrated version {} to {}",
                 path.display(),
                 result.from,
                 result.to
-            ));
+            );
+            completed.push(line.clone());
+            line
         } else {
-            lines.push(format!(
-                "{}: current (version {})",
-                path.display(),
-                result.to
-            ));
-        }
+            format!("{}: current (version {})", path.display(), result.to)
+        };
+        lines.push(line);
     }
     if lines.is_empty() {
         lines.push(format!("no config files found in {}", dir.display()));

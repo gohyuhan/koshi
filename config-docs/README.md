@@ -77,6 +77,10 @@ file that was already wrong. Each changed file is replaced atomically, so a
 reader sees the whole old file or the whole new file, never half a write. Koshi
 never runs migration during startup; only this command changes config files.
 
+Files are replaced one at a time. If a later write fails, the error lists every
+earlier file that finished migration. It also says the failing file may contain
+the migrated data, because a durability check can fail after its atomic replace.
+
 ## When a file has a mistake
 
 - **`koshi.kdl` and `themes/<name>.kdl` are field-partial.** One bad field (a

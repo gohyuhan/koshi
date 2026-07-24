@@ -46,13 +46,17 @@ fn check_validates_every_known_file_in_sorted_path_order() {
         "version 1\nmode \"normal\" {}\n",
     )
     .unwrap();
-    fs::write(dir.path().join("themes/z.kdl"), "version 1\ncolors {}\n").unwrap();
     fs::write(
-        dir.path().join("profile/a.kdl"),
+        dir.path().join("themes").join("z.kdl"),
+        "version 1\ncolors {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("profile").join("a.kdl"),
         "version 1\ntab { pane }\n",
     )
     .unwrap();
-    fs::write(dir.path().join("themes/skip.txt"), "not config").unwrap();
+    fs::write(dir.path().join("themes").join("skip.txt"), "not config").unwrap();
 
     let output = check(dir.path()).unwrap();
 
@@ -62,8 +66,8 @@ fn check_validates_every_known_file_in_sorted_path_order() {
             "{}: valid (version 1)\n{}: valid (version 1)\n{}: valid (version 1)\n{}: valid (version 1)\n",
             dir.path().join("keybinding.kdl").display(),
             dir.path().join("koshi.kdl").display(),
-            dir.path().join("profile/a.kdl").display(),
-            dir.path().join("themes/z.kdl").display(),
+            dir.path().join("profile").join("a.kdl").display(),
+            dir.path().join("themes").join("z.kdl").display(),
         )
     );
 }
@@ -74,7 +78,7 @@ fn check_collects_errors_from_all_files() {
     fs::create_dir(dir.path().join("themes")).unwrap();
     fs::write(dir.path().join("koshi.kdl"), "pane {}\n").unwrap();
     fs::write(
-        dir.path().join("themes/bad.kdl"),
+        dir.path().join("themes").join("bad.kdl"),
         "version 1\ncolors { accent \"bad\" }\n",
     )
     .unwrap();
@@ -86,7 +90,7 @@ fn check_collects_errors_from_all_files() {
         format!(
             "config failed: invalid config version in {}: file must declare `version`\ninvalid config file {}: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
             dir.path().join("koshi.kdl").display(),
-            dir.path().join("themes/bad.kdl").display(),
+            dir.path().join("themes").join("bad.kdl").display(),
         )
     );
 }
@@ -111,7 +115,7 @@ fn check_rejects_a_config_path_that_is_not_a_regular_file() {
 #[test]
 fn check_rejects_a_kdl_directory_below_a_config_folder() {
     let dir = TempDir::new().unwrap();
-    let theme = dir.path().join("themes/bad.kdl");
+    let theme = dir.path().join("themes").join("bad.kdl");
     fs::create_dir_all(&theme).unwrap();
 
     let error = check(dir.path()).unwrap_err();
@@ -129,7 +133,7 @@ fn check_rejects_a_kdl_directory_below_a_config_folder() {
 fn check_reports_read_and_validation_errors_together() {
     let dir = TempDir::new().unwrap();
     let app = dir.path().join("koshi.kdl");
-    let theme = dir.path().join("themes/bad.kdl");
+    let theme = dir.path().join("themes").join("bad.kdl");
     fs::create_dir(&app).unwrap();
     fs::create_dir_all(theme.parent().unwrap()).unwrap();
     fs::write(&theme, "colors {}\n").unwrap();
@@ -170,11 +174,11 @@ fn migrate_writes_nothing_when_any_source_is_invalid() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join("themes")).unwrap();
     let app = dir.path().join("koshi.kdl");
-    let bad = dir.path().join("themes/bad.kdl");
+    let bad = dir.path().join("themes").join("bad.kdl");
     fs::write(&app, "version 1\n").unwrap();
     fs::write(&bad, "version 1\n").unwrap();
 
-    let error = migrate_in_dir_with(dir.path(), fake_migrate).unwrap_err();
+    let error = migrate_in_dir_with(dir.path(), fake_migrate, write_atomic).unwrap_err();
 
     assert_eq!(
         error.to_string(),
@@ -193,7 +197,7 @@ fn migrate_replaces_each_changed_file_after_validation() {
     let app = dir.path().join("koshi.kdl");
     fs::write(&app, "version 1\n").unwrap();
 
-    let output = migrate_in_dir_with(dir.path(), fake_migrate).unwrap();
+    let output = migrate_in_dir_with(dir.path(), fake_migrate, write_atomic).unwrap();
 
     assert_eq!(
         output,
@@ -216,7 +220,7 @@ fn migrate_updates_a_symlink_target_and_keeps_the_link() {
     fs::write(&target, "version 1\n").unwrap();
     symlink(&target, &app).unwrap();
 
-    let output = migrate_in_dir_with(dir.path(), fake_migrate).unwrap();
+    let output = migrate_in_dir_with(dir.path(), fake_migrate, write_atomic).unwrap();
 
     assert_eq!(
         output,
@@ -225,6 +229,70 @@ fn migrate_updates_a_symlink_target_and_keeps_the_link() {
     assert!(fs::symlink_metadata(&app).unwrap().file_type().is_symlink());
     assert_eq!(
         fs::read_to_string(target).unwrap(),
+        "version 1\nmigrated #true\n"
+    );
+}
+
+#[test]
+fn migrate_write_failure_reports_files_already_migrated() {
+    let dir = TempDir::new().unwrap();
+    let keybinding = dir.path().join("keybinding.kdl");
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&keybinding, "version 1\n").unwrap();
+    fs::write(&app, "version 1\n").unwrap();
+    let mut writes = 0;
+
+    let error = migrate_in_dir_with(dir.path(), fake_migrate, |path, data| {
+        writes += 1;
+        if writes == 2 {
+            return Err(StorageError::Io {
+                detail: "injected failure".to_string(),
+            });
+        }
+        write_atomic(path, data)
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config failed: migration write failed for {}: storage io error: injected failure\n{} may already contain migrated data; check it before retrying\nfiles already migrated before this failure:\n{}: migrated version 1 to 2",
+            app.display(),
+            app.display(),
+            keybinding.display(),
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(keybinding).unwrap(),
+        "version 1\nmigrated #true\n"
+    );
+    assert_eq!(fs::read_to_string(app).unwrap(), "version 1\n");
+}
+
+#[test]
+fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("koshi.kdl");
+    fs::write(&app, "version 1\n").unwrap();
+
+    let error = migrate_in_dir_with(dir.path(), fake_migrate, |path, data| {
+        write_atomic(path, data)?;
+        Err(StorageError::Io {
+            detail: "injected fsync failure".to_string(),
+        })
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config failed: migration write failed for {}: storage io error: injected fsync failure\n{} may already contain migrated data; check it before retrying",
+            app.display(),
+            app.display(),
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(app).unwrap(),
         "version 1\nmigrated #true\n"
     );
 }
