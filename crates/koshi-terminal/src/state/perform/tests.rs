@@ -8,7 +8,9 @@ use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::state::Charset;
 use crate::style::{Color, Style, UnderlineStyle};
 use koshi_core::process::PtySize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use vte::Perform;
 
 /// Build per-pane state of `cols × rows`.

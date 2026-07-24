@@ -1,0 +1,43 @@
+# git-cliff configuration — generates the grouped GitHub Release notes.
+# Commit subjects are matched by regex into emoji-titled groups; the
+# `<!-- N -->` prefixes only order the groups and are stripped from the
+# rendered title (they are also invisible HTML comments on GitHub).
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | split(pat="-->") | last | trim }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}{% endfor %}
+{% endfor %}
+"""
+trim = true
+footer = ""
+
+[git]
+# Match our own subject regexes instead of strict conventional-commit parsing,
+# so keywords like `new`/`add`/`impl` group correctly.
+conventional_commits = false
+filter_commits = false
+protect_breaking_commits = false
+# Oldest-first within each group (ascending).
+sort_commits = "oldest"
+# Keep only the subject line; drop any commit body so bullets stay one line.
+commit_preprocessors = [
+  { pattern = '(?s)\n.*', replace = "" },
+]
+commit_parsers = [
+  { message = "(?i)^docs:?", skip = true },
+  { message = "(?i)^test:?", skip = true },
+  { message = "(?i)^ci:?", skip = true },
+  { message = "(?i)^chore:?", skip = true },
+  { message = "(?i)Merge pull request", skip = true },
+  { message = "(?i)Merge branch", skip = true },
+  { message = "(?i)^Revert", skip = true },
+  { message = "(?i)^release:?", skip = true },
+  { message = "(?i)^(feature|feat|new|add|impl)(\\(.*\\))?!?:", group = "<!-- 0 -->🚀 Features" },
+  { message = "(?i)^(refactor|opt|perf|style|performance)(\\(.*\\))?!?:", group = "<!-- 1 -->♻️ Optimization" },
+  { message = "(?i)^(fix|hotfix|bug|fixes|hotfixes)(\\(.*\\))?!?:", group = "<!-- 2 -->🐛 Bug Fixes" },
+  { message = ".*", group = "<!-- 3 -->Others" },
+]

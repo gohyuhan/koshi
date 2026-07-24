@@ -62,9 +62,13 @@ jobs:
           command: check advisories bans licenses sources
 
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
     needs: cargo-deny
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -76,5 +80,7 @@ jobs:
       - name: Check
         run: cargo check --workspace --all-targets --locked
 
+      # --no-fail-fast: run every crate's tests even after one fails, so a
+      # cross-OS run reports all failures in a single pass, not one per push.
       - name: Test
-        run: cargo test --workspace --all-features --locked
+        run: cargo test --workspace --all-features --locked --no-fail-fast

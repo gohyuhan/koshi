@@ -183,7 +183,12 @@ fn ensure_dir_reports_the_blocking_cause() {
     std::fs::write(&file, b"x").expect("plant blocking file");
 
     let error = ensure_dir(&file.join("child")).expect_err("file blocks the dir");
+    // The OS's own kind for "a file sits where a directory must go": `ENOTDIR`
+    // on Unix, `ERROR_ALREADY_EXISTS` on Windows.
+    #[cfg(unix)]
     assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    #[cfg(windows)]
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
 }
 
 #[test]

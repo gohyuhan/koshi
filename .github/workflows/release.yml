@@ -1,0 +1,374 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ── Gate: the exact CI pipeline must pass before anything ships ──────────────
+  formatting:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          rustflags: ""
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  dep-guard:
+    name: dependency guard
+    runs-on: ubuntu-latest
+    needs: formatting
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          rustflags: ""
+
+      - name: Dependency-direction guard
+        run: cargo xtask dep-guard
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    needs: dep-guard
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Audit dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.96.0"
+          command: check advisories bans licenses sources
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: cargo-deny
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          rustflags: ""
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+      # --no-fail-fast: run every crate's tests even after one fails, so a
+      # cross-OS run reports all failures in a single pass, not one per push.
+      - name: Test
+        run: cargo test --workspace --all-features --locked --no-fail-fast
+
+  # ── Reject a tag that isn't clean semver before any script consumes it ──────
+  # The tag flows into shell, Ruby (Homebrew formula) and JSON (Scoop manifest);
+  # constraining it to vX.Y.Z[-prerelease] removes every injection character.
+  validate:
+    name: validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Refusing to release: tag '$TAG' is not clean semver (vX.Y.Z[-prerelease])." >&2
+            exit 1
+          fi
+
+  # ── Build the 6 binaries natively — one target per native runner ────────────
+  build:
+    name: build ${{ matrix.os }}-${{ matrix.arch }}
+    needs: [test, validate]
+    runs-on: ${{ matrix.runner }}
+    # Release binaries must not fail on a stray warning; the gate above already
+    # enforced -D warnings.
+    env:
+      RUSTFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,   os: linux,   arch: amd64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  os: linux,   arch: arm64 }
+          - { runner: macos-15-intel,   target: x86_64-apple-darwin,        os: darwin,  arch: amd64 }
+          - { runner: macos-14,         target: aarch64-apple-darwin,       os: darwin,  arch: arm64 }
+          - { runner: windows-2022,     target: x86_64-pc-windows-msvc,     os: windows, arch: amd64 }
+          - { runner: windows-11-arm,   target: aarch64-pc-windows-msvc,    os: windows, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          rustflags: ""
+          target: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p koshi --target ${{ matrix.target }} --locked
+
+      # Archive name matches the koshi self-update convention exactly:
+      # koshi-v{version}-{os}-{arch}.{tar.gz|zip} (see updater.rs, install.sh).
+      - name: Package (unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          NAME="koshi-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "staging/${NAME}" dist
+          cp "target/${{ matrix.target }}/release/koshi" "staging/${NAME}/"
+          cp LICENSE README.md "staging/${NAME}/"
+          tar -czf "dist/${NAME}.tar.gz" -C "staging/${NAME}" .
+
+      - name: Package (windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $Version = "${env:GITHUB_REF}" -replace '^refs/tags/', ''
+          $Name = "koshi-$Version-${{ matrix.os }}-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "staging/$Name", dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/koshi.exe" "staging/$Name/"
+          Copy-Item LICENSE, README.md "staging/$Name/"
+          Compress-Archive -Path "staging/$Name/*" -DestinationPath "dist/$Name.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koshi-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Assemble the GitHub Release: notes, checksums, tap updates ──────────────
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job creates the GitHub Release; the gate/build jobs keep the
+    # default read-only token. Tap pushes use KOSHI_PAT, not GITHUB_TOKEN.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd dist && shasum -a 256 koshi-* > checksums.txt
+
+      - name: Detect prerelease and changelog range
+        id: meta
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          if [[ "$TAG" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "cliff_args=--latest --strip header" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            PREV_STABLE=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | grep -v -- '-' | head -n1)
+            if [[ -n "$PREV_STABLE" ]]; then
+              echo "cliff_args=${PREV_STABLE}..${TAG} --strip header" >> "$GITHUB_OUTPUT"
+            else
+              echo "cliff_args=--latest --strip header" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: cliff.toml
+          args: ${{ steps.meta.outputs.cliff_args }}
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ steps.meta.outputs.is_prerelease }}
+          files: |
+            dist/koshi-*
+            dist/checksums.txt
+            install.sh
+            install.ps1
+
+      # ── Homebrew tap (stable releases only) ──
+      - name: Checkout homebrew-koshi
+        if: steps.meta.outputs.is_prerelease != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: gohyuhan/homebrew-koshi
+          token: ${{ secrets.KOSHI_PAT }}
+          path: homebrew-koshi
+
+      - name: Generate Homebrew formula
+        if: steps.meta.outputs.is_prerelease != 'true'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_CLEAN=${VERSION#v}
+          DARWIN_ARM64=$(grep 'darwin-arm64' dist/checksums.txt | awk '{print $1}')
+          DARWIN_AMD64=$(grep 'darwin-amd64' dist/checksums.txt | awk '{print $1}')
+          mkdir -p homebrew-koshi/Formula
+          cat > "homebrew-koshi/Formula/koshi.rb" <<EOF
+          class Koshi < Formula
+            desc "A terminal multiplexer in Rust — split panes and tabs in one terminal window"
+            homepage "https://github.com/gohyuhan/koshi"
+            license "MIT"
+
+            on_arm do
+              url "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-darwin-arm64.tar.gz"
+              sha256 "${DARWIN_ARM64}"
+            end
+
+            on_intel do
+              url "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-darwin-amd64.tar.gz"
+              sha256 "${DARWIN_AMD64}"
+            end
+
+            version "${VERSION_CLEAN}"
+
+            def install
+              bin.install "koshi"
+            end
+
+            test do
+              system "#{bin}/koshi", "--version"
+            end
+          end
+          EOF
+          cat > "homebrew-koshi/Formula/koshi@${VERSION_CLEAN}.rb" <<EOF
+          class KoshiAT${VERSION_CLEAN//./} < Formula
+            desc "A terminal multiplexer in Rust — split panes and tabs in one terminal window (v${VERSION_CLEAN})"
+            homepage "https://github.com/gohyuhan/koshi"
+            license "MIT"
+
+            on_arm do
+              url "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-darwin-arm64.tar.gz"
+              sha256 "${DARWIN_ARM64}"
+            end
+
+            on_intel do
+              url "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-darwin-amd64.tar.gz"
+              sha256 "${DARWIN_AMD64}"
+            end
+
+            version "${VERSION_CLEAN}"
+
+            def install
+              bin.install "koshi"
+            end
+
+            test do
+              system "#{bin}/koshi", "--version"
+            end
+          end
+          EOF
+
+      # ── Scoop bucket (stable releases only) ──
+      - name: Checkout scoop-koshi
+        if: steps.meta.outputs.is_prerelease != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: gohyuhan/scoop-koshi
+          token: ${{ secrets.KOSHI_PAT }}
+          path: scoop-koshi
+
+      - name: Generate Scoop manifest
+        if: steps.meta.outputs.is_prerelease != 'true'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_CLEAN=${VERSION#v}
+          WIN_AMD64=$(grep 'windows-amd64' dist/checksums.txt | awk '{print $1}')
+          WIN_ARM64=$(grep 'windows-arm64' dist/checksums.txt | awk '{print $1}')
+          mkdir -p scoop-koshi/bucket
+          cat > "scoop-koshi/bucket/koshi.json" <<EOF
+          {
+            "version": "${VERSION_CLEAN}",
+            "description": "A terminal multiplexer in Rust — split panes and tabs in one terminal window",
+            "homepage": "https://github.com/gohyuhan/koshi",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-windows-amd64.zip",
+                "hash": "${WIN_AMD64}"
+              },
+              "arm64": {
+                "url": "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-windows-arm64.zip",
+                "hash": "${WIN_ARM64}"
+              }
+            },
+            "bin": "koshi.exe",
+            "checkver": "github",
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/gohyuhan/koshi/releases/download/v\$version/koshi-v\$version-windows-amd64.zip"
+                },
+                "arm64": {
+                  "url": "https://github.com/gohyuhan/koshi/releases/download/v\$version/koshi-v\$version-windows-arm64.zip"
+                }
+              }
+            }
+          }
+          EOF
+          cat > "scoop-koshi/bucket/koshi@${VERSION_CLEAN}.json" <<EOF
+          {
+            "version": "${VERSION_CLEAN}",
+            "description": "A terminal multiplexer in Rust — split panes and tabs in one terminal window (v${VERSION_CLEAN})",
+            "homepage": "https://github.com/gohyuhan/koshi",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-windows-amd64.zip",
+                "hash": "${WIN_AMD64}"
+              },
+              "arm64": {
+                "url": "https://github.com/gohyuhan/koshi/releases/download/${VERSION}/koshi-${VERSION}-windows-arm64.zip",
+                "hash": "${WIN_ARM64}"
+              }
+            },
+            "bin": "koshi.exe"
+          }
+          EOF
+
+      - name: Commit and push tap updates
+        if: steps.meta.outputs.is_prerelease != 'true'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_CLEAN=${VERSION#v}
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          cd homebrew-koshi
+          git add "Formula/koshi.rb" "Formula/koshi@${VERSION_CLEAN}.rb"
+          git commit -m "koshi: update to ${VERSION}" || echo "No changes to commit"
+          git push origin HEAD
+          cd ../scoop-koshi
+          git add "bucket/koshi.json" "bucket/koshi@${VERSION_CLEAN}.json"
+          git commit -m "koshi: update to ${VERSION}" || echo "No changes to commit"
+          git push origin HEAD

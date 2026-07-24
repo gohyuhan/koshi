@@ -58,19 +58,21 @@ fn non_utf8_path() -> PathBuf {
 
 #[test]
 fn time_serializes_as_its_flat_epoch_pair() {
-    let info = session_info(SystemTime::UNIX_EPOCH + Duration::new(1234, 56));
+    // 500 ns is a multiple of 100 ns — the resolution of a Windows `SystemTime`
+    // (a `FILETIME`) — so the value survives on every platform.
+    let info = session_info(SystemTime::UNIX_EPOCH + Duration::new(1234, 500));
 
     let value = serde_json::to_value(&info).expect("serializes");
 
     assert_eq!(
         value["created_at"],
-        json!({"secs_since_epoch": 1234, "nanos_since_epoch": 56})
+        json!({"secs_since_epoch": 1234, "nanos_since_epoch": 500})
     );
 }
 
 #[test]
 fn times_round_trip_through_json() {
-    let info = session_info(SystemTime::UNIX_EPOCH + Duration::new(1234, 56));
+    let info = session_info(SystemTime::UNIX_EPOCH + Duration::new(1234, 500));
 
     let value = serde_json::to_value(&info).expect("serializes");
     let back: SessionInfo = serde_json::from_value(value).expect("deserializes");

@@ -12,7 +12,8 @@
 //!
 //! The rename is atomic on every platform. On Unix the target's directory is
 //! fsynced afterward so the rename survives a crash; on Windows the rename's
-//! durability rests on the filesystem's own journaling.
+//! durability rests on the filesystem's own journaling, and a replace racing
+//! another writer is retried briefly so concurrent writes converge.
 //!
 //! The target's directory is trusted: anyone who can write that directory can
 //! replace the file directly, with or without this helper, so koshi only
@@ -92,10 +93,48 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     tmp.as_file()
         .sync_all()
         .map_err(|e| io_err(format!("fsync temp for {}: {e}", dst.display())))?;
-    tmp.persist(dst)
-        .map_err(|e| io_err(format!("replace {}: {}", dst.display(), e.error)))?;
+    persist_over(tmp, dst)?;
     fsync_parent_dir(dst)?;
     Ok(())
+}
+
+/// Renames the staged temp over `dst`. Unix `rename` replaces the target in one
+/// step even while other writers hold it, so a single attempt suffices. A failed
+/// persist drops the returned temp, removing it, so `dst` is left untouched.
+#[cfg(not(windows))]
+fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
+    tmp.persist(dst)
+        .map(|_| ())
+        .map_err(|e| io_err(format!("replace {}: {}", dst.display(), e.error)))
+}
+
+/// Renames the staged temp over `dst`. Windows refuses to replace a file another
+/// writer is momentarily renaming over, failing with `ERROR_ACCESS_DENIED` /
+/// `ERROR_SHARING_VIOLATION`; the rename is retried with a short backoff so
+/// concurrent atomic writes all converge. A directory at `dst` is a permanent
+/// block, reported at once. A failed persist drops the temp, so `dst` is
+/// untouched.
+#[cfg(windows)]
+fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
+    const MAX_ATTEMPTS: u32 = 25;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let err = match tmp.persist(dst) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                tmp = e.file;
+                e.error
+            }
+        };
+        // ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32): another writer
+        // holds the target mid-rename. A directory at `dst` never clears, so it
+        // is not a retryable lock.
+        let transient = matches!(err.raw_os_error(), Some(5) | Some(32)) && !dst.is_dir();
+        if attempt == MAX_ATTEMPTS || !transient {
+            return Err(io_err(format!("replace {}: {err}", dst.display())));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) * 4));
+    }
+    unreachable!("the loop returns on its final attempt")
 }
 
 /// The mode to give the temp on Unix: the existing `dst`'s when `dst` is a
