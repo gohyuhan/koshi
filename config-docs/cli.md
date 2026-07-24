@@ -24,14 +24,13 @@ Explain keys include their file kind: `koshi.pane.min-cols`,
 `keybinding.chord-timeout-ms`, `theme.colors.accent`, and `profile.version`.
 An unknown key exits 2 and suggests the nearest known key.
 
-`check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, every
-`themes/*.kdl`, and every `profile/*.kdl`. Migration does not repair bad KDL or
-bad fields. Example: valid version 1 + current version 3 results in 1 → 2 → 3;
-invalid version 1 stops with no config file written.
+`check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, `themes/*.kdl`, and
+`profile/*.kdl`. Migration does not repair bad KDL or bad fields. Current
+schema version is `1`, so valid version `1` files stay unchanged.
 
-Each matching config path must be a regular file. Both commands report all
-read and schema errors found before migration writes anything. A symbolic link
-to a regular file stays a link; migration updates its target.
+Each path must be a regular file or a symlink to one. Both commands report all
+read and schema errors before migration writes anything. Migration keeps the
+symlink and updates its target.
 
 Migration replaces files one at a time. If a write fails, the error lists files
 already migrated and says the failing file may also contain migrated data.

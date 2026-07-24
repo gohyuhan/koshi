@@ -1,32 +1,22 @@
 # `koshi.kdl` — app settings
 
-The main settings file: which color theme to use, scrollback size, mouse
-behavior, the default split direction, what koshi advertises to child programs,
-and the self-update check. `version` is required. Every other setting is
-optional and falls back to the default shown below.
+Main settings for theme, panes, scrollback, layout, mouse, terminal values,
+logging, and updates. `version` is required. Other settings are optional.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `%APPDATA%\koshi\config\koshi.kdl` on Windows. See [README](README.md#where-the-files-go).
 
-**If a field is wrong:** normal startup skips it (keeps its default) and logs
-it; every other field still applies. Unknown keys also name the nearest valid
-key. `koshi config check` and `migrate` reject any such warning. The one
-exception is the `update` section, which is stricter — see its note below.
+**Bad fields:** startup skips them, keeps their defaults, and logs each one.
+`koshi config check` and `migrate` reject them. A bad value in `update` rejects
+the whole app file for that launch.
 
-Settings are grouped into sections. Each section is a block; each field inside
-it is one node with one value. `theme` is the one setting that stands on its
-own, outside any block.
+Settings use blocks. `theme` is top-level.
 
 ## `theme`
 
-Which color theme koshi draws its chrome with. The value is the name of a file
-in the `themes/` subdirectory: `theme "midnight"` reads
-`themes/midnight.kdl`. The colors live in that file, never here.
-
-`"default"` is koshi's built-in theme. Naming it — or leaving the line out, or
-naming a theme koshi cannot load — draws the built-in colors. See
-[theme.md](theme.md).
+`theme "midnight"` loads `themes/midnight.kdl`. Missing, invalid, omitted, or
+`"default"` themes use built-in colors. See [theme.md](theme.md).
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -77,10 +67,8 @@ naming a theme koshi cannot load — draws the built-in colors. See
 
 ## `logging`
 
-koshi writes a per-session log file, `logs/koshi-log-<session-id>.log`, under
-the state directory. Disabled, no file and no `logs/` directory are ever
-created; enabled, the file is created on the first log line at or above `level`
-and appended thereafter.
+Koshi writes `logs/koshi-log-<session-id>.log` below the state directory.
+Disabled logging creates no log file.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -88,32 +76,14 @@ and appended thereafter.
 | `level` | `"info"` \| `"warning"` \| `"error"` — lowest severity written: `info` writes everything, `warning` writes warnings and errors, `error` writes only errors | `"warning"` | ≥ 0.1.0 |
 | `format` | `"pretty"` \| `"json"` — `pretty` is human-readable, `json` is one JSON object per line for a machine to parse | `"pretty"` | ≥ 0.1.0 |
 
-What you get at each level:
-
-- `info` — everything that worked, as it happens: config files read, config
-  applied, terminal ready, session started, panes and tabs opening and closing,
-  focus moving, a pane's process exiting. Set this when you want to see what
-  koshi did.
-- `warning` — only the things that went wrong but that koshi had an answer for,
-  so it kept running: a profile that would not parse (one plain shell starts
-  instead), a `keybinding.kdl` with a conflict (the built-in keys stay), a
-  command that was rejected.
-- `error` — only the things koshi could not work around at all, after which it
-  exits: it could not enter raw mode, could not build its output terminal, could
-  not start the shell, or panicked.
-
-Each level includes the ones below it, so `info` writes all three. The default
-`warning` records failures only; if you turn logging on to follow what koshi is
-doing, set `level "info"`.
-
-Log lines carry ids, never content. A copied selection is recorded as its byte
-count, not its text; what you type into a pane is never written at any level.
+`info` includes normal lifecycle events. `warning` includes recoverable
+problems. `error` includes failures that stop Koshi. Each level includes higher
+severity. Logs store ids and byte counts, not typed or copied text.
 
 ## `update`
 
-The self-update check. **This section is strict:** a bad value here drops the
-*whole* `koshi.kdl` to defaults for the run, because `auto-check` gates a
-network call and a typo must never silently turn it back on.
+Self-update settings. A bad value here drops the whole `koshi.kdl` for that
+launch.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -123,9 +93,8 @@ network call and a typo must never silently turn it back on.
 
 ## Full example
 
-This is **every** `koshi.kdl` field, set to its **default** value — copy it as a
-complete baseline and change what you like. Keep `version`; deleting any other
-field restores its default.
+This shows every app setting. Fixed values match defaults. `default-shell` is
+commented because its default comes from `$SHELL` or `%COMSPEC%`.
 
 ```kdl
 // koshi.kdl — the complete default configuration.
@@ -161,7 +130,7 @@ copy {
 terminal {
     term "xterm-256color"
     colorterm "truecolor"
-    default-shell "/bin/zsh"     // default: omit this line to use your $SHELL
+    // default-shell "/bin/zsh"  // optional override
 }
 
 logging {

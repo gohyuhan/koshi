@@ -1,15 +1,12 @@
 # `profile/<name>.kdl` — saved session layouts
 
-A profile is a saved session: which tabs to open, how each tab's panes are
-arranged, and what command each pane runs. Unlike the other files, a profile is
-**never loaded automatically** — you ask for one by name:
+A profile defines tabs, pane layouts, and pane commands. Load one by name:
 
 ```
 koshi --profile dev
 ```
 
-which reads `profile/dev.kdl` and opens its tabs and panes instead of a single
-shell.
+This reads `profile/dev.kdl` instead of opening one shell pane.
 
 **Where it goes:** in a `profile/` subdirectory of the config directory —
 `~/.config/koshi/profile/dev.kdl` on Linux,
@@ -17,15 +14,9 @@ shell.
 `%APPDATA%\koshi\config\profile\dev.kdl` on Windows. See
 [README](README.md#where-the-files-go).
 
-**If anything is wrong: the whole profile is dropped** (all-or-nothing) and
-koshi starts a single shell instead, because a half-built layout — some panes
-spawned, some silently missing — is worse than a clean fallback. A profile that
-names a profile which does not exist also falls back to a single shell.
-`koshi config check` validates every saved profile before launch.
-
-> **Plugin panes are not supported yet.** A profile that uses a `plugin` pane
-> cannot launch (there is no plugin host to fill it) and falls back to a single
-> shell. Everything else below works today.
+**If anything is wrong, the whole profile is dropped.** Koshi starts one shell
+instead. A missing named profile uses the same fallback. `koshi config check`
+validates every saved profile.
 
 ## Structure
 
@@ -36,7 +27,6 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `version <n>` | Required schema version | ≥ 0.1.0 |
 | `tab { … }` | One tab. Its children are the pane arrangement. | ≥ 0.1.0 |
 | `pane { … }` | A terminal pane. | ≥ 0.1.0 |
-| `plugin "name"` | A plugin pane *(not supported yet — see note above)*. | ≥ 0.1.0 |
 | `horizontal { … }` | Split its children left to right. | ≥ 0.1.0 |
 | `vertical { … }` | Split its children top to bottom. | ≥ 0.1.0 |
 | `stack { … }` | Its children share one rectangle; one is expanded. | ≥ 0.1.0 |
@@ -46,7 +36,7 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | Key | Value / type | Since |
 |---|---|---|
 | `command "prog" "arg"…` | The program to run and its arguments. Omit for the default shell. | ≥ 0.1.0 |
-| `cwd "/path"` | Working directory, used as written. Use an absolute path — `~` is **not** expanded yet. | ≥ 0.1.0 |
+| `cwd "/path"` | Working directory, used as written. Use an absolute path; `~` is not expanded. | ≥ 0.1.0 |
 | `env "NAME" "VALUE"` | An environment variable for this pane (repeatable). | ≥ 0.1.0 |
 | `focus` | Start with this pane focused. One per tab. | ≥ 0.1.0 |
 
@@ -79,8 +69,7 @@ profile). Without either, the first pane and the first tab start focused.
 
 ## Full example
 
-This exercises **every** profile feature: all three split kinds, every pane
-setting, every sizing key, and a stack.
+This uses every available layout form, pane setting, and sizing key.
 
 ```kdl
 // profile/dev.kdl — a complete profile using every feature.
@@ -128,8 +117,4 @@ tab {
         }
     }
 }
-
-// A plugin pane is written `plugin "name"`, but plugin panes are not supported
-// yet, so a profile using one falls back to a single shell:
-//   tab { plugin "file-tree" }
 ```
