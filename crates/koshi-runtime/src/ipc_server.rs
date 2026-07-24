@@ -144,14 +144,17 @@ impl IpcServer {
     fn stop(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if let Some(handle) = self.accept_thread.take() {
-            // The accept loop sits blocked in `accept`; a bare connect wakes
-            // it so it can observe the flag (the connection is dropped
-            // without a byte sent). A failed connect — say, the process is
-            // out of file descriptors — leaves the loop blocked, so the join
-            // is skipped rather than waiting forever: the thread dies with
-            // the process, and the files below are removed either way.
-            if Connection::connect(&self.addr).is_ok() {
+            // The accept loop sits blocked in `accept`; a bare connect wakes it
+            // so it observes the flag. Hold that connection open across the join:
+            // on Windows a connect that drops before `accept` runs can leave
+            // nothing for `accept` to return, so the pending client must outlive
+            // the join. A failed connect — say, the process is out of file
+            // descriptors — leaves the loop blocked, so the join is skipped
+            // rather than waiting forever: the thread dies with the process, and
+            // the files below are removed either way.
+            if let Ok(wake) = Connection::connect(&self.addr) {
                 let _ = handle.join();
+                drop(wake);
             }
         }
         let _ = std::fs::remove_file(&self.endpoint_path);

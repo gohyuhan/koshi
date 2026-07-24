@@ -1,8 +1,5 @@
 target/
 .koshi-arch/
-.repowise/
-graphify-out/
-.claude/
 docs/
 
 .DS_Store

@@ -133,11 +133,13 @@ fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
     let (mut runtime, client) = runtime();
     add_tab(&mut runtime, client); // two tabs; the new one is active
 
-    // Peek somewhere, then click the first (now inactive) tab.
+    // Start a peek anchored at tab 0 so it stays on the strip regardless of how
+    // wide the auto-generated session and tab names happen to render, then click
+    // that (now inactive) tab.
     runtime
         .client_mut(client)
         .unwrap()
-        .set_tabline_offset(Some(1));
+        .set_tabline_offset(Some(0));
     let snapshot = runtime.build_snapshot(client).unwrap();
     let first_tab = snapshot
         .session
