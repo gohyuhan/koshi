@@ -2,7 +2,7 @@
 
 Notable user-facing changes are recorded here.
 
-## Unreleased
+## v0.1.0
 
 - Split, stacked, fullscreen, focus, resize, and close operations for panes.
 - Tab creation, closing, movement, and switching.
