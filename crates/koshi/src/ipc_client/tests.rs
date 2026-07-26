@@ -92,7 +92,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                         message: "the token presented does not match this Koshi's".to_string(),
                     }),
                 );
-                send(
+                send_best_effort(
                     &mut connection,
                     submit.request_id,
                     IpcResult::Error(IpcErrorPayload {
@@ -118,7 +118,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
     })
 }
 
-/// Answer `request_id` with `result` on `connection`.
+/// Answer `request_id` with `result` on `connection`, requiring it to arrive.
 fn send(connection: &mut Connection, request_id: u64, result: IpcResult) {
     connection
         .send(&IpcResponse {
@@ -126,6 +126,21 @@ fn send(connection: &mut Connection, request_id: u64, result: IpcResult) {
             result,
         })
         .expect("send scripted reply");
+}
+
+/// Answer `request_id` with `result`, allowing the client to have hung up.
+///
+/// A refused hello is the CLI's cue to stop, so it closes the connection
+/// without reading the rest of the script. Whether a later reply still lands
+/// depends on whether the connection's buffer takes it before that close
+/// arrives — a coin flip the CLI's behaviour does not depend on, and one that
+/// tore this test down at random on Windows, where connections close faster.
+/// Only for replies nothing is left to read.
+fn send_best_effort(connection: &mut Connection, request_id: u64, result: IpcResult) {
+    let _ = connection.send(&IpcResponse {
+        request_id: Some(request_id),
+        result,
+    });
 }
 
 #[test]

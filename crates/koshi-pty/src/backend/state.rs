@@ -52,7 +52,8 @@ pub trait PtyBackend: Send + Sync {
 /// pane share one sink.
 pub trait PtySink: Send + Sync {
     /// Take one chunk of `pane`'s child output. Returning `false` means the
-    /// consumer is gone, and the reader stops reading that pane.
+    /// consumer is gone: the reader stops reading that pane, and nothing more
+    /// is delivered for it — not even [`exit`](PtySink::exit).
     fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool;
 
     /// Take `pane`'s final exit status. Delivered after the last

@@ -38,6 +38,23 @@ use crate::{
 /// child output without a syscall per line.
 const READ_CHUNK: usize = 8192;
 
+/// How long the watcher gives the reader to publish a pane's exit before
+/// publishing it itself.
+///
+/// The reader normally publishes, once the child's output has run out, which
+/// keeps the exit behind the last of that output. It only gets there if the
+/// PTY reports an end, and some never do: a `setsid` descendant can hold the
+/// slave open after the child is gone, and Windows' ConPTY keeps the
+/// pseudoconsole readable regardless. Waiting on that would leave the pane
+/// open forever, so the watcher — which already holds the exit status —
+/// publishes once this elapses.
+///
+/// Draining what a dying child left behind takes microseconds, so this is
+/// wide enough that the reader wins whenever the PTY does report an end, and
+/// short enough to be invisible when it does not. Closing a pane never waits
+/// on it: [`kill`](PortablePtyBackend::kill) cancels it before joining.
+const EXIT_PUBLISH_GRACE: Duration = Duration::from_millis(100);
+
 /// Start one of a pane's helper threads under `name`.
 ///
 /// Naming them makes a debugger, a profiler, or a crash report attribute the
@@ -69,6 +86,11 @@ enum Delivery {
         sink: Arc<dyn PtySink>,
         /// The watcher's exit status, awaited after the last chunk.
         exit_receiver: Receiver<ExitStatus>,
+        /// Set once someone has taken charge of this pane's exit — by
+        /// delivering it, or by deciding it must not be delivered. Shared with
+        /// the watcher, which delivers the same exit if this reader never
+        /// reaches the end of the PTY, so the consumer is told exactly once.
+        exit_claimed: Arc<AtomicBool>,
     },
 }
 
@@ -85,15 +107,34 @@ impl Delivery {
     /// Report `pane`'s child as ended, once its output is exhausted. A sink
     /// waits here for the watcher's status; a channel consumer reads the exit
     /// off its own handle, so there is nothing to do.
+    ///
+    /// Does nothing if the watcher already delivered the exit, which it does
+    /// when the PTY never reports an end — the consumer is told exactly once
+    /// either way.
     fn finish(self, pane: PaneId) {
         if let Delivery::Sink {
             sink,
             exit_receiver,
+            exit_claimed,
         } = self
         {
             if let Ok(status) = exit_receiver.recv() {
-                sink.exit(pane, status);
+                if !exit_claimed.swap(true, Ordering::SeqCst) {
+                    sink.exit(pane, status);
+                }
             }
+        }
+    }
+
+    /// Take charge of `pane`'s exit and drop it, for a consumer that has
+    /// reported itself gone.
+    ///
+    /// A consumer that refuses a chunk is finished with the pane, so it must
+    /// not be handed an exit afterwards. Claiming it here is what stops the
+    /// watcher's backstop from delivering one.
+    fn abandon(&self) {
+        if let Delivery::Sink { exit_claimed, .. } = self {
+            exit_claimed.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -181,17 +222,30 @@ pub struct PaneEntry {
     exited: Arc<AtomicBool>,
     /// Reader thread: drains the master's read half to wherever this backend
     /// delivers — the handle's output channel, or the sink. Under a sink it also
-    /// publishes the child's exit, once the read half has run dry.
+    /// publishes the child's exit, once the read half has run dry, which keeps
+    /// that exit behind the last of the child's output.
     ///
     /// Not joined on teardown: the slave fd may outlive the child (e.g., when the
     /// child `setsid`s into a new process group), so the thread could block forever
     /// if joined. It exits once the fd closes, and under a sink once the watcher
     /// has handed it the exit status to publish. Retained so the struct owns the
     /// handle.
+    ///
+    /// A read half that never runs dry leaves this thread blocked and the exit
+    /// unpublished, so the watcher publishes it instead after
+    /// [`EXIT_PUBLISH_GRACE`]; the pane's end never depends on this thread
+    /// getting there.
     #[expect(dead_code)]
     reader: JoinHandle<()>,
     /// Watcher thread: blocks on the child, records exit status, flips `exited`.
     watcher: JoinHandle<()>,
+    /// Cuts short the watcher's wait to publish the exit as a backstop.
+    ///
+    /// [`kill`](PortablePtyBackend::kill) sends on this before joining the
+    /// watcher, so tearing a pane down returns straight away instead of
+    /// sitting through [`EXIT_PUBLISH_GRACE`] — the caller is closing the pane
+    /// itself and has no use for an exit event about it.
+    exit_grace_cancel: Sender<()>,
 }
 
 /// Real OS-PTY backend built on the `portable-pty` crate. Each spawned pane gets
@@ -254,8 +308,10 @@ impl PtyBackend for PortablePtyBackend {
     /// [`with_sink`](PortablePtyBackend::with_sink) the reader hands each chunk
     /// to the sink and publishes the exit itself once the output runs out, and
     /// the returned [`crate::backend::state::PtyHandle`] carries no channels.
-    /// Otherwise the handle carries the output and exit channels for the caller
-    /// to poll or relay.
+    /// When the PTY reports no end to that output the watcher publishes the
+    /// exit instead, so a pane always learns its child ended. Otherwise the
+    /// handle carries the output and exit channels for the caller to poll or
+    /// relay.
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
@@ -276,21 +332,29 @@ impl PtyBackend for PortablePtyBackend {
         //    receiver is private to the reader, which publishes the status once
         //    the child's output has run out — that is what keeps a consumer
         //    from seeing the child end while output is still coming.
-        let (handle, delivery, exit_sender) = match self.sink.clone() {
+        //
+        //    The watcher takes a second reference to the sink and to the
+        //    `exit_claimed` flag, so it can deliver the exit itself when the
+        //    PTY never reports an end. The flag keeps that to one delivery.
+        let exit_claimed = Arc::new(AtomicBool::new(false));
+        let (exit_grace_cancel, exit_grace_rx) = channel::<()>();
+        let (handle, delivery, exit_sender, watcher_sink) = match self.sink.clone() {
             Some(sink) => {
                 let (exit_sender, exit_receiver) = channel::<ExitStatus>();
                 (
                     PtyHandle::detached(pane_id),
                     Delivery::Sink {
-                        sink,
+                        sink: Arc::clone(&sink),
                         exit_receiver,
+                        exit_claimed: Arc::clone(&exit_claimed),
                     },
                     exit_sender,
+                    Some(sink),
                 )
             }
             None => {
                 let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
-                (handle, Delivery::Channel(output_sender), exit_sender)
+                (handle, Delivery::Channel(output_sender), exit_sender, None)
             }
         };
 
@@ -402,6 +466,10 @@ impl PtyBackend for PortablePtyBackend {
                     Ok(0) => break, // EOF = shell gone
                     Ok(n) => {
                         if !delivery.output(pane_id, buf[..n].to_vec()) {
+                            // The consumer is finished with this pane, so the
+                            // exit must not reach it either — claim it here or
+                            // the watcher's backstop would deliver one.
+                            delivery.abandon();
                             consumer_live = false;
                             break;
                         }
@@ -445,8 +513,14 @@ impl PtyBackend for PortablePtyBackend {
         //    our `ExitStatus`, flip `exited` so `kill` won't signal a corpse,
         //    publish the status on the exit channel, then release the writer
         //    thread, which is parked waiting for exactly that.
+        //
+        //    Under a sink it then stands by as the exit's backstop: the reader
+        //    publishes once the child's output runs out, and this publishes
+        //    instead if the PTY never reports an end. `kill` cancels the wait,
+        //    so closing a pane returns without sitting through it.
         let exited_w = Arc::clone(&exited);
         let writer_stop = writer_sender.clone();
+        let watcher_claimed = Arc::clone(&exit_claimed);
         let watcher_thread = spawn_pty_thread("koshi-pty-watch", move || {
             let mut child = child; // owns it; wait() needs &mut
             let status = match child.wait() {
@@ -456,6 +530,16 @@ impl PtyBackend for PortablePtyBackend {
             exited_w.store(true, Ordering::SeqCst); // tell kill() it's dead
             let _ = exit_sender.send(status);
             let _ = writer_stop.send(WriterMsg::Stop);
+
+            if let Some(sink) = watcher_sink {
+                // A value means `kill` cancelled: the pane is being torn down
+                // and its consumer has already let go of it.
+                if exit_grace_rx.recv_timeout(EXIT_PUBLISH_GRACE).is_err()
+                    && !watcher_claimed.swap(true, Ordering::SeqCst)
+                {
+                    sink.exit(pane_id, status);
+                }
+            }
         });
 
         // 10. Retain the master, writer, killer, flag and both thread handles
@@ -474,6 +558,7 @@ impl PtyBackend for PortablePtyBackend {
                 writer: writer_sender,
                 killer,
                 exited,
+                exit_grace_cancel,
                 reader: reader_thread,
                 watcher: watcher_thread,
             },
@@ -556,6 +641,10 @@ impl PtyBackend for PortablePtyBackend {
             }
         }
 
+        // The caller is closing this pane, so it has no use for an exit event
+        // about it: release the watcher from its backstop wait rather than
+        // joining through it.
+        let _ = entry.exit_grace_cancel.send(());
         drop(entry.writer);
         let _ = entry.watcher.join();
 
