@@ -1,10 +1,7 @@
 //! Tests for [`IpcError`]: its `Display` wording and its [`DomainError`]
-//! classification. Link, refused-frame, socket-address-check, and
-//! endpoint-file-read errors are client-fatal — they tear down only the
-//! affected connection or caller, never the session — a failed endpoint-file
-//! write is session-fatal because a session it leaves unadvertised can never
-//! be reached, and a malformed frame is recoverable because the stream stays
-//! aligned on frame boundaries.
+//! classification — link, refused-frame, socket-address-check, and
+//! endpoint-file-read errors client-fatal, a failed endpoint-file write
+//! session-fatal, a malformed frame recoverable.
 
 use super::IpcError;
 use koshi_core::error::{DomainCategory, DomainError, Severity};

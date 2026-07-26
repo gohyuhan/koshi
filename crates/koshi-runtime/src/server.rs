@@ -87,8 +87,7 @@ pub struct Server {
     /// writer.
     pub(crate) action_registry: ActionRegistry,
     /// The user's stored config overrides, one layer per config file. A
-    /// file's reload transaction replaces its own layer; the config loader
-    /// hands over the startup layers when it lands.
+    /// file's reload transaction replaces its own layer.
     pub(crate) config_layers: ConfigLayers,
     /// The effective config: the built-in defaults with the stored user
     /// layers folded on. Recomputed by every reload transaction; consumers

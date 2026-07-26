@@ -7,11 +7,10 @@
 //! requested.
 //!
 //! Commands cross process boundaries (CLI IPC and plugins), so every variant
-//! and arg struct contains only serde-friendly, cross-process-meaningful
-//! types. **No `Instant`** — it is not `Serialize` and is opaque across
-//! processes; use `SystemTime` or epoch units where a timestamp is needed.
-//! No raw OS handles, no `&mut` references, and command identity is never a
-//! free-form `String`.
+//! and arg struct holds only serde-friendly types that mean the same thing in
+//! another process. No `Instant` — use `SystemTime` or epoch units for a
+//! timestamp. No raw OS handles, no `&mut` references, and command identity is
+//! never a free-form `String`.
 
 use crate::event::{Event, RejectReason};
 use crate::geometry::Direction;
@@ -70,12 +69,9 @@ pub enum Command {
 /// `Command` variant, in the same order.
 ///
 /// The action registry ([`crate::action`]) routes a user-facing action to a
-/// core command by naming its `CommandKind`; the dispatcher later rebuilds the
-/// full typed `Command` from that kind plus resolved targets and args. Keeping
-/// the discriminant separate from the data-carrying enum lets action metadata
-/// stay `Copy` and free of placeholder args. [`Command::kind`] maps the other
-/// way, and a test pins the two enums to the same variant set so they cannot
-/// drift apart.
+/// core command by naming its `CommandKind`; the dispatcher then rebuilds the
+/// full typed `Command` from that kind plus resolved targets and args.
+/// [`Command::kind`] maps the other way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandKind {
     /// Discriminant of [`Command::NewPane`].
@@ -142,9 +138,9 @@ impl Command {
 
 /// Arguments for [`Command::NewPane`].
 ///
-/// One command, two structural outcomes — the dispatcher routes on the
-/// flag: `stacked` adds the new pane to the source's stack (creating one
-/// if needed), and otherwise the source leaf splits directionally.
+/// The dispatcher routes on `stacked`: set, the new pane joins the source's
+/// stack, creating one if needed; unset, the source leaf splits
+/// directionally.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
@@ -168,11 +164,11 @@ pub struct NewPaneArgs {
     /// Client to show the new pane on.
     ///
     /// - `Some(client)`: that client is targeted, even over an in-session
-    ///   issuer. A client not attached to the target session is rejected
-    ///   outright — no fallback.
+    ///   issuer. A client not attached to the target session is rejected;
+    ///   there is no fallback.
     /// - `None`: the issuing client; for a source with no client, the
     ///   session's sole client. A session with several attached clients and
-    ///   no named target is rejected rather than switching an arbitrary one.
+    ///   no named target is rejected.
     pub client: Option<ClientId>,
 }
 
@@ -337,16 +333,15 @@ pub struct MoveTabArgs {
 
 /// Selection and copy commands — the commands of visual mode.
 ///
-/// **Visual mode is what a client is in while text is highlighted**, and it is
-/// never entered by hand: a mouse drag over a pane's content starts a
-/// selection, and a click or any key press drops it. So these two variants
-/// *are* its lifecycle — a selection appearing is entering visual mode and it
-/// clearing is leaving — and there is deliberately no `Enter`/`Exit` variant to
-/// be a second source of truth for the same fact.
+/// A client is in visual mode while text is highlighted, and it is never
+/// entered by hand: a mouse drag over a pane's content starts a selection, and
+/// a click or any input that reaches the pane's program drops it. These two
+/// variants are the whole lifecycle — a selection appearing is entering visual
+/// mode, it clearing is leaving — so there is no `Enter`/`Exit` variant.
 ///
-/// There is no copy cursor either: selecting is the mouse's alone. Growing a
-/// highlight with `Shift`+`Arrow` would have to take keys that belong to the
-/// program in the pane — `vim`, readline, and `less` all bind them.
+/// There is no copy cursor: selecting is the mouse's alone. Growing a highlight
+/// with `Shift`+`Arrow` would need keys that belong to the program in the pane —
+/// `vim`, readline, and `less` all bind them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisualCommand {
     /// Begin or extend a selection in one pane. Issued by the mouse layer as a
@@ -360,10 +355,8 @@ pub enum VisualCommand {
 
 /// Arguments for [`VisualCommand::SetSelection`].
 ///
-/// **The pane is named, never inferred.** A highlight belongs to one pane and
-/// panes keep their own, so several can be up at once for one client — leaving
-/// the pane out would make "highlight this" ambiguous the moment a second pane
-/// had a highlight. The mouse layer knows the pane its drag hit, so it says so.
+/// The pane is named, never inferred: each pane keeps its own highlight, so
+/// one client can have several up at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSelectionArgs {
     /// The pane to highlight in.
@@ -374,10 +367,8 @@ pub struct SetSelectionArgs {
 
 /// Arguments for [`VisualCommand::ClearSelection`].
 ///
-/// **The pane is named, never inferred** — same reason as
-/// [`SetSelectionArgs`]: with highlights up in two panes, "clear the selection"
-/// alone cannot say which one. Clearing a pane that has no highlight is not an
-/// error; it changes nothing.
+/// The pane is named, never inferred, as in [`SetSelectionArgs`]. Clearing a
+/// pane that has no highlight is not an error and changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClearSelectionArgs {
     /// The pane whose highlight is dropped.
@@ -410,19 +401,15 @@ pub enum SelectionKind {
 /// A position in one pane's text, spanning its scrollback history and its live
 /// screen as one continuous space.
 ///
-/// **A position is a whole cell.** A terminal reports the pointer as a column
-/// and a row and nothing finer, so there is no sub-cell position to hold: by the
-/// time a mouse event reaches koshi the outer terminal has already rounded the
-/// pointer to a cell. Both ends of a selection are therefore inclusive — the
-/// cell under the pointer is part of the highlight.
+/// A position is a whole cell: the outer terminal reports the pointer as a
+/// column and a row and nothing finer. Both ends of a selection are inclusive,
+/// so the cell under the pointer is part of the highlight.
 ///
-/// **The row is an absolute line number: how many lines the pane had ever
-/// pushed into scrollback when this line was the top of the live screen.** It
-/// counts every line the pane has ever produced, so it never changes meaning —
-/// new output does not renumber it, and neither does the scrollback dropping
-/// its oldest lines to stay under its cap. A row that has been dropped is
-/// simply gone, which is a question about what still exists rather than about
-/// what the number means.
+/// The row is an absolute line number — how many lines the pane had ever pushed
+/// into scrollback when this line was the top of the live screen. It counts
+/// every line the pane has ever produced and never changes meaning: new output
+/// does not renumber it, and neither does the scrollback dropping its oldest
+/// lines to stay under its cap. A dropped row is simply gone.
 ///
 /// Example: a pane has pushed 1000 lines into history and its scrollback holds
 /// the newest 500 (lines 500..=999). The oldest line you can still scroll back
@@ -433,9 +420,9 @@ pub enum SelectionKind {
 /// the oldest line you can reach is now row `510`, and every surviving line
 /// kept the number it had.
 ///
-/// Both numbers are derived from the running total of lines a pane has pushed
-/// into its scrollback and the count it still retains, which the terminal
-/// engine already tracks (`Scrollback::total_pushed` and `Scrollback::len`).
+/// Both numbers come from the running total of lines a pane has pushed into
+/// its scrollback and the count it still retains, which the terminal engine
+/// tracks as `Scrollback::total_pushed` and `Scrollback::len`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridPos {
     /// Absolute line number — see the type docs. Never renumbered.
@@ -445,12 +432,11 @@ pub struct GridPos {
 }
 
 /// A selection: a highlighted range of text, always made with the mouse — a
-/// drag over a pane's content starts one, and a click or any key press drops it.
+/// drag over a pane's content starts one, and a click or any input that reaches
+/// the pane's program drops it.
 ///
 /// This one type is both what [`SetSelectionArgs`] carries and what
-/// [`SelectionChanged`](crate::event::SelectionChanged) reports: the command
-/// asks for a selection and the event announces the selection that resulted,
-/// so they share the shape of that one fact.
+/// [`SelectionChanged`](crate::event::SelectionChanged) reports.
 ///
 /// Both ends are positions the mouse layer resolved from a drag, and either end
 /// may be the earlier one in the text: dragging up or leftward puts `cursor`
@@ -559,11 +545,10 @@ pub struct ReloadPluginArgs {
 /// Where a command came from. The runtime uses this to resolve focus context,
 /// enforce permissions, and attribute diagnostics.
 ///
-/// `ExternalCli` carries only an optional session target: an external
-/// command with no explicit target acts through the session's acting client
-/// (its sole attached client) — with several clients attached and none named
-/// it is rejected, never guessed. `Plugin` and `Internal` have no associated
-/// client.
+/// `ExternalCli` carries only an optional session target: an external command
+/// with no explicit target acts through the session's sole attached client, and
+/// is rejected when several are attached and none is named. `Plugin` and
+/// `Internal` have no associated client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
     /// A keybinding fired by an attached client.
@@ -668,10 +653,10 @@ impl CommandSource {
 /// Why a [`CommandEnvelope`] is not internally consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandEnvelopeError {
-    /// `client_id` does not match the client named by `source` (or names a
-    /// client for a source that has none). This check stops a malformed or
-    /// hostile peer from misattributing a command to another client by
-    /// forging `client_id`.
+    /// `client_id` does not match the client named by `source`, or names a
+    /// client for a source that has none. The check stops a malformed or hostile
+    /// peer from misattributing a command to another client by forging
+    /// `client_id`.
     ClientIdMismatch,
 }
 
@@ -690,11 +675,10 @@ impl std::error::Error for CommandEnvelopeError {}
 /// One command crossing a boundary, with its identity, origin, and timestamp.
 ///
 /// `client_id` is redundant with the client named by `source`; the two must
-/// agree. Deserialization is routed through `CommandEnvelopeWire` and rejects
-/// any envelope where they disagree, so a value decoded from the IPC socket or
-/// a plugin can never carry a forged `client_id`. In-process construction
-/// should use [`CommandEnvelope::new`] (which derives the field) or pass a
-/// hand-built value through [`CommandEnvelope::validate`].
+/// agree. Deserialization is routed through `CommandEnvelopeWire`, which
+/// rejects any envelope where they disagree. In-process construction should use
+/// [`CommandEnvelope::new`], which derives the field, or pass a hand-built
+/// value through [`CommandEnvelope::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
@@ -713,9 +697,9 @@ pub struct CommandEnvelope {
 }
 
 impl CommandEnvelope {
-    /// Build an envelope, deriving `client_id` from the source so the two can
-    /// never disagree. Callers supply `id` and `issued_at` so the type stays
-    /// clock- and randomness-free (and tests stay deterministic).
+    /// Build an envelope, deriving `client_id` from `source`. The caller
+    /// supplies `id` and `issued_at`; this reads no clock and draws no random
+    /// value.
     #[must_use]
     pub fn new(
         id: CommandId,
@@ -734,9 +718,8 @@ impl CommandEnvelope {
     }
 
     /// Check that `client_id` matches the client named by `source`, returning
-    /// the envelope unchanged when it does. This is the gate every untrusted
-    /// envelope (deserialized or hand-built) must pass before the runtime
-    /// trusts its attribution.
+    /// the envelope unchanged when it does. Every deserialized or hand-built
+    /// envelope passes through here before the runtime trusts its attribution.
     ///
     /// # Errors
     /// Returns [`CommandEnvelopeError::ClientIdMismatch`] if the two disagree.
@@ -750,9 +733,8 @@ impl CommandEnvelope {
 }
 
 /// Unvalidated wire shape for [`CommandEnvelope`]. Deserialization lands here
-/// first, then [`CommandEnvelope::validate`] rejects inconsistent attribution
-/// via the `try_from` conversion below — so the consistency invariant holds for
-/// every decoded envelope, not just those built through `new`.
+/// first, then the `try_from` conversion below runs
+/// [`CommandEnvelope::validate`], which rejects inconsistent attribution.
 #[derive(Deserialize)]
 struct CommandEnvelopeWire {
     id: CommandId,
@@ -807,9 +789,8 @@ pub enum CommandResult {
     },
 }
 
-/// Process exit status the external CLI reports. This is the placeholder
-/// core-side enumeration; the full result-to-exit-code wiring lives in the CLI
-/// layer. Discriminants are the actual exit numbers.
+/// Process exit status the external CLI reports. Discriminants are the actual
+/// exit numbers. The full result-to-exit-code wiring lives in the CLI layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliExitCode {
     /// The command succeeded.
@@ -831,10 +812,10 @@ impl CliExitCode {
         self as i32
     }
 
-    /// Placeholder mapping from a [`CommandResult`] to an exit code: applied
-    /// commands succeed, rejected ones report a runtime/action error. Richer
-    /// reasons (session-not-found, IPC-unavailable) are surfaced by the CLI
-    /// layer, not derivable from the result alone.
+    /// Maps a [`CommandResult`] to an exit code: [`CommandResult::Ok`] gives
+    /// [`Success`](Self::Success), [`CommandResult::Rejected`] gives
+    /// [`RuntimeAction`](Self::RuntimeAction). The CLI layer supplies the
+    /// narrower codes, which the result alone cannot tell apart.
     #[must_use]
     pub const fn for_result(result: &CommandResult) -> Self {
         match result {

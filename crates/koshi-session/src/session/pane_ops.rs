@@ -38,10 +38,9 @@ pub struct NewPaneSpec {
 /// that would have hidden the new pane, so it lands visible — and focus the new
 /// pane for `focus_client` when one is given and still attached.
 ///
-/// Whose zoom drops depends on who made the split: with a `focus_client`, that
-/// one client's (another client's zoom is not disturbed by someone else's split);
-/// with none, every zoom of the tab, since nobody owns the edit and a pane added
-/// beneath a zoom would be seen by no one and focused by no one.
+/// Whose zoom drops depends on who made the split: with a `focus_client`, only
+/// that client's; with none, every zoom of the tab, since no client owns the
+/// edit.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_to_stack`],

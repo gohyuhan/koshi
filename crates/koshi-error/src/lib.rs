@@ -1,8 +1,9 @@
-//! `koshi-error` — the aggregate [`KoshiError`] wraps any crate's domain error so
-//! the runtime and diagnostics can handle one type while preserving its
-//! category and severity. It lives in its own crate because wrapping the
-//! concrete per-crate errors needs those crates as dependencies, which
-//! `koshi-core` (a dependency of every crate) cannot take on.
+//! `koshi-error` — [`KoshiError`] wraps any crate's domain error into one
+//! type, keeping its category and severity.
+//!
+//! It is its own crate because wrapping the concrete per-crate errors means
+//! depending on those crates, and `koshi-core` — which every crate depends on —
+//! cannot take those dependencies without a cycle.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
@@ -16,9 +17,9 @@ use koshi_pty::error::PtyError;
 use koshi_storage::error::StorageError;
 use koshi_terminal::error::TerminalError;
 
-/// Any domain failure, wrapped for uniform handling. Display is transparent to
-/// the wrapped error; [`category`](KoshiError::category) and
-/// [`severity`](KoshiError::severity) delegate to it.
+/// Any domain failure, wrapped as one type. `Display`,
+/// [`category`](KoshiError::category) and [`severity`](KoshiError::severity)
+/// all forward to the wrapped error.
 #[derive(Debug, Error)]
 pub enum KoshiError {
     /// Configuration parse or validation failure.
@@ -48,7 +49,7 @@ pub enum KoshiError {
 }
 
 impl DomainError for KoshiError {
-    /// The error's domain category, delegated from the wrapped error.
+    /// The wrapped error's category.
     fn category(&self) -> DomainCategory {
         match self {
             KoshiError::Config(e) => e.category(),
@@ -62,7 +63,7 @@ impl DomainError for KoshiError {
         }
     }
 
-    /// The error's severity level, delegated from the wrapped error.
+    /// The wrapped error's severity.
     fn severity(&self) -> Severity {
         match self {
             KoshiError::Config(e) => e.severity(),

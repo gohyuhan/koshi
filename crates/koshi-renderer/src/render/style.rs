@@ -43,8 +43,7 @@ pub(super) fn session_style(theme: &Theme) -> Style {
 }
 
 /// The `[v0.1.0]` badge beside the session name: the ramp's start end again,
-/// without the name's bold, so the version reads as a quieter tag on the same
-/// block rather than a second heading.
+/// without the name's bold.
 pub(super) fn version_style(theme: &Theme) -> Style {
     Style::default().fg(theme.ramp(0, 2))
 }
@@ -57,8 +56,7 @@ pub(super) fn scroll_arrow_style(theme: &Theme) -> Style {
 }
 
 /// The background filling a koshi-owned bar row whole — the tab bar and the
-/// key-hint bar — laid down before any text, so chrome reads against a color
-/// the theme picks rather than whatever the terminal's own background is.
+/// key-hint bar — laid down before any text.
 pub(crate) fn bar_style(theme: &Theme) -> Style {
     Style::default().bg(theme.bar_bg)
 }

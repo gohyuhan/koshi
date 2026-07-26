@@ -14,14 +14,13 @@
 //! Plugins never hold a reference — they ask the dispatcher to register or
 //! unregister for them.
 //!
-//! [`register`](ActionRegistry::register) accepts `plugin:` references only
-//! (`core:` is seeded once and permanent, `user:` macros come later), and it
-//! trusts only the `caller` the host authenticated: the reference's namespace,
-//! the metadata's namespace, and the handler's target must all name that
-//! caller, and the handler must be the caller's own
-//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall) — the
-//! one door where per-command capability checks happen. So a plugin can never
-//! touch another plugin's namespace or a built-in action.
+//! [`register`](ActionRegistry::register) accepts `plugin:` references only —
+//! `core:` is seeded once and permanent, and `user:` has no registration path.
+//! It trusts only the `caller` the host authenticated: the reference's
+//! namespace, the metadata's namespace, and the handler's target must all name
+//! that caller, and the handler must be the caller's own
+//! [`PluginHostCall`](crate::action::ActionHandlerRef::PluginHostCall), the one
+//! door where per-command capability checks happen.
 //!
 //! [`version`](ActionRegistry::version) counts successful adds and removes;
 //! a consumer caching a derived view (the which-key hint bar) rebuilds only
@@ -58,8 +57,7 @@ pub enum RegistryError {
         /// The reference whose namespace is not `plugin:`.
         action: ActionRef,
     },
-    /// The reference belongs to a plugin other than the caller, which would let
-    /// one plugin claim a name in another's namespace.
+    /// The reference belongs to a plugin other than the caller.
     ForeignNamespace {
         /// The reference the caller does not own.
         action: ActionRef,
@@ -67,14 +65,13 @@ pub enum RegistryError {
         caller: PluginId,
     },
     /// The metadata's namespace names a different owner than the reference
-    /// does. The two restate one fact, so they must agree.
+    /// does; the two must agree.
     NamespaceMismatch {
         /// The reference whose metadata disagreed with it.
         action: ActionRef,
     },
-    /// The metadata does not dispatch through the owning plugin's host call.
-    /// A plugin action reaches the runtime only that way, so every command it
-    /// performs passes the capability check the host makes on each host call.
+    /// The metadata does not dispatch through the owning plugin's host call,
+    /// the only route a plugin action has into the runtime.
     InvalidHandler {
         /// The reference whose handler was not its owner's host call.
         action: ActionRef,
@@ -153,14 +150,11 @@ impl ActionRegistry {
 
     /// Add `caller`'s action to the table and bump [`version`](Self::version).
     ///
-    /// `caller` is the plugin the host authenticated, and is the only fact here
-    /// the registry trusts. `action` and `metadata` arrive together from the
-    /// same request, so they are checked against `caller` rather than against
-    /// each other: the reference is in `caller`'s namespace, the metadata
-    /// repeats that namespace, and the handler is `caller`'s own
-    /// [`PluginHostCall`](ActionHandlerRef::PluginHostCall). Every command a
-    /// plugin action performs therefore passes through the host call the
-    /// runtime capability-checks.
+    /// `caller` is the plugin the host authenticated, and the only fact here
+    /// the registry trusts. Both `action` and `metadata` are checked against
+    /// it: the reference is in `caller`'s namespace, the metadata repeats that
+    /// namespace, and the handler is `caller`'s own
+    /// [`PluginHostCall`](ActionHandlerRef::PluginHostCall).
     ///
     /// # Errors
     /// - [`RegistryError::ReservedNamespace`] if `action` is a `core:` or

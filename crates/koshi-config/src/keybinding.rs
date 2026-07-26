@@ -21,9 +21,8 @@
 //! detection reports it against the effective depth.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
-//! span-tagged [`KeybindingDiagnostic`] and a file with any problem yields
-//! no layer. A half-applied keymap (some bindings live, the mistyped ones
-//! silently dropped) would be worse than a clean error and the running map.
+//! span-tagged [`KeybindingDiagnostic`], and a file with any problem yields no
+//! layer at all. The running map stays as it was.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

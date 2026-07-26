@@ -30,9 +30,7 @@ const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A styled blank — a background-colored prompt segment, say — is not a
 /// default blank and is kept, so its color survives.
 ///
-/// Returning a slice rather than a shortened vector lets the caller allocate
-/// once, at the size actually kept, instead of copying a full screen row and
-/// then shrinking it.
+/// Returns a slice, so the caller allocates once at the size actually kept.
 fn kept(row: &[Cell], end: RowEnd) -> &[Cell] {
     if matches!(end, RowEnd::Hard) {
         &row[..content_len(row)]
@@ -120,10 +118,8 @@ impl Scrollback {
     /// is measured against.
     ///
     /// Width-0 cells are skipped: they are the placeholder right halves of wide
-    /// (CJK/emoji) glyphs, which carry only a blank space — the glyph's real
-    /// text lives entirely in its width-2 base cell (character plus combining
-    /// marks). Counting the placeholder would over-charge one byte per wide
-    /// glyph and evict history early for wide-glyph-heavy output.
+    /// (CJK/emoji) glyphs, which carry only a blank space. The glyph's real text
+    /// lives entirely in its width-2 base cell, character plus combining marks.
     pub fn line_bytes(&self, line: &[Cell]) -> usize {
         line.iter()
             .filter(|cell| cell.width() != 0)
@@ -156,9 +152,9 @@ impl Scrollback {
     /// A hard-ended row is stored without the trailing default blanks that pad
     /// it out to the screen width, so a 200-column row reading `README.md`
     /// keeps 9 cells. A soft-wrapped row keeps every cell. Taking the row
-    /// borrowed makes that one allocation at the stored size rather than a copy
-    /// of the whole row followed by a shrink; a 1000-column screen scrolling
-    /// 20 000 lines runs about 18% faster for it.
+    /// borrowed makes one allocation at the stored size, instead of copying the
+    /// whole row and then shrinking it: a 1000-column screen scrolling 20 000
+    /// lines runs about 18% faster for it.
     pub fn push_row(&mut self, row: &[Cell], end: RowEnd) {
         let line = kept(row, end).to_vec();
         let new_bytes = self.line_bytes(&line);
@@ -207,9 +203,9 @@ impl Scrollback {
     }
 
     /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines"). The
-    /// cumulative tallies are left intact: an explicit erase is not a cap-driven
-    /// truncation, so it must not perturb the truncation reporting, and
-    /// [`total_pushed`](Self::total_pushed) stays monotonic across it.
+    /// cumulative tallies are left intact — an explicit erase is not a
+    /// cap-driven truncation — and [`total_pushed`](Self::total_pushed) stays
+    /// monotonic across it.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.byte_total = 0;

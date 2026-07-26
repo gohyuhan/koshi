@@ -5,11 +5,11 @@
 //! the bytes a program running inside a pane expects, for the keys no binding
 //! consumed.
 //!
-//! Encoding is a function of the chord *and* the receiving pane's mode, not of
-//! the chord alone, so it happens where the bytes are written rather than here
-//! at decode time. A bare Up arrow is `ESC [ A` to a shell but `ESC O A` to
-//! vim, which turned on application-cursor-keys mode (DECCKM, `ESC [ ? 1 h`).
-//! The chord `<Up>` is the same press in both cases; only the bytes differ.
+//! Encoding depends on the chord *and* the receiving pane's mode, so it happens
+//! where the bytes are written. A bare Up arrow is `ESC [ A` to a shell but
+//! `ESC O A` to vim, which turned on application-cursor-keys mode (DECCKM,
+//! `ESC [ ? 1 h`). The chord `<Up>` is the same press in both cases; only the
+//! bytes differ.
 //!
 //! # Byte forms
 //!
@@ -32,10 +32,9 @@ const ESC: u8 = 0x1b;
 /// a bitmap of the held modifiers offset by one.
 const UNMODIFIED: u8 = 1;
 
-/// Decode one press or repeat into its canonical chord. Releases yield `None`
-/// so one physical press cannot be delivered twice, as do keys this model has
-/// no name for (media keys, `CapsLock`, `Menu`): a chord no binding can spell
-/// and no program expects bytes for is not an input event.
+/// Decode one press or repeat into its canonical chord. Releases yield `None`,
+/// so one physical press is delivered once, as do keys this model has no name
+/// for: media keys, `CapsLock`, `Menu`.
 #[must_use]
 pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
     if matches!(event.kind, KeyEventKind::Release) {
@@ -58,15 +57,14 @@ pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
 /// (DECCKM): an unmodified cursor key is `ESC O A` while it is on and
 /// `ESC [ A` while it is off. It changes no other key.
 ///
-/// Every chord encodes to something: a chord the host can produce is a chord a
-/// program can receive.
+/// Every chord encodes to something.
 ///
 /// Super rides along only where a sequence has room for it. A CSI key carries
 /// it in the modifier parameter (`<D-Up>` → `ESC [ 1 ; 9 A`), the same slot
 /// Shift and Control use; a C0 key has no field for any modifier but Control
-/// and Alt, so `<D-a>` reaches the pane as a plain `a` — what it sends in a
-/// terminal running no multiplexer at all. Shift splits the same way, folding
-/// into the character (`<S-a>` → `A`) but riding the parameter on a named key.
+/// and Alt, so `<D-a>` reaches the pane as a plain `a`. Shift splits the same
+/// way, folding into the character (`<S-a>` → `A`) but riding the parameter on
+/// a named key.
 #[must_use]
 pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
     match chord.key {
@@ -264,10 +262,9 @@ fn tilde(code: u8, param: u8) -> Vec<u8> {
 /// and `ESC [ 1 ; <param> P` … once modified); F5–F12 join the `~` family
 /// under the codes terminfo lists, whose run skips 16 and 22.
 ///
-/// F13–F24 are the keys of a 24-key keyboard, which terminals give no sequence
-/// of their own: terminfo spends those slots on Shift plus F1–F12 (`kf13` IS
-/// `ESC [ 1 ; 2 P`, Shift+F1), and a program reads the bytes back as exactly
-/// that. So `<F13>` encodes as Shift+F1 — what the program is waiting for.
+/// F13–F24 have no sequence of their own: terminfo spends those slots on Shift
+/// plus F1–F12, so `kf13` IS `ESC [ 1 ; 2 P`, Shift+F1. `<F13>` encodes as
+/// Shift+F1.
 fn function_key(n: u8, mods: ModFlags) -> Vec<u8> {
     let (n, mods) = if n > 12 {
         (n - 12, mods.union(ModFlags::SHIFT))
@@ -341,11 +338,10 @@ fn unfold_shift(c: char) -> char {
 /// covers `@` through `_` — 32 characters for the 32 C0 codes — and a letter is
 /// just its capital's version of that.
 ///
-/// The digit row is the awkward part. A terminal has to deliver the control
-/// codes whose punctuation is hard to reach, so it spreads the leftovers across
-/// `2`–`8`: `2` sends NUL, `3` sends ESC, `4`–`7` send `0x1c`–`0x1f`, and `8`
-/// sends DEL. The same byte therefore has two spellings — `<C-4>` and `<C-\>`
-/// both send `0x1c` — and which one arrives depends on the host:
+/// The digit row carries the leftovers, the control codes whose punctuation is
+/// hard to reach: `2` sends NUL, `3` sends ESC, `4`–`7` send `0x1c`–`0x1f`, and
+/// `8` sends DEL. The same byte therefore has two spellings — `<C-4>` and
+/// `<C-\>` both send `0x1c` — and which one arrives depends on the host:
 ///
 /// - On unix the terminal sends the byte, and crossterm decodes `0x1c`–`0x1f`
 ///   back to `Char('4')`–`Char('7')` — so `Ctrl+\` reaches koshi as `<C-4>`.
@@ -354,8 +350,7 @@ fn unfold_shift(c: char) -> char {
 /// - On Windows there is no byte to decode; crossterm reports the key's own
 ///   character, so `Ctrl+4` arrives as `<C-4>` and `Ctrl+\` as `<C-\>`.
 ///
-/// Both spellings must leave here as the same byte, or a control chord the user
-/// pressed reaches the pane as a literal digit.
+/// Both spellings leave here as the same byte.
 fn control_byte(c: char) -> Option<u8> {
     match c {
         '@'..='_' => Some((c as u8) & 0x1f),

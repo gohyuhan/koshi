@@ -8,12 +8,11 @@
 //!
 //! A [`MouseInput`] is the mouse peer of a [`KeyChord`](crate::key::KeyChord):
 //! the boundary that decodes a host event produces one of these and nothing
-//! host-specific escapes it. Its coordinate is a [`Point`] — a cell in the
-//! client's own screen, still raw. Nothing here says which pane, border, or bar
-//! that cell falls in; that hit-test happens later, against the client's render
-//! layout. The type carries no client identity: which client the press came
-//! from is the caller's to attach when it hands the event to the hit-test, the
-//! same way a decoded key chord travels without one.
+//! host-specific escapes it. Its coordinate is a [`Point`] — a raw cell in the
+//! client's own screen. Which pane, border, or bar that cell falls in is
+//! hit-tested later against the client's render layout. The type carries no
+//! client identity; the caller attaches that when it hands the event to the
+//! hit-test.
 
 use crate::geometry::Point;
 use crate::key::ModFlags;

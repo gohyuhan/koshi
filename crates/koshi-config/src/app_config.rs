@@ -12,9 +12,8 @@
 //! Each skipped field is named in the returned warnings for the loader to log.
 //!
 //! The `update` section is **strict**: a bad field there fails the whole parse.
-//! `update.auto-check` gates a network call, and quietly dropping an unreadable
-//! `auto-check #false` would re-enable it — so the update loader must fail
-//! closed, which needs the parse to fail rather than skip the field.
+//! `update.auto-check` gates a network call, so an unreadable
+//! `auto-check #false` must fail closed rather than be skipped.
 //!
 //! # The `theme` line
 //!
@@ -74,11 +73,11 @@ const SECTIONS: &[&str] = &[
 
 /// A parsed `koshi.kdl`.
 ///
-/// The theme it names is kept **out** of [`layer`](Self::layer) on purpose.
-/// Every other setting in the file is an override that folds onto the defaults;
-/// the theme line is not a color at all, it is the name of another file to go
-/// read. Keeping it separate means merging the layer can never produce a config
-/// claiming a theme whose colors were never loaded.
+/// The theme it names is kept **out** of [`layer`](Self::layer). Every other
+/// setting in the file is an override that folds onto the defaults; the theme
+/// line is not a color, it is the name of another file to read. So merging the
+/// layer never produces a config claiming a theme whose colors were never
+/// loaded.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AppConfigFile {
     /// The settings this file overrides, to fold onto the built-in defaults.

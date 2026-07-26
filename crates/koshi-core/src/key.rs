@@ -179,12 +179,10 @@ impl fmt::Display for Key {
 /// [`Key::Char`] chord is stored in — the one rule shared by the config
 /// parser and the input decoder.
 ///
-/// The fold is **reversible or it does not happen**. A chord is all the input
-/// layer keeps of a key press: when no binding consumes the key, it rebuilds
-/// the typed character from `lowercase + Shift` to send it to the pane. A fold
-/// whose capital cannot be recovered would change the user's text, so a letter
-/// only folds when uppercasing the lowercase form gives the original character
-/// back.
+/// A letter folds only when uppercasing its lowercase form gives the original
+/// character back. A chord is all the input layer keeps of a key press: when no
+/// binding consumes the key, it rebuilds the typed character from
+/// `lowercase + Shift` and sends that to the pane.
 ///
 /// - `'A'` → `('a', true)` — the `true` means "Shift is part of this key";
 ///   `'a'` uppercases back to `'A'`, so the fold is safe.
@@ -240,9 +238,9 @@ impl KeyChord {
     ///
     /// This classifies, it does not forbid. Outside lock mode a key goes to
     /// the keymap before the pane, so any binding — a typeable one included —
-    /// takes its key away from the pane until the client locks. The value
-    /// exists so the keybinding layer can keep shipped defaults and the
-    /// lock-mode unlock chord off keys that plain typing would hit.
+    /// takes its key away from the pane until the client locks. The keybinding
+    /// layer reads this to keep shipped defaults and the lock-mode unlock chord
+    /// off keys plain typing would hit.
     pub fn is_typeable(&self) -> bool {
         !self.mods.intersects(NON_TEXT)
     }

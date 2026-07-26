@@ -6,9 +6,8 @@
 //! dependency. The payload is base64 so any bytes survive the trip.
 //!
 //! `ClipboardWriter` is the seam an operating-system clipboard backend plugs
-//! into. Today `Osc52Clipboard` is the only writer and `ClipboardBackend` has
-//! the single `Osc52` variant; a native backend adds a writer plus its own
-//! variant without reshaping this flow.
+//! into. `Osc52Clipboard` is the only writer, and `ClipboardBackend` has the
+//! single `Osc52` variant.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;

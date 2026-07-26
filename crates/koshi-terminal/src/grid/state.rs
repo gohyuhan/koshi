@@ -7,8 +7,7 @@ use std::cmp::min;
 /// layered over its base character.
 ///
 /// It is a type of its own so a [`Cell`] can hold it behind a *thin* pointer —
-/// eight bytes, and null unless the cell actually has continuations. Boxing the
-/// vector directly would store a pointer plus the vector's own three words.
+/// eight bytes, and null unless the cell actually has continuations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CellExtra {
     /// The continuation code points in arrival order. Never empty: the box is
@@ -18,11 +17,9 @@ struct CellExtra {
 
 /// A single grid cell: its character, display width, and style.
 ///
-/// A cell is copied once per grid slot and once per scrollback row, so its
-/// size is multiplied by every column of every retained line. The continuation
-/// code points therefore sit behind a pointer that is null for a plain cell
-/// (the overwhelming majority), and the whole cell occupies 40 bytes on a
-/// 64-bit target.
+/// A cell occupies 40 bytes on a 64-bit target, and one exists per grid slot
+/// and per scrollback-row column. The continuation code points sit behind a
+/// pointer that is null for a plain cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// The base character occupying the cell.

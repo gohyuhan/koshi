@@ -244,9 +244,8 @@ fn lock_and_focus_seeds_are_client_scoped() {
 }
 
 /// Pins which seeds are coming-soon: the selection, search, and plugin families
-/// and `quit` have no runtime handler yet, so each is seeded `ComingSoon` and
-/// every other action is `Available`. When one lands, its `core_seed`
-/// declaration flips and this list shrinks.
+/// and `quit` have no runtime handler, so each is seeded `ComingSoon` and every
+/// other action is `Available`.
 #[test]
 fn coming_soon_seeds_are_pinned() {
     let mut coming_soon: Vec<String> = core_action_seeds()
@@ -277,8 +276,7 @@ fn coming_soon_seeds_are_pinned() {
 }
 
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
-/// changes this list and fails the assert — a deliberate gate so the stable
-/// user-facing surface never shifts silently.
+/// changes this list and fails the assert.
 #[test]
 fn core_seed_snapshot_is_stable() {
     let mut names: Vec<String> = core_action_seeds()

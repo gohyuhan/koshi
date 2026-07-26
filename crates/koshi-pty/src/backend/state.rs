@@ -24,10 +24,10 @@ pub trait PtyBackend: Send + Sync {
     /// status. The caller owns the pane identity; the backend keys its records
     /// by `pane_id` so later `resize`/`write`/`kill` address the same pane.
     ///
-    /// `pane_id` must not already be live in the backend: spawning over a live id
-    /// would orphan the previous child's PTY and I/O threads. A caller re-running
-    /// a command in an existing pane (respawn) must [`kill`](PtyBackend::kill) it
-    /// first. Implementations assert this in debug builds.
+    /// `pane_id` must not already be live in the backend; spawning over a live
+    /// id orphans the previous child's PTY and I/O threads. A caller re-running
+    /// a command in an existing pane must [`kill`](PtyBackend::kill) it first.
+    /// Implementations assert this in debug builds.
     fn spawn(&self, pane_id: PaneId, spec: SpawnSpec, size: PtySize)
         -> Result<PtyHandle, PtyError>;
     /// Resize an existing pane's PTY.
@@ -44,12 +44,11 @@ pub trait PtyBackend: Send + Sync {
 
 /// Where a backend delivers a pane's child output and exit status.
 ///
-/// The channel-and-handle route in [`PtyHandle`] needs a relay thread per pane
-/// to move each chunk from the pane's channel onto the consumer's own queue. A
-/// consumer that implements this trait is handed the chunk by the reader
-/// thread itself, so that relay thread does not exist and a pane costs one
-/// thread less. `Send + Sync` because the reader and watcher threads of every
-/// pane share one sink.
+/// A consumer implementing this trait is handed each chunk by the reader thread
+/// itself, so a pane needs no relay thread — unlike the channel-and-handle route
+/// in [`PtyHandle`], where one thread per pane moves chunks onto the consumer's
+/// queue. `Send + Sync` because the reader and watcher threads of every pane
+/// share one sink.
 pub trait PtySink: Send + Sync {
     /// Take one chunk of `pane`'s child output. Returning `false` means the
     /// consumer is gone: the reader stops reading that pane, and nothing more

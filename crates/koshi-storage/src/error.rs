@@ -1,13 +1,12 @@
-//! Storage domain error. Defines [`StorageError`], the error type returned by
-//! persistence operations, and its [`DomainError`] impl that classifies every
-//! variant into [`DomainCategory::Storage`].
+//! Storage domain error: [`StorageError`], returned by persistence operations.
+//! Its [`DomainError`] impl puts every variant in
+//! [`DomainCategory::Storage`].
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-/// A failure persisting or loading state. I/O failures are recoverable (retry
-/// or skip the snapshot); a corrupt store means core state is unusable and is
-/// session-fatal.
+/// A failure persisting or loading state. I/O failures are recoverable; a
+/// corrupt store leaves core state unusable and is session-fatal.
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// Reading or writing the store failed.

@@ -33,9 +33,8 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
-    /// The diagnostics domain a failure on this pane classifies into: a terminal
-    /// pane is a `Terminal` failure, a plugin pane a `Plugin` failure — so a
-    /// pane-domain error is never mislabelled as a terminal-emulator failure.
+    /// The diagnostics domain a failure on this pane classifies into: a
+    /// terminal pane is a `Terminal` failure, a plugin pane a `Plugin` failure.
     #[must_use]
     pub fn domain_category(&self) -> DomainCategory {
         match self {
@@ -52,8 +51,7 @@ pub struct PaneRecord {
     /// Stable id, matching the layout leaf that references this pane. Read-only:
     /// the registry keys records by it, so it is fixed for the record's life.
     id: PaneId,
-    /// What backs the pane (terminal or plugin surface). Fixed at creation so a
-    /// pane's diagnostics domain never changes underneath it.
+    /// What backs the pane, terminal or plugin surface. Fixed at creation.
     kind: PaneKind,
     /// The process this pane was spawned to run, if any.
     pub command: Option<SpawnSpec>,
@@ -81,9 +79,8 @@ impl PaneRecord {
         Self::new_with_kind(id, PaneKind::Terminal, created_at)
     }
 
-    /// A fresh `Spawning` record for a pane backed by `kind`. `kind` is fixed
-    /// here and never changes afterward, so the pane's diagnostics domain stays
-    /// stable for its whole life.
+    /// A fresh `Spawning` record for a pane backed by `kind`. `kind` is set
+    /// here and never changes afterward.
     pub fn new_with_kind(id: PaneId, kind: PaneKind, created_at: SystemTime) -> Self {
         Self {
             id,
@@ -118,10 +115,8 @@ impl PaneRecord {
     }
 
     /// Apply a lifecycle `event`, advancing the pane's state, or return
-    /// [`InvalidTransition`] if the move is illegal from the current state.
-    /// The pane is the sole owner of its lifecycle (the field is private), so
-    /// this is the only way to drive it; the caller decides whether a rejected
-    /// event is an expected no-op to ignore or a fault to report.
+    /// [`InvalidTransition`] if the move is illegal from the current state. The
+    /// lifecycle field is private, so this is the only way to drive it.
     pub fn update_lifecycle(&mut self, event: PaneLifecycleEvent) -> Result<(), InvalidTransition> {
         self.lifecycle = self.lifecycle.transition(event, self.kind.clone())?;
         Ok(())

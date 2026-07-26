@@ -5,9 +5,8 @@
 //! implementation handles child output streaming, input queuing, process
 //! termination (with cross-platform kill policies), and exit status tracking.
 //!
-//! Three threads is the whole per-pane cost. The reader delivers output to the
-//! consumer itself — see [`crate::backend::state::PtySink`] — so nothing has to
-//! run alongside a pane to move its bytes along.
+//! Three threads is the whole per-pane cost: the reader delivers output to the
+//! consumer itself, through [`crate::backend::state::PtySink`].
 
 use std::{
     collections::HashMap,
@@ -49,17 +48,16 @@ const READ_CHUNK: usize = 8192;
 /// open forever, so the watcher — which already holds the exit status —
 /// publishes once this elapses.
 ///
-/// Draining what a dying child left behind takes microseconds, so this is
-/// wide enough that the reader wins whenever the PTY does report an end, and
-/// short enough to be invisible when it does not. Closing a pane never waits
-/// on it: [`kill`](PortablePtyBackend::kill) cancels it before joining.
+/// Draining what a dying child left behind takes microseconds, so this is wide
+/// enough that the reader wins whenever the PTY does report an end, and short
+/// enough to go unnoticed when it does not. Closing a pane never waits on it:
+/// [`kill`](PortablePtyBackend::kill) cancels it before joining.
 const EXIT_PUBLISH_GRACE: Duration = Duration::from_millis(100);
 
 /// Start one of a pane's helper threads under `name`.
 ///
-/// Naming them makes a debugger, a profiler, or a crash report attribute the
-/// thread to koshi rather than showing an anonymous worker. Spawn failure
-/// panics, matching [`std::thread::spawn`].
+/// The name is what a debugger, profiler, or crash report shows for the thread.
+/// Spawn failure panics, matching [`std::thread::spawn`].
 fn spawn_pty_thread<F>(name: &str, body: F) -> JoinHandle<()>
 where
     F: FnOnce() + Send + 'static,
@@ -75,7 +73,7 @@ where
 ///
 /// The two arms are the two routes a pane can be driven through: a caller
 /// polling [`PtyHandle`] gets `Channel`, a caller that implements [`PtySink`]
-/// gets `Sink` and saves the relay thread the channel route needs.
+/// gets `Sink`, which needs no relay thread.
 enum Delivery {
     /// Push each chunk onto the handle's output channel.
     Channel(Sender<Vec<u8>>),
@@ -277,10 +275,8 @@ impl PortablePtyBackend {
     /// Creates a new, empty PTY backend that hands every pane's output and exit
     /// to `sink` from the pane's own reader thread.
     ///
-    /// This is the shape an event loop wants: without it each pane needs a
-    /// thread of its own to move chunks from the pane's channel onto the loop's
-    /// queue, so a session's thread count grows a whole thread per pane for
-    /// work that is a single function call here.
+    /// This is the shape an event loop wants: no per-pane relay thread, since
+    /// delivering a chunk is a single function call.
     pub fn with_sink(sink: Arc<dyn PtySink>) -> Self {
         PortablePtyBackend {
             panes: Mutex::new(HashMap::new()),

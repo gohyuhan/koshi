@@ -90,8 +90,8 @@ pub struct MergedKeyMap {
 /// the defaults layer does the same. A dead binding (resolver-refused,
 /// swallowed by the locked-mode reserved-chord bypass, or longer than the
 /// chord-depth cap) enters no map: a
-/// dead user entry leaves the default beneath it live, and a dead default
-/// is simply absent — dead by build state, not displaced by the user.
+/// dead user entry leaves the default beneath it live, and a dead default is
+/// absent — dead by build state, not displaced by the user.
 #[must_use]
 pub fn merge_keymaps(
     layers: &[KeyMapLayer],

@@ -25,23 +25,20 @@
 //!   row 1023  ─┘
 //! ```
 //!
-//! The point of counting this way is that **the number never changes meaning**.
-//! Ten lines of output arrive: `total_pushed` becomes 1010, the live screen's
-//! top row is 1010, and the line that was row 1000 is *still* row 1000 — it just
-//! lives in history now. The cap drops the ten oldest: the first reachable row
-//! becomes 510, and every surviving line kept its number. So a selection is
-//! stored once and never re-anchored; a row that has been dropped is out of
-//! [`TextView::first_row`]`..=`[`TextView::last_row`] and reads as [`None`],
-//! which is a question about what still exists rather than about what the number
-//! means.
+//! **The number never changes meaning.** Ten lines of output arrive:
+//! `total_pushed` becomes 1010, the live screen's top row is 1010, and the line
+//! that was row 1000 is *still* row 1000 — it just lives in history now. The cap
+//! drops the ten oldest: the first reachable row becomes 510, and every
+//! surviving line kept its number. So a selection is stored once and never
+//! re-anchored, and a dropped row falls outside
+//! [`TextView::first_row`]`..=`[`TextView::last_row`] and reads as [`None`].
 //!
 //! # Word boundaries
 //!
 //! A double-click grows the selection to a whole "word", but a terminal's idea
-//! of a word is not an editor's. [`WORD_SEPARATORS`] deliberately leaves out
-//! `/`, `.`, `-`, and `_`, so double-clicking `/usr/local/bin` selects the whole
-//! path and `foo.tar.gz` comes out whole — paths and URLs are what people
-//! actually double-click in a terminal.
+//! of a word is not an editor's. [`WORD_SEPARATORS`] leaves out `/`, `.`, `-`,
+//! and `_`, so double-clicking `/usr/local/bin` selects the whole path and
+//! `foo.tar.gz` comes out whole.
 
 use std::collections::VecDeque;
 use std::sync::LazyLock;
@@ -55,8 +52,8 @@ use crate::scrollback::Scrollback;
 ///
 /// History keeps a row's text without the default blanks padding it out to the
 /// screen width, so a column right of a history line's last character has no
-/// stored cell. It stands for one of those dropped blanks, which is what it
-/// was, so a walk over a row sees the full screen width either way.
+/// stored cell. This stands in for one of those dropped blanks, so a walk over
+/// a row sees the full screen width either way.
 static PADDING: LazyLock<Cell> = LazyLock::new(Cell::blank);
 
 /// The cell at `col` of `cells`, treating a row shorter than `cols` as if the
@@ -78,10 +75,9 @@ fn cell_or_padding(cells: &[Cell], col: u16, cols: u16) -> Option<&Cell> {
 /// Whitespace, quotes, brackets, and the shell's own punctuation stop a word;
 /// `/`, `.`, `-`, and `_` do not, so a path, a URL, or a dotted filename is one
 /// word. Double-clicking `local` in `/usr/local/bin` selects `/usr/local/bin`;
-/// double-clicking inside `(foo bar)` selects `foo` alone, because the space and
-/// the parentheses are separators. Double-clicking a separator itself selects
-/// the run of that same character — the two spaces in `foo  bar`, not the words
-/// around them.
+/// double-clicking inside `(foo bar)` selects `foo` alone. Double-clicking a
+/// separator itself selects the run of that same character — the two spaces in
+/// `foo  bar`, not the words around them.
 pub const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
 
 /// One pane's text — its scrollback history and its live screen — addressed by
@@ -104,10 +100,9 @@ impl<'a> TextView<'a> {
     /// the primary screen.
     ///
     /// **Only for the primary screen.** The alternate screen keeps no history of
-    /// its own while `scrollback` still holds the *primary's*, so pairing the two
-    /// would let a walk step off the alternate's top row into text from another
-    /// screen entirely. Use [`screen_only`](Self::screen_only) there —
-    /// [`TerminalState::text_view`] picks the right one.
+    /// its own while `scrollback` still holds the *primary's*. Use
+    /// [`screen_only`](Self::screen_only) there; [`TerminalState::text_view`]
+    /// picks the right one.
     ///
     /// [`TerminalState::text_view`]: crate::state::TerminalState::text_view
     #[must_use]

@@ -5,25 +5,25 @@ use thiserror::Error;
 
 /// A failure on the control channel.
 ///
-/// A broken link ([`Transport`](IpcError::Transport),
-/// [`Disconnected`](IpcError::Disconnected)) and a refused frame
-/// ([`FrameTooLarge`](IpcError::FrameTooLarge)) are client-fatal: the affected
-/// connection must tear down, but the session keeps serving others. A socket
-/// address that fails its trust or liveness checks
+/// Client-fatal — the affected connection or caller stops and the session
+/// serves on: a broken link ([`Transport`](IpcError::Transport),
+/// [`Disconnected`](IpcError::Disconnected)), a refused frame
+/// ([`FrameTooLarge`](IpcError::FrameTooLarge)), a socket address that fails
+/// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
-/// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy))
-/// is client-fatal too: no connection comes up at all, as is an endpoint
-/// file the caller cannot read
+/// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
+/// and an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)): that one
-/// caller cannot connect, and the session serves on. A failed endpoint-file
-/// write ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) is
-/// session-fatal: it happens in the session's own startup, and a session
-/// whose endpoint file never lands is one no caller can ever reach. A frame
-/// that arrived whole yet does not decode
-/// ([`MalformedFrame`](IpcError::MalformedFrame)) is recoverable: the stream
-/// is still aligned on frame boundaries, so the connection can answer and
-/// keep going.
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)).
+///
+/// Session-fatal: a failed endpoint-file write
+/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)). It happens during the
+/// session's own startup, and a session whose endpoint file never lands is one
+/// no caller can reach.
+///
+/// Recoverable: a frame that arrived whole yet does not decode
+/// ([`MalformedFrame`](IpcError::MalformedFrame)). The stream is still aligned
+/// on frame boundaries, so the connection can answer and keep going.
 #[derive(Debug, Error)]
 pub enum IpcError {
     /// The underlying transport failed.

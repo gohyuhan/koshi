@@ -151,11 +151,10 @@ impl TerminalState {
     }
 
     /// Move the cursor to an absolute (`row`, `col`), clamped into the active
-    /// grid, and clear the deferred-wrap latch — the single chokepoint every
-    /// absolute cursor placement (CUP/HVP, CHA/HPA, VPA, CNL, CPL) routes
-    /// through. Centralizing here is deliberate: origin mode (DECOM) and
-    /// left/right margins (DECSLRM) become a one-place change when they land,
-    /// the same way alacritty funnels its absolute moves through one `goto`.
+    /// grid, and clear the deferred-wrap latch. This is the single chokepoint
+    /// every absolute cursor placement — CUP/HVP, CHA/HPA, VPA, CNL, CPL —
+    /// routes through, so origin mode (DECOM) and left/right margins (DECSLRM)
+    /// are a one-place change when they land.
     pub(super) fn goto(&mut self, row: u16, col: u16) {
         let (rows, cols) = self.active_grid().dimensions();
         let cursor = self.active_cursor_mut();
@@ -170,8 +169,7 @@ impl TerminalState {
     /// cursor resting there with no wrap pending, so the next glyph overwrites in
     /// place (DEC: a character at the right margin replaces when autowrap is
     /// reset). Re-enabling autowrap afterward does not retroactively arm a wrap.
-    /// Every site where a glyph lands on the last column funnels through here, so
-    /// the arm-iff-autowrap rule lives in one place.
+    /// Every site where a glyph lands on the last column funnels through here.
     pub(super) fn arm_wrap_latch(&mut self, last_col: u16) {
         let armed = self.modes.autowrap;
         let cursor = self.active_cursor_mut();
@@ -190,8 +188,8 @@ impl TerminalState {
 /// The next 8-column tab stop strictly after `col`, clamped to `last_col`. With
 /// stops at every multiple of 8, this rounds `col` up to the next multiple (a
 /// column already on a stop still advances a full 8), bounded by the last
-/// column. A later task will replace the fixed 8-grid with a configurable stop
-/// table; this is the single place the forward-stop math lives (HT and CHT share it).
+/// column. Stops are fixed at every 8th column; there is no configurable stop
+/// table. HT and CHT share this.
 pub(super) fn next_tab_stop(col: u16, last_col: u16) -> u16 {
     col.saturating_add(8 - col % 8).min(last_col)
 }

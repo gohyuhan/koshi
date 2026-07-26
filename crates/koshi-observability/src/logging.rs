@@ -24,8 +24,6 @@
 //! error kind. No payloads, no command arguments, no terminal/PTY output, no
 //! per-frame or per-keystroke activity. Anything high-frequency or content-like
 //! belongs in the in-memory event ring (`koshi debug events`), not the log file.
-//! This keeps the file small over a session and free of user data — and keeps
-//! the per-line file open cheap, since the volume stays low.
 //!
 //! # What each level means
 //!
@@ -41,19 +39,18 @@
 //!   fallback to take. koshi or the client is going down. Entering raw mode
 //!   fails and there is no way to draw anything at all.
 //!
-//! The consequence worth stating: a runtime [`koshi_core::event::Event`] is
-//! never an `error`, because every variant of it is a fact koshi modelled in
-//! advance. Errors are written at the startup and teardown steps that have
-//! nowhere to fall back to. Events are classified in [`logging::event_log`].
+//! So a runtime [`koshi_core::event::Event`] is never an `error`: every variant
+//! of it is a fact koshi modelled in advance. Errors are written at the startup
+//! and teardown steps that have nowhere to fall back to. Events are classified
+//! in [`logging::event_log`].
 //!
-//! When enabled, logs never go to stdout: that is Koshi's render surface, and
-//! writing to it would corrupt the terminal UI.
+//! Logs never go to stdout, which is Koshi's render surface.
 //!
-//! Redaction is not optional: anything derived from the environment must pass
-//! through [`logging::redacted_env_field`] before it becomes a log value, so a secret
-//! such as `KOSHI_CONTEXT_TOKEN` can never reach the output even if it is handed
-//! to the logger by mistake. The scrubbing itself lives in [`koshi_core::redact`];
-//! this module only routes env maps through it on the way to a log line.
+//! Anything derived from the environment must pass through
+//! [`logging::redacted_env_field`] before it becomes a log value, so a secret
+//! such as `KOSHI_CONTEXT_TOKEN` cannot reach the output. The scrubbing itself
+//! lives in [`koshi_core::redact`]; this module only routes env maps through it
+//! on the way to a log line.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -143,9 +140,8 @@ pub fn init_tracing(params: LoggingParams) -> Result<(), TracingError> {
     )
 }
 
-/// Install a subscriber writing to `path`. Separated from [`init_tracing`] so a
-/// test can point it at a temp directory without going through the
-/// state-directory resolver.
+/// Install a subscriber writing to `path`, bypassing the state-directory
+/// resolver [`init_tracing`] uses, so a test can point it at a temp directory.
 pub fn init_to_path(path: &Path, level: LogLevel, format: LogFormat) -> Result<(), TracingError> {
     let writer = SessionLogMaker {
         path: path.to_path_buf(),
@@ -178,10 +174,9 @@ fn max_level(level: LogLevel) -> Level {
 /// re-creating it if it is removed while koshi runs.
 ///
 /// Every line is one open-append-close, which is what lets a log file deleted
-/// mid-session come back on the next line. Measured against a local disk that
-/// costs about 25µs per line, against about 1.5µs for a handle held open. The
-/// write runs on the runtime's dispatch thread, so a command committing several
-/// events pays it once per event before dispatch returns.
+/// mid-session come back on the next line. On a local disk that costs about
+/// 25µs per line. The write runs on the runtime's dispatch thread, so a command
+/// committing several events pays it once per event before dispatch returns.
 // ponytail: reopen-per-line buys surviving `rm` of the log file for ~24µs a
 // line. Hold the handle, reopening when a write fails, if dispatch latency
 // needs those microseconds back.
@@ -232,10 +227,9 @@ pub struct CapturedLogs {
 }
 
 impl CapturedLogs {
-    /// All captured output as a single string. Recovers a poisoned lock rather
-    /// than panicking: if a writer thread panicked mid-log, the bytes it already
-    /// wrote are still readable, so reading them must not cascade into a second
-    /// panic.
+    /// All captured output as a single string. Recovers a poisoned lock instead
+    /// of panicking, so bytes written before a writer thread panicked are still
+    /// readable.
     pub fn contents(&self) -> String {
         let bytes = self
             .buffer
@@ -300,8 +294,7 @@ pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
 /// render as `***`. Use this for any env-derived value before logging it.
 ///
 /// Environment is the one payload the [logging policy](self#logging-policy)
-/// admits — it is occasionally needed to diagnose a spawn — and only ever in this
-/// scrubbed form. Routine activity must not be logged with it.
+/// admits, and only in this scrubbed form.
 pub fn redacted_env_field(env: &BTreeMap<String, String>) -> String {
     redact_env_map(env)
         .iter()

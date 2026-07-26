@@ -1,10 +1,8 @@
 //! The resize transaction: move one pane border by an exact cell count.
 //!
-//! A resize is not a visual adjustment — it permanently shifts cells between
-//! two siblings by updating their weights' `resize_delta`, then lets the
-//! solver re-derive geometry. Keybindings and mouse border drags both go
-//! through this one function, so there is no second geometry-mutation path
-//! to drift out of sync.
+//! A resize permanently shifts cells between two siblings by updating their
+//! weights' `resize_delta`, then lets the solver re-derive geometry.
+//! Keybindings and mouse border drags both go through this one function.
 //!
 //! The size is signed and names the border by direction: `resize(pane,
 //! Right, 5)` moves the pane's right border outward (the pane grows,
@@ -58,11 +56,10 @@ impl DomainError for ResizeError {
 /// The border that moves is the nearest one to the pane: walking up the
 /// pane's ancestors, the first split that runs on the matching axis
 /// (horizontal for left/right, vertical for up/down) *and* has a sibling on
-/// the `direction` side owns it. Walking upward is what makes nested
-/// layouts behave: if the pane touches its inner split's edge, the border
-/// that actually moves is the enclosing split's — exactly the line the
-/// user sees next to the pane. `tab_rect` is the rect the tree currently
-/// solves into; the donating side's solved size bounds how much it can give.
+/// the `direction` side owns it. So if the pane touches its inner split's
+/// edge, the border that moves is the enclosing split's — the line the user
+/// sees next to the pane. `tab_rect` is the rect the tree currently solves
+/// into; the donating side's solved size bounds how much it can give.
 ///
 /// # Errors
 ///

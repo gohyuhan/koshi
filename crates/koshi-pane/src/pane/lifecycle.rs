@@ -7,9 +7,7 @@
 //! any live stage, even before the child runs) — before it is finally
 //! `Removed` from the registry. A dead `Exited` pane may instead respawn (the
 //! `RespawnShell` policy), looping back to `Spawning` in place; only `Removed`
-//! is terminal. Modelling the stages as a type keeps an
-//! illegal move — reviving a removed pane, running one mid-teardown — a
-//! transition-time error instead of a silent bug.
+//! is terminal.
 //!
 //! The enum and its `transition` function — which rejects every move outside
 //! the legal set — both live here, driven one step per [`PaneLifecycleEvent`].
@@ -37,10 +35,9 @@ pub enum PaneLifecycle {
 }
 
 impl PaneLifecycle {
-    /// Advance the pane's lifecycle state by applying `event`, or reject the move if
-    /// it is illegal from the current state. Returns the new state, or
-    /// [`InvalidTransition`] if the event cannot occur here. The `kind` parameter is
-    /// used only in the error, to provide context for why the transition was rejected.
+    /// Advance the pane's lifecycle state by applying `event`. Returns the new
+    /// state, or [`InvalidTransition`] if the event cannot occur from the
+    /// current one. `kind` appears only in that error.
     pub fn transition(
         self,
         event: PaneLifecycleEvent,

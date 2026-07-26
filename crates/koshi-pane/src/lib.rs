@@ -5,8 +5,7 @@
 //! (command, cwd, lifecycle, exit code), [`pane::policy`] rules (how to close,
 //! what happens on process exit), and the [`pane::lifecycle`] state machine. The layout
 //! tree holds only [`koshi_core::ids::PaneId`] leaves; the [`registry::PaneRegistry`] is
-//! the single owner of everything else, keyed by id. Commands and events (in [`pane::command`]
-//! and [`pane::event`]) will route pane operations and notifications through the runtime.
+//! the single owner of everything else, keyed by id.
 
 pub mod error;
 pub mod types;

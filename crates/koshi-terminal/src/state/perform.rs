@@ -28,8 +28,8 @@
 //!   working-directory report.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
-//!   ends a text run like any non-printing event); the payload handling, and
-//!   `put`, are left to a later task.
+//!   ends a text run like any non-printing event); the payload and `put` are
+//!   not handled.
 //!
 //! The performer's helpers are split across submodules by concern — charset
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
@@ -859,17 +859,14 @@ impl TerminalState {
     /// One value carries both halves of the look: the shape, and whether it
     /// blinks. Values `1`–`6` name a style, the odd ones blinking and the even
     /// ones steady. The blink half is written into
-    /// [`cursor_blink`](crate::state::TerminalState::cursor_blink) — the same
-    /// field `?12` writes — because a cursor either blinks or it does not, and
-    /// the two sequences are two writers of that one answer: `CSI 2 SP q`
-    /// ("steady block") must stop a blink an earlier `CSI ? 12 h` started, or
-    /// "steady" would be a lie.
+    /// [`cursor_blink`](crate::state::TerminalState::cursor_blink), the same
+    /// field `?12` writes, so `CSI 2 SP q` ("steady block") stops a blink an
+    /// earlier `CSI ? 12 h` started.
     ///
     /// `0` gives the cursor back: the pane returns to asking for no style, and
-    /// the user's own configured cursor stands again — the meaning editors
-    /// rely on when they write `CSI 0 SP q` on exit to undo their own cursor.
-    /// (xterm's reference reads `0` as blinking block; koshi follows the
-    /// editors' meaning, as the mainstream terminals do.)
+    /// the user's own configured cursor stands again. This is what an editor
+    /// relies on when it writes `CSI 0 SP q` on exit. (xterm's reference reads
+    /// `0` as blinking block; koshi follows the mainstream terminals.)
     ///
     /// An unknown value changes nothing: `CSI 9 SP q` names no style, so there
     /// is nothing to apply, and the style already set stands.

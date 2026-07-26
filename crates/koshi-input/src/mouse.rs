@@ -2,9 +2,8 @@
 //! [`MouseInput`].
 //!
 //! This is the mouse peer of [`decode_key`](crate::keyboard::decode_key). It is
-//! a pure mapping — every host event turns into exactly one koshi event, so
-//! unlike a key press (where a release yields nothing) there is no `None` case:
-//! a mouse release and a bare motion are both real events koshi keeps.
+//! a pure mapping: every host event turns into exactly one koshi event, so
+//! there is no `None` case. A mouse release and a bare motion are both kept.
 //!
 //! The coordinate that comes out is a raw client cell. Which pane, border, or
 //! bar it lands on is decided later by a hit-test against the client's render

@@ -7,8 +7,8 @@
 //! `--session`/`--tab`/`--pane`/`--client` targets.
 //!
 //! [`SessionOverview`] gathers all four into one picture of a session, so a
-//! caller asking across process boundaries makes one request and filters the
-//! answer for the query it was actually given.
+//! caller makes one request across the process boundary and filters the answer
+//! for its query.
 //!
 //! Paths serialize as their lossy UTF-8 string, so a non-UTF-8 working
 //! directory never fails a render.
