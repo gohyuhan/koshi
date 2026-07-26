@@ -35,6 +35,9 @@ pub trait PtyBackend: Send + Sync {
     /// Write bytes to a pane's child stdin.
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError>;
     /// Terminate a pane's child according to `kill_policy`.
+    ///
+    /// The caller is closing the pane, so no exit for it reaches a
+    /// [`PtySink`] afterwards and its output stops being forwarded.
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError>;
     /// The live working directory of `pane`'s child, asked from the OS
     /// (Linux `/proc/<pid>/cwd`, macOS `proc_pidinfo`). `None` when the pane
@@ -50,14 +53,30 @@ pub trait PtyBackend: Send + Sync {
 /// queue. `Send + Sync` because the reader and watcher threads of every pane
 /// share one sink.
 pub trait PtySink: Send + Sync {
-    /// Take one chunk of `pane`'s child output. Returning `false` means the
-    /// consumer is gone: the reader stops reading that pane, and nothing more
-    /// is delivered for it — not even [`exit`](PtySink::exit).
+    /// Take one chunk of `pane`'s child output. Returning `false` means this
+    /// consumer is done with `pane`: the reader stops reading it and nothing
+    /// more is delivered for it — not even [`exit`](PtySink::exit). Every
+    /// other pane keeps running.
     fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool;
 
-    /// Take `pane`'s final exit status. Delivered after the last
-    /// [`output`](PtySink::output) call for that pane, so a consumer sees all
-    /// of a child's output before it sees the child end.
+    /// Take `pane`'s final exit status, delivered at most once.
+    ///
+    /// Called on one of the pane's own threads, and which one is not fixed —
+    /// so this may close the pane through
+    /// [`PtyBackend::kill`] from inside the call, and the
+    /// backend will not wait on the thread it is already running.
+    ///
+    /// It comes after the last [`output`](PtySink::output) call for that pane,
+    /// so a consumer sees everything the child printed before it sees the child
+    /// end. On Windows that ordering comes from the backend closing the pane's
+    /// terminal once the child ends: the console flushes what it still holds,
+    /// the reader drains it to its end, and the exit follows.
+    ///
+    /// A disowned descendant can hold a Unix terminal open after the child is
+    /// gone and keep printing into it. There the exit comes once output stops
+    /// arriving, or after a bounded wait if it never stops. A pane whose output
+    /// resumes past that point is no longer read, so nothing arrives after the
+    /// exit either way.
     fn exit(&self, pane: PaneId, status: ExitStatus);
 }
 

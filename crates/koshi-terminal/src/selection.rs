@@ -410,9 +410,8 @@ pub fn selection_text(
         any_row_written = true;
         let mut line = String::new();
         for col in from..=to {
-            // The row is resolved once above rather than per column, so this
-            // reads the slice and its end directly instead of asking the view
-            // to find the row again for every column.
+            // The row is resolved once above, so this reads its cells and its
+            // end directly.
             let Some(cell) = cell_or_padding(cells, col, cols) else {
                 break;
             };

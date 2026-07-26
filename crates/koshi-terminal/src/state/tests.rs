@@ -388,9 +388,9 @@ fn state_with_history() -> TerminalState {
         *state.active_grid_mut().cell_mut(1, col as u16).unwrap() =
             Cell::new(ch, 1, Style::default());
     }
-    state.scrollback.push_line(line("h0."), RowEnd::Hard);
-    state.scrollback.push_line(line("h1."), RowEnd::Hard);
-    state.scrollback.push_line(line("h2."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h0."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h1."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h2."), RowEnd::Hard);
     state
 }
 
@@ -469,7 +469,7 @@ fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
     // line as it was, not as the running program currently paints.
     let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
     state.primary_render.style.set_bg(Color::Indexed(4));
-    state.scrollback.push_line(line("ab"), RowEnd::Hard);
+    state.scrollback.push_row(&line("ab"), RowEnd::Hard);
 
     let (grid, _) = state.scrolled_view(1);
     let padded = grid.cell(0, 2).unwrap();
@@ -487,7 +487,7 @@ fn scrolled_view_keeps_a_history_rows_own_background() {
     red.set_bg(Color::Indexed(1));
     state
         .scrollback
-        .push_line(vec![Cell::blank_with(red); 3], RowEnd::Hard);
+        .push_row(&vec![Cell::blank_with(red); 3], RowEnd::Hard);
 
     let (grid, _) = state.scrolled_view(1);
     for col in 0..3 {

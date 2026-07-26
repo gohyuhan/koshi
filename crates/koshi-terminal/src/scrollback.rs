@@ -39,6 +39,18 @@ fn kept(row: &[Cell], end: RowEnd) -> &[Cell] {
     }
 }
 
+/// Shorten an owned `row` to what history keeps of it, then hand back the
+/// memory the dropped blanks held.
+///
+/// The counterpart of [`kept`] for a row already owned. It moves the cells it
+/// keeps rather than cloning them, so a cell carrying combining marks does not
+/// allocate a fresh copy of them, and a row that keeps every cell costs
+/// nothing at all.
+fn keep_in_place(row: &mut Vec<Cell>, end: RowEnd) {
+    row.truncate(kept(row, end).len());
+    row.shrink_to_fit();
+}
+
 /// The line- and byte-count caps bounding one pane's [`Scrollback`].
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollbackLimit {
@@ -134,13 +146,6 @@ impl Scrollback {
             .sum()
     }
 
-    /// Append `line` as the newest row, taking it by value.
-    /// [`push_row`](Self::push_row) is the same append from a borrowed row and
-    /// carries the details.
-    pub fn push_line(&mut self, line: Vec<Cell>, end: RowEnd) {
-        self.push_row(&line, end);
-    }
-
     /// Append `row` as the newest line — recording how it ended, so a reflow
     /// can re-join a soft-wrapped row with the screen row below it — then drop
     /// oldest rows from the front until both caps hold, tallying each drop.
@@ -152,9 +157,8 @@ impl Scrollback {
     /// A hard-ended row is stored without the trailing default blanks that pad
     /// it out to the screen width, so a 200-column row reading `README.md`
     /// keeps 9 cells. A soft-wrapped row keeps every cell. Taking the row
-    /// borrowed makes one allocation at the stored size, instead of copying the
-    /// whole row and then shrinking it: a 1000-column screen scrolling 20 000
-    /// lines runs about 18% faster for it.
+    /// borrowed makes one allocation at the stored size; a 1000-column screen
+    /// scrolling 20 000 lines runs about 18% faster for it.
     pub fn push_row(&mut self, row: &[Cell], end: RowEnd) {
         let line = kept(row, end).to_vec();
         let new_bytes = self.line_bytes(&line);
@@ -170,11 +174,19 @@ impl Scrollback {
     /// other cap-driven drop. [`total_pushed`](Self::total_pushed) grows by
     /// the net increase in retained rows (rows the screen handed into
     /// history) and never decreases, staying monotonic.
+    ///
+    /// Each row is stored the same way [`push_row`](Self::push_row) stores
+    /// one: a hard-ended row without its trailing default blanks, a
+    /// soft-wrapped row whole. Rows arrive owned, so they are shortened in
+    /// place rather than copied.
     pub fn replace_lines(&mut self, lines: Vec<(Vec<Cell>, RowEnd)>) {
         let before = self.lines.len() as u64;
         self.lines = lines
             .into_iter()
-            .map(|(cells, end)| (kept(&cells, end).to_vec(), end))
+            .map(|(mut cells, end)| {
+                keep_in_place(&mut cells, end);
+                (cells, end)
+            })
             .collect();
         self.byte_total = self
             .lines

@@ -837,7 +837,7 @@ impl Server {
         args: &WriteToPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         // Plugin input injection requires the `pane_write` capability granted
-        // by the plugin host; until that lands a plugin source is denied.
+        // by the plugin host; a plugin source is denied.
         if matches!(source, CommandSource::Plugin { .. }) {
             return Err(Rejection::new(
                 RejectReason::Unauthorized,

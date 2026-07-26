@@ -55,8 +55,9 @@ impl PtySink for InboxSink {
     }
 
     /// Queue the child's exit, stamped with the time it was observed. The
-    /// backend calls this only after the pane's last output, so the user sees
-    /// everything the child printed before the pane closes.
+    /// backend calls this after the pane's last output, so the user sees
+    /// everything the child printed before the pane closes, and stops reading
+    /// the pane afterwards, so nothing arrives for a pane already removed.
     fn exit(&self, pane_id: PaneId, status: ExitStatus) {
         let _ = self.inbox_tx.send(RuntimeEvent::ChildExit {
             pane_id,
