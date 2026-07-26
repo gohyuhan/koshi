@@ -49,9 +49,8 @@ impl TerminalState {
             let removed = n.min(bottom.saturating_sub(first).saturating_add(1));
             for row in 0..removed {
                 if let Some(scrolled_off) = self.primary.rows().get(row as usize) {
-                    let scrolled_off = scrolled_off.clone();
                     let end = self.primary.row_end(row);
-                    self.scrollback.push_line(scrolled_off, end);
+                    self.scrollback.push_row(scrolled_off, end);
                 }
             }
         }

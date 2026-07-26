@@ -42,6 +42,25 @@ pub trait PtyBackend: Send + Sync {
     fn live_cwd(&self, pane: PaneId) -> Option<PathBuf>;
 }
 
+/// Where a backend delivers a pane's child output and exit status.
+///
+/// The channel-and-handle route in [`PtyHandle`] needs a relay thread per pane
+/// to move each chunk from the pane's channel onto the consumer's own queue. A
+/// consumer that implements this trait is handed the chunk by the reader
+/// thread itself, so that relay thread does not exist and a pane costs one
+/// thread less. `Send + Sync` because the reader and watcher threads of every
+/// pane share one sink.
+pub trait PtySink: Send + Sync {
+    /// Take one chunk of `pane`'s child output. Returning `false` means the
+    /// consumer is gone, and the reader stops reading that pane.
+    fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool;
+
+    /// Take `pane`'s final exit status. Delivered after the last
+    /// [`output`](PtySink::output) call for that pane, so a consumer sees all
+    /// of a child's output before it sees the child end.
+    fn exit(&self, pane: PaneId, status: ExitStatus);
+}
+
 /// The read side of one spawned pane: its id and the channels the backend
 /// delivers child output and exit status on.
 ///
@@ -71,6 +90,22 @@ impl PtyHandle {
         };
 
         (new_pty_handle, output_sender, exit_sender)
+    }
+
+    /// Build a handle for `pane_id` that carries no channels, for a backend
+    /// delivering that pane's output and exit through a [`PtySink`] instead.
+    ///
+    /// The handle stays the pane's live token — `contains_key`/`remove` still
+    /// address it — while [`take_receivers`](PtyHandle::take_receivers) and
+    /// both `try_*` polls return `None`, so a caller that would otherwise
+    /// start a relay thread for the pane starts none.
+    #[must_use]
+    pub fn detached(pane_id: PaneId) -> Self {
+        PtyHandle {
+            pane_id,
+            output: None,
+            exit: None,
+        }
     }
 
     /// The pane this handle addresses.

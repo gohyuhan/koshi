@@ -194,3 +194,130 @@ fn total_pushed_counts_every_push_and_survives_a_clear() {
     sb.push_line(line("d"), RowEnd::Hard);
     assert_eq!(sb.total_pushed(), 4);
 }
+
+/// A row of `text` padded out to `width` with default blanks, the shape every
+/// row arrives in from the screen.
+fn padded(text: &str, width: usize) -> Vec<Cell> {
+    let mut row = line(text);
+    row.resize(width, Cell::blank());
+    row
+}
+
+#[test]
+fn a_hard_row_drops_the_blanks_padding_it_out_to_the_screen_width() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(padded("README.md", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 9);
+    assert_eq!(retained(&sb), vec!["README.md".to_string()]);
+}
+
+#[test]
+fn a_trimmed_row_releases_the_memory_and_does_not_just_hide_it() {
+    // `truncate` alone leaves the 200-cell allocation in place, which would
+    // make the whole trim cost memory rather than save it.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(padded("hi", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.capacity(), 2);
+}
+
+#[test]
+fn a_soft_wrapped_row_keeps_every_cell() {
+    // A soft-wrapped row filled the width, so its trailing cells are content.
+    // Shortening one would move where a reflow re-joins the logical line.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(padded("ab", 6), RowEnd::Soft);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 6);
+}
+
+#[test]
+fn a_wide_glyph_wrap_row_keeps_its_spacer() {
+    // The final blank stands in for the wide glyph that starts the next row.
+    // Dropping it would pull that glyph one column left after a reflow.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(padded("ab", 6), RowEnd::SoftWide);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 6);
+}
+
+#[test]
+fn a_background_colored_blank_is_content_and_survives() {
+    // A prompt segment painting color into blank cells: the color is the
+    // content, so those cells stay even though they hold no character.
+    let mut red = Style::default();
+    red.set_bg(crate::style::Color::Indexed(1));
+    let mut row = line("ab");
+    row.push(Cell::blank_with(red));
+    row.resize(200, Cell::blank());
+
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(row, RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[2].style().bg(), crate::style::Color::Indexed(1));
+}
+
+#[test]
+fn a_wide_glyphs_continuation_cell_is_content_and_survives() {
+    // The zero-width right half of a CJK glyph is not a default blank, so the
+    // glyph is never cut in half by the trim.
+    let mut row = vec![
+        Cell::new('漢', 2, Style::default()),
+        Cell::new(' ', 0, Style::default()),
+    ];
+    row.resize(200, Cell::blank());
+
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(row, RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].width(), 0);
+}
+
+#[test]
+fn a_row_of_nothing_but_padding_stores_no_cells() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_line(padded("", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert!(stored.is_empty());
+    assert_eq!(sb.len(), 1); // the blank line itself is still a line
+}
+
+#[test]
+fn a_reflow_rebuild_trims_the_same_way_a_push_does() {
+    // Reflow replaces history wholesale, so it must not put the padding back.
+    let mut sb = bounded(10, 1_000_000);
+    sb.replace_lines(vec![
+        (padded("one", 200), RowEnd::Hard),
+        (padded("ab", 200), RowEnd::Soft),
+    ]);
+
+    let (hard, _) = &sb.lines()[0];
+    let (soft, _) = &sb.lines()[1];
+    assert_eq!(hard.len(), 3);
+    assert_eq!(soft.len(), 200);
+}
+
+#[test]
+fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
+    // The cap counts characters. Before the trim a 200-column row of `hi`
+    // charged 200 against it; now it charges the 2 the line actually holds, so
+    // a given cap keeps the amount of text it names.
+    let mut sb = bounded(1000, 20);
+    for _ in 0..10 {
+        sb.push_line(padded("hi", 200), RowEnd::Hard);
+    }
+    assert_eq!(sb.len(), 10);
+    assert_eq!(sb.byte_total, 20);
+    assert_eq!(sb.dropped_lines(), 0);
+}

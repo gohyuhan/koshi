@@ -701,3 +701,116 @@ fn different_separators_do_not_join_into_one_run() {
     assert_eq!(view.word_start(0, 2), (0, 2));
     assert_eq!(view.word_end(0, 2), (0, 2), "the space after `)` is too");
 }
+
+/// A scrollback holding `lines`, each padded out to `cols` the way a row
+/// arrives from the screen, so the stored rows are the trimmed ones.
+fn scrollback_padded(lines: &[&str], cols: u16, max_lines: usize) -> Scrollback {
+    let mut scrollback = Scrollback::new(ScrollbackLimit::new(max_lines, usize::MAX));
+    for line in lines {
+        let mut row = cells_of(line);
+        row.resize(cols as usize, Cell::blank());
+        scrollback.push_line(row, RowEnd::Hard);
+    }
+    scrollback
+}
+
+#[test]
+fn a_column_right_of_a_history_lines_text_reads_as_the_blank_it_was() {
+    // History stores `hi`, not `hi` plus eight blanks. Every column of the
+    // screen width must still answer, or a double-click in the empty area
+    // right of a line would find no cell where it used to find a space.
+    let scrollback = scrollback_padded(&["hi"], 10, 100);
+    let grid = grid_of(&["live"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    let padded = view.cell(0, 5).expect("a column inside the screen answers");
+    assert_eq!(padded.ch(), ' ');
+    assert_eq!(padded.width(), 1);
+    assert_eq!(padded.style(), Style::default());
+}
+
+#[test]
+fn a_column_past_the_screen_width_still_reads_as_nothing() {
+    let scrollback = scrollback_padded(&["hi"], 10, 100);
+    let grid = grid_of(&["live"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert!(view.cell(0, 10).is_none());
+    assert!(view.cell(0, 99).is_none());
+}
+
+#[test]
+fn a_dropped_row_still_reads_as_nothing_at_every_column() {
+    // The fallback answers for a column past a row's text, never for a row
+    // that is gone.
+    let scrollback = scrollback_padded(&["a", "b"], 10, 1);
+    let grid = grid_of(&["live"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    assert!(view.cell(0, 0).is_none()); // evicted by the one-line cap
+    assert!(view.cell(0, 5).is_none());
+}
+
+#[test]
+fn copying_a_history_line_keeps_its_trailing_blanks_when_asked_to() {
+    // With trimming off, a copy preserves every selected blank. Those blanks
+    // are no longer stored, so this is the guarantee the read fallback exists
+    // for.
+    let scrollback = scrollback_padded(&["hi"], 10, 100);
+    let grid = grid_of(&["live"], 10);
+    let view = TextView::new(&scrollback, &grid);
+    let selection = Selection {
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos { row: 0, col: 9 },
+        kind: SelectionKind::Character,
+    };
+
+    assert_eq!(selection_text(&view, &selection, false), "hi        ");
+    assert_eq!(selection_text(&view, &selection, true), "hi");
+}
+
+#[test]
+fn a_word_selection_in_the_space_right_of_a_history_line_behaves_as_before() {
+    // Double-clicking the empty area right of `hi` lands on a blank, which is
+    // a word separator, so it selects that run of blanks and not the text.
+    let scrollback = scrollback_padded(&["hi"], 10, 100);
+    let grid = grid_of(&["live"], 10);
+    let view = TextView::new(&scrollback, &grid);
+
+    let (start_row, start_col) = view.word_start(0, 5);
+    let (end_row, end_col) = view.word_end(0, 5);
+    let word = Selection {
+        anchor: GridPos {
+            row: start_row,
+            col: start_col,
+        },
+        cursor: GridPos {
+            row: end_row,
+            col: end_col,
+        },
+        kind: SelectionKind::Word,
+    };
+    assert_eq!(selection_text(&view, &word, false), "        ");
+}
+
+#[test]
+fn a_word_selection_on_a_history_line_still_finds_the_text() {
+    let scrollback = scrollback_padded(&["/usr/local/bin here"], 40, 100);
+    let grid = grid_of(&["live"], 40);
+    let view = TextView::new(&scrollback, &grid);
+
+    let (start_row, start_col) = view.word_start(0, 6);
+    let (end_row, end_col) = view.word_end(0, 6);
+    let word = Selection {
+        anchor: GridPos {
+            row: start_row,
+            col: start_col,
+        },
+        cursor: GridPos {
+            row: end_row,
+            col: end_col,
+        },
+        kind: SelectionKind::Word,
+    };
+    assert_eq!(selection_text(&view, &word, false), "/usr/local/bin");
+}

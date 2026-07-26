@@ -292,10 +292,14 @@ impl TerminalState {
     /// A non-zero effective offset composes a fresh window `rows` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
     /// rows the top of the live grid, so a view scrolled that many lines up shows
-    /// that much history with the rest of the live screen below. History rows
-    /// captured at a narrower width are padded to the current width with the
-    /// primary screen's background ([`Style::bg_fill`]), the same fill every
-    /// erase and scroll uses.
+    /// that much history with the rest of the live screen below.
+    ///
+    /// History stores a row's text without the default blanks padding it out to
+    /// the screen width, so composing the window pads each row back out with
+    /// exactly those blanks. Live rows already span the full width, so the fill
+    /// only ever applies to history — and it restores what was dropped rather
+    /// than repainting old lines in whatever background the running program
+    /// happens to have set.
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
         let scrolled = self.effective_view_offset(offset);
         if scrolled == 0 {
@@ -318,11 +322,7 @@ impl TerminalState {
             .take(rows as usize)
             .collect();
         (
-            Arc::new(Grid::from_rows(
-                window,
-                cols,
-                self.primary_render.style.bg_fill(),
-            )),
+            Arc::new(Grid::from_rows(window, cols, Style::default())),
             scrolled,
         )
     }

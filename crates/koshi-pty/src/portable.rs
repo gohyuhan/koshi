@@ -4,13 +4,17 @@
 //! watcher), all owned through the [`crate::portable::PortablePtyBackend`] pane map. The
 //! implementation handles child output streaming, input queuing, process
 //! termination (with cross-platform kill policies), and exit status tracking.
+//!
+//! Three threads is the whole per-pane cost. The reader delivers output to the
+//! consumer itself — see [`crate::backend::state::PtySink`] — so nothing has to
+//! run alongside a pane to move its bytes along.
 
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel, RecvTimeoutError, Sender},
+        mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -24,11 +28,84 @@ use koshi_core::{
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty};
 
 use crate::{
-    backend::state::{PtyBackend, PtyHandle},
+    backend::state::{PtyBackend, PtyHandle, PtySink},
     env::build_env,
     error::PtyError,
     kill::PtyChildKillControl,
 };
+
+/// Bytes read from a pane's master end in one go. Sized to hold a burst of
+/// child output without a syscall per line.
+const READ_CHUNK: usize = 8192;
+
+/// Start one of a pane's helper threads under `name`.
+///
+/// Naming them makes a debugger, a profiler, or a crash report attribute the
+/// thread to koshi rather than showing an anonymous worker. Spawn failure
+/// panics, matching [`std::thread::spawn`].
+fn spawn_pty_thread<F>(name: &str, body: F) -> JoinHandle<()>
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(body)
+        .expect("spawn pty helper thread")
+}
+
+/// Where one pane's reader thread puts the child's output, and how it reports
+/// the child's end.
+///
+/// The two arms are the two routes a pane can be driven through: a caller
+/// polling [`PtyHandle`] gets `Channel`, a caller that implements [`PtySink`]
+/// gets `Sink` and saves the relay thread the channel route needs.
+enum Delivery {
+    /// Push each chunk onto the handle's output channel.
+    Channel(Sender<Vec<u8>>),
+    /// Hand each chunk to the consumer directly. `exit_receiver` is the
+    /// watcher's end of a private channel, read once the output is exhausted.
+    Sink {
+        /// The consumer taking this pane's output and exit.
+        sink: Arc<dyn PtySink>,
+        /// The watcher's exit status, awaited after the last chunk.
+        exit_receiver: Receiver<ExitStatus>,
+    },
+}
+
+impl Delivery {
+    /// Deliver one chunk of `pane`'s output. `false` means the consumer is
+    /// gone and the reader should stop.
+    fn output(&self, pane: PaneId, bytes: Vec<u8>) -> bool {
+        match self {
+            Delivery::Channel(sender) => sender.send(bytes).is_ok(),
+            Delivery::Sink { sink, .. } => sink.output(pane, bytes),
+        }
+    }
+
+    /// Report `pane`'s child as ended, once its output is exhausted. A sink
+    /// waits here for the watcher's status; a channel consumer reads the exit
+    /// off its own handle, so there is nothing to do.
+    fn finish(self, pane: PaneId) {
+        if let Delivery::Sink {
+            sink,
+            exit_receiver,
+        } = self
+        {
+            if let Ok(status) = exit_receiver.recv() {
+                sink.exit(pane, status);
+            }
+        }
+    }
+}
+
+/// What the per-pane writer thread accepts on its channel.
+enum WriterMsg {
+    /// Bytes to write to the child's stdin.
+    Bytes(Vec<u8>),
+    /// Stop and release the thread: queued by the watcher once the child has
+    /// exited, so the writer never has to wake on a timer to notice.
+    Stop,
+}
 
 /// Kills the wrapped child on drop unless [`disarm`](ChildGuard::disarm)ed.
 ///
@@ -80,25 +157,37 @@ pub struct PaneEntry {
     /// Input channel to the per-pane writer thread. Bytes sent here are written
     /// to the master (and so reach the child) off the dispatcher, so a child that
     /// has stopped reading its stdin blocks only the writer thread, never the
-    /// dispatcher. Dropping this `Sender` (on `kill`/teardown) closes the channel
-    /// so a writer parked in `recv` exits. A writer already blocked *inside*
+    /// dispatcher.
+    ///
+    /// What releases the writer is the watcher's [`WriterMsg::Stop`], queued
+    /// once the child has exited — including for a pane left open past its
+    /// child's death. This is not the only `Sender` on the channel: the watcher
+    /// holds a clone to send that `Stop` with, so dropping this one (on
+    /// `kill`/teardown) leaves the channel open until the watcher ends too.
+    /// `kill` joins the watcher, so by the time it returns the writer has been
+    /// released either way.
+    ///
+    /// A writer already blocked *inside*
     /// `write_all` — child stopped reading while a `setsid` descendant still holds
     /// the slave open (Linux; macOS `revoke`s it) — cannot be interrupted; like the
     /// reader it detaches and exits only once that fd finally closes. `kill` never
     /// joins it, so this can leak a thread + fd in that case but never blocks the
     /// dispatcher.
-    writer: Sender<Vec<u8>>,
+    writer: Sender<WriterMsg>,
     /// Kill handle for the child process; `kill()` sends the terminating signal.
     killer: PtyChildKillControl,
     /// Flipped to `true` by the watcher thread the moment the child exits; read
     /// by [`kill`](PortablePtyBackend::kill) to avoid signalling a dead process.
     exited: Arc<AtomicBool>,
-    /// Reader thread: drains the master's read half into the output channel.
+    /// Reader thread: drains the master's read half to wherever this backend
+    /// delivers — the handle's output channel, or the sink. Under a sink it also
+    /// publishes the child's exit, once the read half has run dry.
     ///
     /// Not joined on teardown: the slave fd may outlive the child (e.g., when the
     /// child `setsid`s into a new process group), so the thread could block forever
-    /// if joined. It exits on its own once the fd closes. Retained so the struct
-    /// owns the handle.
+    /// if joined. It exits once the fd closes, and under a sink once the watcher
+    /// has handed it the exit status to publish. Retained so the struct owns the
+    /// handle.
     #[expect(dead_code)]
     reader: JoinHandle<()>,
     /// Watcher thread: blocks on the child, records exit status, flips `exited`.
@@ -114,13 +203,34 @@ pub struct PortablePtyBackend {
     /// [`write`](PtyBackend::write), and [`kill`](PtyBackend::kill) can all be
     /// called from different dispatcher calls.
     panes: Mutex<HashMap<PaneId, PaneEntry>>,
+    /// Where spawned panes deliver output and exit. `None` routes both through
+    /// each pane's [`PtyHandle`] channels, which the caller polls or relays;
+    /// `Some` has the reader thread hand them to the consumer directly, so no
+    /// relay thread exists per pane.
+    sink: Option<Arc<dyn PtySink>>,
 }
 
 impl PortablePtyBackend {
-    /// Creates a new, empty PTY backend with no active panes.
+    /// Creates a new, empty PTY backend with no active panes, delivering each
+    /// pane's output and exit through its own [`PtyHandle`] channels.
     pub fn new() -> Self {
         PortablePtyBackend {
             panes: Mutex::new(HashMap::new()),
+            sink: None,
+        }
+    }
+
+    /// Creates a new, empty PTY backend that hands every pane's output and exit
+    /// to `sink` from the pane's own reader thread.
+    ///
+    /// This is the shape an event loop wants: without it each pane needs a
+    /// thread of its own to move chunks from the pane's channel onto the loop's
+    /// queue, so a session's thread count grows a whole thread per pane for
+    /// work that is a single function call here.
+    pub fn with_sink(sink: Arc<dyn PtySink>) -> Self {
+        PortablePtyBackend {
+            panes: Mutex::new(HashMap::new()),
+            sink: Some(sink),
         }
     }
 }
@@ -134,11 +244,18 @@ impl Default for PortablePtyBackend {
 impl PtyBackend for PortablePtyBackend {
     /// Open a fresh PTY, launch `spec` as a child inside it, and wire up its I/O.
     ///
-    /// Returns a [`crate::backend::state::PtyHandle`] the caller polls for output and exit status. The
-    /// child runs detached on three background threads owned by the backend: a
-    /// **reader** (master output → output channel), a **writer** (input channel →
-    /// master, so writes never block the dispatcher), and a **watcher**
-    /// (`child.wait()` → exit channel, and flips the `exited` flag).
+    /// The child runs detached on three background threads owned by the
+    /// backend: a **reader** (master output → wherever this backend delivers),
+    /// a **writer** (input channel → master, so writes never block the
+    /// dispatcher), and a **watcher** (`child.wait()` → exit channel, flips the
+    /// `exited` flag, and releases the writer).
+    ///
+    /// Where the output goes depends on how the backend was built. Under
+    /// [`with_sink`](PortablePtyBackend::with_sink) the reader hands each chunk
+    /// to the sink and publishes the exit itself once the output runs out, and
+    /// the returned [`crate::backend::state::PtyHandle`] carries no channels.
+    /// Otherwise the handle carries the output and exit channels for the caller
+    /// to poll or relay.
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
@@ -149,10 +266,33 @@ impl PtyBackend for PortablePtyBackend {
         spec: SpawnSpec,
         size: PtySize,
     ) -> Result<PtyHandle, PtyError> {
-        // 1. Build a channel-backed handle for the caller's pane id.
-        //    `output_sender` / `exit_sender` are the producing ends the threads
-        //    below feed; the caller keeps the consuming ends inside `handle`.
-        let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
+        // 1. Decide where this pane's output goes, and build the caller's handle
+        //    to match. With a sink the reader hands each chunk straight to the
+        //    consumer and the handle carries no channels, so the caller starts
+        //    no relay thread for the pane; without one the handle keeps the
+        //    consuming ends and the threads below feed the producing ends.
+        //
+        //    `exit_sender` is the watcher's in both cases. Under a sink its
+        //    receiver is private to the reader, which publishes the status once
+        //    the child's output has run out — that is what keeps a consumer
+        //    from seeing the child end while output is still coming.
+        let (handle, delivery, exit_sender) = match self.sink.clone() {
+            Some(sink) => {
+                let (exit_sender, exit_receiver) = channel::<ExitStatus>();
+                (
+                    PtyHandle::detached(pane_id),
+                    Delivery::Sink {
+                        sink,
+                        exit_receiver,
+                    },
+                    exit_sender,
+                )
+            }
+            None => {
+                let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
+                (handle, Delivery::Channel(output_sender), exit_sender)
+            }
+        };
 
         // 2. Open the PTY pair sized to the pane. The pair is two linked ends:
         //    `master` stays with us, `slave` becomes the child's terminal.
@@ -246,17 +386,23 @@ impl PtyBackend for PortablePtyBackend {
         // and is responsible for reaping it, so disarm the guard.
         let child = child.disarm();
 
-        // 7. Reader thread: block on the master read half, forwarding each chunk
-        //    of child output into the output channel until EOF (child gone) or
-        //    the caller drops the receiver.
-        let reader_thread = thread::spawn(move || {
-            let mut buf = [0u8; 8192];
+        // 7. Reader thread: block on the master read half, handing each chunk of
+        //    child output to `delivery` until EOF (child gone) or the consumer
+        //    goes away.
+        let reader_thread = spawn_pty_thread("koshi-pty-read", move || {
+            let mut buf = [0u8; READ_CHUNK];
             let mut reader = reader;
+            // Cleared only when the consumer reports itself gone, which is the
+            // one ending that must not wait for the child: `finish` blocks for
+            // the watcher's status, and there would be nobody left to give it
+            // to — a child that outlives its consumer would pin this thread.
+            let mut consumer_live = true;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF = shell gone
                     Ok(n) => {
-                        if output_sender.send(buf[..n].to_vec()).is_err() {
+                        if !delivery.output(pane_id, buf[..n].to_vec()) {
+                            consumer_live = false;
                             break;
                         }
                     } // runtime dropped handle
@@ -264,12 +410,44 @@ impl PtyBackend for PortablePtyBackend {
                     Err(_) => break,
                 }
             }
+            if consumer_live {
+                // Output has run out, so a sink can now be told the child ended.
+                delivery.finish(pane_id);
+            }
         });
-        // 8. Watcher thread: block on `child.wait()`, map the OS exit status into
-        //    our `ExitStatus`, flip `exited` so `kill` won't signal a corpse, then
-        //    publish the status on the exit channel.
+
+        // 8. Writer thread: own the master's write half and drain the input
+        //    channel onto it, so a write to a child that has stopped reading
+        //    blocks only this thread, never the dispatcher. It parks in `recv`
+        //    with no timer, so an idle pane costs no wakeups. It exits on either
+        //    teardown path: the channel closing (the entry's `Sender` dropped by
+        //    `kill`/teardown → `Disconnected`), or the [`WriterMsg::Stop`] the
+        //    watcher queues once the child is gone, so a pane kept open past its
+        //    child's death still reclaims the thread. `Stop` travels the same
+        //    channel as the bytes, so every write queued before the child exited
+        //    is written first. Started before the watcher, which needs a sender
+        //    of its own to queue that `Stop` on.
+        let (writer_sender, writer_receiver) = channel::<WriterMsg>();
+
+        let _ = spawn_pty_thread("koshi-pty-write", move || {
+            let mut writer = writer;
+            while let Ok(message) = writer_receiver.recv() {
+                match message {
+                    WriterMsg::Bytes(bytes) => {
+                        let _ = writer.write_all(&bytes).and_then(|_| writer.flush());
+                    }
+                    WriterMsg::Stop => break,
+                }
+            }
+        });
+
+        // 9. Watcher thread: block on `child.wait()`, map the OS exit status into
+        //    our `ExitStatus`, flip `exited` so `kill` won't signal a corpse,
+        //    publish the status on the exit channel, then release the writer
+        //    thread, which is parked waiting for exactly that.
         let exited_w = Arc::clone(&exited);
-        let watcher_thread = thread::spawn(move || {
+        let writer_stop = writer_sender.clone();
+        let watcher_thread = spawn_pty_thread("koshi-pty-watch", move || {
             let mut child = child; // owns it; wait() needs &mut
             let status = match child.wait() {
                 Ok(s) => map_status(s),
@@ -277,34 +455,7 @@ impl PtyBackend for PortablePtyBackend {
             };
             exited_w.store(true, Ordering::SeqCst); // tell kill() it's dead
             let _ = exit_sender.send(status);
-        });
-
-        // 9. Writer thread: own the master's write half and drain the input
-        //    channel onto it, so a write to a child that has stopped reading
-        //    blocks only this thread, never the dispatcher. It exits on either
-        //    teardown path: the channel closing (the entry's `Sender` dropped by
-        //    `kill`/teardown → `Disconnected`), or the watcher flagging the child
-        //    as exited — `recv_timeout` wakes periodically to check `exited` so a
-        //    pane kept open past its child's death still reclaims the thread.
-        let (writer_sender, writer_receiver) = channel::<Vec<u8>>();
-        let exited_writer = Arc::clone(&exited);
-
-        let _ = thread::spawn(move || {
-            let writer_receiver = writer_receiver;
-            let mut writer = writer;
-            loop {
-                match writer_receiver.recv_timeout(Duration::from_millis(100)) {
-                    Ok(bytes) => {
-                        let _ = writer.write_all(&bytes).and_then(|_| writer.flush());
-                    }
-                    Err(RecvTimeoutError::Timeout) => {
-                        if exited_writer.load(Ordering::SeqCst) {
-                            break;
-                        }
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            }
+            let _ = writer_stop.send(WriterMsg::Stop);
         });
 
         // 10. Retain the master, writer, killer, flag and both thread handles
@@ -348,9 +499,12 @@ impl PtyBackend for PortablePtyBackend {
             return Err(PtyError::UnknownPane { pane });
         };
 
-        entry.writer.send(bytes.to_vec()).map_err(|e| PtyError::Io {
-            detail: e.to_string(),
-        })
+        entry
+            .writer
+            .send(WriterMsg::Bytes(bytes.to_vec()))
+            .map_err(|e| PtyError::Io {
+                detail: e.to_string(),
+            })
     }
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
         let entry = self

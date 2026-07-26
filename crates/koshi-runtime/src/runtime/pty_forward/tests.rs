@@ -1,6 +1,8 @@
-//! Tests for per-pane PTY forwarding: parking records the handle, size, and a
-//! terminal engine, and the forwarder thread relays child output in order and
-//! then the exit once output reaches end of file.
+//! Tests for getting a pane's child output into the inbox by either route:
+//! [`InboxSink`], which the backend calls from the pane's own reader thread,
+//! and the forwarder thread, which relays child output in order and then the
+//! exit once output reaches end of file. Parking a pane picks the route and
+//! records the handle, size, and a terminal engine either way.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::TryRecvError;
@@ -196,4 +198,70 @@ fn parking_a_drained_handle_records_the_pane_but_spawns_no_forwarder() {
     // inbox.
     fake.push_output(pane, b"ignored".to_vec()).expect("push");
     assert!(matches!(rt.inbox_rx().try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn a_sink_queues_child_output_on_the_inbox_as_it_arrives() {
+    let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+    let sink = InboxSink::new(tx);
+    let pane = PaneId::new();
+
+    assert!(sink.output(pane, b"first".to_vec()));
+    assert!(sink.output(pane, b"second".to_vec()));
+
+    expect_pty_output(&rx, pane, b"first");
+    expect_pty_output(&rx, pane, b"second");
+}
+
+#[test]
+fn a_sink_tags_each_chunk_with_the_pane_it_came_from() {
+    let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+    let sink = InboxSink::new(tx);
+    let left = PaneId::new();
+    let right = PaneId::new();
+
+    assert!(sink.output(left, b"L".to_vec()));
+    assert!(sink.output(right, b"R".to_vec()));
+
+    expect_pty_output(&rx, left, b"L");
+    expect_pty_output(&rx, right, b"R");
+}
+
+#[test]
+fn a_sink_stamps_the_childs_exit_and_queues_it() {
+    let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+    let sink = InboxSink::new(tx);
+    let pane = PaneId::new();
+
+    let before = SystemTime::now();
+    sink.exit(pane, ExitStatus::Signaled(9));
+
+    match rx.recv_timeout(DEADLINE) {
+        Ok(RuntimeEvent::ChildExit {
+            pane_id,
+            status,
+            exited_at,
+        }) => {
+            assert_eq!(pane_id, pane);
+            assert_eq!(status, ExitStatus::Signaled(9));
+            assert!(exited_at >= before);
+        }
+        other => panic!("expected ChildExit, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_sink_reports_a_closed_inbox_so_the_reader_can_stop() {
+    // The reader thread stops reading a pane the moment `output` answers
+    // `false`, so a runtime that has gone away must produce exactly that —
+    // otherwise a child outliving the runtime keeps its reader thread alive.
+    let (tx, rx) = mpsc::channel::<RuntimeEvent>();
+    let sink = InboxSink::new(tx);
+    let pane = PaneId::new();
+    drop(rx);
+
+    assert!(!sink.output(pane, b"nobody home".to_vec()));
+    // The exit half has no way to report the same, so it must simply not
+    // panic: it runs on the teardown path of every pane.
+    sink.exit(pane, ExitStatus::ExitCode(0));
 }

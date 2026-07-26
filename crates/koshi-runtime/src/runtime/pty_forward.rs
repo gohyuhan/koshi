@@ -1,32 +1,80 @@
-//! Per-pane PTY forwarding: parking a freshly spawned pane's handle and
-//! relaying its child output and exit into the runtime event inbox.
+//! Getting a pane's child output and exit into the runtime event inbox.
 //!
-//! A spawned pane's [`PtyHandle`] carries blocking receivers (channel endpoints
-//! that block the thread until a value arrives) for the child's output and
-//! exit. Rather than the event loop polling them, each pane gets one forwarder
-//! thread that blocks on those receivers and pushes
-//! [`RuntimeEvent::PtyOutput`] / [`RuntimeEvent::ChildExit`] into the single
-//! inbox — so the child's I/O reaches the dispatcher the same way every other
-//! event does.
+//! Both routes end the same way — [`RuntimeEvent::PtyOutput`] and
+//! [`RuntimeEvent::ChildExit`] land in the single inbox, so a child's I/O
+//! reaches the dispatcher exactly like every other event.
 //!
+//! [`InboxSink`] is the route the running binary takes: the PTY backend calls
+//! it from the pane's own reader thread, so nothing extra runs per pane.
+//!
+//! The other route is for a backend that hands back a [`PtyHandle`] carrying
+//! channels instead — the fake backend the tests drive, for one. Those
+//! receivers block, so the pane gets a forwarder thread to block on them.
+//! Parking a pane picks the route from the handle it was given: a handle with
+//! no receivers was already wired to a sink.
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, PtySize};
-use koshi_pty::backend::state::PtyHandle;
+use koshi_pty::backend::state::{PtyHandle, PtySink};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::scrollback::ScrollbackLimit;
 
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
+/// A [`PtySink`] that drops every pane's child output and exit straight into
+/// the runtime inbox.
+///
+/// Handing this to the PTY backend is what removes the per-pane forwarder
+/// thread: the pane's reader thread, which has to exist anyway to drain the
+/// PTY, builds the event and sends it itself.
+pub struct InboxSink {
+    /// The inbox every event is sent on. Cloned from the server's own sender,
+    /// so these events queue with all the others in arrival order.
+    inbox_tx: Sender<RuntimeEvent>,
+}
+
+impl InboxSink {
+    /// A sink feeding `inbox_tx`.
+    #[must_use]
+    pub fn new(inbox_tx: Sender<RuntimeEvent>) -> Self {
+        InboxSink { inbox_tx }
+    }
+}
+
+impl PtySink for InboxSink {
+    /// Queue one chunk of child output. A closed inbox means the runtime is
+    /// gone, which is reported back as "stop reading this pane".
+    fn output(&self, pane_id: PaneId, bytes: Vec<u8>) -> bool {
+        self.inbox_tx
+            .send(RuntimeEvent::PtyOutput { pane_id, bytes })
+            .is_ok()
+    }
+
+    /// Queue the child's exit, stamped with the time it was observed. The
+    /// backend calls this only after the pane's last output, so the user sees
+    /// everything the child printed before the pane closes.
+    fn exit(&self, pane_id: PaneId, status: ExitStatus) {
+        let _ = self.inbox_tx.send(RuntimeEvent::ChildExit {
+            pane_id,
+            status,
+            exited_at: SystemTime::now(),
+        });
+    }
+}
+
 impl Server {
-    /// Register a freshly spawned pane's PTY: hand its receivers to forwarder
-    /// threads, then record its handle (as the live-pane token), its size, and
-    /// a new terminal engine. Every spawn path funnels through here so output
-    /// forwarding is wired identically wherever a pane is born.
+    /// Register a freshly spawned pane's PTY: make sure its output is on its
+    /// way to the inbox, then record its handle (as the live-pane token), its
+    /// size, and a new terminal engine. Every spawn path funnels through here
+    /// so output forwarding is wired identically wherever a pane is born.
+    ///
+    /// A handle with receivers came from a backend with no sink, so the pane
+    /// gets a forwarder thread to drain them; a handle without receivers is
+    /// already delivering through [`InboxSink`] and needs no thread.
     pub(crate) fn park_pane_pty(&mut self, pane_id: PaneId, mut handle: PtyHandle, size: PtySize) {
         if let Some((output_rx, exit_rx)) = handle.take_receivers() {
             Self::spawn_pty_forwarder(&self.inbox_tx, pane_id, output_rx, exit_rx);
@@ -47,30 +95,30 @@ impl Server {
     /// stamping the time it observed it. Draining output before the exit
     /// preserves the order the user sees: all of the child's output, then the
     /// pane closes. The thread stops when the inbox drops (shutdown).
+    ///
+    /// The events themselves are built by [`InboxSink`], the same way the
+    /// backend builds them when it delivers to a sink directly, so a pane
+    /// reaches the dispatcher identically whichever route carried it.
     fn spawn_pty_forwarder(
         inbox_tx: &Sender<RuntimeEvent>,
         pane_id: PaneId,
         output_rx: Receiver<Vec<u8>>,
         exit_rx: Receiver<ExitStatus>,
     ) {
-        let inbox = inbox_tx.clone();
-        thread::spawn(move || {
-            while let Ok(bytes) = output_rx.recv() {
-                if inbox
-                    .send(RuntimeEvent::PtyOutput { pane_id, bytes })
-                    .is_err()
-                {
-                    return;
+        let sink = InboxSink::new(inbox_tx.clone());
+        let _ = thread::Builder::new()
+            .name("koshi-pty-fwd".to_string())
+            .spawn(move || {
+                while let Ok(bytes) = output_rx.recv() {
+                    if !sink.output(pane_id, bytes) {
+                        return;
+                    }
                 }
-            }
-            if let Ok(status) = exit_rx.recv() {
-                let _ = inbox.send(RuntimeEvent::ChildExit {
-                    pane_id,
-                    status,
-                    exited_at: SystemTime::now(),
-                });
-            }
-        });
+                if let Ok(status) = exit_rx.recv() {
+                    sink.exit(pane_id, status);
+                }
+            })
+            .expect("spawn pty forwarder thread");
     }
 }
 
