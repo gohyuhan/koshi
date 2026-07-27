@@ -19,6 +19,7 @@
 //! grid, title, highlight, or hint bar. Mouse hit-testing and selection drags
 //! read only that much, and they run on every pointer move.
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use koshi_config::types::{RgbColor, ThemeConfig};
@@ -156,8 +157,12 @@ impl Server {
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
         // from `content_rects` — both in the same solve order, so they zip.
-        // `suppressed` is scanned rather than hashed: it holds one entry per pane
-        // that ran out of room, and this runs on every pointer move.
+        //
+        // `suppressed` is indexed before the walk, not scanned inside it: a tab
+        // with no room suppresses every pane it holds, so scanning it per pane
+        // would cost pane-count squared on a path that runs for every pointer
+        // move.
+        let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes
             .iter()
@@ -170,7 +175,7 @@ impl Server {
                     inner_rect,
                     kind: record.map_or(PaneKind::Terminal, |record| record.kind().clone()),
                     visible: inner_rect.is_some(),
-                    suppressed: solve.suppressed.contains(&pane_id),
+                    suppressed: suppressed.contains(&pane_id),
                     dead: record.is_some_and(|record| {
                         matches!(record.lifecycle(), PaneLifecycle::Exited { .. })
                     }),

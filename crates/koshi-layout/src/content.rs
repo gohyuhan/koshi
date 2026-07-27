@@ -7,6 +7,8 @@
 //! into, and the cells the renderer fills) happens in exactly one place: here.
 //! Both PTY sizing and the render snapshot consume this output.
 
+use std::collections::HashSet;
+
 use koshi_core::geometry::Rect;
 use koshi_core::ids::PaneId;
 
@@ -30,16 +32,23 @@ use crate::solver::SolveResult;
 /// PTY layer applies its own minimum-size floor.
 #[must_use]
 pub fn content_rects(solve: &SolveResult) -> Vec<(PaneId, Option<Rect>)> {
-    // `suppressed` and `stack_headers` each hold one entry per pane that is out
-    // of room or collapsed, so both are scanned in place. This runs on every
-    // pointer move.
-    let collapsed = |pane: PaneId| solve.stack_headers.iter().any(|header| header.pane == pane);
+    // Both lists are indexed before the walk rather than scanned inside it. A
+    // tab with no room suppresses every pane it holds, so `suppressed` can be
+    // as long as `panes`, and scanning it per pane would cost pane-count
+    // squared. A tab's pane count has no cap, and this runs on every pointer
+    // move.
+    let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
+    let collapsed: HashSet<PaneId> = solve
+        .stack_headers
+        .iter()
+        .map(|header| header.pane)
+        .collect();
 
     solve
         .panes
         .iter()
         .map(|&(pane, outer)| {
-            if solve.suppressed.contains(&pane) || outer.is_empty() || collapsed(pane) {
+            if suppressed.contains(&pane) || outer.is_empty() || collapsed.contains(&pane) {
                 (pane, None)
             } else {
                 (pane, Some(outer.inner_with_border()))
