@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// Every attribute of `attrs` read out in one value, in the order they are
+/// declared. Asserting on this pins all nine at once, so a setter that also
+/// touches a flag it has no business touching fails here.
+fn all(
+    attrs: AttrFlags,
+) -> (
+    bool,
+    bool,
+    UnderlineStyle,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+) {
+    (
+        attrs.bold(),
+        attrs.italic(),
+        attrs.underline(),
+        attrs.reverse(),
+        attrs.faint(),
+        attrs.blink(),
+        attrs.conceal(),
+        attrs.strike(),
+        attrs.overline(),
+    )
+}
+
 #[test]
 fn color_default_is_the_default_variant() {
     assert_eq!(Color::default(), Color::Default);
@@ -10,18 +39,18 @@ fn color_default_is_the_default_variant() {
 #[test]
 fn attr_flags_default_is_all_false() {
     assert_eq!(
-        AttrFlags::default(),
-        AttrFlags {
-            bold: false,
-            italic: false,
-            underline: UnderlineStyle::None,
-            reverse: false,
-            faint: false,
-            blink: false,
-            conceal: false,
-            strike: false,
-            overline: false,
-        }
+        all(AttrFlags::default()),
+        (
+            false,
+            false,
+            UnderlineStyle::None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
     );
 }
 
@@ -61,33 +90,33 @@ fn attribute_setters_toggle_their_flag_independently() {
     style.set_bold(true);
     style.set_underline(UnderlineStyle::Single);
     assert_eq!(
-        style.attrs,
-        AttrFlags {
-            bold: true,
-            italic: false,
-            underline: UnderlineStyle::Single,
-            reverse: false,
-            faint: false,
-            blink: false,
-            conceal: false,
-            strike: false,
-            overline: false,
-        }
+        all(style.attrs),
+        (
+            true,
+            false,
+            UnderlineStyle::Single,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
     );
     style.set_bold(false); // clears bold, leaves underline set
     assert_eq!(
-        style.attrs,
-        AttrFlags {
-            bold: false,
-            italic: false,
-            underline: UnderlineStyle::Single,
-            reverse: false,
-            faint: false,
-            blink: false,
-            conceal: false,
-            strike: false,
-            overline: false,
-        }
+        all(style.attrs),
+        (
+            false,
+            false,
+            UnderlineStyle::Single,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
     );
 }
 
@@ -97,18 +126,18 @@ fn set_italic_and_set_reverse_set_their_flags() {
     style.set_italic(true);
     style.set_reverse(true);
     assert_eq!(
-        style.attrs,
-        AttrFlags {
-            bold: false,
-            italic: true,
-            underline: UnderlineStyle::None,
-            reverse: true,
-            faint: false,
-            blink: false,
-            conceal: false,
-            strike: false,
-            overline: false,
-        }
+        all(style.attrs),
+        (
+            false,
+            true,
+            UnderlineStyle::None,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false
+        )
     );
 }
 

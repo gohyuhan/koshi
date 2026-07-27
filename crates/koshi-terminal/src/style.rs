@@ -3,6 +3,8 @@
 //! bold. `Style` also serves as the "pen": the color/attribute state an app
 //! sets that then applies to every character printed until changed again.
 
+use std::fmt;
+
 /// The visual style of a single cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style {
@@ -26,22 +28,22 @@ impl Style {
 
     /// Set or clear the bold attribute (SGR `1` / `22`).
     pub fn set_bold(&mut self, bold: bool) {
-        self.attrs.bold = bold
+        self.attrs.set(AttrFlags::BOLD, bold)
     }
 
     /// Set or clear the italic attribute (SGR `3` / `23`).
     pub fn set_italic(&mut self, italic: bool) {
-        self.attrs.italic = italic
+        self.attrs.set(AttrFlags::ITALIC, italic)
     }
 
     /// Set the underline style (SGR `4` single / `21` double / `24` none).
     pub fn set_underline(&mut self, underline: UnderlineStyle) {
-        self.attrs.underline = underline
+        self.attrs.set_underline(underline)
     }
 
     /// Set or clear the reverse-video attribute (SGR `7` / `27`).
     pub fn set_reverse(&mut self, reverse: bool) {
-        self.attrs.reverse = reverse
+        self.attrs.set(AttrFlags::REVERSE, reverse)
     }
 
     /// Set the background color (SGR `40`-`47` / `100`-`107` / `48`, or `49`
@@ -58,27 +60,27 @@ impl Style {
 
     /// Set or clear the faint (decreased-intensity) attribute (SGR `2` / `22`).
     pub fn set_faint(&mut self, faint: bool) {
-        self.attrs.faint = faint
+        self.attrs.set(AttrFlags::FAINT, faint)
     }
 
     /// Set or clear the blink attribute (SGR `5`/`6` / `25`).
     pub fn set_blink(&mut self, blink: bool) {
-        self.attrs.blink = blink
+        self.attrs.set(AttrFlags::BLINK, blink)
     }
 
     /// Set or clear the conceal (hidden) attribute (SGR `8` / `28`).
     pub fn set_conceal(&mut self, conceal: bool) {
-        self.attrs.conceal = conceal
+        self.attrs.set(AttrFlags::CONCEAL, conceal)
     }
 
     /// Set or clear the strikethrough attribute (SGR `9` / `29`).
     pub fn set_strike(&mut self, strike: bool) {
-        self.attrs.strike = strike
+        self.attrs.set(AttrFlags::STRIKE, strike)
     }
 
     /// Set or clear the overline attribute (SGR `53` / `55`).
     pub fn set_overline(&mut self, overline: bool) {
-        self.attrs.overline = overline
+        self.attrs.set(AttrFlags::OVERLINE, overline)
     }
 
     /// Set the underline color (SGR `58`), or pass `None` for the default that
@@ -130,74 +132,142 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-/// Boolean SGR text attributes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AttrFlags {
-    /// Bold / increased intensity (SGR 1).
-    bold: bool,
-    /// Italic (SGR 3).
-    italic: bool,
-    /// Underline style (SGR 4 single / 21 double / 24 none) — one aspect with
-    /// mutually exclusive values, so single and double are never both set.
-    underline: UnderlineStyle,
-    /// Reverse video — swap foreground and background (SGR 7).
-    reverse: bool,
-    /// Faint / decreased intensity (SGR 2).
-    faint: bool,
-    /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
-    blink: bool,
-    /// Conceal — hidden text (SGR 8).
-    conceal: bool,
-    /// Crossed-out / strikethrough (SGR 9).
-    strike: bool,
-    /// Overline (SGR 53).
-    overline: bool,
-}
+/// Boolean SGR text attributes, packed into one 16-bit word.
+///
+/// Each boolean attribute owns one bit and the underline style a 3-bit code in
+/// bits 8-10 — eleven bits in all, five spare. `ESC[1;3m` (bold and italic)
+/// gives `0b11`; `ESC[4;9m` (single underline and strikethrough) gives
+/// `1 << 6 | 1 << 8` = 320.
+///
+/// One [`Style`] rides in every [`Cell`](crate::grid::state::Cell), and a cell
+/// exists per grid slot and per scrollback-row column, so these two bytes are
+/// paid hundreds of thousands of times over in a live session. Adding an
+/// attribute takes a spare bit, not another field.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttrFlags(u16);
 
 impl AttrFlags {
     /// Bold / increased intensity (SGR 1).
+    const BOLD: u16 = 1 << 0;
+    /// Italic (SGR 3).
+    const ITALIC: u16 = 1 << 1;
+    /// Reverse video (SGR 7).
+    const REVERSE: u16 = 1 << 2;
+    /// Faint / decreased intensity (SGR 2).
+    const FAINT: u16 = 1 << 3;
+    /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
+    const BLINK: u16 = 1 << 4;
+    /// Conceal — hidden text (SGR 8).
+    const CONCEAL: u16 = 1 << 5;
+    /// Crossed-out / strikethrough (SGR 9).
+    const STRIKE: u16 = 1 << 6;
+    /// Overline (SGR 53).
+    const OVERLINE: u16 = 1 << 7;
+    /// Where the underline code starts: bits 8-10 hold it.
+    const UNDERLINE_SHIFT: u16 = 8;
+    /// The three bits the underline code occupies, in place.
+    const UNDERLINE_MASK: u16 = 0b111 << Self::UNDERLINE_SHIFT;
+
+    /// Whether `bit` is set. Called with the single-bit constants above.
+    fn has(self, bit: u16) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Set `bit` when `on`, clear it otherwise.
+    fn set(&mut self, bit: u16, on: bool) {
+        if on {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+    }
+
+    /// Replace the underline code with `underline`'s, leaving every other bit
+    /// as it was.
+    fn set_underline(&mut self, underline: UnderlineStyle) {
+        self.0 = (self.0 & !Self::UNDERLINE_MASK) | (underline.code() << Self::UNDERLINE_SHIFT);
+    }
+
+    /// Bold / increased intensity (SGR 1).
     pub fn bold(&self) -> bool {
-        self.bold
+        self.has(Self::BOLD)
     }
 
     /// Italic (SGR 3).
     pub fn italic(&self) -> bool {
-        self.italic
+        self.has(Self::ITALIC)
     }
 
     /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms).
     pub fn underline(&self) -> UnderlineStyle {
-        self.underline
+        UnderlineStyle::from_code((self.0 & Self::UNDERLINE_MASK) >> Self::UNDERLINE_SHIFT)
     }
 
     /// Reverse video — swap foreground and background (SGR 7).
     pub fn reverse(&self) -> bool {
-        self.reverse
+        self.has(Self::REVERSE)
     }
 
     /// Faint / decreased intensity (SGR 2).
     pub fn faint(&self) -> bool {
-        self.faint
+        self.has(Self::FAINT)
     }
 
     /// Blink (SGR 5 slow or 6 rapid).
     pub fn blink(&self) -> bool {
-        self.blink
+        self.has(Self::BLINK)
     }
 
     /// Conceal — hidden text (SGR 8).
     pub fn conceal(&self) -> bool {
-        self.conceal
+        self.has(Self::CONCEAL)
     }
 
     /// Crossed-out / strikethrough (SGR 9).
     pub fn strike(&self) -> bool {
-        self.strike
+        self.has(Self::STRIKE)
     }
 
     /// Overline (SGR 53).
     pub fn overline(&self) -> bool {
-        self.overline
+        self.has(Self::OVERLINE)
+    }
+}
+
+impl fmt::Debug for AttrFlags {
+    /// List the attributes that are on, so a failing assertion names them
+    /// rather than printing the packed word.
+    ///
+    /// Default flags print `AttrFlags(none)`; bold with a single underline
+    /// prints `AttrFlags(bold, underline)`; a curly underline alone prints
+    /// `AttrFlags(curly-underline)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut set: Vec<&str> = [
+            ("bold", Self::BOLD),
+            ("italic", Self::ITALIC),
+            ("reverse", Self::REVERSE),
+            ("faint", Self::FAINT),
+            ("blink", Self::BLINK),
+            ("conceal", Self::CONCEAL),
+            ("strike", Self::STRIKE),
+            ("overline", Self::OVERLINE),
+        ]
+        .into_iter()
+        .filter(|&(_, bit)| self.has(bit))
+        .map(|(name, _)| name)
+        .collect();
+        match self.underline() {
+            UnderlineStyle::None => {}
+            UnderlineStyle::Single => set.push("underline"),
+            UnderlineStyle::Double => set.push("double-underline"),
+            UnderlineStyle::Curly => set.push("curly-underline"),
+            UnderlineStyle::Dotted => set.push("dotted-underline"),
+            UnderlineStyle::Dashed => set.push("dashed-underline"),
+        }
+        if set.is_empty() {
+            set.push("none");
+        }
+        write!(f, "AttrFlags({})", set.join(", "))
     }
 }
 
@@ -220,6 +290,34 @@ pub enum UnderlineStyle {
     Dotted,
     /// Dashed underline (`4:5`).
     Dashed,
+}
+
+impl UnderlineStyle {
+    /// This style's 3-bit code, as stored in [`AttrFlags`]. The codes are the
+    /// `4:n` subparameter numbers: `None` is 0, `Curly` is 3.
+    fn code(self) -> u16 {
+        match self {
+            UnderlineStyle::None => 0,
+            UnderlineStyle::Single => 1,
+            UnderlineStyle::Double => 2,
+            UnderlineStyle::Curly => 3,
+            UnderlineStyle::Dotted => 4,
+            UnderlineStyle::Dashed => 5,
+        }
+    }
+
+    /// The style a 3-bit `code` names. [`code`](Self::code) is the only writer
+    /// of those bits, so 6 and 7 never appear and read as `None`.
+    fn from_code(code: u16) -> Self {
+        match code {
+            1 => UnderlineStyle::Single,
+            2 => UnderlineStyle::Double,
+            3 => UnderlineStyle::Curly,
+            4 => UnderlineStyle::Dotted,
+            5 => UnderlineStyle::Dashed,
+            _ => UnderlineStyle::None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -35,7 +35,9 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::snapshot::{ClientSnapshot, CursorStyle, PaneSnapshot, RenderSnapshot, SelectionSpans};
+use crate::snapshot::{
+    ClientSnapshot, CursorStyle, FrameLayout, PaneSnapshot, RenderSnapshot, SelectionSpans,
+};
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
 
@@ -96,7 +98,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         width: area.width,
         height: 1,
     };
-    draw_tabline(snapshot, tabline, buf);
+    draw_tabline(snapshot.layout(), tabline, buf);
 
     if area.height >= 2 {
         let hint_bar = RatatuiRect {

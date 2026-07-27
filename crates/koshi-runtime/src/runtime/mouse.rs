@@ -3,11 +3,15 @@
 //!
 //! Peer of [`crate::runtime::input`] for the pointer. A decoded
 //! [`MouseInput`] carries a cell in the client's screen space; the runtime
-//! builds that client's current frame, asks [`hit_test`](fn@koshi_renderer::hit_test)
-//! what sits under the cell, and turns the answer into a command, a tab-strip
-//! scroll, or a mouse report handed to the program in the pane. The frame is
-//! rebuilt per event so the hit-test always reads the pixels the client sees;
-//! its grid buffers are shared by `Arc`, so the rebuild is cheap.
+//! solves where that client's surfaces sit, asks
+//! [`hit_test`](fn@koshi_renderer::hit_test) what sits under the cell, and
+//! turns the answer into a command, a tab-strip scroll, or a mouse report
+//! handed to the program in the pane.
+//!
+//! The solve is redone per event, so the hit-test always reads the layout the
+//! client is looking at. What it produces is an [`OwnedFrameLayout`]: the
+//! solved rects, the tab bar, and the client's own view state, and never the
+//! panes' contents — classifying a cell needs no grid, title, or highlight.
 //!
 //! What each region does on a left press: a **tab** focuses that tab; a
 //! **scroll arrow** peeks the tab strip toward its side; a **stack header**
@@ -56,7 +60,7 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneKind;
-use koshi_renderer::snapshot::RenderSnapshot;
+use koshi_renderer::snapshot::{FrameLayout, OwnedFrameLayout};
 use koshi_renderer::{
     hit_test, pane_content_rect, pane_local_cell, tabline_first_visible, HitRegion,
 };
@@ -77,20 +81,21 @@ impl Server {
     /// Koshi acts on what it owns — a click on a tab, a border, the tab strip —
     /// and hands everything else to the program in the pane under the pointer,
     /// encoded as a mouse report when that program asked for one. A press or
-    /// wheel reads the frame to hit-test it; a drag or release consults the
-    /// stored drag first; a buttonless move rebuilds nothing unless the focused
-    /// pane is in any-motion mode, so an idle mouse still costs nothing.
+    /// wheel solves the layout to hit-test it; a drag or release consults the
+    /// stored drag first; a buttonless move solves it to find the pane under
+    /// the pointer, and solves it again only when the program in that pane
+    /// asked to be told about moves.
     pub fn handle_mouse_input(&mut self, client_id: ClientId, mouse: MouseInput, now: Instant) {
         match mouse.kind {
             MouseKind::Press(MouseButton::Left) => {
-                if let Some((snapshot, region)) = self.frame_hit(client_id, mouse.at) {
-                    self.mouse_left_press(client_id, &snapshot, region, mouse, now);
+                if let Some((frame, region)) = self.frame_hit(client_id, mouse.at) {
+                    self.mouse_left_press(client_id, frame.layout(), region, mouse, now);
                 }
             }
             MouseKind::Scroll(direction) => {
-                if let Some((snapshot, region)) = self.frame_hit(client_id, mouse.at) {
+                if let Some((frame, region)) = self.frame_hit(client_id, mouse.at) {
                     self.set_hover(client_id, pane_under(&region));
-                    self.route_wheel(client_id, &snapshot, region, direction, mouse);
+                    self.route_wheel(client_id, frame.layout(), region, direction, mouse);
                 }
             }
             MouseKind::Drag(MouseButton::Left) => {
@@ -143,19 +148,23 @@ impl Server {
         }
     }
 
-    /// Build the client's frame and classify the cell `at` landed on, or `None`
-    /// when there is no frame to build.
-    fn frame_hit(&mut self, client_id: ClientId, at: Point) -> Option<(RenderSnapshot, HitRegion)> {
-        let snapshot = self.build_snapshot(client_id)?;
-        let region = hit_test(&snapshot, at);
-        Some((snapshot, region))
+    /// Solve where the client's surfaces sit and classify the cell `at` landed
+    /// on, or `None` when there is no frame to solve.
+    ///
+    /// Builds a [`OwnedFrameLayout`], not a full frame: classifying a cell
+    /// reads the solved layout, the tab bar, and the client's own view state,
+    /// and never the contents of a pane.
+    fn frame_hit(&self, client_id: ClientId, at: Point) -> Option<(OwnedFrameLayout, HitRegion)> {
+        let frame = self.build_layout(client_id)?;
+        let region = hit_test(frame.layout(), at);
+        Some((frame, region))
     }
 
     /// Act on a left press over `region`.
     fn mouse_left_press(
         &mut self,
         client_id: ClientId,
-        snapshot: &RenderSnapshot,
+        frame: FrameLayout<'_>,
         region: HitRegion,
         mouse: MouseInput,
         now: Instant,
@@ -179,7 +188,7 @@ impl Server {
                     self.begin_resize_drag(client_id, pane_id, side, mouse.at);
                 }
             }
-            HitRegion::Tabline => self.begin_tabline_drag(client_id, snapshot, mouse.at.x),
+            HitRegion::Tabline => self.begin_tabline_drag(client_id, frame, mouse.at.x),
             HitRegion::Statusline | HitRegion::None => {}
         }
     }
@@ -289,8 +298,8 @@ impl Server {
     /// press was koshi's, or it focused nothing — is dropped, so no program ever
     /// sees a release without its press.
     ///
-    /// The pane's tracking level is checked before the frame is rebuilt, so a
-    /// bare move over a pane in no mouse mode costs nothing.
+    /// The pane's tracking level is checked before the layout is solved, so a
+    /// bare move over a pane in no mouse mode solves nothing here.
     ///
     /// An event that is written also drops this client's highlight in that
     /// pane: input reaching the pane's child leaves visual mode.
@@ -318,7 +327,7 @@ impl Server {
             },
             MouseKind::Scroll(_) => return,
         };
-        // Cheap gate before any frame rebuild: does the program want this event?
+        // Cheap gate before the layout is solved: does the program want this event?
         let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
             (
                 engine.state().mouse_tracking(),
@@ -330,10 +339,10 @@ impl Server {
         if !reports(tracking, kind) {
             return;
         }
-        let Some(snapshot) = self.build_snapshot(client_id) else {
+        let Some(frame) = self.build_layout(client_id) else {
             return;
         };
-        let Some((col, row)) = pane_cell(&snapshot, pane_id, mouse.at, clamp) else {
+        let Some((col, row)) = pane_cell(frame.layout(), pane_id, mouse.at, clamp) else {
             return;
         };
         if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
@@ -421,13 +430,8 @@ impl Server {
 
     /// Anchor a tab-strip peek-drag at column `anchor_x`, recording the first
     /// visible tab at that instant so drag motion scrolls relative to it.
-    fn begin_tabline_drag(
-        &mut self,
-        client_id: ClientId,
-        snapshot: &RenderSnapshot,
-        anchor_x: u16,
-    ) {
-        let anchor_first_visible = tabline_first_visible(snapshot);
+    fn begin_tabline_drag(&mut self, client_id: ClientId, frame: FrameLayout<'_>, anchor_x: u16) {
+        let anchor_first_visible = tabline_first_visible(frame);
         if let Some(client) = self.client_mut(client_id) {
             client.set_tabline_drag(Some(TablineDragState {
                 anchor_x,
@@ -541,7 +545,7 @@ impl Server {
     fn scroll_over_tabline(
         &mut self,
         client_id: ClientId,
-        snapshot: &RenderSnapshot,
+        frame: FrameLayout<'_>,
         region: HitRegion,
         direction: ScrollDirection,
     ) {
@@ -555,7 +559,7 @@ impl Server {
         if !over_tabline {
             return;
         }
-        let first = tabline_first_visible(snapshot);
+        let first = tabline_first_visible(frame);
         let target = match direction {
             ScrollDirection::Up | ScrollDirection::Left => first.saturating_sub(1),
             ScrollDirection::Down | ScrollDirection::Right => first + 1,
@@ -570,7 +574,7 @@ impl Server {
     fn route_wheel(
         &mut self,
         client_id: ClientId,
-        snapshot: &RenderSnapshot,
+        frame: FrameLayout<'_>,
         region: HitRegion,
         direction: ScrollDirection,
         mouse: MouseInput,
@@ -582,7 +586,7 @@ impl Server {
                 | HitRegion::TablineScrollLeft { .. }
                 | HitRegion::TablineScrollRight { .. }
         ) {
-            self.scroll_over_tabline(client_id, snapshot, region, direction);
+            self.scroll_over_tabline(client_id, frame, region, direction);
             return;
         }
         let target = match region {
@@ -590,7 +594,7 @@ impl Server {
             _ => self.focused_terminal_pane(client_id),
         };
         if let Some(pane_id) = target {
-            self.wheel_on_pane(client_id, snapshot, pane_id, direction, mouse);
+            self.wheel_on_pane(client_id, frame, pane_id, direction, mouse);
         }
     }
 
@@ -603,7 +607,7 @@ impl Server {
     fn wheel_on_pane(
         &mut self,
         client_id: ClientId,
-        snapshot: &RenderSnapshot,
+        frame: FrameLayout<'_>,
         pane_id: PaneId,
         direction: ScrollDirection,
         mouse: MouseInput,
@@ -612,7 +616,7 @@ impl Server {
         if self.pane_has_selection(client_id, pane_id) {
             self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
         } else if self.pane_reports_mouse(pane_id, MouseKind::Scroll(direction)) {
-            self.forward_wheel_to_pane(snapshot, pane_id, direction, mouse);
+            self.forward_wheel_to_pane(frame, pane_id, direction, mouse);
         } else if self.pane_alt_scroll(pane_id) {
             self.send_alt_scroll_keys(pane_id, direction, lines);
         } else {
@@ -686,7 +690,7 @@ impl Server {
     /// a wheel over no pane goes to the focused one.
     fn forward_wheel_to_pane(
         &mut self,
-        snapshot: &RenderSnapshot,
+        frame: FrameLayout<'_>,
         pane_id: PaneId,
         direction: ScrollDirection,
         mouse: MouseInput,
@@ -700,7 +704,7 @@ impl Server {
             return;
         };
         let kind = MouseKind::Scroll(direction);
-        let Some((col, row)) = pane_cell(snapshot, pane_id, mouse.at, true) else {
+        let Some((col, row)) = pane_cell(frame, pane_id, mouse.at, true) else {
             return;
         };
         if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
@@ -737,9 +741,9 @@ impl Server {
         }
     }
 
-    /// Update this client's hovered pane from a pointer at `at`, rebuilding the
-    /// frame to hit-test it. Cheap enough per move — grid buffers are shared by
-    /// `Arc` — and repaints only when the hovered pane actually changes.
+    /// Update this client's hovered pane from a pointer at `at`, solving the
+    /// layout to hit-test it. Repaints only when the hovered pane actually
+    /// changes, so a move within one pane draws nothing.
     fn update_hover(&mut self, client_id: ClientId, at: Point) {
         let hovered = self
             .frame_hit(client_id, at)
@@ -810,15 +814,15 @@ fn advance_toward(side: Direction, from: Point, to: Point, n: u16) -> Point {
 /// outside the pane is pulled to its nearest edge, so a captured drag that left
 /// the pane still selects to the edge; without it, an outside point is [`None`].
 fn pane_cell(
-    snapshot: &RenderSnapshot,
+    frame: FrameLayout<'_>,
     pane_id: PaneId,
     at: Point,
     clamp: bool,
 ) -> Option<(u16, u16)> {
     if !clamp {
-        return pane_local_cell(snapshot, pane_id, at);
+        return pane_local_cell(frame, pane_id, at);
     }
-    let rect = pane_content_rect(snapshot, pane_id)?;
+    let rect = pane_content_rect(frame, pane_id)?;
     let right = rect.origin.x + rect.size.cols.saturating_sub(1);
     let bottom = rect.origin.y + rect.size.rows.saturating_sub(1);
     let x = at.x.clamp(rect.origin.x, right);

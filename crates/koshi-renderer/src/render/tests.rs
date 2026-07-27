@@ -249,7 +249,7 @@ fn tabline_lists_tabs_with_active_marker() {
     // Where each tab landed, read from the same solve the paint used, so the
     // badge's width never has to be spelled out here.
     let tabs = tabline_layout(
-        &snap,
+        snap.layout(),
         RatatuiRect {
             x: 0,
             y: 0,

@@ -3,9 +3,9 @@
 //! A decoded mouse event carries a cell coordinate in the client's own screen
 //! space (`(0, 0)` top-left, `x` rightward, `y` downward). Before koshi can act
 //! on a click — focus a pane, drag a border, forward to a program — it must know
-//! *what* that cell sits on. [`hit_test`] answers that against one frozen
-//! [`RenderSnapshot`], returning a [`HitRegion`] label. It only classifies; it
-//! never changes state and never forwards anything.
+//! *what* that cell sits on. [`hit_test`] answers that from one frame's
+//! [`FrameLayout`] — where its surfaces sit — returning a [`HitRegion`] label.
+//! It only classifies; it never changes state and never forwards anything.
 //!
 //! The frame is read the same way [`crate::render`] draws it, so the region a
 //! click lands on is the region that was painted there:
@@ -24,7 +24,7 @@ use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
 use crate::render::{content_rect, tabline_layout};
-use crate::snapshot::RenderSnapshot;
+use crate::snapshot::FrameLayout;
 
 /// The UI region under a client-local screen cell, as classified by
 /// [`hit_test`].
@@ -80,21 +80,20 @@ pub enum HitRegion {
     None,
 }
 
-/// Classify the client-local screen cell `at` against the frozen frame
-/// `snapshot`.
+/// Classify the client-local screen cell `at` against the frame `frame`.
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the tabline (top row) and hint bar (bottom row) are
 /// tested before the pane area, and the pane area is the layout centered inside
 /// the viewport with a letterbox margin that hits nothing.
 #[must_use]
-pub fn hit_test(snapshot: &RenderSnapshot, at: Point) -> HitRegion {
-    let viewport = snapshot.client.viewport;
+pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
+    let viewport = frame.client.viewport;
     if viewport.cols == 0 || viewport.rows == 0 {
         return HitRegion::None;
     }
 
-    let tab = &snapshot.session.active_tab;
+    let tab = &frame.session.active_tab;
     // No room for any pane: the whole frame is the too-small overlay, and no
     // chrome or pane is drawn, so nothing is hit-testable.
     if tab.all_suppressed {
@@ -111,7 +110,7 @@ pub fn hit_test(snapshot: &RenderSnapshot, at: Point) -> HitRegion {
     // Chrome rows are painted last and cover the pane area beneath them, so a
     // click on those rows is chrome regardless of what the layout put there.
     if at.y == area.y {
-        return tabline_region(snapshot, area, at.x);
+        return tabline_region(frame, area, at.x);
     }
     if viewport.rows >= 2 && at.y == area.bottom() - 1 {
         return HitRegion::Statusline;
@@ -164,8 +163,8 @@ pub fn hit_test(snapshot: &RenderSnapshot, at: Point) -> HitRegion {
 
 /// Classify a cell on the tabline row at column `x`: a scroll arrow, the tab
 /// whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off all of them.
-fn tabline_region(snapshot: &RenderSnapshot, area: RatatuiRect, x: u16) -> HitRegion {
-    let layout = tabline_layout(snapshot, area);
+fn tabline_region(frame: FrameLayout<'_>, area: RatatuiRect, x: u16) -> HitRegion {
+    let layout = tabline_layout(frame, area);
     if let Some((arrow_x, to)) = layout.left_arrow {
         if x == arrow_x {
             return HitRegion::TablineScrollLeft { to };
@@ -179,7 +178,7 @@ fn tabline_region(snapshot: &RenderSnapshot, area: RatatuiRect, x: u16) -> HitRe
     for (meta_index, tab_x, width) in layout.tabs {
         if x >= tab_x && x < tab_x + width {
             return HitRegion::Tab {
-                tab_id: snapshot.session.tabs_metadata[meta_index].id,
+                tab_id: frame.session.tabs_metadata[meta_index].id,
             };
         }
     }
@@ -194,12 +193,12 @@ fn tabline_region(snapshot: &RenderSnapshot, area: RatatuiRect, x: u16) -> HitRe
 /// the viewport with a letterbox margin), so a cell forwarded to a program is
 /// the cell the user clicked.
 #[must_use]
-pub fn pane_content_rect(snapshot: &RenderSnapshot, pane_id: PaneId) -> Option<Rect> {
-    let viewport = snapshot.client.viewport;
+pub fn pane_content_rect(frame: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
+    let viewport = frame.client.viewport;
     if viewport.cols == 0 || viewport.rows == 0 {
         return None;
     }
-    let tab = &snapshot.session.active_tab;
+    let tab = &frame.session.active_tab;
     if tab.all_suppressed {
         return None;
     }
@@ -231,34 +230,30 @@ pub fn pane_content_rect(snapshot: &RenderSnapshot, pane_id: PaneId) -> Option<R
 /// A mouse report addresses the program's own grid, whose top-left content cell
 /// is `(1, 1)`, so the caller forwards these coordinates straight into the pane.
 #[must_use]
-pub fn pane_local_cell(
-    snapshot: &RenderSnapshot,
-    pane_id: PaneId,
-    at: Point,
-) -> Option<(u16, u16)> {
-    let rect = pane_content_rect(snapshot, pane_id)?;
+pub fn pane_local_cell(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> Option<(u16, u16)> {
+    let rect = pane_content_rect(frame, pane_id)?;
     if !rect.contains(at) {
         return None;
     }
     Some((at.x - rect.origin.x + 1, at.y - rect.origin.y + 1))
 }
 
-/// The metadata index of the first tab currently visible in `snapshot`'s
-/// tabline window.
+/// The metadata index of the first tab currently visible in `frame`'s tabline
+/// window.
 ///
 /// The mouse-routing layer reads this to anchor a peek-drag and to step the
 /// window on a wheel scroll. It resolves the same window the renderer draws and
 /// [`hit_test`] classifies.
 #[must_use]
-pub fn tabline_first_visible(snapshot: &RenderSnapshot) -> usize {
-    let viewport = snapshot.client.viewport;
+pub fn tabline_first_visible(frame: FrameLayout<'_>) -> usize {
+    let viewport = frame.client.viewport;
     let area = RatatuiRect {
         x: 0,
         y: 0,
         width: viewport.cols,
         height: viewport.rows,
     };
-    tabline_layout(snapshot, area).first_visible
+    tabline_layout(frame, area).first_visible
 }
 
 /// The side of `rect`'s one-cell border ring that `point` lies on. `point` is

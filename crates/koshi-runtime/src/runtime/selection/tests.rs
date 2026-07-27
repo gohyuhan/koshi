@@ -47,7 +47,7 @@ fn feed(rt: &mut Server, pane: PaneId, bytes: &[u8]) {
 /// draws at.
 fn origin(rt: &Server, client: ClientId, pane: PaneId) -> Point {
     let snapshot = rt.build_snapshot(client).expect("snapshot");
-    koshi_renderer::pane_content_rect(&snapshot, pane)
+    koshi_renderer::pane_content_rect(snapshot.layout(), pane)
         .expect("content rect")
         .origin
 }
@@ -66,7 +66,7 @@ fn cell_at(rt: &Server, client: ClientId, pane: PaneId, col: u16, row: u16) -> P
 /// narrower than 80.
 fn last_col(rt: &Server, client: ClientId, pane: PaneId) -> u16 {
     let snapshot = rt.build_snapshot(client).expect("snapshot");
-    koshi_renderer::pane_content_rect(&snapshot, pane)
+    koshi_renderer::pane_content_rect(snapshot.layout(), pane)
         .expect("content rect")
         .size
         .cols

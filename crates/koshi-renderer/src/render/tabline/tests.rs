@@ -89,8 +89,14 @@ fn area(width: u16) -> RatatuiRect {
 fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
-    draw_tabline(snapshot, a, &mut buf);
+    draw_tabline(snapshot.layout(), a, &mut buf);
     buf
+}
+
+/// Solve the tabline for `snapshot` over `area`, taking the whole frame so a
+/// test can pass a snapshot fixture straight in.
+fn solve_tabline(snapshot: &RenderSnapshot, area: RatatuiRect) -> TablineLayout {
+    tabline_layout(snapshot.layout(), area)
 }
 
 /// The symbol at cell `x` of the single rendered row.
@@ -105,7 +111,7 @@ fn one_tab_that_fits_shows_whole_with_no_arrows() {
     // Session block ` s ` (3 cells) plus the version badge; right block
     // " BASE " = 6; the strip starts one cell past the session block, so the
     // tab " #1  a " (7 cells) sits just after the badge.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
         area(20 + BADGE),
     );
@@ -119,7 +125,7 @@ fn one_tab_that_fits_shows_whole_with_no_arrows() {
 
 #[test]
 fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap(
             "s",
             &[("a", false), ("b", false), ("c", true)],
@@ -141,7 +147,7 @@ fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
 fn a_tab_that_exactly_fills_the_gap_is_kept() {
     // One cell wider than the tab needs: the tab's last cell lands exactly on
     // `right_x`, so it just fits and no scrolling begins.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
         area(17 + BADGE),
     );
@@ -155,7 +161,7 @@ fn one_column_too_narrow_drops_the_tab_and_shows_a_right_arrow() {
     // One cell narrower than that: the tab no longer fits, so the strip
     // scrolls; nothing is visible yet and a right arrow marks the tab hidden
     // off the right edge.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
         area(16 + BADGE),
     );
@@ -170,7 +176,7 @@ fn following_the_active_tab_scrolls_it_into_view() {
     // The strip holds one tab in the arrow-framed window; with the last tab
     // active and no peek offset, the window starts at it and only a left arrow
     // shows.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap(
             "s",
             &[("a", false), ("b", false), ("c", true)],
@@ -188,7 +194,7 @@ fn following_the_active_tab_scrolls_it_into_view() {
 
 #[test]
 fn a_peek_offset_windows_from_that_index_with_both_arrows() {
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap(
             "s",
             &[("a", true), ("b", false), ("c", false)],
@@ -206,7 +212,7 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
 
 #[test]
 fn a_peek_offset_past_the_last_tab_clamps_to_it() {
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap(
             "s",
             &[("a", true), ("b", false), ("c", false)],
@@ -224,7 +230,7 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
 
 #[test]
 fn an_empty_tab_list_leaves_only_the_two_blocks() {
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[], None, LockMode::Normal, false),
         area(20 + BADGE),
     );
@@ -239,7 +245,7 @@ fn an_empty_tab_list_leaves_only_the_two_blocks() {
 #[test]
 fn no_room_between_the_blocks_yields_no_tabs() {
     // width 6 is exactly the right block, leaving no strip at all.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Normal, false),
         area(6),
     );
@@ -256,7 +262,7 @@ fn no_room_between_the_blocks_yields_no_tabs() {
 fn the_select_mode_tag_widens_the_right_block() {
     // " SELECT " is 8 cells, so the right block starts 8 cells from the right
     // edge — two cells left of where the 6-cell " BASE " block starts.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Normal, true),
         area(20 + BADGE),
     );
@@ -266,7 +272,7 @@ fn the_select_mode_tag_widens_the_right_block() {
 #[test]
 fn a_lock_mode_tag_is_the_same_width_as_base() {
     // " LOCK " and " BASE " are both 6 cells.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("a", true)], None, LockMode::Locked, false),
         area(20 + BADGE),
     );
@@ -278,7 +284,7 @@ fn a_lock_mode_tag_is_the_same_width_as_base() {
 #[test]
 fn a_wide_cjk_title_counts_two_cells_per_glyph() {
     // " 字 " is 1 + 2 + 1 = 4 cells, so the tab is " #1 "(4) + 4 = 8 wide.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("字", true)], None, LockMode::Normal, false),
         area(60 + BADGE),
     );
@@ -287,7 +293,7 @@ fn a_wide_cjk_title_counts_two_cells_per_glyph() {
 
 #[test]
 fn an_emoji_title_counts_two_cells() {
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("🎉", true)], None, LockMode::Normal, false),
         area(60 + BADGE),
     );
@@ -297,7 +303,7 @@ fn an_emoji_title_counts_two_cells() {
 #[test]
 fn a_combining_mark_title_stays_one_cell() {
     // "e" + combining acute is one display cell: " é " is 3, tab is 4 + 3 = 7.
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &[("e\u{0301}", true)], None, LockMode::Normal, false),
         area(60 + BADGE),
     );
@@ -308,7 +314,7 @@ fn a_combining_mark_title_stays_one_cell() {
 fn a_two_digit_tab_number_widens_that_tab() {
     // Tab 9 shows "#10" — a wider `#N` block than the single-digit tabs.
     let tabs: Vec<(&str, bool)> = (0..10).map(|i| ("a", i == 0)).collect();
-    let layout = tabline_layout(
+    let layout = solve_tabline(
         &snap("s", &tabs, None, LockMode::Normal, false),
         area(200 + BADGE),
     );
@@ -377,7 +383,7 @@ fn a_row_too_narrow_for_the_badge_drops_it_whole() {
     let buf = draw(&snapshot, 16);
     let row: String = (0..16).map(|x| cell(&buf, x)).collect();
     assert_eq!(row, " s       ▶ BASE ");
-    assert_eq!(tabline_layout(&snapshot, area(16)).session_width, 3);
+    assert_eq!(solve_tabline(&snapshot, area(16)).session_width, 3);
 }
 
 #[test]

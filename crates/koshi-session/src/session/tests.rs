@@ -240,6 +240,20 @@ fn a_tab_survives_a_serde_round_trip() {
 }
 
 #[test]
+fn a_tabs_name_is_stored_as_a_plain_json_string() {
+    // A tab is part of the saved session, so its name's stored shape is a file
+    // format: a session written by one build has to load in the next. A
+    // round-trip test alone cannot see this — it passes just as well if the
+    // name starts writing itself as a nested object, because it reads back
+    // whatever it wrote. This pins the shape on disk instead.
+    let tab = Tab::new(TabId::new(), "code".to_owned(), 2, PaneId::new());
+
+    let value = serde_json::to_value(&tab).expect("serialize");
+
+    assert_eq!(value["name"], serde_json::Value::String("code".to_owned()));
+}
+
+#[test]
 fn a_fresh_session_is_starting() {
     let session = Session::new(
         SessionId::new(),

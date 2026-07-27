@@ -78,7 +78,7 @@ fn content_point(server: &Server, client_id: ClientId, pane_id: PaneId) -> Point
     for y in 0..snapshot.client.viewport.rows {
         for x in 0..snapshot.client.viewport.cols {
             let point = Point { x, y };
-            if hit_test(&snapshot, point) == (HitRegion::PaneContent { pane_id }) {
+            if hit_test(snapshot.layout(), point) == (HitRegion::PaneContent { pane_id }) {
                 return point;
             }
         }
