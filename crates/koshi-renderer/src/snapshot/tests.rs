@@ -96,7 +96,6 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         client,
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
     }
 }
 

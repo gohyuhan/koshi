@@ -16,7 +16,6 @@ use crate::snapshot::{
     ClientSnapshot, KeymapHints, PaneSlot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot,
     TabMeta, TabSnapshot,
 };
-use crate::theme::Theme;
 
 /// A cell rect: origin `(x, y)`, size `cols x rows`.
 fn rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
@@ -97,7 +96,6 @@ fn snap(
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
     }
 }
 

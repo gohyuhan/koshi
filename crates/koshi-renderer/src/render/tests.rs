@@ -126,12 +126,17 @@ fn build(
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
     }
 }
 
 /// Render a snapshot into a fresh `w x h` buffer.
 fn render(snapshot: &RenderSnapshot, w: u16, h: u16) -> Buffer {
+    render_with(snapshot, &Theme::default(), w, h)
+}
+
+/// Paint `snapshot` in `theme`'s colors, for the tests that check which color
+/// a surface takes rather than where it sits.
+fn render_with(snapshot: &RenderSnapshot, theme: &Theme, w: u16, h: u16) -> Buffer {
     let area = RatatuiRect {
         x: 0,
         y: 0,
@@ -139,7 +144,7 @@ fn render(snapshot: &RenderSnapshot, w: u16, h: u16) -> Buffer {
         height: h,
     };
     let mut buf = Buffer::empty(area);
-    render_frame(snapshot, area, &mut buf);
+    render_frame(snapshot, theme, area, &mut buf);
     buf
 }
 
@@ -539,7 +544,7 @@ fn reused_buffer_is_blanked_before_painting() {
         }
     }
 
-    render_frame(&snap, area, &mut buf);
+    render_frame(&snap, &Theme::default(), area, &mut buf);
 
     // Tabline gap between the left tab list and the right status: blanked.
     assert_eq!(buf[(12, 0)].symbol(), " ");
@@ -1274,6 +1279,7 @@ fn small_and_zero_size_areas_are_safe() {
     });
     render_frame(
         &snap,
+        &Theme::default(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1379,6 +1385,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     });
     render_frame(
         &snap,
+        &Theme::default(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1429,6 +1436,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     });
     render_frame(
         &snap,
+        &Theme::default(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1479,7 +1487,7 @@ fn equal_viewport_draws_no_letterbox() {
 fn a_custom_theme_recolors_the_chrome() {
     let left = PaneId::new();
     let right = PaneId::new();
-    let mut snap = build(
+    let snap = build(
         "sess",
         &[("shell", true), ("logs", false)],
         &[
@@ -1490,14 +1498,14 @@ fn a_custom_theme_recolors_the_chrome() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    snap.theme = Theme {
+    let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
         border_focused: Color::Rgb(0xff, 0x88, 0x00),
         border_unfocused: Color::Rgb(0x11, 0x22, 0x33),
         ..Theme::default()
     };
-    let buf = render(&snap, 40, 8);
+    let buf = render_with(&snap, &theme, 40, 8);
 
     // Borders take the theme's border colors.
     assert_eq!(buf[(0, 1)].fg, Color::Rgb(0xff, 0x88, 0x00));

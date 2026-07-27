@@ -51,7 +51,7 @@ use crate::theme::Theme;
 /// pane (`all_suppressed`), draws only a centered too-small overlay and
 /// returns, skipping the panes and both chrome rows. Does nothing for a
 /// zero-size area.
-pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+pub fn render_frame(snapshot: &RenderSnapshot, theme: &Theme, area: RatatuiRect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -84,13 +84,13 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         y: content.y,
     };
 
-    draw_panes(snapshot, offset, buf);
+    draw_panes(snapshot, theme, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
-    draw_stack_headers(snapshot, offset, buf);
+    draw_stack_headers(snapshot, theme, offset, buf);
 
     // Fill multi-client margins before chrome; the tabline and hint bar own
     // the outer rows and must remain visible over the letterbox.
-    draw_letterbox(area, content, &snapshot.theme, buf);
+    draw_letterbox(area, content, theme, buf);
 
     let tabline = RatatuiRect {
         x: area.x,
@@ -98,7 +98,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         width: area.width,
         height: 1,
     };
-    draw_tabline(snapshot.layout(), tabline, buf);
+    draw_tabline(snapshot.layout(), theme, tabline, buf);
 
     if area.height >= 2 {
         let hint_bar = RatatuiRect {
@@ -107,7 +107,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
             width: area.width,
             height: 1,
         };
-        draw_hint_bar(snapshot, hint_bar, buf);
+        draw_hint_bar(snapshot, theme, hint_bar, buf);
     }
 }
 
@@ -215,7 +215,7 @@ fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
 /// resolved title into its top border line, and — when the pane is scrolled
 /// back — its scroll position into its bottom border. `offset` shifts each pane
 /// into the centered content rect.
-fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
+fn draw_panes(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, buf: &mut Buffer) {
     let focused = snapshot.client.focused_pane;
     let hovered = snapshot.client.hovered_pane;
     for slot in &snapshot.session.active_tab.layout_solved {
@@ -225,11 +225,11 @@ fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
         // Focus keeps its own color; the hover color marks only an unfocused
         // pane the wheel would scroll, so the focused pane never turns purple.
         let style = if Some(slot.pane_id) == focused {
-            border_focused_style(&snapshot.theme)
+            border_focused_style(theme)
         } else if Some(slot.pane_id) == hovered {
-            border_hover_style(&snapshot.theme)
+            border_hover_style(theme)
         } else {
-            border_unfocused_style(&snapshot.theme)
+            border_unfocused_style(theme)
         };
         let rect = place(slot.rect, offset);
         Block::new()
@@ -428,8 +428,8 @@ fn cell_color(color: CellColor) -> Color {
 /// arrow and the pane title on the left, a `[position/total]` indicator
 /// right-aligned, over a theme-filled row that marks the strip as
 /// koshi-owned. `offset` shifts each strip into the centered content rect.
-fn draw_stack_headers(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
-    let style = stack_header_style(&snapshot.theme);
+fn draw_stack_headers(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, buf: &mut Buffer) {
+    let style = stack_header_style(theme);
     for header in &snapshot.session.active_tab.stack_headers {
         let rect = place(header.rect, offset);
         if rect.width == 0 || rect.height == 0 {

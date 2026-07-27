@@ -65,7 +65,6 @@ fn snap(
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
     }
 }
 
@@ -89,7 +88,7 @@ fn area(width: u16) -> RatatuiRect {
 fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
-    draw_tabline(snapshot.layout(), a, &mut buf);
+    draw_tabline(snapshot.layout(), &Theme::default(), a, &mut buf);
     buf
 }
 

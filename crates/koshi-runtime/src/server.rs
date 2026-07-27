@@ -3,8 +3,8 @@
 //!
 //! A [`Server`] owns the sessions and their layout trees, the per-pane
 //! terminal engines, the shared PTY backend, the action registry, and the
-//! service handles the event loop drives. The view side lives in
-//! [`Client`](crate::client::Client); the two halves talk only through the
+//! service handles the event loop drives. The view side lives in its own
+//! crate, `koshi-client`; the two halves talk only through the
 //! server's doors — [`Server::submit_command`] carries a client's command in,
 //! [`Server::subscribe`] carries the emitted events out — so the server never
 //! reads client view state and a client never mutates session or pane data.
@@ -27,7 +27,6 @@ use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::logging::event_log::log_event;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
-use koshi_renderer::theme::Theme;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
@@ -40,17 +39,16 @@ use crate::{
         hints::KeymapHintCatalog,
         reload::ConfigLayers,
         render_schedule::RenderScheduler,
-        snapshot::resolve_theme,
     },
 };
 
 /// The authoritative half of one koshi process: owns the sessions and their
 /// layout trees, the per-pane terminal engines, the shared PTY backend, the
 /// action registry, and the service handles the event loop drives. One
-/// process holds exactly one. The view side — viewport, rendering, the
-/// subscribed event feed — lives in [`Client`](crate::client::Client), which
-/// reaches session state only through [`submit_command`](Self::submit_command)
-/// and [`subscribe`](Self::subscribe).
+/// process holds exactly one. The view side — viewport, rendering, the colors
+/// chrome is painted in, the subscribed event feed — lives in the
+/// `koshi-client` crate, which reaches session state only through
+/// [`submit_command`](Self::submit_command) and [`subscribe`](Self::subscribe).
 pub struct Server {
     /// Every session in this process, keyed by id. Each session owns its tabs,
     /// layout trees, pane registry, and clients.
@@ -105,9 +103,6 @@ pub struct Server {
     /// the built-in defaults and rebuilt whenever the keymap inputs change —
     /// a keybinding reload or a registry refresh.
     pub(crate) keymap_hints: KeymapHintCatalog,
-    /// The resolved chrome theme copied onto each frame's snapshot. Resolved
-    /// from the effective config's theme; a theme reload replaces it.
-    pub(crate) theme: Theme,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -165,7 +160,6 @@ impl Server {
             storage,
             ipc_server: None,
             keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
-            theme: resolve_theme(&client_config.theme),
             action_registry,
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
@@ -185,6 +179,16 @@ impl Server {
     /// requests a session/pane mutation.
     pub fn submit_command(&mut self, envelope: CommandEnvelope) -> CommandResult {
         self.dispatch(envelope)
+    }
+
+    /// The viewer-owned settings folded from this process's config files.
+    ///
+    /// The reload transactions here own the parsed layers, so this is where a
+    /// viewer in the same process gets its settings from; each section leaves
+    /// as that feature moves to the client.
+    #[must_use]
+    pub fn client_config(&self) -> &ClientConfig {
+        &self.client_config
     }
 
     /// The server→client door: register a subscriber for the events `filter`

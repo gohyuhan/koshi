@@ -28,11 +28,15 @@ use crate::theme::Theme;
 const REVERT_MARKER: &str = " keys! ";
 
 /// Paint one chrome-owned hint row.
-pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+pub fn draw_hint_bar(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let theme = &snapshot.theme;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.

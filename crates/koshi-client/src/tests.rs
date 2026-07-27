@@ -1,8 +1,9 @@
-//! Tests for the client half: construction, viewport updates, and discarding
-//! the subscribed event feed.
+//! Tests for the viewer half: construction, viewport updates, the colors it
+//! resolves from its own config, and discarding the subscribed event feed.
 
 use std::sync::mpsc;
 
+use koshi_config::types::RgbColor;
 use koshi_core::event::{LayoutChanged, TabCreated};
 use koshi_core::ids::TabId;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -10,14 +11,26 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use super::*;
 
 fn new_client() -> (Client, mpsc::SyncSender<Event>) {
+    with_config(ClientConfig::default())
+}
+
+fn with_config(config: ClientConfig) -> (Client, mpsc::SyncSender<Event>) {
     let (tx, rx) = mpsc::sync_channel(8);
     let client = Client::new(
         ClientId::new(),
         Size { cols: 80, rows: 24 },
         rx,
+        config,
         TerminalCleanupGuard::new(),
     );
     (client, tx)
+}
+
+/// A config whose focused-border role is `color`.
+fn config_with_focused_border(color: RgbColor) -> ClientConfig {
+    let mut config = ClientConfig::default();
+    config.theme.colors.border_focused = color;
+    config
 }
 
 #[test]
@@ -40,6 +53,40 @@ fn set_viewport_records_the_new_size() {
             cols: 120,
             rows: 40,
         }
+    );
+}
+
+#[test]
+fn a_new_client_resolves_its_colors_from_the_config_it_was_given() {
+    let (client, _tx) = with_config(config_with_focused_border(RgbColor::new(1, 2, 3)));
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(1, 2, 3)
+    );
+}
+
+#[test]
+fn a_default_config_client_paints_the_stock_colors() {
+    let (client, _tx) = new_client();
+    assert_eq!(*client.theme(), Theme::default());
+}
+
+#[test]
+fn reloaded_settings_repaint_the_chrome_in_the_new_colors() {
+    let (mut client, _tx) = new_client();
+    assert_eq!(*client.theme(), Theme::default());
+
+    client.set_config(config_with_focused_border(RgbColor::new(0xff, 0, 0)));
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(0xff, 0, 0),
+        "the new palette reaches the colors the next frame paints with"
+    );
+    assert_eq!(
+        client.config().theme.colors.border_focused,
+        RgbColor::new(0xff, 0, 0),
+        "and the stored settings carry it too"
     );
 }
 

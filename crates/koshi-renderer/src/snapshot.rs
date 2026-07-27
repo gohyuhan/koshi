@@ -30,8 +30,6 @@ use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
-use crate::theme::Theme;
-
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
 /// The renderer joins [`panes`](Self::panes) to the [`PaneSlot`]s in
@@ -51,9 +49,6 @@ pub struct RenderSnapshot {
     pub plugin_ui: PluginUiSnapshot,
     /// The keybinding data the hint bar draws for the client's current mode.
     pub keymap_hints: KeymapHints,
-    /// The resolved chrome theme every koshi-owned surface draws its colors
-    /// from this frame.
-    pub theme: Theme,
 }
 
 impl RenderSnapshot {
@@ -63,29 +58,30 @@ impl RenderSnapshot {
         FrameLayout {
             session: &self.session,
             client: &self.client,
-            theme: &self.theme,
         }
     }
 }
 
 /// Where a frame's surfaces sit, borrowed: the session with its solved active
-/// tab, the viewing client, and the theme. Carries no pane content.
+/// tab, and the viewing client. Carries no pane content and no colors.
 ///
-/// This is what hit-testing a mouse cell and solving the tabline read. A
-/// caller that already holds a [`RenderSnapshot`] borrows one out of it with
+/// This is what hit-testing a mouse cell and solving the tabline read. Both
+/// answer in cells, and a cell's position does not depend on what color it is
+/// painted, so no theme reaches here — the colors are applied only where
+/// something is actually drawn.
+///
+/// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
 /// [`RenderSnapshot::layout`]; a caller answering a mouse event builds these
-/// three on their own and skips every pane's grid, title, and highlight.
+/// two on their own and skips every pane's grid, title, and highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
     pub session: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: &'a ClientSnapshot,
-    /// The resolved chrome theme every koshi-owned surface draws with.
-    pub theme: &'a Theme,
 }
 
-/// The owned form of [`FrameLayout`], for a caller that builds these three
+/// The owned form of [`FrameLayout`], for a caller that builds these two
 /// itself instead of borrowing them out of a [`RenderSnapshot`].
 ///
 /// Answering a mouse event needs to know where the surfaces are and nothing
@@ -97,18 +93,15 @@ pub struct OwnedFrameLayout {
     pub session: SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: ClientSnapshot,
-    /// The resolved chrome theme every koshi-owned surface draws with.
-    pub theme: Theme,
 }
 
 impl OwnedFrameLayout {
-    /// Borrow these three as a [`FrameLayout`].
+    /// Borrow these two as a [`FrameLayout`].
     #[must_use]
     pub fn layout(&self) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
-            theme: &self.theme,
         }
     }
 }

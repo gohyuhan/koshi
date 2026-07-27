@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 
+use koshi_config::types::ClientConfig;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
@@ -48,7 +49,13 @@ fn test_server(fake: Arc<FakePtyBackend>) -> (Server, mpsc::Sender<RuntimeEvent>
 /// that drive the real `run_loop`.
 fn test_client(server: &mut Server, client_id: ClientId) -> Client {
     let events = server.subscribe(EventFilter::All);
-    Client::new(client_id, VIEWPORT, events, TerminalCleanupGuard::new())
+    Client::new(
+        client_id,
+        VIEWPORT,
+        events,
+        ClientConfig::default(),
+        TerminalCleanupGuard::new(),
+    )
 }
 
 /// A bootstrapped server with its client id and sole pane id.
@@ -98,11 +105,12 @@ fn pty_output_event_renders_to_the_screen() {
         },)
         .is_continue());
 
+    let client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     render(
         &mut terminal,
         &server,
-        client_id,
+        &client,
         &mut String::new(),
         &mut None,
     )
@@ -556,7 +564,8 @@ fn host_paste_event_writes_the_pasted_text_to_the_focused_pane() {
 #[test]
 fn render_for_a_client_without_a_snapshot_draws_nothing() {
     let fake = Arc::new(FakePtyBackend::new());
-    let (server, _tx, _client_id, _pane_id) = boot(&fake);
+    let (mut server, _tx, _client_id, _pane_id) = boot(&fake);
+    let unknown = test_client(&mut server, ClientId::new());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
 
     // An unknown client resolves to no snapshot, so render early-returns and
@@ -564,7 +573,7 @@ fn render_for_a_client_without_a_snapshot_draws_nothing() {
     render(
         &mut terminal,
         &server,
-        ClientId::new(),
+        &unknown,
         &mut String::new(),
         &mut None,
     )
@@ -587,11 +596,12 @@ fn render_emits_a_changed_cursor_style_and_records_it() {
             bytes: b"\x1b[6 q".to_vec(),
         },)
         .is_continue());
+    let client = test_client(&mut server, client_id);
     let mut last_cursor = None;
     render(
         &mut terminal,
         &server,
-        client_id,
+        &client,
         &mut String::new(),
         &mut last_cursor,
     )

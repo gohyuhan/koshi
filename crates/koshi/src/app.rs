@@ -30,6 +30,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
+use koshi_client::Client;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_input::mouse::decode_mouse;
@@ -38,8 +39,8 @@ use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
 use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
+use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
-use koshi_runtime::client::Client;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
@@ -53,11 +54,11 @@ use crate::keys::decode_key;
 /// Paints a render snapshot into ratatui's frame buffer via the widget trait —
 /// the only way to reach the frame's buffer, and exactly the shape
 /// [`render_frame`] expects.
-struct SnapshotWidget<'a>(&'a RenderSnapshot);
+struct SnapshotWidget<'a>(&'a RenderSnapshot, &'a Theme);
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame(self.0, area, buf);
+        render_frame(self.0, self.1, area, buf);
     }
 }
 
@@ -228,7 +229,11 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // server's events and holds the cleanup guard, since the outer terminal
     // it restores is the client's.
     let events_rx = server.subscribe(EventFilter::All);
-    let mut client = Client::new(client_id, viewport, events_rx, cleanup);
+    // The viewer's own settings, folded from the same files the session read.
+    // It resolves its chrome colors from these, so the palette a frame is
+    // painted in belongs to this terminal rather than to the session.
+    let client_config = server.client_config().clone();
+    let mut client = Client::new(client_id, viewport, events_rx, client_config, cleanup);
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
@@ -379,13 +384,7 @@ fn run_loop<B: Backend>(
         server.expire_key_sequences(Instant::now());
         server.expire_selection_scrolls(Instant::now());
         if server.poll_render(Instant::now()) {
-            render(
-                terminal,
-                server,
-                client.id(),
-                &mut last_title,
-                &mut last_cursor,
-            )?;
+            render(terminal, server, client, &mut last_title, &mut last_cursor)?;
         }
         if !server.has_active_panes() {
             break;
@@ -426,11 +425,11 @@ fn earliest(
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     server: &Server,
-    client_id: ClientId,
+    client: &Client,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
 ) -> Result<(), B::Error> {
-    let Some(snapshot) = server.build_snapshot(client_id) else {
+    let Some(snapshot) = server.build_snapshot(client.id()) else {
         return Ok(());
     };
     let title = window_title(&snapshot);
@@ -452,7 +451,7 @@ fn render<B: Backend>(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        frame.render_widget(SnapshotWidget(&snapshot), area);
+        frame.render_widget(SnapshotWidget(&snapshot, client.theme()), area);
         if let Some(position) = cursor_position(&snapshot, area) {
             frame.set_cursor_position(position);
         }

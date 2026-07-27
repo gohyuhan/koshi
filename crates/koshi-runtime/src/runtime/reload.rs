@@ -30,7 +30,6 @@ use koshi_core::ids::SessionId;
 use crate::runtime::{
     hints::{built_in_modes, keymap_layers, KeymapHintCatalog},
     render_schedule::InvalidationReason,
-    snapshot::resolve_theme,
 };
 use crate::server::Server;
 
@@ -105,17 +104,17 @@ pub struct KeymapReloadOutcome {
 
 impl Server {
     /// Swap in a reloaded color theme: store the candidate as the theme
-    /// layer, recompute the viewer-owned config, resolve the chrome theme
-    /// from it, and schedule a repaint. Colors are a viewer's own setting, so
-    /// the session-owned config is untouched here. Returns one
-    /// [`Event::ConfigReloaded`] per live session.
+    /// layer, recompute the viewer-owned config, and schedule a repaint.
+    /// Colors are a viewer's own setting, so the session-owned config is
+    /// untouched here and the palette itself is resolved by each viewer out of
+    /// the config this leaves behind. Returns one [`Event::ConfigReloaded`]
+    /// per live session.
     pub fn reload_theme(&mut self, candidate: PartialThemeConfig) -> Vec<Event> {
         self.config_layers.theme = PartialKoshiConfig {
             theme: Some(candidate),
             ..PartialKoshiConfig::default()
         };
         self.client_config = self.config_layers.effective_client();
-        self.theme = resolve_theme(&self.client_config.theme);
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
         self.config_reloaded_events()

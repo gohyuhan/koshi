@@ -175,11 +175,13 @@ fn theme_reload_recolors_the_chrome_and_reports_the_session() {
         }),
     });
 
-    assert_eq!(runtime.theme.ramp_start, (0xff, 0x00, 0x00));
+    // The palette reaches the viewer-owned config; resolving it into colors is
+    // the viewer's own step, covered in `koshi-client`.
     assert_eq!(
         runtime.client_config.theme.colors.ramp_start,
         RgbColor::new(0xff, 0x00, 0x00)
     );
+    assert_eq!(runtime.client_config.theme.name, "ocean");
     assert_eq!(
         events,
         vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
@@ -424,7 +426,6 @@ fn keybinding_reload_with_low_depth_drops_overlong_bindings() {
 #[test]
 fn app_config_reload_drops_theme_and_keybinding_sections() {
     let (mut runtime, _client) = runtime();
-    let theme_before = runtime.theme;
 
     runtime.reload_app_config(PartialKoshiConfig {
         theme: Some(PartialThemeConfig {
@@ -441,11 +442,10 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
         ..PartialKoshiConfig::default()
     });
 
-    // Both foreign sections were dropped: each side's effective config and the
-    // resolved theme are exactly what they were.
+    // Both foreign sections were dropped: each side's effective config is
+    // exactly what it was, palette included.
     assert_eq!(runtime.config, ServerConfig::default());
     assert_eq!(runtime.client_config, ClientConfig::default());
-    assert_eq!(runtime.theme, theme_before);
     assert!(
         runtime
             .keymap_hints
@@ -649,9 +649,12 @@ fn reload_with_no_live_sessions_emits_no_events_but_still_applies() {
         }),
     });
 
-    // No session means no one to notify, but the config and theme still swap.
+    // No session means no one to notify, but the config still swaps.
     assert_eq!(events, Vec::new());
-    assert_eq!(runtime.theme.ramp_start, (0x01, 0x02, 0x03));
+    assert_eq!(
+        runtime.client_config.theme.colors.ramp_start,
+        RgbColor::new(0x01, 0x02, 0x03)
+    );
 }
 
 #[test]

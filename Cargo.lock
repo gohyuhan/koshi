@@ -712,6 +712,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "koshi-client",
  "koshi-config",
  "koshi-core",
  "koshi-input",
@@ -736,6 +737,17 @@ dependencies = [
  "ureq",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "koshi-client"
+version = "0.1.0"
+dependencies = [
+ "koshi-config",
+ "koshi-core",
+ "koshi-observability",
+ "koshi-renderer",
+ "ratatui",
 ]
 
 [[package]]

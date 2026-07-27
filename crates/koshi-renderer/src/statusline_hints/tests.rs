@@ -97,12 +97,17 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
         },
         plugin_ui: PluginUiSnapshot::default(),
         keymap_hints,
-        theme: Theme::default(),
     }
 }
 
 /// Draw the bar into a fresh one-row buffer of `width` cells.
 fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
+    draw_themed(snapshot, &Theme::default(), width)
+}
+
+/// Paint the hint bar in `theme`'s colors, for the tests that check which
+/// color a piece of the bar takes.
+fn draw_themed(snapshot: &RenderSnapshot, theme: &Theme, width: u16) -> Buffer {
     let area = RatatuiRect {
         x: 0,
         y: 0,
@@ -110,7 +115,7 @@ fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
         height: 1,
     };
     let mut buf = Buffer::empty(area);
-    draw_hint_bar(snapshot, area, &mut buf);
+    draw_hint_bar(snapshot, theme, area, &mut buf);
     buf
 }
 
@@ -420,7 +425,7 @@ fn empty_mode_blanks_the_row() {
     let mut buf = Buffer::empty(area);
     // Pre-fill the row: the bar owns it, so stale cells must be cleared.
     buf.set_string(0, 0, "X".repeat(20), Style::default());
-    draw_hint_bar(&snapshot, area, &mut buf);
+    draw_hint_bar(&snapshot, &Theme::default(), area, &mut buf);
     assert_eq!(row_text(&buf), "");
     // Blank of text, but not of color: the row still carries the bar
     // background, so an empty mode reads as a bar rather than a hole.
@@ -444,7 +449,7 @@ fn zero_size_area_draws_nothing() {
         width: 10,
         height: 1,
     });
-    draw_hint_bar(&snapshot, area, &mut buf);
+    draw_hint_bar(&snapshot, &Theme::default(), area, &mut buf);
     assert_eq!(row_text(&buf), "");
 }
 
@@ -452,15 +457,15 @@ fn zero_size_area_draws_nothing() {
 /// theme's accent pair and a group's key block sits on the custom ramp.
 #[test]
 fn a_custom_theme_recolors_the_bar() {
-    let mut snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
-    snapshot.theme = Theme {
+    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
+    let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
         accent: Color::Rgb(0x00, 0xff, 0x00),
         on_accent: Color::Rgb(0x01, 0x02, 0x03),
         ..Theme::default()
     };
-    let buf = draw(&snapshot, 80);
+    let buf = draw_themed(&snapshot, &theme, 80);
     // Row: " Ctrl +  p  PANE  ▶  n  New Pane …". The breadcrumb's `Ctrl +`
     // is accent text; its key block is on-accent text on the accent.
     assert_eq!(buf[(1, 0)].fg, Color::Rgb(0x00, 0xff, 0x00));
