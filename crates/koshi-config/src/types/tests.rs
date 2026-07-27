@@ -17,15 +17,18 @@ use crate::key::{parse_chord, Leader};
 
 #[test]
 fn default_loads_with_expected_values() {
-    let config = KoshiConfig::default();
+    let server = ServerConfig::default();
+    let config = ClientConfig::default();
 
+    assert_eq!(server.version, SCHEMA_VERSION);
     assert_eq!(config.version, SCHEMA_VERSION);
 
-    assert_eq!(config.pane.min_cols, 2);
-    assert_eq!(config.pane.min_rows, 1);
+    assert_eq!(server.pane.min_cols, 2);
+    assert_eq!(server.pane.min_rows, 1);
 
-    assert_eq!(config.scrollback.max_lines, 10_000);
-    assert_eq!(config.scrollback.max_bytes, 32 * 1024 * 1024);
+    assert_eq!(server.scrollback.max_lines, 10_000);
+    assert_eq!(server.scrollback.max_bytes, 32 * 1024 * 1024);
+    assert!(config.scrollback.scroll_on_input);
 
     assert_eq!(config.keybindings.chord_timeout_ms, 500);
     assert_eq!(config.keybindings.which_key_delay_ms, 300);
@@ -48,12 +51,14 @@ fn default_loads_with_expected_values() {
     assert!(config.copy.trim_trailing_whitespace);
     assert_eq!(config.copy.clipboard, ClipboardBackend::Osc52);
 
-    assert_eq!(config.terminal.term, "xterm-256color");
-    assert_eq!(config.terminal.colorterm, "truecolor");
-    assert_eq!(config.terminal.default_shell, None);
+    assert_eq!(server.terminal.term, "xterm-256color");
+    assert_eq!(server.terminal.colorterm, "truecolor");
+    assert_eq!(server.terminal.default_shell, None);
 
     assert_eq!(config.theme.name, "default");
 
+    // Logging is process-local: both sides carry the same defaults.
+    assert!(!server.logging.enabled);
     assert!(!config.logging.enabled);
 }
 
@@ -469,7 +474,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
 
 #[test]
 fn default_binding_table_is_exact_and_resolves() {
-    let config = KoshiConfig::default();
+    let config = ClientConfig::default();
     let registry = ActionRegistry::new();
     let expected = expected_default_bindings();
 
@@ -516,7 +521,7 @@ fn default_binding_table_is_exact_and_resolves() {
 
 #[test]
 fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
-    let config = KoshiConfig::default();
+    let config = ClientConfig::default();
     // On unix terminals without the kitty keyboard protocol these four Ctrl
     // chords arrive as the Tab, Enter, Esc, and Backspace control bytes.
     let ambiguous = ['i', 'm', '[', 'h'].map(|c| KeyChord::new(ModFlags::CTRL, Key::Char(c)));
@@ -548,7 +553,7 @@ fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
 
 #[test]
 fn reserved_unlock_is_the_locked_mode_binding() {
-    let config = KoshiConfig::default();
+    let config = ClientConfig::default();
     assert_eq!(KeybindingsConfig::RESERVED_UNLOCK.to_string(), "<C-l>");
     assert_eq!(
         parse_chord("<C-l>").expect("reserved unlock text parses"),

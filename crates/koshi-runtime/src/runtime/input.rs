@@ -209,7 +209,7 @@ impl Server {
     /// so its scroll position is left to the full-screen program that owns it —
     /// the snap only fires on the primary screen.
     fn snap_view_to_bottom_on_input(&mut self, client_id: ClientId, pane_id: PaneId) {
-        if self.config.scrollback.scroll_on_input
+        if self.client_config.scrollback.scroll_on_input
             && self
                 .terminal_engines
                 .get(&pane_id)

@@ -77,8 +77,14 @@ fn load_startup_config_applies_the_app_and_theme_layers_before_genesis() {
     let report = runtime.load_startup_config(Some(app), Some(theme), None);
 
     assert!(report.is_none(), "no keybinding file means no report");
-    assert_eq!(runtime.config.layout.new_pane_direction, Direction::Down);
-    assert_eq!(runtime.config.theme.colors.accent, RgbColor::new(1, 2, 3));
+    assert_eq!(
+        runtime.client_config.layout.new_pane_direction,
+        Direction::Down
+    );
+    assert_eq!(
+        runtime.client_config.theme.colors.accent,
+        RgbColor::new(1, 2, 3)
+    );
 }
 
 #[test]
@@ -171,7 +177,7 @@ fn theme_reload_recolors_the_chrome_and_reports_the_session() {
 
     assert_eq!(runtime.theme.ramp_start, (0xff, 0x00, 0x00));
     assert_eq!(
-        runtime.config.theme.colors.ramp_start,
+        runtime.client_config.theme.colors.ramp_start,
         RgbColor::new(0xff, 0x00, 0x00)
     );
     assert_eq!(
@@ -185,7 +191,10 @@ fn app_config_reload_replaces_the_startup_split_direction() {
     let (mut runtime, _client) = runtime();
     let session_id = only_session_id(&runtime);
     // The constructor seeded `Right` as the app layer.
-    assert_eq!(runtime.config.layout.new_pane_direction, Direction::Right);
+    assert_eq!(
+        runtime.client_config.layout.new_pane_direction,
+        Direction::Right
+    );
 
     let events = runtime.reload_app_config(PartialKoshiConfig {
         layout: Some(PartialLayoutDefaults {
@@ -193,7 +202,10 @@ fn app_config_reload_replaces_the_startup_split_direction() {
         }),
         ..PartialKoshiConfig::default()
     });
-    assert_eq!(runtime.config.layout.new_pane_direction, Direction::Down);
+    assert_eq!(
+        runtime.client_config.layout.new_pane_direction,
+        Direction::Down
+    );
     assert_eq!(
         events,
         vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
@@ -202,7 +214,10 @@ fn app_config_reload_replaces_the_startup_split_direction() {
     // An empty `koshi.kdl` replaces the whole app layer, so the direction
     // falls back to the built-in default rather than the startup seed.
     runtime.reload_app_config(PartialKoshiConfig::default());
-    assert_eq!(runtime.config.layout.new_pane_direction, Direction::Right);
+    assert_eq!(
+        runtime.client_config.layout.new_pane_direction,
+        Direction::Right
+    );
 }
 
 #[test]
@@ -426,9 +441,10 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
         ..PartialKoshiConfig::default()
     });
 
-    // Both foreign sections were dropped: the effective config and the
+    // Both foreign sections were dropped: each side's effective config and the
     // resolved theme are exactly what they were.
-    assert_eq!(runtime.config, KoshiConfig::default());
+    assert_eq!(runtime.config, ServerConfig::default());
+    assert_eq!(runtime.client_config, ClientConfig::default());
     assert_eq!(runtime.theme, theme_before);
     assert!(
         runtime

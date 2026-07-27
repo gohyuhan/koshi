@@ -54,7 +54,7 @@ impl Server {
     /// OSC 52 is the only backend koshi builds today; a native backend plugs a
     /// new `ClipboardWriter` in behind a new `ClipboardBackend` variant.
     pub(crate) fn copy_to_clipboard(&mut self, client_id: ClientId, text: &str) {
-        match self.config.copy.clipboard {
+        match self.client_config.copy.clipboard {
             ClipboardBackend::Osc52 => {
                 let mut clipboard = Osc52Clipboard::default();
                 if clipboard.write(text) {

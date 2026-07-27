@@ -1123,7 +1123,7 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
 #[test]
 fn border_resize_off_leaves_a_border_press_inert() {
     let (mut runtime, client) = runtime();
-    runtime.config.mouse.border_resize = false;
+    runtime.client_config.mouse.border_resize = false;
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
@@ -1371,7 +1371,7 @@ fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
 #[test]
 fn the_ignore_wheel_config_does_nothing_over_a_plain_pane() {
     let (mut runtime, fake, client) = runtime_with_fake();
-    runtime.config.mouse.wheel = WheelScroll::Ignore;
+    runtime.client_config.mouse.wheel = WheelScroll::Ignore;
     let pane = only_pane(&runtime);
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);

@@ -248,5 +248,5 @@ fn constructor_seeds_the_app_config_with_the_given_default_new_pane_direction() 
         Direction::Down,
     );
 
-    assert_eq!(rt.config.layout.new_pane_direction, Direction::Down);
+    assert_eq!(rt.client_config.layout.new_pane_direction, Direction::Down);
 }

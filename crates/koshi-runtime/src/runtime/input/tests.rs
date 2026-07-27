@@ -1524,7 +1524,7 @@ fn typing_snaps_a_scrolled_up_view_back_to_live_output() {
 #[test]
 fn typing_leaves_the_view_parked_when_scroll_on_input_is_off() {
     let (mut runtime, pane, client) = runtime_scrolled_up();
-    runtime.config.scrollback.scroll_on_input = false;
+    runtime.client_config.scrollback.scroll_on_input = false;
 
     runtime.handle_key_input(client, chord(ModFlags::NONE, 'a'), Instant::now());
     assert_eq!(scroll_offset(&runtime, client, pane), 3);

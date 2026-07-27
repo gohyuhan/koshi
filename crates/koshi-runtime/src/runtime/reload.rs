@@ -19,9 +19,10 @@
 
 use koshi_config::conflict::{detect_conflicts, ConflictReport, ConflictSeverity, KeymapVerdict};
 use koshi_config::layer::{
-    merge, PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialThemeConfig,
+    merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig,
+    PartialLayoutDefaults, PartialThemeConfig,
 };
-use koshi_config::types::KoshiConfig;
+use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::event::{ConfigReloadFailed, ConfigReloaded, Event};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
@@ -63,18 +64,30 @@ impl ConfigLayers {
         }
     }
 
-    /// Fold the stored layers onto the built-in defaults. The dedicated
-    /// theme and keybinding layers fold after the app layer, so their
-    /// sections win over a same-named section in the app file.
-    pub(crate) fn effective(&self) -> KoshiConfig {
-        merge(
-            KoshiConfig::default(),
-            vec![
-                self.app.clone(),
-                self.theme.clone(),
-                self.keybindings.clone(),
-            ],
-        )
+    /// The stored layers in fold order. The dedicated theme and keybinding
+    /// layers come after the app layer, so their sections win over a
+    /// same-named section in the app file.
+    ///
+    /// Both sides fold this same order, so a section can never resolve to one
+    /// value for the session and a differently-ordered one for the viewer.
+    fn ordered(&self) -> Vec<PartialKoshiConfig> {
+        vec![
+            self.app.clone(),
+            self.theme.clone(),
+            self.keybindings.clone(),
+        ]
+    }
+
+    /// Fold the stored layers onto the built-in defaults, keeping the
+    /// sections the session owns.
+    pub(crate) fn effective_server(&self) -> ServerConfig {
+        merge_server(ServerConfig::default(), self.ordered())
+    }
+
+    /// Fold the stored layers onto the built-in defaults, keeping the
+    /// sections one viewer owns.
+    pub(crate) fn effective_client(&self) -> ClientConfig {
+        merge_client(ClientConfig::default(), self.ordered())
     }
 }
 
@@ -92,16 +105,17 @@ pub struct KeymapReloadOutcome {
 
 impl Server {
     /// Swap in a reloaded color theme: store the candidate as the theme
-    /// layer, recompute the effective config, resolve the chrome theme from
-    /// it, and schedule a repaint. Returns one [`Event::ConfigReloaded`] per
-    /// live session.
+    /// layer, recompute the viewer-owned config, resolve the chrome theme
+    /// from it, and schedule a repaint. Colors are a viewer's own setting, so
+    /// the session-owned config is untouched here. Returns one
+    /// [`Event::ConfigReloaded`] per live session.
     pub fn reload_theme(&mut self, candidate: PartialThemeConfig) -> Vec<Event> {
         self.config_layers.theme = PartialKoshiConfig {
             theme: Some(candidate),
             ..PartialKoshiConfig::default()
         };
-        self.config = self.config_layers.effective();
-        self.theme = resolve_theme(&self.config.theme);
+        self.client_config = self.config_layers.effective_client();
+        self.theme = resolve_theme(&self.client_config.theme);
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
         self.config_reloaded_events()
@@ -122,7 +136,9 @@ impl Server {
         candidate.theme = None;
         candidate.keybindings = None;
         self.config_layers.app = candidate;
-        self.config = self.config_layers.effective();
+        // `koshi.kdl` carries sections both sides own, so both are recomputed.
+        self.config = self.config_layers.effective_server();
+        self.client_config = self.config_layers.effective_client();
         self.config_reloaded_events()
     }
 
@@ -148,7 +164,8 @@ impl Server {
             },
             ..self.config_layers.clone()
         };
-        let tentative = tentative_layers.effective();
+        // Bindings are a viewer's own setting, so only that side is folded.
+        let tentative = tentative_layers.effective_client();
         let layers = keymap_layers(user_modes, tentative.keybindings.leader);
         let report = detect_conflicts(
             &layers,
@@ -174,9 +191,12 @@ impl Server {
             return KeymapReloadOutcome { events, report };
         }
         self.config_layers = tentative_layers;
-        self.config = tentative;
-        self.keymap_hints =
-            KeymapHintCatalog::from_parts(&layers, &self.config.keybindings, &self.action_registry);
+        self.client_config = tentative;
+        self.keymap_hints = KeymapHintCatalog::from_parts(
+            &layers,
+            &self.client_config.keybindings,
+            &self.action_registry,
+        );
         self.clear_pending_key_sequences();
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
@@ -229,20 +249,23 @@ impl Server {
             .keybindings
             .as_ref()
             .and_then(|keybindings| keybindings.modes.clone());
-        let layers = keymap_layers(user_modes, self.config.keybindings.leader);
+        let layers = keymap_layers(user_modes, self.client_config.keybindings.leader);
         let report = detect_conflicts(
             &layers,
-            self.config.keybindings.leader,
-            self.config.keybindings.unlock_alternative,
-            self.config.keybindings.max_chord_depth,
+            self.client_config.keybindings.leader,
+            self.client_config.keybindings.unlock_alternative,
+            self.client_config.keybindings.max_chord_depth,
             &self.action_registry,
             &built_in_modes(),
         );
         if report.verdict() != KeymapVerdict::Apply {
             return report;
         }
-        self.keymap_hints =
-            KeymapHintCatalog::from_parts(&layers, &self.config.keybindings, &self.action_registry);
+        self.keymap_hints = KeymapHintCatalog::from_parts(
+            &layers,
+            &self.client_config.keybindings,
+            &self.action_registry,
+        );
         self.clear_pending_key_sequences();
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);

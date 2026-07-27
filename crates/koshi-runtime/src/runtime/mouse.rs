@@ -182,7 +182,7 @@ impl Server {
                 // Only a real divider — one with an adjacent pane to resize
                 // against — begins a resize. The tab-edge outer frame and the
                 // boundary above a collapsed stack header have no neighbor.
-                if self.config.mouse.border_resize
+                if self.client_config.mouse.border_resize
                     && self.border_has_neighbor(client_id, pane_id, side)
                 {
                     self.begin_resize_drag(client_id, pane_id, side, mouse.at);
@@ -612,7 +612,7 @@ impl Server {
         direction: ScrollDirection,
         mouse: MouseInput,
     ) {
-        let lines = usize::from(self.config.mouse.scroll_lines);
+        let lines = usize::from(self.client_config.mouse.scroll_lines);
         if self.pane_has_selection(client_id, pane_id) {
             self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
         } else if self.pane_reports_mouse(pane_id, MouseKind::Scroll(direction)) {
@@ -620,7 +620,7 @@ impl Server {
         } else if self.pane_alt_scroll(pane_id) {
             self.send_alt_scroll_keys(pane_id, direction, lines);
         } else {
-            match self.config.mouse.wheel {
+            match self.client_config.mouse.wheel {
                 WheelScroll::ScrollScrollback => {
                     self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
                 }

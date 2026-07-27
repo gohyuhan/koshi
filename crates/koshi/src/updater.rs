@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koshi_config::app_config::parse_app_config;
-use koshi_config::layer::merge;
-use koshi_config::types::{KoshiConfig, UpdateConfig};
+use koshi_config::layer::merge_client;
+use koshi_config::types::{ClientConfig, UpdateConfig};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempPath};
@@ -500,7 +500,7 @@ fn load_update_config() -> UpdateConfig {
     match parse_app_config(&path, &source) {
         // Only the strict `update` section matters here; a bad field there is
         // still an `Err` (fail closed), so field-partial warnings are ignored.
-        Ok(file) => merge(KoshiConfig::default(), vec![file.layer]).update,
+        Ok(file) => merge_client(ClientConfig::default(), vec![file.layer]).update,
         Err(err) => {
             tracing::warn!(%err, "koshi.kdl did not parse; disabling auto update check");
             UpdateConfig {

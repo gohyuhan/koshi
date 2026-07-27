@@ -17,7 +17,7 @@ use std::{
     },
 };
 
-use koshi_config::types::KoshiConfig;
+use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Size};
@@ -89,13 +89,17 @@ pub struct Server {
     /// The user's stored config overrides, one layer per config file. A
     /// file's reload transaction replaces its own layer.
     pub(crate) config_layers: ConfigLayers,
-    /// The effective config: the built-in defaults with the stored user
-    /// layers folded on. Recomputed by every reload transaction; consumers
-    /// read current values from here — except the keymap, whose merged
-    /// lookup table is [`keymap_hints`](Self::keymap_hints) (the
-    /// `keybindings.modes` section here holds the folded layer data the
-    /// merge consumes, not the merge result).
-    pub(crate) config: KoshiConfig,
+    /// The session's effective config: the built-in defaults with the stored
+    /// user layers folded on, keeping the sections one session shares across
+    /// every viewer. Recomputed by every reload transaction that touches
+    /// `koshi.kdl`.
+    pub(crate) config: ServerConfig,
+    /// The effective config of the viewer this process runs, folded from the
+    /// same layers. Held here while one process runs both halves; each of its
+    /// sections moves to the client as that feature's own state does — except
+    /// `scrollback.scroll_on_input`, which the session must be told because it
+    /// acts on typed input the session already handles.
+    pub(crate) client_config: ClientConfig,
     /// Per-mode hint-bar data resolved from the merged keymap and the action
     /// registry, shared by reference with each frame's snapshot. Seeded from
     /// the built-in defaults and rebuilt whenever the keymap inputs change —
@@ -148,7 +152,8 @@ impl Server {
         let action_registry = ActionRegistry::new();
         let config_layers =
             ConfigLayers::with_default_new_pane_direction(default_new_pane_direction);
-        let config = config_layers.effective();
+        let config = config_layers.effective_server();
+        let client_config = config_layers.effective_client();
         Server {
             sessions: HashMap::new(),
             pty_backend,
@@ -160,7 +165,7 @@ impl Server {
             storage,
             ipc_server: None,
             keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
-            theme: resolve_theme(&config.theme),
+            theme: resolve_theme(&client_config.theme),
             action_registry,
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
@@ -171,6 +176,7 @@ impl Server {
             host_writes: HashMap::new(),
             config_layers,
             config,
+            client_config,
         }
     }
 

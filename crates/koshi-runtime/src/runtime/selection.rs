@@ -160,8 +160,8 @@ impl Server {
     /// clears the highlight, like any input reaching the pane's child. A
     /// plain click, whose press highlighted nothing, copies nothing.
     pub(crate) fn end_selection_drag(&mut self, client_id: ClientId) {
-        let copy_on_select = self.config.copy.copy_on_select;
-        let trim_trailing_whitespace = self.config.copy.trim_trailing_whitespace;
+        let copy_on_select = self.client_config.copy.copy_on_select;
+        let trim_trailing_whitespace = self.client_config.copy.trim_trailing_whitespace;
         let Some(drag) = self
             .client_mut(client_id)
             .and_then(|client| client.selection_drag())

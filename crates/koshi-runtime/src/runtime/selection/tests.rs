@@ -1499,7 +1499,7 @@ fn releasing_the_gesture_is_the_copy() {
 #[test]
 fn internal_copy_on_select_switch_can_hold_the_copy_for_a_future_action() {
     let (mut rt, client, pane) = runtime();
-    rt.config.copy.copy_on_select = false;
+    rt.client_config.copy.copy_on_select = false;
     feed(&mut rt, pane, b"hello world");
 
     select_hello(&mut rt, client, pane);
@@ -1512,7 +1512,7 @@ fn internal_copy_on_select_switch_can_hold_the_copy_for_a_future_action() {
 fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
     let (mut rt, client, pane) = runtime();
     let mut clock = Clock::new();
-    rt.config.copy.trim_trailing_whitespace = false;
+    rt.client_config.copy.trim_trailing_whitespace = false;
     feed(&mut rt, pane, b"a");
 
     let from = cell_at(&rt, client, pane, 0, 0);
