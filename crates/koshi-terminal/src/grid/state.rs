@@ -17,7 +17,7 @@ struct CellExtra {
 
 /// A single grid cell: its character, display width, and style.
 ///
-/// A cell occupies 40 bytes on a 64-bit target, and one exists per grid slot
+/// A cell occupies 32 bytes on a 64-bit target, and one exists per grid slot
 /// and per scrollback-row column. The continuation code points sit behind a
 /// pointer that is null for a plain cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,24 +53,26 @@ pub struct Cell {
 /// panes hold cells in the hundreds of thousands, for the whole life of the
 /// session. Whatever a cell weighs is paid that many times over.
 ///
-/// So 40 is not a budget someone picked — it is what the fields currently add
+/// So 32 is not a budget someone picked — it is what the fields currently add
 /// up to, kept here as a tripwire. Adding a `u64` to [`Cell`] is a one-line
 /// edit that no test fails and nothing reports, and it makes every pane's cell
-/// memory a fifth larger. This turns that silent edit into a build error, in
+/// memory a quarter larger. This turns that silent edit into a build error, in
 /// the file where it was made.
 ///
 /// **When it fires, the answer is usually [`CellExtra`], not a bigger number.**
 /// That is what `combining` does: a plain cell pays eight bytes for a null
 /// pointer instead of carrying a `Vec` inline, so data that almost no cell has
-/// costs almost nothing. Per-cell data that is rare belongs there. Raise the
-/// figure only when the growth genuinely has to sit in every cell — and raise
-/// it in the [`Cell`] doc in the same edit, so the two cannot disagree.
+/// costs almost nothing. Per-cell data that is rare belongs there, and a new
+/// boolean attribute belongs in one of
+/// [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raise the figure only
+/// when the growth genuinely has to sit in every cell — and raise it in the
+/// [`Cell`] doc in the same edit, so the two cannot disagree.
 ///
 /// A 32-bit target holds that pointer in four bytes rather than eight, so this
 /// is a 64-bit figure.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
-    std::mem::size_of::<Cell>() == 40,
+    std::mem::size_of::<Cell>() == 32,
     "Cell changed size: put rare per-cell data behind CellExtra, or raise this figure and the `Cell` doc together"
 );
 

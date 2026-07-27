@@ -79,8 +79,8 @@ fn a_content_cell(runtime: &Server, client: ClientId, pane: PaneId) -> (Point, u
     for y in 0..viewport.rows {
         for x in 0..viewport.cols {
             let at = Point { x, y };
-            if hit_test(&snapshot, at) == (HitRegion::PaneContent { pane_id: pane }) {
-                let (col, row) = pane_local_cell(&snapshot, pane, at).expect("local cell");
+            if hit_test(snapshot.layout(), at) == (HitRegion::PaneContent { pane_id: pane }) {
+                let (col, row) = pane_local_cell(snapshot.layout(), pane, at).expect("local cell");
                 return (at, col, row);
             }
         }
@@ -116,7 +116,7 @@ fn find_on_tabline(
 ) -> u16 {
     let snapshot = runtime.build_snapshot(client).expect("snapshot");
     (min_x..snapshot.client.viewport.cols)
-        .find(|&x| pred(hit_test(&snapshot, Point { x, y: 0 })))
+        .find(|&x| pred(hit_test(snapshot.layout(), Point { x, y: 0 })))
         .expect("a matching tabline cell")
 }
 
@@ -179,7 +179,10 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
     let x = find_on_tabline(&runtime, client, 0, |region| {
         matches!(region, HitRegion::TablineScrollRight { .. })
     });
-    let to = match hit_test(&runtime.build_snapshot(client).unwrap(), Point { x, y: 0 }) {
+    let to = match hit_test(
+        runtime.build_snapshot(client).unwrap().layout(),
+        Point { x, y: 0 },
+    ) {
         HitRegion::TablineScrollRight { to } => to,
         other => panic!("expected a right scroll arrow, got {other:?}"),
     };
@@ -417,7 +420,8 @@ fn find_vertical_border(runtime: &Server, client: ClientId) -> (Point, PaneId, D
     let center = viewport.cols / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for x in 0..viewport.cols {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        {
             if matches!(side, Direction::Left | Direction::Right)
                 && best.is_none_or(|(bx, ..)| center.abs_diff(x) < center.abs_diff(bx))
             {
@@ -713,7 +717,8 @@ fn find_horizontal_border(runtime: &Server, client: ClientId) -> (Point, PaneId,
     let center = viewport.rows / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for y in 1..viewport.rows - 1 {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        {
             if matches!(side, Direction::Up | Direction::Down)
                 && best.is_none_or(|(by, ..)| center.abs_diff(y) < center.abs_diff(by))
             {
@@ -743,7 +748,8 @@ fn find_outer_vertical_frame(runtime: &Server, client: ClientId) -> (Point, Pane
     let y = viewport.rows / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for x in 0..viewport.cols {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(&snapshot, Point { x, y }) {
+        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        {
             if matches!(side, Direction::Left | Direction::Right)
                 && best.is_none_or(|(bx, ..)| x > bx)
             {
@@ -927,6 +933,32 @@ fn a_press_drag_release_gesture_forwards_each_event() {
             format!("\x1b[<0;{col};{row}m").into_bytes(),
         ],
         "press, then drag with the motion bit, then release with a lowercase m"
+    );
+}
+
+#[test]
+fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_round() {
+    // Every other forwarding test presses `a_content_cell`, which is the pane's
+    // top-left content cell — column 1, row 1. Two equal numbers cannot show
+    // which is which, so those tests pass just as well with the pair swapped.
+    // This one moves three columns across and one row down, where a swap reads
+    // `4;2` as `2;4`.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    // Button-event tracking reports drags; SGR encoding.
+    runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
+    let (start, col, row) = a_content_cell(&runtime, client, pane);
+
+    mouse(&mut runtime, client, press(start.x, start.y));
+    mouse(&mut runtime, client, drag(start.x + 3, start.y + 1));
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![
+            format!("\x1b[<0;{col};{row}M").into_bytes(),
+            format!("\x1b[<32;{};{}M", col + 3, row + 1).into_bytes(),
+        ],
+        "the drag reports the cell it moved to, column first"
     );
 }
 
@@ -1528,7 +1560,7 @@ fn a_chrome_cell(runtime: &Server, client: ClientId) -> Point {
         for x in 0..viewport.cols {
             let at = Point { x, y };
             if matches!(
-                hit_test(&snapshot, at),
+                hit_test(snapshot.layout(), at),
                 HitRegion::PaneBorder { .. } | HitRegion::Statusline | HitRegion::None
             ) {
                 return at;

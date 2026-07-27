@@ -32,6 +32,11 @@ use crate::solver::SolveResult;
 /// PTY layer applies its own minimum-size floor.
 #[must_use]
 pub fn content_rects(solve: &SolveResult) -> Vec<(PaneId, Option<Rect>)> {
+    // Both lists are indexed before the walk rather than scanned inside it. A
+    // tab with no room suppresses every pane it holds, so `suppressed` can be
+    // as long as `panes`, and scanning it per pane would cost pane-count
+    // squared. A tab's pane count has no cap, and this runs on every pointer
+    // move.
     let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
     let collapsed: HashSet<PaneId> = solve
         .stack_headers

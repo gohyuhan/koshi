@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use koshi_core::command::{
     ClearSelectionArgs, GridPos, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
 };
-use koshi_core::geometry::Point;
+use koshi_core::geometry::{Point, Rect};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::ModFlags;
 use koshi_session::client::{ClickCount, SelectionDragState};
@@ -311,16 +311,25 @@ impl Server {
         Some(GridPos { row, col })
     }
 
+    /// Where `pane_id`'s content sits on `client_id`'s screen, or `None` when
+    /// the pane is not drawn for that client.
+    ///
+    /// Solves only the layout, never the panes' contents: a drag asks for this
+    /// on every pointer move.
+    fn pane_rect(&self, client_id: ClientId, pane_id: PaneId) -> Option<Rect> {
+        let frame = self.build_layout(client_id)?;
+        koshi_renderer::pane_content_rect(frame.layout(), pane_id)
+    }
+
     /// The 0-based cell inside `pane_id`'s content that `at` names, pulled to the
     /// nearest edge when `at` is outside it.
     fn pane_cell_clamped(
-        &mut self,
+        &self,
         client_id: ClientId,
         pane_id: PaneId,
         at: Point,
     ) -> Option<(u16, u16)> {
-        let snapshot = self.build_snapshot(client_id)?;
-        let rect = koshi_renderer::pane_content_rect(&snapshot, pane_id)?;
+        let rect = self.pane_rect(client_id, pane_id)?;
         let right = rect.origin.x + rect.size.cols.saturating_sub(1);
         let bottom = rect.origin.y + rect.size.rows.saturating_sub(1);
         Some((
@@ -343,14 +352,8 @@ impl Server {
     /// Only the vertical edges scroll. Past the left or right edge there is no
     /// further text to reach, so the highlight clamps to the edge column and
     /// stays put.
-    fn edge_scroll_direction(
-        &mut self,
-        client_id: ClientId,
-        pane_id: PaneId,
-        at: Point,
-    ) -> Option<i8> {
-        let snapshot = self.build_snapshot(client_id)?;
-        let rect = koshi_renderer::pane_content_rect(&snapshot, pane_id)?;
+    fn edge_scroll_direction(&self, client_id: ClientId, pane_id: PaneId, at: Point) -> Option<i8> {
+        let rect = self.pane_rect(client_id, pane_id)?;
         let bottom = rect.origin.y + rect.size.rows.saturating_sub(1);
         if at.y < rect.origin.y {
             Some(-1)

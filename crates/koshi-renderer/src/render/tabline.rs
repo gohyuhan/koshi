@@ -17,18 +17,18 @@ mod tests;
 /// The block widths and per-tab cell spans come from [`tabline_layout`], the
 /// same solve [`crate::hit_test()`] reads, so the tab a click lands on is the tab
 /// that was drawn there.
-pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+pub(super) fn draw_tabline(frame: FrameLayout<'_>, area: RatatuiRect, buf: &mut Buffer) {
     // The row is koshi-owned chrome: reset it first so no letterbox fill or
     // stale cell survives, then fill it with the theme's bar background. Text
     // painted after this sets only its foreground, so the fill shows through
     // as the row's background.
     Clear.render(area, buf);
-    buf.set_style(area, bar_style(&snapshot.theme));
+    buf.set_style(area, bar_style(frame.theme));
 
-    let layout = tabline_layout(snapshot, area);
+    let layout = tabline_layout(frame, area);
 
     // Right block: it owns the right edge whole.
-    let right = right_block(snapshot);
+    let right = right_block(frame);
     set_line_clipped(
         buf,
         layout.right_x,
@@ -39,22 +39,22 @@ pub(super) fn draw_tabline(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &m
 
     // Left block: the session name and version badge. The same `room` the
     // solve used, so draw and layout agree on whether the badge is there.
-    let session = session_line(snapshot, layout.right_x.saturating_sub(area.x));
+    let session = session_line(frame, layout.right_x.saturating_sub(area.x));
     set_line_clipped(buf, area.x, area.y, &session, layout.session_width);
 
     // Tab ribbons in the windowed middle, each on its own ramp stop.
     for &(meta_index, x, width) in &layout.tabs {
-        let tab = tab_line(snapshot, meta_index);
+        let tab = tab_line(frame, meta_index);
         set_line_clipped(buf, x, area.y, &tab, width);
     }
     // Clickable scroll arrows mark tabs hidden off each side, and scroll the
     // strip one tab that way when clicked.
     if let Some((x, _)) = layout.left_arrow {
-        let arrow = Line::from(Span::styled("◀", scroll_arrow_style(&snapshot.theme)));
+        let arrow = Line::from(Span::styled("◀", scroll_arrow_style(frame.theme)));
         set_line_clipped(buf, x, area.y, &arrow, TABLINE_ARROW_WIDTH);
     }
     if let Some((x, _)) = layout.right_arrow {
-        let arrow = Line::from(Span::styled("▶", scroll_arrow_style(&snapshot.theme)));
+        let arrow = Line::from(Span::styled("▶", scroll_arrow_style(frame.theme)));
         set_line_clipped(buf, x, area.y, &arrow, TABLINE_ARROW_WIDTH);
     }
 }
@@ -96,16 +96,16 @@ pub(crate) struct TablineLayout {
 /// is peeking, or — following the active tab — at the smallest index that keeps
 /// the active tab on screen. A one-cell arrow is reserved on each side while
 /// scrolled and drawn on whichever side still hides tabs.
-pub(crate) fn tabline_layout(snapshot: &RenderSnapshot, area: RatatuiRect) -> TablineLayout {
-    let right_width = right_block(snapshot).width() as u16;
+pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> TablineLayout {
+    let right_width = right_block(frame).width() as u16;
     let right_x = area.right().saturating_sub(right_width).max(area.x);
     let room = right_x.saturating_sub(area.x);
-    let session_width = (session_line(snapshot, room).width() as u16).min(room);
+    let session_width = (session_line(frame, room).width() as u16).min(room);
     let strip_start = area.x.saturating_add(session_width).saturating_add(1);
 
-    let count = snapshot.session.tabs_metadata.len();
+    let count = frame.session.tabs_metadata.len();
     let widths: Vec<u16> = (0..count)
-        .map(|i| tab_line(snapshot, i).width() as u16)
+        .map(|i| tab_line(frame, i).width() as u16)
         .collect();
 
     let empty = |first_visible| TablineLayout {
@@ -141,13 +141,13 @@ pub(crate) fn tabline_layout(snapshot: &RenderSnapshot, area: RatatuiRect) -> Ta
         return empty(0);
     }
 
-    let active = snapshot
+    let active = frame
         .session
         .tabs_metadata
         .iter()
         .position(|meta| meta.active)
         .unwrap_or(0);
-    let first_visible = match snapshot.client.tabline_offset {
+    let first_visible = match frame.client.tabline_offset {
         Some(i) => i.min(count - 1),
         None => reveal_active(&widths, active, lo, hi),
     };
@@ -205,10 +205,10 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
 
 /// The tabline's right-anchored block: the mode tag. Each pane's scroll
 /// position lives in its own bottom border (see [`draw_panes`]), not here.
-fn right_block(snapshot: &RenderSnapshot) -> Line<'static> {
+fn right_block(frame: FrameLayout<'_>) -> Line<'static> {
     Line::from(Span::styled(
-        format!(" {} ", mode_tags(&snapshot.client)),
-        mode_style(&snapshot.theme),
+        format!(" {} ", mode_tags(frame.client)),
+        mode_style(frame.theme),
     ))
 }
 
@@ -224,15 +224,12 @@ const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// both parts do not fit in it the badge is dropped whole, the way a tab that
 /// does not fit is dropped rather than clipped — a 16-cell row shows ` s `,
 /// never the half-written ` s [v0.1.0`.
-fn session_line(snapshot: &RenderSnapshot, room: u16) -> Line<'static> {
+fn session_line(frame: FrameLayout<'_>, room: u16) -> Line<'static> {
     let name = Span::styled(
-        format!(" {} ", snapshot.session.name),
-        session_style(&snapshot.theme),
+        format!(" {} ", frame.session.name),
+        session_style(frame.theme),
     );
-    let badge = Span::styled(
-        format!("[v{KOSHI_VERSION}] "),
-        version_style(&snapshot.theme),
-    );
+    let badge = Span::styled(format!("[v{KOSHI_VERSION}] "), version_style(frame.theme));
     if name.width() + badge.width() <= usize::from(room) {
         Line::from(vec![name, badge])
     } else {
@@ -242,17 +239,17 @@ fn session_line(snapshot: &RenderSnapshot, room: u16) -> Line<'static> {
 
 /// One tab's two-block ribbon (`#N` block + name block) at metadata index
 /// `meta_index`, styled on its own stop of the theme's chrome ramp.
-fn tab_line(snapshot: &RenderSnapshot, meta_index: usize) -> Line<'static> {
-    let count = snapshot.session.tabs_metadata.len();
-    let meta = &snapshot.session.tabs_metadata[meta_index];
+fn tab_line(frame: FrameLayout<'_>, meta_index: usize) -> Line<'static> {
+    let count = frame.session.tabs_metadata.len();
+    let meta = &frame.session.tabs_metadata[meta_index];
     Line::from(vec![
         Span::styled(
             format!(" #{} ", meta.index + 1),
-            tab_index_style(&snapshot.theme, meta.active, meta_index, count),
+            tab_index_style(frame.theme, meta.active, meta_index, count),
         ),
         Span::styled(
             format!(" {} ", meta.name),
-            tab_name_style(&snapshot.theme, meta.active, meta_index, count),
+            tab_name_style(frame.theme, meta.active, meta_index, count),
         ),
     ])
 }

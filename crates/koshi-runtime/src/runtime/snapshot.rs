@@ -13,9 +13,14 @@
 //! The snapshot is per-client, not session-global: `session.active_tab` holds
 //! *this* client's viewed tab (the renderer asserts the two agree), while
 //! `session.name`/`tabs_metadata` are the true session-wide data.
+//!
+//! `Server::build_layout` is the same work stopping short of the panes: it
+//! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
+//! grid, title, highlight, or hint bar. Mouse hit-testing and selection drags
+//! read only that much, and they run on every pointer move.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use koshi_config::types::{RgbColor, ThemeConfig};
 use koshi_core::action::{MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
@@ -28,9 +33,9 @@ use koshi_layout::solver::{solve_with_mode_min, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, HintBinding, KeymapHints, PaneSlot, PaneSnapshot,
-    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
-    TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, HintBinding, KeymapHints, OwnedFrameLayout, PaneSlot,
+    PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans,
+    SessionSnapshot, TabMeta, TabSnapshot,
 };
 use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
@@ -87,6 +92,51 @@ impl Server {
     /// letterboxes it (centers it with padding) into this client's larger
     /// viewport.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
+        let layout = self.build_layout(client_id)?;
+        let session = self.session_for_client(client_id)?;
+        let client = session.clients.get(client_id)?;
+
+        // Content for each of the active tab's panes, joined to the slots by id.
+        // The slots are in solve order, so the panes come out in it too.
+        let panes: Vec<PaneSnapshot> = layout
+            .session
+            .active_tab
+            .layout_solved
+            .iter()
+            .map(|slot| {
+                self.pane_snapshot(
+                    slot.pane_id,
+                    client.scroll_offset(slot.pane_id),
+                    client.selection(slot.pane_id),
+                )
+            })
+            .collect();
+
+        Some(RenderSnapshot {
+            session: layout.session,
+            panes,
+            client: layout.client,
+            plugin_ui: PluginUiSnapshot::default(),
+            keymap_hints: mouse_select_hints(
+                self.keymap_hints.hints_for(client.lock_mode()),
+                client.mouse_select(),
+            ),
+            theme: layout.theme,
+        })
+    }
+
+    /// Freeze only where `client_id`'s surfaces sit: the solved layout, the tab
+    /// bar's metadata, the client's own view state, and the theme.
+    ///
+    /// Returns `None` on the same terms as
+    /// [`build_snapshot`](Self::build_snapshot) — no attached client with that
+    /// id, or its viewed tab has gone.
+    ///
+    /// This is [`build_snapshot`](Self::build_snapshot) without the per-pane
+    /// content: no grid, no title, no highlight resolution, no hint bar. Mouse
+    /// hit-testing and selection drags read only these fields, and they run on
+    /// every pointer move.
+    pub(crate) fn build_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
         let active_tab_id = client.active_tab();
@@ -107,6 +157,11 @@ impl Server {
 
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
         // from `content_rects` — both in the same solve order, so they zip.
+        //
+        // `suppressed` is indexed before the walk, not scanned inside it: a tab
+        // with no room suppresses every pane it holds, so scanning it per pane
+        // would cost pane-count squared on a path that runs for every pointer
+        // move.
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes
@@ -125,19 +180,6 @@ impl Server {
                         matches!(record.lifecycle(), PaneLifecycle::Exited { .. })
                     }),
                 }
-            })
-            .collect();
-
-        // Content for each of the active tab's panes, joined to the slots by id.
-        let panes: Vec<PaneSnapshot> = solve
-            .panes
-            .iter()
-            .map(|&(pane_id, _)| {
-                self.pane_snapshot(
-                    pane_id,
-                    client.scroll_offset(pane_id),
-                    client.selection(pane_id),
-                )
             })
             .collect();
 
@@ -164,14 +206,13 @@ impl Server {
             .collect();
         tabs_metadata.sort_by_key(|meta| meta.index);
 
-        Some(RenderSnapshot {
+        Some(OwnedFrameLayout {
             session: SessionSnapshot {
                 id: session.id,
                 name: session.name.clone(),
                 active_tab,
                 tabs_metadata,
             },
-            panes,
             client: ClientSnapshot {
                 id: client.id(),
                 viewport: client.viewport(),
@@ -185,11 +226,6 @@ impl Server {
                     .map(|pending| pending.sequence.clone()),
                 tabline_offset: client.tabline_offset(),
             },
-            plugin_ui: PluginUiSnapshot::default(),
-            keymap_hints: mouse_select_hints(
-                self.keymap_hints.hints_for(client.lock_mode()),
-                client.mouse_select(),
-            ),
             theme: self.theme,
         })
     }
@@ -344,20 +380,32 @@ fn mouse_select_hints(hints: KeymapHints, on: bool) -> KeymapHints {
 /// One path as pane-title text: the user's home directory prefix shortened
 /// to `~`, everything else verbatim.
 fn display_path(path: &std::path::Path) -> String {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from);
-    shorten_home(path, home.as_deref())
+    shorten_home(path, home_text())
+}
+
+/// The home directory as display text, read from the environment on the first
+/// call and reused after — `HOME`, or `USERPROFILE` on Windows. `None` when
+/// neither is set, which leaves every path whole.
+///
+/// A pane's title is resolved once per pane per frame, so the value is read
+/// far more often than the environment can change.
+fn home_text() -> Option<&'static str> {
+    static HOME: OnceLock<Option<String>> = OnceLock::new();
+    HOME.get_or_init(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|home| std::path::Path::new(&home).display().to_string())
+    })
+    .as_deref()
 }
 
 /// The `~`-shortening behind [`display_path`], with the home directory passed
 /// in. The prefix must end on a path boundary — a sibling like `/Users/ab2`
 /// next to home `/Users/ab` stays whole.
-fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+fn shorten_home(path: &std::path::Path, home: Option<&str>) -> String {
     let text = path.display().to_string();
     if let Some(home) = home {
-        let home = home.display().to_string();
-        if let Some(rest) = text.strip_prefix(&home) {
+        if let Some(rest) = text.strip_prefix(home) {
             if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') {
                 return format!("~{rest}");
             }

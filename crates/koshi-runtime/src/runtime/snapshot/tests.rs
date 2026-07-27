@@ -529,7 +529,7 @@ fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen(
 fn shorten_home_replaces_the_prefix_only_on_a_path_boundary() {
     use super::shorten_home;
     use std::path::Path;
-    let home = Some(Path::new("/Users/ab"));
+    let home = Some("/Users/ab");
     assert_eq!(shorten_home(Path::new("/Users/ab"), home), "~");
     assert_eq!(shorten_home(Path::new("/Users/ab/koshi"), home), "~/koshi");
     // A sibling directory sharing the prefix text is NOT under home.

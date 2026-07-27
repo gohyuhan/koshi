@@ -56,6 +56,63 @@ pub struct RenderSnapshot {
     pub theme: Theme,
 }
 
+impl RenderSnapshot {
+    /// Borrow the parts of this frame that say where things sit.
+    #[must_use]
+    pub fn layout(&self) -> FrameLayout<'_> {
+        FrameLayout {
+            session: &self.session,
+            client: &self.client,
+            theme: &self.theme,
+        }
+    }
+}
+
+/// Where a frame's surfaces sit, borrowed: the session with its solved active
+/// tab, the viewing client, and the theme. Carries no pane content.
+///
+/// This is what hit-testing a mouse cell and solving the tabline read. A
+/// caller that already holds a [`RenderSnapshot`] borrows one out of it with
+/// [`RenderSnapshot::layout`]; a caller answering a mouse event builds these
+/// three on their own and skips every pane's grid, title, and highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLayout<'a> {
+    /// The session being viewed, including its solved active tab.
+    pub session: &'a SessionSnapshot,
+    /// The viewing client's own state (viewport, focus, lock mode).
+    pub client: &'a ClientSnapshot,
+    /// The resolved chrome theme every koshi-owned surface draws with.
+    pub theme: &'a Theme,
+}
+
+/// The owned form of [`FrameLayout`], for a caller that builds these three
+/// itself instead of borrowing them out of a [`RenderSnapshot`].
+///
+/// Answering a mouse event needs to know where the surfaces are and nothing
+/// about what is inside them, so the mouse path builds one of these and calls
+/// [`layout`](Self::layout) to hand it to the hit-testing functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedFrameLayout {
+    /// The session being viewed, including its solved active tab.
+    pub session: SessionSnapshot,
+    /// The viewing client's own state (viewport, focus, lock mode).
+    pub client: ClientSnapshot,
+    /// The resolved chrome theme every koshi-owned surface draws with.
+    pub theme: Theme,
+}
+
+impl OwnedFrameLayout {
+    /// Borrow these three as a [`FrameLayout`].
+    #[must_use]
+    pub fn layout(&self) -> FrameLayout<'_> {
+        FrameLayout {
+            session: &self.session,
+            client: &self.client,
+            theme: &self.theme,
+        }
+    }
+}
+
 /// The session-scoped part of a frame: identity plus the active tab and the
 /// metadata needed to draw the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq)]

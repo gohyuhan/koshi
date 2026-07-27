@@ -10,11 +10,11 @@ fn default_grid(rows: u16, cols: u16) -> Grid {
 
 #[test]
 #[cfg(target_pointer_width = "64")]
-fn a_cell_is_forty_bytes() {
+fn a_cell_is_thirty_two_bytes() {
     // One cell is stored per grid slot and per scrollback column, so its size
     // sets how much memory a pane's history costs: at a 10 000-line cap and 200
     // columns, every extra byte per cell is another 2 MB per pane.
-    assert_eq!(std::mem::size_of::<Cell>(), 40);
+    assert_eq!(std::mem::size_of::<Cell>(), 32);
 }
 
 #[test]
