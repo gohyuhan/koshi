@@ -3,9 +3,13 @@
 
 use std::sync::mpsc;
 
-use koshi_config::types::RgbColor;
+use koshi_config::conflict::keymap_layers;
+use koshi_config::hints::KeymapHintCatalog;
+use koshi_config::key::Leader;
+use koshi_config::types::{KeybindingsConfig, RgbColor};
 use koshi_core::event::{LayoutChanged, TabCreated};
 use koshi_core::ids::TabId;
+use koshi_core::registry::ActionRegistry;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 
 use super::*;
@@ -16,11 +20,17 @@ fn new_client() -> (Client, mpsc::SyncSender<Event>) {
 
 fn with_config(config: ClientConfig) -> (Client, mpsc::SyncSender<Event>) {
     let (tx, rx) = mpsc::sync_channel(8);
+    let keymap = KeymapHintCatalog::from_parts(
+        &keymap_layers(None, Leader::default()),
+        &KeybindingsConfig::default(),
+        &ActionRegistry::new(),
+    );
     let client = Client::new(
         ClientId::new(),
         Size { cols: 80, rows: 24 },
         rx,
         config,
+        keymap,
         TerminalCleanupGuard::new(),
     );
     (client, tx)

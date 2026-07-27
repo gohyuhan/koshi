@@ -180,6 +180,14 @@ impl Server {
         if !transparent(mode) {
             return;
         }
+        self.write_press(client_id, chord);
+    }
+
+    /// Write one unconsumed press to the pane the client is typing into,
+    /// encoded for the cursor-key mode that pane is in at this instant: a
+    /// program in application-cursor-keys mode reads `<Up>` as `ESC O A`, one
+    /// outside it reads `ESC [ A`.
+    fn write_press(&mut self, client_id: ClientId, chord: KeyChord) {
         let Some(pane_id) = self.typed_pane(client_id) else {
             return;
         };
@@ -358,6 +366,19 @@ impl Server {
                 client.update_pending_key_sequence(Some(pending));
             }
         }
+    }
+
+    /// Dispatch a binding the viewer already resolved: look its name up in the
+    /// action table and run it. The viewer owns the keymap; the session owns
+    /// what an action does.
+    pub fn handle_bound_action(&mut self, client_id: ClientId, bound: BoundAction) {
+        self.fire_binding(client_id, bound);
+    }
+
+    /// Write one key the viewer did not bind to the pane it is typing into,
+    /// encoded for that pane's cursor-key mode at this instant.
+    pub fn handle_key_press(&mut self, client_id: ClientId, chord: KeyChord) {
+        self.write_press(client_id, chord);
     }
 
     fn fire_binding(&mut self, client_id: ClientId, bound: BoundAction) {

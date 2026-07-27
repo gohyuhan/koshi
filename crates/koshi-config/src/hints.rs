@@ -75,6 +75,9 @@ pub struct HintBinding {
 
 /// Per-mode hint-bar data: every mode's bindings joined to display names,
 /// shared by reference with each frame's snapshot.
+///
+/// Cloning is cheap — every collection travels behind an [`Arc`].
+#[derive(Clone)]
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
     merged: Arc<MergedKeyMap>,

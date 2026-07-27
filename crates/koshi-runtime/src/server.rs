@@ -181,6 +181,25 @@ impl Server {
         self.dispatch(envelope)
     }
 
+    /// Mark the chrome stale so the next poll repaints it. The viewer calls
+    /// this after a key changed something only it can see — an opened or
+    /// closed sequence, a mode switch — since the hint bar and mode tag are
+    /// drawn from the viewer's own state.
+    pub fn invalidate_status(&mut self) {
+        self.render_scheduler
+            .invalidate(crate::runtime::render_schedule::InvalidationReason::StatusChanged);
+    }
+
+    /// The keymap folded from this process's parsed keybinding layers.
+    ///
+    /// Cloning is cheap (every collection is behind an `Arc`). The viewer
+    /// resolves its own keys against this; it reads the layers itself once it
+    /// owns them.
+    #[must_use]
+    pub fn keymap_catalog(&self) -> KeymapHintCatalog {
+        self.keymap_hints.clone()
+    }
+
     /// The viewer-owned settings folded from this process's config files.
     ///
     /// The reload transactions here own the parsed layers, so this is where a

@@ -233,7 +233,15 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // It resolves its chrome colors from these, so the palette a frame is
     // painted in belongs to this terminal rather than to the session.
     let client_config = server.client_config().clone();
-    let mut client = Client::new(client_id, viewport, events_rx, client_config, cleanup);
+    let keymap = server.keymap_catalog();
+    let mut client = Client::new(
+        client_id,
+        viewport,
+        events_rx,
+        client_config,
+        keymap,
+        cleanup,
+    );
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);

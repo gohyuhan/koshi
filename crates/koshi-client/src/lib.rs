@@ -11,11 +11,16 @@
 //! *which pane is focused*, and each viewer looks up what "focused" should
 //! look like in its own theme. So one session can be painted two ways at once.
 
+pub mod input;
 pub mod theme;
 
 use std::sync::mpsc::Receiver;
 
+use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::ClientConfig;
+use koshi_core::key::PendingKeySequence;
+use koshi_core::lock::LockMode;
+use koshi_core::registry::ActionRegistry;
 use koshi_core::{event::Event, geometry::Size, ids::ClientId};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::theme::Theme;
@@ -44,6 +49,21 @@ pub struct Client {
     /// The chrome colors [`config`](Self::config)'s theme resolves to, kept
     /// resolved so a frame costs a borrow rather than a palette conversion.
     theme: Theme,
+    /// The keymap this viewer resolves its own keys against, folded from its
+    /// own [`config`](Self::config).
+    keymap: KeymapHintCatalog,
+    /// The action table a bound name is checked against — for the hint bar's
+    /// labels and the `continuous` flag a repeat-capable binding re-arms on.
+    /// Dispatch itself happens on the session, against its own table.
+    registry: ActionRegistry,
+    /// This viewer's input mode. It owns this because it decides what a key
+    /// means before anything is sent; the session keeps its own copy so
+    /// `koshi lock --client` can reach a viewer and `koshi list-clients` can
+    /// report one.
+    lock_mode: LockMode,
+    /// The multi-chord binding being typed, if any. Held chords belong to
+    /// koshi and never reach a pane.
+    pending: Option<PendingKeySequence>,
     /// Restores the outer terminal when the client ends or the process
     /// panics.
     cleanup_guard: TerminalCleanupGuard,
@@ -55,22 +75,30 @@ impl Client {
     /// config, and the outer-terminal cleanup guard.
     ///
     /// The chrome colors are resolved from `config` once here; a later config
-    /// change goes through [`set_config`](Self::set_config).
+    /// change goes through [`set_config`](Self::set_config). `keymap` is
+    /// folded from the parsed keybinding layers, which the session still owns
+    /// — the viewer reads them itself once it holds its own config layers.
     #[must_use]
     pub fn new(
         id: ClientId,
         viewport: Size,
         events: Receiver<Event>,
         config: ClientConfig,
+        keymap: KeymapHintCatalog,
         cleanup_guard: TerminalCleanupGuard,
     ) -> Self {
         let theme = theme::resolve(&config.theme);
+        let registry = ActionRegistry::new();
         Client {
             id,
             viewport,
             events,
             config,
             theme,
+            keymap,
+            registry,
+            lock_mode: LockMode::Normal,
+            pending: None,
             cleanup_guard,
         }
     }
@@ -113,6 +141,20 @@ impl Client {
     pub fn set_config(&mut self, config: ClientConfig) {
         self.theme = theme::resolve(&config.theme);
         self.config = config;
+    }
+
+    /// Swap in a reloaded keymap, dropping any open sequence with it: the held
+    /// chords were reaching for bindings the new keymap may not have, so they
+    /// resolve to nothing rather than firing something else.
+    pub fn set_keymap(&mut self, keymap: KeymapHintCatalog) {
+        self.keymap = keymap;
+        self.pending = None;
+    }
+
+    /// The hint-bar data for the viewer's current mode.
+    #[must_use]
+    pub fn keymap_hints(&self) -> koshi_config::hints::KeymapHints {
+        self.keymap.hints_for(self.lock_mode)
     }
 
     /// Drop every event the subscription has delivered since the last call,

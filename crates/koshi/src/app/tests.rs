@@ -49,11 +49,13 @@ fn test_server(fake: Arc<FakePtyBackend>) -> (Server, mpsc::Sender<RuntimeEvent>
 /// that drive the real `run_loop`.
 fn test_client(server: &mut Server, client_id: ClientId) -> Client {
     let events = server.subscribe(EventFilter::All);
+    let keymap = server.keymap_catalog();
     Client::new(
         client_id,
         VIEWPORT,
         events,
         ClientConfig::default(),
+        keymap,
         TerminalCleanupGuard::new(),
     )
 }
