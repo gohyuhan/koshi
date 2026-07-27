@@ -19,6 +19,7 @@
 //! ALT and SHIFT.
 
 use std::fmt;
+use std::time::Instant;
 
 /// The modifier keys held down as part of a chord, packed one per bit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -314,3 +315,22 @@ impl fmt::Display for KeySequence {
 
 #[cfg(test)]
 mod tests;
+
+/// One incomplete multi-chord keybinding: the chords typed into it so far, and
+/// the instant an ambiguous one resolves.
+///
+/// The chords are Koshi's, not the pane's. A sequence that is open captures the
+/// keyboard until it resolves, so no chord held here is ever written to a pane —
+/// it fires a binding, or it is dropped when the sequence is left. That is why
+/// the pane a chord was typed into, and the byte form it would have taken there,
+/// are not kept: nothing will ever send them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingKeySequence {
+    /// Canonical chords pressed so far.
+    pub sequence: KeySequence,
+    /// Disambiguation instant, set only when the chords so far are BOTH a
+    /// complete binding and the prefix of a longer one — reaching it fires the
+    /// complete binding. A prefix-only sequence carries `None` and waits for
+    /// the next chord indefinitely.
+    pub deadline: Option<Instant>,
+}

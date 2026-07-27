@@ -36,13 +36,12 @@ use koshi_config::types::BoundAction;
 use koshi_core::action::ActionRef;
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, CommandId, PaneId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey, PendingKeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::{resolve_action, ActionArgs, DispatchPlan};
 use koshi_input::keyboard::encode;
 use koshi_layout::content::content_rects;
 use koshi_pane::pane::state::PaneKind;
-use koshi_session::client::PendingKeySequence;
 
 use crate::runtime::render_schedule::InvalidationReason;
 use crate::runtime::snapshot::solve_tab;
