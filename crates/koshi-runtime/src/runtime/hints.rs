@@ -17,13 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
+use koshi_config::conflict::{built_in_modes, keymap_layers, KeyMapLayer};
 use koshi_config::key::Leader;
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
-use koshi_config::types::{
-    default_mode_bindings, default_prefix_labels, BoundAction, KeybindingsConfig, ModeBindings,
-    ModeName,
-};
+use koshi_config::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::ActionRef;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
@@ -160,40 +157,6 @@ impl KeymapHintCatalog {
             reverted: self.reverted,
         }
     }
-}
-
-/// The ordered keymap layers: the built-in default binding table, plus the
-/// user's `keybinding.kdl` modes when present. The user layer passes through
-/// [`KeyMapLayer::with_user_args_stripped`], so binding arguments in a user
-/// file are dropped rather than honored.
-pub(crate) fn keymap_layers(
-    user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
-    leader: Leader,
-) -> Vec<KeyMapLayer> {
-    let mut layers = vec![KeyMapLayer {
-        origin: LayerOrigin::Defaults,
-        // Built against the effective leader, so rebinding the leader moves the
-        // leader-relative defaults.
-        modes: default_mode_bindings(leader),
-    }];
-    if let Some(modes) = user_modes {
-        layers.push(
-            KeyMapLayer {
-                origin: LayerOrigin::User,
-                modes,
-            }
-            .with_user_args_stripped(),
-        );
-    }
-    layers
-}
-
-/// Every built-in input mode's name.
-pub(crate) fn built_in_modes() -> BTreeSet<ModeName> {
-    LockMode::ALL
-        .iter()
-        .map(|mode| ModeName::new(mode.name()))
-        .collect()
 }
 
 /// Exact and longer-prefix results for one sequence lookup.

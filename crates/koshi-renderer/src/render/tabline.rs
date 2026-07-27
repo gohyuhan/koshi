@@ -105,15 +105,14 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
     let right_width = text_width(&right_block_text(frame));
     let right_x = area.right().saturating_sub(right_width).max(area.x);
     let room = right_x.saturating_sub(area.x);
-    let (name, badge) = session_texts(frame, room);
-    let session_width = (text_width(&name) + badge.as_deref().map_or(0, text_width)).min(room);
+    let session_width = session_texts(frame, room).width.min(room);
     let strip_start = area.x.saturating_add(session_width).saturating_add(1);
 
     let count = frame.session.tabs_metadata.len();
     let widths: Vec<u16> = (0..count)
         .map(|i| {
             let (index, name) = tab_texts(frame, i);
-            text_width(&index) + text_width(&name)
+            text_width(&index).saturating_add(text_width(&name))
         })
         .collect();
 
@@ -216,8 +215,12 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
 /// in its text and never looks at its style, so measuring an unstyled span
 /// gives the same answer the drawn one does — which is what lets the solve
 /// below run without any colors.
+///
+/// Text wider than a `u16` saturates rather than wrapping: no terminal is
+/// 65535 cells across, so anything at the cap is already "wider than the row"
+/// and every comparison below treats it that way.
 fn text_width(text: &str) -> u16 {
-    Span::raw(text).width() as u16
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
 }
 
 /// The tabline's right-anchored block text: the mode tag. Each pane's scroll
@@ -243,21 +246,46 @@ const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// both parts do not fit in it the badge is dropped whole, the way a tab that
 /// does not fit is dropped rather than clipped — a 16-cell row shows ` s `,
 /// never the half-written ` s [v0.1.0`.
-fn session_texts(frame: FrameLayout<'_>, room: u16) -> (String, Option<String>) {
+fn session_texts(frame: FrameLayout<'_>, room: u16) -> SessionBlock {
     let name = format!(" {} ", frame.session.name);
     let badge = format!("[v{KOSHI_VERSION}] ");
-    if text_width(&name) + text_width(&badge) <= room {
-        (name, Some(badge))
+    let name_width = text_width(&name);
+    let badge_width = text_width(&badge);
+    if name_width.saturating_add(badge_width) <= room {
+        SessionBlock {
+            width: name_width.saturating_add(badge_width),
+            name,
+            badge: Some(badge),
+        }
     } else {
-        (name, None)
+        SessionBlock {
+            width: name_width,
+            name,
+            badge: None,
+        }
     }
+}
+
+/// The left block's text and the cells it occupies, measured once.
+///
+/// The solve and the draw both need this, and measuring text means walking it
+/// grapheme by grapheme — so the width the fit decision already computed is
+/// carried out rather than recomputed. `tabline_layout` runs on every pointer
+/// move, so the walks it does are worth counting.
+struct SessionBlock {
+    /// The session name, padded — always drawn.
+    name: String,
+    /// The version badge, present only when it fit whole beside the name.
+    badge: Option<String>,
+    /// Cells `name` plus `badge` occupy together.
+    width: u16,
 }
 
 /// The left-anchored block, colored for drawing.
 fn session_line(frame: FrameLayout<'_>, theme: &Theme, room: u16) -> Line<'static> {
-    let (name, badge) = session_texts(frame, room);
-    let name = Span::styled(name, session_style(theme));
-    match badge {
+    let block = session_texts(frame, room);
+    let name = Span::styled(block.name, session_style(theme));
+    match block.badge {
         Some(badge) => Line::from(vec![name, Span::styled(badge, version_style(theme))]),
         None => Line::from(name),
     }

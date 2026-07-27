@@ -471,3 +471,67 @@ fn draw_paints_the_left_scroll_arrow_when_a_tab_is_hidden_left() {
     // And the right arrow marks tab 2 hidden off the right.
     assert_eq!(cell(&buf, 17 + BADGE), "▶");
 }
+
+#[test]
+fn an_absurdly_long_name_saturates_instead_of_wrapping() {
+    // Session and tab names are unbounded strings — a profile file can set one
+    // of any length. Measuring must saturate at the widest a `u16` holds, so a
+    // name past that reads as "wider than the row" rather than wrapping around
+    // to a small number and being laid out as if it fit.
+    let huge = "x".repeat(usize::from(u16::MAX) + 64);
+    assert_eq!(text_width(&huge), u16::MAX);
+
+    // The solve still answers, and gives the oversized name no more than the
+    // row it has to fit in.
+    let snapshot = snap(&huge, &[("one", true)], None, LockMode::Normal, false);
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 1,
+    };
+    let layout = tabline_layout(snapshot.layout(), area);
+    assert!(
+        layout.session_width <= 40,
+        "the session block never claims more than the row: {}",
+        layout.session_width
+    );
+}
+
+#[test]
+fn text_width_counts_display_cells_not_bytes_or_chars() {
+    // The solve places blocks in terminal cells, so measuring must use display
+    // width. "漢字" is 2 chars and 6 bytes but occupies 4 cells; an emoji is
+    // 1 char and 4 bytes but occupies 2; a combining mark adds none.
+    assert_eq!(text_width("漢字"), 4);
+    assert_eq!(text_width("🦀"), 2);
+    assert_eq!(
+        text_width("e\u{0301}"),
+        1,
+        "e + combining acute is one cell"
+    );
+    assert_eq!(text_width(""), 0);
+}
+
+#[test]
+fn the_version_badge_is_kept_at_exactly_enough_room_and_dropped_one_cell_short() {
+    // The badge is all-or-nothing: it fits or it goes whole, never clipped.
+    // This pins the `<=` boundary of that decision, which is the comparison the
+    // session block's width is solved from.
+    let snapshot = snap("s", &[("one", true)], None, LockMode::Normal, false);
+    let frame = snapshot.layout();
+
+    let full = session_texts(frame, u16::MAX);
+    let badge_width = text_width(&format!("[v{KOSHI_VERSION}] "));
+    let exactly_enough = text_width(&full.name) + badge_width;
+
+    assert!(
+        session_texts(frame, exactly_enough).badge.is_some(),
+        "room for both means both: {exactly_enough} cells"
+    );
+
+    assert!(
+        session_texts(frame, exactly_enough - 1).badge.is_none(),
+        "one cell short drops the badge whole rather than clipping it"
+    );
+}

@@ -11,19 +11,16 @@
 //! parse, or whose conflict verdict refuses it, leaves the view on the
 //! built-in defaults and carries the reasons for the caller to surface.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use koshi_config::conflict::{
-    detect_conflicts, ConflictReport, KeyMapLayer, KeymapVerdict, LayerOrigin,
+    built_in_modes, detect_conflicts, keymap_layers, ConflictReport, KeymapVerdict,
 };
-use koshi_config::key::Leader;
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap};
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{default_mode_bindings, KeybindingsConfig, ModeBindings, ModeName};
-use koshi_core::lock::LockMode;
+use koshi_config::types::KeybindingsConfig;
 use koshi_core::registry::ActionRegistry;
 
 #[cfg(test)]
@@ -143,41 +140,6 @@ pub fn view_from_partial(
         user_file,
         file_error,
     }
-}
-
-/// The ordered offline keymap layers: the built-in default binding table,
-/// plus the user file's modes when present, arguments stripped.
-///
-/// The default table is built against `leader` — the effective leader, the
-/// user's when their file set one — so `koshi keys list/validate/conflicts`
-/// resolve the same `<leader>`-relative defaults a running koshi does, instead
-/// of the built-in `C-` table.
-fn keymap_layers(
-    user_modes: Option<std::collections::BTreeMap<ModeName, ModeBindings>>,
-    leader: Leader,
-) -> Vec<KeyMapLayer> {
-    let mut layers = vec![KeyMapLayer {
-        origin: LayerOrigin::Defaults,
-        modes: default_mode_bindings(leader),
-    }];
-    if let Some(modes) = user_modes {
-        layers.push(
-            KeyMapLayer {
-                origin: LayerOrigin::User,
-                modes,
-            }
-            .with_user_args_stripped(),
-        );
-    }
-    layers
-}
-
-/// Every built-in input mode's name.
-fn built_in_modes() -> BTreeSet<ModeName> {
-    LockMode::ALL
-        .iter()
-        .map(|mode| ModeName::new(mode.name()))
-        .collect()
 }
 
 /// The outcome of dry-running one keybinding file.

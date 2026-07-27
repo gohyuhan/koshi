@@ -13,6 +13,9 @@ use koshi_core::resolve::ActionArgs;
 
 use super::*;
 
+use koshi_config::conflict::LayerOrigin;
+use koshi_config::types::default_mode_bindings;
+
 /// Parse a test key sequence with the default leader and depth.
 fn seq(s: &str) -> KeySequence {
     parse_sequence(s, KeybindingsConfig::default().leader, 8).expect("test sequence parses")

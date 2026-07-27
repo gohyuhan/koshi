@@ -805,3 +805,85 @@ fn keybinding_reload_can_remove_a_default_binding_scoped_to_its_own_mode() {
         .exact
         .is_some());
 }
+
+#[test]
+fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
+    // The other reload tests all assert the server config is *unchanged*, which
+    // stays true even if the fold never runs. This one pins the opposite
+    // direction: `koshi.kdl`'s session-owned sections must actually reach the
+    // session, or every pane would spawn the stock shell at the stock size
+    // while the suite stayed green.
+    use koshi_config::layer::{PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig};
+
+    let (mut runtime, _client) = runtime();
+    assert_eq!(runtime.config.pane.min_cols, 2, "the built-in floor");
+    assert_eq!(runtime.config.terminal.term, "xterm-256color");
+
+    runtime.reload_app_config(PartialKoshiConfig {
+        pane: Some(PartialPaneConfig {
+            min_cols: Some(20),
+            min_rows: Some(5),
+        }),
+        scrollback: Some(PartialScrollbackConfig {
+            max_lines: Some(50_000),
+            max_bytes: None,
+            scroll_on_input: Some(false),
+        }),
+        terminal: Some(PartialTerminalConfig {
+            term: Some("screen-256color".to_owned()),
+            colorterm: None,
+            default_shell: Some(Some("/bin/fish".to_owned())),
+        }),
+        ..PartialKoshiConfig::default()
+    });
+
+    assert_eq!(runtime.config.pane.min_cols, 20);
+    assert_eq!(runtime.config.pane.min_rows, 5);
+    assert_eq!(runtime.config.scrollback.max_lines, 50_000);
+    assert_eq!(runtime.config.terminal.term, "screen-256color");
+    assert_eq!(
+        runtime.config.terminal.default_shell,
+        Some("/bin/fish".to_owned())
+    );
+
+    // The same file's viewer-owned section went to the viewer, not the session.
+    assert!(!runtime.client_config.scrollback.scroll_on_input);
+}
+
+#[test]
+fn the_client_config_getter_hands_out_the_folded_settings_not_the_defaults() {
+    // The binary reads a viewer's settings through this getter at startup and
+    // gives them to the client, which resolves its colors from them. If it ever
+    // returned the defaults, a user's theme would silently never apply, so this
+    // pins that it carries the loaded layer.
+    let (tx, rx) = mpsc::channel();
+    let mut runtime = Server::new(
+        Arc::new(FakePtyBackend::new()),
+        Arc::new(NullSnapshotProvider),
+        Arc::new(NullStorage),
+        rx,
+        tx,
+        Direction::Right,
+    );
+
+    runtime.load_startup_config(
+        None,
+        Some(PartialThemeConfig {
+            name: Some("midnight".to_owned()),
+            colors: Some(PartialColorPalette {
+                accent: Some(RgbColor::new(9, 8, 7)),
+                ..PartialColorPalette::default()
+            }),
+        }),
+        None,
+    );
+
+    let handed_out = runtime.client_config();
+    assert_eq!(handed_out.theme.name, "midnight");
+    assert_eq!(handed_out.theme.colors.accent, RgbColor::new(9, 8, 7));
+    assert_ne!(
+        *handed_out,
+        ClientConfig::default(),
+        "the getter carries the loaded layer, not the built-in defaults"
+    );
+}

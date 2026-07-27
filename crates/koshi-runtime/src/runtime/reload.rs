@@ -17,7 +17,10 @@
 //! event per live session — [`Event::ConfigReloaded`] when the file's
 //! settings applied, [`Event::ConfigReloadFailed`] when the keymap was kept.
 
-use koshi_config::conflict::{detect_conflicts, ConflictReport, ConflictSeverity, KeymapVerdict};
+use koshi_config::conflict::{
+    built_in_modes, detect_conflicts, keymap_layers, ConflictReport, ConflictSeverity,
+    KeymapVerdict,
+};
 use koshi_config::layer::{
     merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig,
     PartialLayoutDefaults, PartialThemeConfig,
@@ -27,10 +30,7 @@ use koshi_core::event::{ConfigReloadFailed, ConfigReloaded, Event};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 
-use crate::runtime::{
-    hints::{built_in_modes, keymap_layers, KeymapHintCatalog},
-    render_schedule::InvalidationReason,
-};
+use crate::runtime::{hints::KeymapHintCatalog, render_schedule::InvalidationReason};
 use crate::server::Server;
 
 /// The user's stored config overrides, one layer per config file, folded

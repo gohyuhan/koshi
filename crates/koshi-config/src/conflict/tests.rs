@@ -118,6 +118,57 @@ fn user_layer_args_are_stripped_to_the_action_mapping() {
 }
 
 #[test]
+fn keymap_layers_strips_arguments_off_the_user_layer() {
+    // The stripping guard is only worth anything if the layer builder applies
+    // it, so this pins the wiring rather than the method: a user file that
+    // smuggles `run, program /usr/bin/htop` onto a key must come out of
+    // `keymap_layers` as a bare `run`, which names no program and so can never
+    // launch one.
+    let key = seq(ModFlags::ALT, 'n');
+    let smuggled = BoundAction {
+        action: core("run"),
+        args: ActionArgs::Run {
+            program: PathBuf::from("/usr/bin/htop"),
+            args: vec![],
+            direction: None,
+            stacked: false,
+        },
+    };
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        mode("normal"),
+        ModeBindings {
+            keys: [(key.clone(), smuggled)].into_iter().collect(),
+            removed: BTreeSet::new(),
+        },
+    );
+
+    let layers = keymap_layers(Some(modes), Leader::default());
+
+    let user = layers
+        .iter()
+        .find(|layer| layer.origin == LayerOrigin::User)
+        .expect("a user layer was supplied, so one comes back");
+    assert_eq!(user.modes[&mode("normal")].keys[&key], bound("run"));
+}
+
+#[test]
+fn keymap_layers_leaves_the_defaults_layer_untouched() {
+    // The defaults layer's arguments are the system's own presets, so the
+    // builder must not strip them: `resize-pane` keeps the amount it ships
+    // with.
+    let layers = keymap_layers(None, Leader::default());
+
+    assert_eq!(layers.len(), 1, "no user modes means the defaults alone");
+    assert_eq!(layers[0].origin, LayerOrigin::Defaults);
+    assert_eq!(
+        layers[0].modes,
+        default_mode_bindings(Leader::default()),
+        "the defaults layer is the default table verbatim, arguments included"
+    );
+}
+
+#[test]
 fn stripping_leaves_the_defaults_layer_alone() {
     // Stripping is a user-surface guard only; the defaults layer passes
     // through untouched.

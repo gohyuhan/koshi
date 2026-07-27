@@ -45,11 +45,12 @@ use std::fmt;
 
 use koshi_core::action::ActionRef;
 use koshi_core::key::{KeyChord, KeySequence, ModFlags};
+use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ActionArgs, ResolveError};
 
 use crate::key::Leader;
-use crate::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
+use crate::types::{default_mode_bindings, BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 
 /// Which configuration surface authored a keymap layer, lowest precedence
 /// first. Every origin except `Defaults` is user-authored.
@@ -116,6 +117,44 @@ impl KeyMapLayer {
         }
         self
     }
+}
+
+/// The ordered keymap layers: the built-in default binding table, plus the
+/// user's `keybinding.kdl` modes when present.
+///
+/// The default table is built against `leader`, so rebinding the leader moves
+/// every leader-relative default with it — a user file setting `leader "alt"`
+/// turns the `<C-p>` pane prefix into `<A-p>`. The user layer passes through
+/// [`KeyMapLayer::with_user_args_stripped`], so binding arguments in a user
+/// file are dropped rather than honored.
+#[must_use]
+pub fn keymap_layers(
+    user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
+    leader: Leader,
+) -> Vec<KeyMapLayer> {
+    let mut layers = vec![KeyMapLayer {
+        origin: LayerOrigin::Defaults,
+        modes: default_mode_bindings(leader),
+    }];
+    if let Some(modes) = user_modes {
+        layers.push(
+            KeyMapLayer {
+                origin: LayerOrigin::User,
+                modes,
+            }
+            .with_user_args_stripped(),
+        );
+    }
+    layers
+}
+
+/// Every built-in input mode's name.
+#[must_use]
+pub fn built_in_modes() -> BTreeSet<ModeName> {
+    LockMode::ALL
+        .iter()
+        .map(|mode| ModeName::new(mode.name()))
+        .collect()
 }
 
 /// How severe one finding is, mildest first.

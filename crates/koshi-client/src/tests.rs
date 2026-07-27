@@ -107,3 +107,55 @@ fn discard_events_drops_everything_delivered_and_counts_it() {
         .expect("send into the subscription");
     assert_eq!(client.discard_events(), 1);
 }
+
+#[test]
+fn the_last_reload_wins_when_settings_are_swapped_twice() {
+    // Reloads arrive one after another; the colors a frame paints with must
+    // track the newest settings, not the first ones seen.
+    let (mut client, _tx) = new_client();
+
+    client.set_config(config_with_focused_border(RgbColor::new(1, 1, 1)));
+    client.set_config(config_with_focused_border(RgbColor::new(2, 2, 2)));
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(2, 2, 2)
+    );
+}
+
+#[test]
+fn reloading_the_settings_it_already_has_changes_nothing() {
+    // A reload that resolves to the same settings leaves the client exactly as
+    // it was — the palette is recomputed, not accumulated.
+    let (mut client, _tx) = new_client();
+    let before = *client.theme();
+
+    client.set_config(ClientConfig::default());
+
+    assert_eq!(*client.theme(), before);
+    assert_eq!(*client.config(), ClientConfig::default());
+}
+
+#[test]
+fn extreme_palette_values_survive_the_round_trip() {
+    // The palette's endpoints are plain bytes; black and white must map
+    // through unchanged rather than being clamped or shifted.
+    let mut config = ClientConfig::default();
+    config.theme.colors.border_focused = RgbColor::new(0, 0, 0);
+    config.theme.colors.border_unfocused = RgbColor::new(0xff, 0xff, 0xff);
+    config.theme.colors.ramp_start = RgbColor::new(0, 0, 0);
+    config.theme.colors.ramp_end = RgbColor::new(0xff, 0xff, 0xff);
+
+    let (client, _tx) = with_config(config);
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(0, 0, 0)
+    );
+    assert_eq!(
+        client.theme().border_unfocused,
+        ratatui::style::Color::Rgb(0xff, 0xff, 0xff)
+    );
+    assert_eq!(client.theme().ramp_start, (0, 0, 0));
+    assert_eq!(client.theme().ramp_end, (0xff, 0xff, 0xff));
+}
