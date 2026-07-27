@@ -30,7 +30,9 @@ use koshi_core::event::{ConfigReloadFailed, ConfigReloaded, Event};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 
-use crate::runtime::{hints::KeymapHintCatalog, render_schedule::InvalidationReason};
+use koshi_config::hints::KeymapHintCatalog;
+
+use crate::runtime::render_schedule::InvalidationReason;
 use crate::server::Server;
 
 /// The user's stored config overrides, one layer per config file, folded

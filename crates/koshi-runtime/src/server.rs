@@ -17,6 +17,7 @@ use std::{
     },
 };
 
+use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
@@ -36,7 +37,6 @@ use crate::{
     runtime::{
         bus::{EventBus, EventFilter},
         event::RuntimeEvent,
-        hints::KeymapHintCatalog,
         reload::ConfigLayers,
         render_schedule::RenderScheduler,
     },

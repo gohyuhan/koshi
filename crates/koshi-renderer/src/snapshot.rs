@@ -17,18 +17,22 @@
 //! live state; renderer modules draw only these fields. This DTO is their
 //! contract.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::{KeyChord, KeySequence};
+use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
+
+/// The hint-bar data types live with the keymap that produces them; the
+/// renderer only draws them, and re-exports them here so a frame's fields all
+/// resolve from one place.
+pub use koshi_config::hints::{HintBinding, KeymapHints};
 
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
@@ -352,49 +356,6 @@ pub struct ClientSnapshot {
     /// tab index `i` without changing focus. The renderer windows the tab list
     /// from this; mouse scroll, arrow clicks, and drag set it.
     pub tabline_offset: Option<usize>,
-}
-
-/// The keybinding data behind the hint bar, projected for one client's
-/// current input mode.
-///
-/// Everything is plain data resolved by the runtime: the merged keymap's
-/// bindings for the mode, each already joined to its action's display name.
-/// The per-mode collections travel behind [`Arc`]s — the runtime computes
-/// them once per keymap change, and every frame's snapshot shares them by
-/// reference.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KeymapHints {
-    /// Every binding in the client's current mode, sorted by key sequence.
-    pub entries: Arc<Vec<HintBinding>>,
-    /// Display labels for prefix chords whose sequence group is untouched
-    /// defaults (`<C-p>` → `PANE`). A group with any user-authored entry, or
-    /// a user removal under it, ignores this and shows a `+N` marker instead.
-    pub prefix_labels: Arc<BTreeMap<KeyChord, String>>,
-    /// Every key a user surface removed in the current mode. A removal under
-    /// a labeled prefix voids the label: the shipped name no longer describes
-    /// the group.
-    pub removed: Arc<BTreeSet<KeySequence>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision: the bar shows a conflict marker, and the hints listed are
-    /// the reverted-to defaults.
-    pub reverted: bool,
-}
-
-/// One binding the hint bar can show: a key sequence, the display name of the
-/// action it fires, and the flags the bar's grouping and ordering read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HintBinding {
-    /// The chords pressed to fire the binding.
-    pub sequence: KeySequence,
-    /// The bound action's human-facing name, from its registry metadata.
-    pub label: String,
-    /// Whether a user surface authored the winning entry (a default shows
-    /// `false`). Any `true` entry under a prefix voids the prefix's label.
-    pub user_set: bool,
-    /// Whether the bar must keep this hint visible ahead of every other —
-    /// set on the reserved unlock binding in locked mode, which truncation
-    /// never drops.
-    pub pinned: bool,
 }
 
 /// Plugin-contributed UI for one frame. All slots are empty for a stock,

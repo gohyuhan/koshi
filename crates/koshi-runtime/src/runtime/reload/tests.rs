@@ -23,7 +23,7 @@ use koshi_core::resolve::ActionArgs;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
-use crate::runtime::hints::KeyMatch;
+use koshi_config::hints::KeyMatch;
 
 fn runtime() -> (Server, ClientId) {
     let (tx, rx) = mpsc::channel();

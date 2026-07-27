@@ -22,8 +22,8 @@ use koshi_session::client::Client;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
-use crate::runtime::hints::KeymapHintCatalog;
 use crate::server::Server;
+use koshi_config::hints::KeymapHintCatalog;
 
 fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId) {
     let fake = Arc::new(FakePtyBackend::new());
