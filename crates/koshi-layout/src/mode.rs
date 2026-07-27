@@ -3,13 +3,12 @@
 //! Fullscreen (zoom) is the only mode beyond plain tiling: one pane is
 //! promoted to the whole tab rect and everything else is hidden. The split
 //! tree is never rewritten for it — the mode is a sidecar value, so leaving
-//! fullscreen restores the exact prior layout by construction. There is
-//! nothing to put back and nothing that can drift.
+//! fullscreen restores the exact prior layout.
 //!
 //! **A mode belongs to a viewer, not to a tab.** The solver takes one as an
-//! argument and never reads it off the tab, because a zoom is a fact about one
-//! client's view: two clients can solve the same tree in the same frame, one
-//! zoomed and one tiled. The session layer stores it per client.
+//! argument and never reads it off the tab: a zoom is a fact about one client's
+//! view, and two clients can solve the same tree in the same frame, one zoomed
+//! and one tiled. The session layer stores it per client.
 //!
 //! Content replacement (swapping what a leaf shows) is a one-shot tree edit
 //! with unchanged geometry, handled with the other edits.

@@ -11,9 +11,8 @@
 //! Instantiation closes the gap: create one pane per leaf, then call
 //! [`TemplateNode::to_layout_node`] with the new ids in layout order to get
 //! the live tree. Example: a template `horizontal(pane "nvim", pane)` plus
-//! ids `[7, 8]` yields `Split(Horizontal, [Pane(7), Pane(8)])` — the same
-//! tree a runtime split of pane 7 would have produced, so file-defined and
-//! runtime-built layouts stay one model.
+//! ids `[7, 8]` yields `Split(Horizontal, [Pane(7), Pane(8)])`, the same tree a
+//! runtime split of pane 7 produces.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

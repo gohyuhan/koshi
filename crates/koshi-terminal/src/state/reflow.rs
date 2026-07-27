@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use koshi_core::process::PtySize;
 
-use crate::grid::state::{Cell, Grid, RowEnd};
+use crate::grid::state::{content_len, Cell, Grid, RowEnd};
 use crate::style::Style;
 
 use super::TerminalState;
@@ -140,17 +140,6 @@ impl TerminalState {
         ) as u16;
         self.primary_cursor.col = min(new_cursor_col, size.cols.saturating_sub(1) as usize) as u16;
     }
-}
-
-/// The number of content cells in a hard-ended row: its length with the
-/// trailing run of fully-default blanks (the padding every row is filled
-/// with) excluded. A styled blank — e.g. a background-colored prompt
-/// segment — counts as content, so its color survives a reflow.
-fn content_len(row: &[Cell]) -> usize {
-    let blank = Cell::blank();
-    row.iter()
-        .rposition(|cell| *cell != blank)
-        .map_or(0, |index| index + 1)
 }
 
 /// Re-wrap one logical line's content into `cols`-wide rows.

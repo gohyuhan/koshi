@@ -2,12 +2,12 @@
 //! structs meant to be serialized to disk and read back, as opposed to the
 //! live tree types the solver works on.
 //!
-//! A stack's identity is its membership, its active member, and which
-//! members are collapsed. That is exactly what survives a detach/attach or
-//! a daemon restart — a pane's live PTY (the pseudo-terminal process feeding
-//! its content) does not. The snapshot stores pane ids and flags only;
-//! weights are not part of it because collapsed members have no independent
-//! size and the active member takes whatever the stack gets.
+//! A stack's identity is its membership, its active member, and which members
+//! are collapsed. That survives a detach/attach or a daemon restart; a pane's
+//! live PTY (the pseudo-terminal process feeding its content) does not. The
+//! snapshot stores pane ids and flags only. It carries no weights: collapsed
+//! members have no independent size, and the active member takes whatever the
+//! stack gets.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;

@@ -5,22 +5,21 @@
 //! dispatcher: given an [`ActionRef`] such as `core:next-tab` plus the arguments
 //! bound to it, produce the [`Command`] the runtime should execute.
 //!
-//! # Why an action is not just a command
+//! # Actions and commands are not one-to-one
 //!
-//! An action is the stable user-facing name; a [`Command`] is the internal
-//! mutation. The two are not one-to-one. Several actions build the same command
-//! and differ only by a value fixed for that action: `lock` and `unlock` both
-//! build [`Command::SetLockMode`], `next-tab` and `previous-tab` both build
-//! [`Command::FocusTab`]. Those fixed values live in a table keyed on the
-//! action's name rather than on its [`CommandKind`](crate::command::CommandKind),
-//! which cannot tell those actions apart.
+//! Several actions build the same command and differ only by a value fixed for
+//! that action: `lock` and `unlock` both build [`Command::SetLockMode`],
+//! `next-tab` and `previous-tab` both build [`Command::FocusTab`]. Those fixed
+//! values live in a table keyed on the action's NAME, not on its
+//! [`CommandKind`](crate::command::CommandKind), which cannot tell those
+//! actions apart.
 //!
 //! # What this module does not decide
 //!
 //! Every command it builds names its target as `None`, which each argument
-//! struct already reads as "the focused one". Choosing the actual pane, tab, or
-//! client — and refusing a session with several attached clients and no named
-//! target — happens in the runtime's command handlers, which see the issuing
+//! struct reads as "the focused one". Choosing the actual pane, tab, or client
+//! — and refusing a session with several attached clients and no named target —
+//! happens in the runtime's command handlers, which see the issuing
 //! [`CommandSource`](crate::command::CommandSource). Resolution is a pure
 //! function of the reference, its arguments, and the registry.
 //!
@@ -60,18 +59,17 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 /// The arguments bound to an action at its call site — a keymap entry, or a step
 /// of a macro.
 ///
-/// Bindings themselves carry no arguments: an action choice with a small fixed
-/// set of values lives in the action NAME (`core:new-pane-left`,
+/// Bindings themselves carry no arguments: a choice with a small fixed set of
+/// values lives in the action NAME (`core:new-pane-left`,
 /// `core:close-pane-tree`), and a value with an open range (a tab index, a
 /// program to run) is reachable only through a CLI command. A variant here is a
 /// SYSTEM-authored preset — nothing a user writes in `keybinding.kdl` produces
-/// one, and user-authored layers have their args stripped to [`ActionArgs::None`]
-/// on load.
+/// one, and user-authored layers have their args stripped to
+/// [`ActionArgs::None`] on load.
 ///
 /// A field the issuing boundary owns never appears in a variant: a pane's `cwd`
-/// and `env` are captured where the command is issued, which is why
-/// [`ActionArgs::Run`] names a program and its arguments rather than a whole
-/// [`SpawnSpec`].
+/// and `env` are captured where the command is issued, so [`ActionArgs::Run`]
+/// names a program and its arguments rather than a whole [`SpawnSpec`].
 ///
 /// [`ActionArgs::None`] means no arguments were given. Actions whose every field
 /// is optional accept it and fall back to their defaults; actions with a
@@ -254,11 +252,10 @@ fn resolve_at_depth(
 /// [`ResolveError::ArgsMismatch`]. Targets are left `None` for the runtime to
 /// resolve against the command's source.
 ///
-/// The action's [`CommandKind`](crate::command::CommandKind) is deliberately not
-/// consulted: three actions share `FocusTab` and two share `SetLockMode`, so the
+/// The action's [`CommandKind`](crate::command::CommandKind) is not consulted:
+/// three actions share `FocusTab` and two share `SetLockMode`, so the
 /// discriminant cannot say which command to build. It stays on the metadata as
-/// the introspection surface, and a test pins it against what this table
-/// produces.
+/// the introspection surface.
 fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, ResolveError> {
     let command = match (action.name.as_str(), args) {
         // --- Panes ---

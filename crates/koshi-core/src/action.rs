@@ -1,24 +1,17 @@
 //! Action vocabulary — the stable, plugin-extensible user surface.
 //!
 //! An *action* is what a user binds a key to, types as a CLI subcommand, or a
-//! plugin contributes. It is deliberately **not** the same thing as a
-//! [`Command`](crate::command::Command): a `Command` is the runtime's internal
-//! mutation type and is free to evolve, while an action is the public name that
-//! config files and the plugin SDK depend on. The action → command mapping
-//! decouples the user-facing surface from internal churn.
+//! plugin contributes. It is not a [`Command`](crate::command::Command): a
+//! `Command` is the runtime's internal mutation type, an action is the public
+//! name config files and the plugin SDK use. Each action maps to a command.
 //!
-//! Unlike commands, the action set is **open**. Built-in actions live in the
-//! `core:` namespace, plugins own `plugin:<id>:*`, and `user:` is reserved for
-//! user-defined macros (a later feature; the namespace is claimed now so it
-//! cannot collide). This file ships the *primitives* — [`ActionRef`],
-//! [`ActionNamespace`], [`ActionMetadata`], [`ActionHandlerRef`], and the static
-//! [`core_action_seeds`] table. The mutable, runtime table that loads those seeds
+//! The action set is open. Built-in actions live in the `core:` namespace,
+//! plugins own `plugin:<id>:*`, and `user:` is reserved for user-defined
+//! macros. This file holds the primitives — [`ActionRef`], [`ActionNamespace`],
+//! [`ActionMetadata`], [`ActionHandlerRef`], and the static
+//! [`core_action_seeds`] table. The mutable runtime table that loads those seeds
 //! and accepts plugin registrations is
 //! [`ActionRegistry`](crate::registry::ActionRegistry).
-//!
-//! Actions are not a fixed enum: the open design ensures plugins are
-//! first-class citizens on the keyboard surface, not locked out of the
-//! primary user-binding interface.
 
 use crate::command::CommandKind;
 use crate::ids::PluginId;
@@ -81,10 +74,9 @@ impl std::error::Error for ActionNameError {}
 /// The local name of an action within its namespace, validated against
 /// `^[a-z][a-z0-9-]{0,30}$`.
 ///
-/// The grammar is enforced on construction *and* on deserialization (via
+/// The grammar is enforced on construction and on deserialization (via
 /// [`TryFrom<String>`]), so a name decoded from a config file, the IPC socket,
-/// or a plugin can never carry characters that would break display rendering or
-/// collide across surfaces.
+/// or a plugin is always valid.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionName(String);
@@ -155,7 +147,7 @@ pub enum ActionNamespace {
     Core,
     /// Actions contributed by a plugin; the id scopes the name.
     Plugin(PluginId),
-    /// User-defined macros. Reserved now; the feature lands post-1.0.
+    /// Reserved for user-defined macros.
     User,
 }
 
@@ -351,12 +343,8 @@ pub enum ActionStatus {
     ComingSoon,
 }
 
-/// Typed schema for an action's arguments.
-///
-/// Placeholder: the full typed-argument model is owned by the keybinding
-/// system, which fills this in once config parsing exists. It is a named type
-/// now so [`ActionMetadata`] has a stable shape and seed entries can carry
-/// `None`.
+/// Typed schema for an action's arguments. Carries no fields; it is named now
+/// so [`ActionMetadata`] has a stable shape and seed entries can carry `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionArgsSchema {}
 
@@ -403,11 +391,9 @@ pub struct ActionMetadata {
     pub continuous: bool,
 }
 
-/// Build one `core:` seed entry. Names here are compile-time constants known to
-/// satisfy the grammar; an invalid one is a bug in this table and is caught by
-/// the seed test rather than returned as an error. Each entry declares its own
-/// [`ActionStatus`], so readiness is per-action: one member of a command family
-/// can be `Available` while its siblings are still `ComingSoon`.
+/// Build one `core:` seed entry. Panics if `name` violates the action-name
+/// grammar. `status` is per entry, so one member of a command family can be
+/// `Available` while its siblings are `ComingSoon`.
 fn core_seed(
     name: &'static str,
     display_name: &str,
@@ -433,14 +419,13 @@ fn core_seed(
     (action, metadata)
 }
 
-/// The hint-bar label for `core:mouse-select` while the mode is **off** — its
-/// registry display name, so a press reads as "turn selection on".
+/// The hint-bar label for `core:mouse-select` while the mode is **off**, and
+/// the action's registry display name.
 pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 
-/// The hint-bar label for `core:mouse-select` while the mode is **on** — a
-/// press reads as "turn selection off". The snapshot swaps
-/// [`MOUSE_SELECT_HINT`] for this on the acting client's live state, the way
-/// `core:lock`/`core:unlock` flip across the lock modes.
+/// The hint-bar label for `core:mouse-select` while the mode is **on**. The
+/// snapshot swaps [`MOUSE_SELECT_HINT`] for this on the acting client's live
+/// state.
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
 /// The built-in action table, loaded into the runtime registry at startup.
@@ -453,10 +438,8 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// all build `FocusTab`.
 ///
 /// Each entry declares its own [`ActionStatus`]. The `copy-selection` and
-/// `plugin-*` actions have no runtime handler yet and are
-/// seeded `ComingSoon`, so introspection hides them; every other action is
-/// `Available`. Status is per-action, so a family lands one member at a time
-/// rather than all at once.
+/// `plugin-*` actions have no runtime handler and are seeded `ComingSoon`, so
+/// introspection hides them; every other action is `Available`.
 #[must_use]
 pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     use ActionHandlerRef::CoreCommand;
@@ -766,9 +749,10 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
     // ComingSoon)
     //
     // The only action of visual mode. Entering and leaving it are NOT actions:
-    // a mouse drag starts a selection and a click or any key press drops it, so
-    // there is no name for a user to bind. Setting and clearing the selection
-    // are not actions either — the mouse layer issues those commands directly.
+    // a mouse drag starts a selection, and a click or any input reaching the
+    // pane's program drops it, so there is no name for a user to bind. Setting
+    // and clearing the selection are not actions either — the mouse layer
+    // issues those commands directly.
     seeds.push(core_seed(
         "copy-selection",
         "Copy Selection",

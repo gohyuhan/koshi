@@ -70,9 +70,8 @@ pub fn encode_mouse(
 /// wheel tick reports from `Normal` up — `X10` predates the wheel and reports
 /// only presses.
 ///
-/// The forward path calls this to skip the frame rebuild for an event the pane's
-/// program does not want — a bare move over a pane not in `AnyMotion` costs
-/// nothing.
+/// The forward path calls this to skip the frame rebuild for an event the
+/// pane's program does not want.
 #[must_use]
 pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
     match kind {

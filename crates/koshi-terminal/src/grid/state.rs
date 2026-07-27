@@ -3,7 +3,23 @@
 use crate::style::Style;
 use std::cmp::min;
 
+/// The part of a cell that almost no cell has: the continuation code points
+/// layered over its base character.
+///
+/// It is a type of its own so a [`Cell`] can hold it behind a *thin* pointer —
+/// eight bytes, and null unless the cell actually has continuations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CellExtra {
+    /// The continuation code points in arrival order. Never empty: the box is
+    /// allocated only when the first one arrives.
+    combining: Vec<char>,
+}
+
 /// A single grid cell: its character, display width, and style.
+///
+/// A cell occupies 40 bytes on a 64-bit target, and one exists per grid slot
+/// and per scrollback-row column. The continuation code points sit behind a
+/// pointer that is null for a plain cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// The base character occupying the cell.
@@ -12,17 +28,51 @@ pub struct Cell {
     /// — a grapheme cluster is the run of code points a person perceives as
     /// one visual character — in arrival order: combining accents, variation
     /// selectors, and the joined parts of a multi-codepoint emoji (ZWJ-joined
-    /// glyphs, skin-tone modifiers, the second half of a flag). Empty for a
+    /// glyphs, skin-tone modifiers, the second half of a flag). `None` for a
     /// plain cell; the renderer draws `ch` followed by these as one glyph.
     /// Named for the common case (combining marks) though it also carries
     /// non-zero-width emoji continuations.
-    combining: Vec<char>,
+    ///
+    /// [`push_combining`](Cell::push_combining) is the only writer and always
+    /// leaves at least one code point behind, so a present [`CellExtra`] is
+    /// never empty and `None` is the single representation of "no
+    /// continuations" — which is what makes the derived equality exact.
+    combining: Option<Box<CellExtra>>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
     width: u8,
     /// The cell's visual style (color, bold, italic, etc.).
     style: Style,
 }
+
+/// Holds [`Cell`] to the size the type is built around.
+///
+/// A cell is the most multiplied value in koshi. One exists per grid slot, and
+/// one more per column of every row history keeps: an 80×24 pane is 1 920 grid
+/// cells, and its scrollback adds up to 10 000 rows on top of that. A few open
+/// panes hold cells in the hundreds of thousands, for the whole life of the
+/// session. Whatever a cell weighs is paid that many times over.
+///
+/// So 40 is not a budget someone picked — it is what the fields currently add
+/// up to, kept here as a tripwire. Adding a `u64` to [`Cell`] is a one-line
+/// edit that no test fails and nothing reports, and it makes every pane's cell
+/// memory a fifth larger. This turns that silent edit into a build error, in
+/// the file where it was made.
+///
+/// **When it fires, the answer is usually [`CellExtra`], not a bigger number.**
+/// That is what `combining` does: a plain cell pays eight bytes for a null
+/// pointer instead of carrying a `Vec` inline, so data that almost no cell has
+/// costs almost nothing. Per-cell data that is rare belongs there. Raise the
+/// figure only when the growth genuinely has to sit in every cell — and raise
+/// it in the [`Cell`] doc in the same edit, so the two cannot disagree.
+///
+/// A 32-bit target holds that pointer in four bytes rather than eight, so this
+/// is a 64-bit figure.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+    std::mem::size_of::<Cell>() == 40,
+    "Cell changed size: put rare per-cell data behind CellExtra, or raise this figure and the `Cell` doc together"
+);
 
 impl Cell {
     /// A blank cell: a single space in the default style.
@@ -37,7 +87,7 @@ impl Cell {
     pub fn blank_with(style: Style) -> Self {
         Cell {
             ch: ' ',
-            combining: Vec::new(),
+            combining: None,
             width: 1,
             style,
         }
@@ -47,7 +97,7 @@ impl Cell {
     pub fn new(ch: char, width: u8, style: Style) -> Self {
         Cell {
             ch,
-            combining: Vec::new(),
+            combining: None,
             width,
             style,
         }
@@ -62,14 +112,25 @@ impl Cell {
     /// arrival order (combining marks plus any emoji continuation); empty for a
     /// plain cell.
     pub fn combining(&self) -> &[char] {
-        &self.combining
+        match &self.combining {
+            Some(extra) => &extra.combining,
+            None => &[],
+        }
     }
 
     /// Layer one continuation code point (combining mark, ZWJ, variation
     /// selector, joined emoji part, …) onto this cell, keeping the base
-    /// character and width unchanged.
+    /// character and width unchanged. The first mark allocates the backing
+    /// vector; a plain cell never pays for one.
     pub fn push_combining(&mut self, mark: char) {
-        self.combining.push(mark);
+        self.combining
+            .get_or_insert_with(|| {
+                Box::new(CellExtra {
+                    combining: Vec::new(),
+                })
+            })
+            .combining
+            .push(mark);
     }
 
     /// The cell's display width: 0 (combining/continuation), 1 (narrow), or 2
@@ -99,6 +160,22 @@ pub enum RowEnd {
     /// re-joins the line, so the wide glyph rejoins the text with no
     /// phantom space.
     SoftWide,
+}
+
+/// The number of content cells in a hard-ended row: its length with the
+/// trailing run of fully-default blanks (the padding every row is filled
+/// with) excluded. A styled blank — e.g. a background-colored prompt
+/// segment — counts as content, so its color survives.
+///
+/// Only meaningful for a [`RowEnd::Hard`] row. A [`RowEnd::Soft`] row is full
+/// of content by definition, and a [`RowEnd::SoftWide`] row's final blank is a
+/// spacer standing in for the wide glyph on the next row, so neither may be
+/// measured this way.
+pub(crate) fn content_len(row: &[Cell]) -> usize {
+    let blank = Cell::blank();
+    row.iter()
+        .rposition(|cell| *cell != blank)
+        .map_or(0, |index| index + 1)
 }
 
 /// A fixed-size grid of cells, addressed `rows[row][col]`.

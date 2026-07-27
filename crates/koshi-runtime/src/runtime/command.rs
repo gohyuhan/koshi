@@ -298,9 +298,9 @@ impl Server {
     /// Turn a [`Rejection`] into a [`CommandResult::Rejected`] keyed to
     /// `command_id`.
     ///
-    /// Every rejection a handler or validation produces is built here, so this
-    /// is where one is logged. It is a warning: the command simply did not
-    /// apply, state is untouched, and the session carries on.
+    /// Every rejection a handler or validation produces is built here, and
+    /// logged here at `warn`: the command did not apply, state is untouched,
+    /// and the session carries on.
     fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
         tracing::warn!(
             command_id = %command_id,

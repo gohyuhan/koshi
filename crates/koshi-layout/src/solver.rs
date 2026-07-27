@@ -1,16 +1,14 @@
 //! Geometry solver: a layout tree plus a tab rectangle in, exact pane
 //! rectangles out.
 //!
-//! The tree is pure intent — structure and relative sizes — and this module
-//! is the only place geometry is computed from it. That split of roles is
-//! what makes terminal resizes cheap and safe: the tree never changes, the
-//! solver just runs again over the new rectangle.
+//! The tree is pure intent — structure and relative sizes — and this module is
+//! the only place geometry is computed from it. A terminal resize changes no
+//! tree; the solver runs again over the new rectangle.
 //!
 //! Solving is pure and deterministic: the same tree over the same rect always
-//! yields the same placement, so nothing flickers across renders. Every leaf
-//! appears in the result exactly once, in layout order, and the placed rects
-//! tile the tab exactly — a split's children always account for every cell of
-//! the split's own rectangle.
+//! yields the same placement. Every leaf appears in the result exactly once, in
+//! layout order, and the placed rects tile the tab exactly — a split's children
+//! always account for every cell of the split's own rectangle.
 //!
 //! ## Distribution order
 //!
@@ -150,9 +148,7 @@ pub fn solve_with_min(tree: &LayoutNode, tab_rect: Rect, min: Size) -> SolveResu
 /// and zero area to everyone else — without touching the tree, so leaving
 /// fullscreen restores the prior layout exactly. No stack headers are drawn
 /// over a fullscreen pane. A fullscreen mode pointing at a pane that is no
-/// longer in the tree is treated as stale and falls back to the tiled
-/// solve: the session stays visible with its normal grid instead of an
-/// empty screen, and the user can simply toggle fullscreen again.
+/// longer in the tree is stale and falls back to the tiled solve.
 #[must_use]
 pub fn solve_with_mode(tree: &LayoutNode, mode: LayoutMode, tab_rect: Rect) -> SolveResult {
     solve_with_mode_min(tree, mode, tab_rect, MIN_PANE_SIZE)
@@ -531,10 +527,9 @@ fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
 
 /// Place one collapsed stack member on its header strip.
 ///
-/// Members are panes by construction (the stack edits only ever add
-/// leaves). If a subtree somehow ends up collapsed in a stack, its first
-/// leaf stands in on the strip and the rest solve to zero — deterministic
-/// and unreachable through the public edits.
+/// Members are panes by construction: the stack edits only ever add leaves.
+/// If a subtree does end up collapsed in a stack, its first leaf stands in on
+/// the strip and the rest solve to zero.
 fn emit_header(
     child: &LayoutChild,
     header_rect: Rect,

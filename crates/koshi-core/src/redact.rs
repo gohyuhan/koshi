@@ -1,11 +1,9 @@
 //! Redaction helpers. A single place to scrub user data before it reaches logs,
 //! debug dumps, snapshots, or IPC watchers.
 //!
-//! The safety property is enforced by the type system, not by discipline at call
-//! sites: a [`RedactedValue::Hidden`] prints `***` in both `Display` and `Debug`,
-//! so no caller can accidentally format a sensitive value. `RedactedValue` is
-//! intentionally not `Serialize` — serializing a redacted map must go through a
-//! `Display`-based dump, never a derived encoder that could emit the inner value.
+//! A [`RedactedValue::Hidden`] prints `***` in both `Display` and `Debug`, so no
+//! formatting call can reveal a sensitive value. `RedactedValue` is not
+//! `Serialize`: a redacted map is dumped through `Display`.
 
 use std::collections::BTreeMap;
 
@@ -17,10 +15,9 @@ pub const REDACTED: &str = "***";
 /// A key is redacted if it *contains* any of these.
 const SENSITIVE_KEY_FRAGMENTS: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH"];
 
-/// The in-session capability token. Any process in a pane inherits it and can act
-/// as that pane, so it is always redacted. It already matches the
-/// `TOKEN` fragment; this explicit guard is defense-in-depth against future edits
-/// to [`SENSITIVE_KEY_FRAGMENTS`].
+/// The in-session capability token. Any process in a pane inherits it and can
+/// act as that pane, so it is always redacted — by this name and by the `TOKEN`
+/// fragment in [`SENSITIVE_KEY_FRAGMENTS`].
 const ALWAYS_HIDDEN_KEY: &str = "KOSHI_CONTEXT_TOKEN";
 
 /// An environment value after redaction. A `Hidden` value never reveals its

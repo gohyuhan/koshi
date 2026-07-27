@@ -116,8 +116,8 @@ impl Connection {
 
 /// Buffer for one outgoing frame: 4 placeholder length bytes, then the JSON
 /// payload as encoding produces it. Refuses the payload byte that crosses
-/// [`MAX_FRAME_LEN`], which stops the encoder mid-message, so building a
-/// frame never allocates past the cap no matter how large the message is.
+/// [`MAX_FRAME_LEN`], stopping the encoder mid-message, so building a frame
+/// never allocates past the cap.
 struct FrameBuffer {
     /// The frame being built: 4 placeholder bytes, then the payload so far.
     bytes: Vec<u8>,

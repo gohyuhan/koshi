@@ -30,9 +30,9 @@ use crate::snapshot::RenderSnapshot;
 /// [`hit_test`].
 ///
 /// Every variant names a region the renderer actually draws this frame; the
-/// caller decides what a click on each one does (focus, resize, forward — all in
-/// later steps). [`None`](HitRegion::None) is the letterbox margin, the
-/// too-small overlay, or a degenerate viewport: nothing to act on.
+/// caller decides what a click on each one does. [`None`](HitRegion::None) is
+/// the letterbox margin, the too-small overlay, or a degenerate viewport:
+/// nothing to act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitRegion {
     /// A pane's content area (inside its border) — the cells the program draws.
@@ -247,8 +247,8 @@ pub fn pane_local_cell(
 /// tabline window.
 ///
 /// The mouse-routing layer reads this to anchor a peek-drag and to step the
-/// window on a wheel scroll, resolving the same window the renderer draws and
-/// [`hit_test`] classifies — the tab-strip solve lives in one place.
+/// window on a wheel scroll. It resolves the same window the renderer draws and
+/// [`hit_test`] classifies.
 #[must_use]
 pub fn tabline_first_visible(snapshot: &RenderSnapshot) -> usize {
     let viewport = snapshot.client.viewport;

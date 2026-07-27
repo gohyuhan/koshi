@@ -251,8 +251,7 @@ impl TerminalState {
     /// **The screen decides which.** The scrollback belongs to the primary and
     /// is still there while the alternate is up, so pairing it with the
     /// alternate's grid would let a word or line grown from the alternate's top
-    /// row step up into the primary's text. Building the view here rather than
-    /// at each call site is what makes that impossible to write.
+    /// row step up into the primary's text.
     pub fn text_view(&self) -> TextView<'_> {
         match self.active {
             Screen::Primary => TextView::new(&self.scrollback, self.active_grid()),
@@ -266,9 +265,9 @@ impl TerminalState {
     /// `offset` clamped to the retained line count, and `0` on the alternate
     /// screen (which keeps no scrollback) or with no history to show.
     ///
-    /// This is the one place the clamp happens, so the composed grid, the scroll
-    /// indicator, cursor suppression, and the row a selection resolves to can
-    /// never disagree about how far back the view sits.
+    /// This is the one place the clamp happens; the composed grid, the scroll
+    /// indicator, cursor suppression, and the row a selection resolves to all
+    /// read it.
     pub fn effective_view_offset(&self, offset: usize) -> usize {
         if !matches!(self.active, Screen::Primary) {
             return 0;
@@ -285,17 +284,19 @@ impl TerminalState {
     /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
     /// with empty history. In every other case it is `offset` clamped to the
     /// retained line count, so an over-scrolled or stale value stops at the
-    /// oldest line and never indexes past it. Returning it here keeps the
-    /// composed grid, the scroll indicator, and cursor suppression from ever
-    /// disagreeing about whether the view is scrolled.
+    /// oldest line and never indexes past it. The composed grid, the scroll
+    /// indicator, and cursor suppression all read the returned value.
     ///
     /// A non-zero effective offset composes a fresh window `rows` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
     /// rows the top of the live grid, so a view scrolled that many lines up shows
-    /// that much history with the rest of the live screen below. History rows
-    /// captured at a narrower width are padded to the current width with the
-    /// primary screen's background ([`Style::bg_fill`]), the same fill every
-    /// erase and scroll uses.
+    /// that much history with the rest of the live screen below.
+    ///
+    /// History stores a row's text without the default blanks padding it out to
+    /// the screen width, so composing the window pads each row back out with
+    /// exactly those blanks — the ones that were dropped, not the running
+    /// program's current background. Live rows already span the full width, so
+    /// the fill only ever applies to history.
     pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
         let scrolled = self.effective_view_offset(offset);
         if scrolled == 0 {
@@ -318,11 +319,7 @@ impl TerminalState {
             .take(rows as usize)
             .collect();
         (
-            Arc::new(Grid::from_rows(
-                window,
-                cols,
-                self.primary_render.style.bg_fill(),
-            )),
+            Arc::new(Grid::from_rows(window, cols, Style::default())),
             scrolled,
         )
     }

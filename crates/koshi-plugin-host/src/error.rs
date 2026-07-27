@@ -1,10 +1,11 @@
-//! Plugin domain error. Classifies into [`koshi_core::error::DomainCategory::Plugin`].
+//! Plugin domain error: [`crate::error::PluginError`]. Every variant
+//! classifies as [`koshi_core::error::DomainCategory::Plugin`].
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-/// A failure loading or running a plugin. Recoverable: a failed plugin is
-/// isolated and disabled without crashing the session.
+/// A failure loading or running a plugin. Recoverable: the plugin is isolated
+/// and disabled, and the session keeps running.
 #[derive(Debug, Error)]
 pub enum PluginError {
     /// The plugin module could not be loaded or instantiated.
@@ -16,12 +17,12 @@ pub enum PluginError {
 }
 
 impl DomainError for PluginError {
-    /// Returns the error domain category: plugin failures are classified under [`koshi_core::error::DomainCategory::Plugin`].
+    /// Always [`DomainCategory::Plugin`].
     fn category(&self) -> DomainCategory {
         DomainCategory::Plugin
     }
 
-    /// Returns the error severity: plugin failures are recoverable, allowing the session to continue.
+    /// Always [`Severity::Recoverable`]; the session continues.
     fn severity(&self) -> Severity {
         Severity::Recoverable
     }

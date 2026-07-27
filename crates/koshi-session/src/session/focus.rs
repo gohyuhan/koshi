@@ -50,8 +50,8 @@ pub enum FocusRepairResult {
 /// `koshi_layout::focus::focus_candidates`); its `layout_order` is exactly the
 /// visible panes, so suppressed panes are already excluded and a pane is
 /// *eligible* when it appears there and is not [`PaneLifecycle::Removed`]. A
-/// dead (`Exited`) pane stays eligible on purpose: it is a visible, focusable
-/// placeholder, so focus may rest on it until it is actually removed.
+/// dead (`Exited`) pane stays eligible: it is a visible, focusable placeholder,
+/// so focus may rest on it until it is removed.
 ///
 /// When no pane is eligible, the result distinguishes the two empty cases by
 /// the tab's layout: panes still present but all suppressed yield

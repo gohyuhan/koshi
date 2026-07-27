@@ -497,3 +497,50 @@ fn autowrap_off_never_records_soft_ends() {
     assert_eq!(row_text(&e, 0), "abcdefgj");
     assert_eq!(row_end(&e, 0), RowEnd::Hard);
 }
+
+#[test]
+fn a_wrapped_row_keeps_its_link_when_it_scrolls_into_history() {
+    // One continuous line long enough to wrap across the whole screen and push
+    // its first row into history. Every row of it is a continuation, so every
+    // row end -- in history and on screen -- must stay Soft except the last.
+    //
+    // `delete_lines` force-marks the row sliding to the band's bottom `Hard`,
+    // which is right for a linefeed-driven scroll and wrong for a wrap-driven
+    // one; `wrap_linefeed` re-applies the real end afterwards. Without that
+    // repair, double-clicking a word straddling the boundary selects only its
+    // on-screen half.
+    let mut engine = engine(10, 3);
+    feed(&mut engine, "abcdefghijklmnopqrstuvwxyz0123456789");
+
+    let state = engine.state();
+    let history: Vec<RowEnd> = state
+        .scrollback()
+        .lines()
+        .iter()
+        .map(|(_, end)| *end)
+        .collect();
+    assert_eq!(history, vec![RowEnd::Soft]);
+
+    let grid = state.active_grid();
+    assert_eq!(grid.row_end(0), RowEnd::Soft);
+    assert_eq!(grid.row_end(1), RowEnd::Soft);
+    assert_eq!(grid.row_end(2), RowEnd::Hard);
+}
+
+#[test]
+fn a_linefeed_scroll_still_ends_its_row_hard() {
+    // The counterpart: content scrolled off by an explicit newline genuinely
+    // ends, so its history row must be Hard. Guards against "fix" the wrap case
+    // by making every boundary Soft.
+    let mut engine = engine(10, 3);
+    feed(&mut engine, "one\r\ntwo\r\nthree\r\nfour");
+
+    let state = engine.state();
+    let history: Vec<RowEnd> = state
+        .scrollback()
+        .lines()
+        .iter()
+        .map(|(_, end)| *end)
+        .collect();
+    assert_eq!(history, vec![RowEnd::Hard]);
+}

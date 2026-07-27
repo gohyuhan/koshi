@@ -13,13 +13,13 @@ pub enum TerminalError {
 }
 
 impl DomainError for TerminalError {
-    /// Returns the error category as Terminal.
+    /// Always [`DomainCategory::Terminal`].
     fn category(&self) -> DomainCategory {
         DomainCategory::Terminal
     }
 
-    /// Returns the severity as Recoverable, since malformed sequences are dropped
-    /// and emulation continues without crashing.
+    /// Always [`Severity::Recoverable`]; a malformed sequence is dropped and
+    /// emulation continues.
     fn severity(&self) -> Severity {
         Severity::Recoverable
     }

@@ -25,40 +25,59 @@
 //!   row 1023  ─┘
 //! ```
 //!
-//! The point of counting this way is that **the number never changes meaning**.
-//! Ten lines of output arrive: `total_pushed` becomes 1010, the live screen's
-//! top row is 1010, and the line that was row 1000 is *still* row 1000 — it just
-//! lives in history now. The cap drops the ten oldest: the first reachable row
-//! becomes 510, and every surviving line kept its number. So a selection is
-//! stored once and never re-anchored; a row that has been dropped is out of
-//! [`TextView::first_row`]`..=`[`TextView::last_row`] and reads as [`None`],
-//! which is a question about what still exists rather than about what the number
-//! means.
+//! **The number never changes meaning.** Ten lines of output arrive:
+//! `total_pushed` becomes 1010, the live screen's top row is 1010, and the line
+//! that was row 1000 is *still* row 1000 — it just lives in history now. The cap
+//! drops the ten oldest: the first reachable row becomes 510, and every
+//! surviving line kept its number. So a selection is stored once and never
+//! re-anchored, and a dropped row falls outside
+//! [`TextView::first_row`]`..=`[`TextView::last_row`] and reads as [`None`].
 //!
 //! # Word boundaries
 //!
 //! A double-click grows the selection to a whole "word", but a terminal's idea
-//! of a word is not an editor's. [`WORD_SEPARATORS`] deliberately leaves out
-//! `/`, `.`, `-`, and `_`, so double-clicking `/usr/local/bin` selects the whole
-//! path and `foo.tar.gz` comes out whole — paths and URLs are what people
-//! actually double-click in a terminal.
+//! of a word is not an editor's. [`WORD_SEPARATORS`] leaves out `/`, `.`, `-`,
+//! and `_`, so double-clicking `/usr/local/bin` selects the whole path and
+//! `foo.tar.gz` comes out whole.
 
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
 
 use crate::grid::state::{Cell, Grid, RowEnd};
 use crate::scrollback::Scrollback;
 
+/// The cell a column past a stored row's end reads as.
+///
+/// History keeps a row's text without the default blanks padding it out to the
+/// screen width, so a column right of a history line's last character has no
+/// stored cell. This stands in for one of those dropped blanks, so a walk over
+/// a row sees the full screen width either way.
+static PADDING: LazyLock<Cell> = LazyLock::new(Cell::blank);
+
+/// The cell at `col` of `cells`, treating a row shorter than `cols` as if the
+/// blanks trimmed off its end were still there. `None` past `cols`, where the
+/// screen itself ends.
+///
+/// A history row holding `hi` on an 80-column screen answers `h`, `i`, then a
+/// blank for columns 2 through 79, then `None`.
+fn cell_or_padding(cells: &[Cell], col: u16, cols: u16) -> Option<&Cell> {
+    match cells.get(col as usize) {
+        Some(cell) => Some(cell),
+        None if col < cols => Some(&PADDING),
+        None => None,
+    }
+}
+
 /// The characters that end a word for a double-click selection.
 ///
 /// Whitespace, quotes, brackets, and the shell's own punctuation stop a word;
 /// `/`, `.`, `-`, and `_` do not, so a path, a URL, or a dotted filename is one
 /// word. Double-clicking `local` in `/usr/local/bin` selects `/usr/local/bin`;
-/// double-clicking inside `(foo bar)` selects `foo` alone, because the space and
-/// the parentheses are separators. Double-clicking a separator itself selects
-/// the run of that same character — the two spaces in `foo  bar`, not the words
-/// around them.
+/// double-clicking inside `(foo bar)` selects `foo` alone. Double-clicking a
+/// separator itself selects the run of that same character — the two spaces in
+/// `foo  bar`, not the words around them.
 pub const WORD_SEPARATORS: &str = ",│`|:\"' ()[]{}<>\t";
 
 /// One pane's text — its scrollback history and its live screen — addressed by
@@ -81,10 +100,9 @@ impl<'a> TextView<'a> {
     /// the primary screen.
     ///
     /// **Only for the primary screen.** The alternate screen keeps no history of
-    /// its own while `scrollback` still holds the *primary's*, so pairing the two
-    /// would let a walk step off the alternate's top row into text from another
-    /// screen entirely. Use [`screen_only`](Self::screen_only) there —
-    /// [`TerminalState::text_view`] picks the right one.
+    /// its own while `scrollback` still holds the *primary's*. Use
+    /// [`screen_only`](Self::screen_only) there; [`TerminalState::text_view`]
+    /// picks the right one.
     ///
     /// [`TerminalState::text_view`]: crate::state::TerminalState::text_view
     #[must_use]
@@ -164,11 +182,16 @@ impl<'a> TextView<'a> {
     }
 
     /// The cell at `row`/`col`, or `None` if the row is gone or the column is
-    /// past the end of it.
+    /// past the screen width.
+    ///
+    /// A history row is stored without the default blanks that padded it out to
+    /// the screen width, so a column right of its text has no stored cell and
+    /// reads as one of those blanks. Every column of every live row addresses a
+    /// cell, so the fallback only ever answers for history.
     #[must_use]
     pub fn cell(&self, row: u64, col: u16) -> Option<&'a Cell> {
         let (cells, _) = self.row(row)?;
-        cells.get(col as usize)
+        cell_or_padding(cells, col, self.cols())
     }
 
     /// Whether `row` continues onto the row below it because the text wrapped
@@ -222,9 +245,10 @@ impl<'a> TextView<'a> {
 
     /// Whether the cell at `row`/`col` ends a word.
     ///
-    /// A cell holding one of [`WORD_SEPARATORS`] ends a word, and so does a row
-    /// short enough that the column is past its end — there is no text there to
-    /// be part of one.
+    /// A cell holding one of [`WORD_SEPARATORS`] ends a word, and so does a
+    /// column past the screen width, where there is no text to be part of one.
+    /// A column right of a history line's text reads as a blank, and a blank is
+    /// itself a separator.
     fn is_separator(&self, row: u64, col: u16) -> bool {
         self.cell(row, col)
             .is_none_or(|cell| WORD_SEPARATORS.contains(cell.ch()))
@@ -363,12 +387,13 @@ pub fn selection_text(
 ) -> String {
     let ordered = order(selection.anchor, selection.cursor);
     let (start, end) = (ordered.start, ordered.end);
-    let last_col = view.cols().saturating_sub(1);
+    let cols = view.cols();
+    let last_col = cols.saturating_sub(1);
     let block = matches!(selection.kind, SelectionKind::Block);
     let mut out = String::new();
     let mut any_row_written = false;
     for row in start.row..=end.row {
-        let Some((cells, _)) = view.row(row) else {
+        let Some((cells, row_end)) = view.row(row) else {
             continue;
         };
         let (from, to) = if block {
@@ -385,16 +410,23 @@ pub fn selection_text(
         any_row_written = true;
         let mut line = String::new();
         for col in from..=to {
-            let Some(cell) = cells.get(col as usize) else {
+            // The row is resolved once above, so this reads its cells and its
+            // end directly.
+            let Some(cell) = cell_or_padding(cells, col, cols) else {
                 break;
             };
-            if cell.width() == 0 || view.is_wide_wrap_spacer(row, col) {
+            // Skipped: the blank right half of a wide glyph, whose text lives
+            // in its left half, and the spacer left in the last column when a
+            // wide glyph wrapped whole onto the next row. Both are layout.
+            let wrap_spacer = row_end == RowEnd::SoftWide && usize::from(col) + 1 == cells.len();
+            if cell.width() == 0 || wrap_spacer {
                 continue;
             }
             line.push(cell.ch());
             line.extend(cell.combining());
         }
-        if trim_trailing_whitespace && (block || !view.wraps(row)) {
+        let wraps = matches!(row_end, RowEnd::Soft | RowEnd::SoftWide);
+        if trim_trailing_whitespace && (block || !wraps) {
             out.push_str(line.trim_end());
         } else {
             out.push_str(&line);

@@ -25,10 +25,7 @@ use subtle::ConstantTimeEq;
 /// [`IpcRequestKind::Hello`] names a different version is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// Any change to the shape of a wire struct bumps this: the version is the
-/// only thing standing between two builds that no longer agree on the
-/// bytes. The version stays 1 until the first release ships; from then on
-/// every wire-shape change bumps it in the same commit.
+/// Any change to the shape of a wire struct bumps this, in the same commit.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The secret a connection presents to prove it belongs to the user who
@@ -40,10 +37,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// Two ways out of this type, and only two:
 ///
-/// - `Serialize` and [`expose`](Self::expose) write the **real secret**. They
-///   exist for the endpoint file and the socket, which cannot work without it.
-///   `serde_json::to_string(&hello)` yields `{"protocol_version":1,
-///   "token":"k7Qx…"}`, secret included.
+/// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
+///   the endpoint file and the socket. `serde_json::to_string(&hello)` yields
+///   `{"protocol_version":1, "token":"k7Qx…"}`, secret included.
 /// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
@@ -115,7 +111,7 @@ impl fmt::Display for ConnectionToken {
 /// One message from a caller to a running Koshi.
 ///
 /// Decoding rejects any field it does not know, so a misspelled name is an
-/// error rather than a field that quietly keeps its default.
+/// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcRequest {
@@ -165,9 +161,8 @@ impl IpcRequestKind {
 
 /// One message answering an [`IpcRequest`].
 ///
-/// Decoding rejects any field it does not know. `request_id` carries meaning
-/// when it is absent, so a misspelled `request_id` must fail loudly instead of
-/// reading as the "could not be read" answer.
+/// Decoding rejects any field it does not know. An absent `request_id` means
+/// the request could not be read, so a misspelled one is an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcResponse {

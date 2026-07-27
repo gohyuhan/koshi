@@ -1,8 +1,8 @@
 //! Layout normalization: bring a tree back to canonical shape after edits.
 //!
-//! Edits deliberately leave debris — removal keeps unary splits, splitting
-//! nests same-direction splits — so each edit stays small and obviously
-//! correct. Normalization is the one pass that cleans all of it up:
+//! Edits leave debris: removal keeps unary splits, splitting nests
+//! same-direction splits. Normalization is the one pass that cleans all of it
+//! up:
 //!
 //! - leaves referencing dead panes are dropped,
 //! - emptied splits are pruned,

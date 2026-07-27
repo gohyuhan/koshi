@@ -15,11 +15,11 @@
 //! `koshi-runtime` -> `koshi-plugin-host` -> `wasmtime`), and the real failure
 //! mode this guards against is a stray `cargo add` in the wrong crate.
 //!
-//! The architecture's full per-crate dependency matrix is intentionally *not*
-//! encoded here: it would require editing this file on every PR that adds a
-//! legitimate internal dependency, and several of its edges are interpretation.
-//! Cargo already rejects dependency cycles; this guard covers the two things it
-//! does not — foundation isolation and heavy-dependency containment.
+//! The architecture's full per-crate dependency matrix is *not* encoded here:
+//! it would mean editing this file on every PR that adds a legitimate internal
+//! dependency, and several of its edges are a judgment call. Cargo already
+//! rejects dependency cycles; this guard covers the two things it does not —
+//! foundation isolation and heavy-dependency containment.
 //!
 //! Both regular and dev-dependencies are checked, so test-only coupling cannot
 //! quietly cross an isolation line either. A dev-dependency on a test-support

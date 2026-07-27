@@ -35,7 +35,7 @@ use koshi_core::ids::{ClientId, SessionId};
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
-use koshi_pty::backend::state::PtyBackend;
+use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
 use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
@@ -44,6 +44,7 @@ use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::pty_forward::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_terminal::state::CursorShape;
 
@@ -141,7 +142,12 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Build the server. The cleanup guard stays out of it — the outer
     // terminal is the client's, so the client built below holds the guard.
     let (inbox_tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::new());
+    // Panes deliver their child's output straight into this inbox from their own
+    // PTY reader threads. Handing the backend the sink is what keeps a session's
+    // thread count flat as panes are added: without it every pane also needs a
+    // thread whose whole job is moving chunks from the pane's channel to here.
+    let pty_sink: Arc<dyn PtySink> = Arc::new(InboxSink::new(inbox_tx.clone()));
+    let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::with_sink(pty_sink));
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let mut server = Server::new(
@@ -283,35 +289,38 @@ fn teardown<E>(server: &mut Server, outcome: thread::Result<Result<(), E>>) -> R
 /// Block on crossterm events and forward decoded keys plus every terminal
 /// resize into the server inbox. Read failure means terminal hangup and quits.
 fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId) {
-    thread::spawn(move || loop {
-        let runtime_event = match event::read() {
-            Ok(Event::Key(key)) => {
-                let Some(chord) = decode_key(key) else {
-                    continue;
-                };
-                Some(RuntimeEvent::KeyInput { client_id, chord })
+    let _ = thread::Builder::new()
+        .name("koshi-input".to_string())
+        .spawn(move || loop {
+            let runtime_event = match event::read() {
+                Ok(Event::Key(key)) => {
+                    let Some(chord) = decode_key(key) else {
+                        continue;
+                    };
+                    Some(RuntimeEvent::KeyInput { client_id, chord })
+                }
+                Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
+                    client_id,
+                    size: Size { cols, rows },
+                }),
+                Ok(Event::Mouse(mouse)) => Some(RuntimeEvent::MouseInput {
+                    client_id,
+                    mouse: decode_mouse(mouse),
+                }),
+                // The outer terminal pasted (the OS paste key): the text arrives
+                // whole, so no character of it can fire a keybinding.
+                Ok(Event::Paste(text)) => Some(RuntimeEvent::HostPaste { client_id, text }),
+                Ok(_) => None,
+                Err(_) => Some(RuntimeEvent::Quit),
+            };
+            if let Some(runtime_event) = runtime_event {
+                let quit = matches!(runtime_event, RuntimeEvent::Quit);
+                if inbox_tx.send(runtime_event).is_err() || quit {
+                    break;
+                }
             }
-            Ok(Event::Resize(cols, rows)) => Some(RuntimeEvent::Resize {
-                client_id,
-                size: Size { cols, rows },
-            }),
-            Ok(Event::Mouse(mouse)) => Some(RuntimeEvent::MouseInput {
-                client_id,
-                mouse: decode_mouse(mouse),
-            }),
-            // The outer terminal pasted (the OS paste key): the text arrives
-            // whole, so no character of it can fire a keybinding.
-            Ok(Event::Paste(text)) => Some(RuntimeEvent::HostPaste { client_id, text }),
-            Ok(_) => None,
-            Err(_) => Some(RuntimeEvent::Quit),
-        };
-        if let Some(runtime_event) = runtime_event {
-            let quit = matches!(runtime_event, RuntimeEvent::Quit);
-            if inbox_tx.send(runtime_event).is_err() || quit {
-                break;
-            }
-        }
-    });
+        })
+        .expect("spawn terminal input thread");
 }
 
 /// The event loop: block until an event is due (bounded by the next render

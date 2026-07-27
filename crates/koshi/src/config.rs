@@ -3,9 +3,8 @@
 //! Discovers the config directory and reads the per-section files —
 //! `koshi.kdl` (app settings), the color theme `koshi.kdl` names,
 //! `keybinding.kdl` (key bindings) — parsing each into its override layer for
-//! the runtime to apply. This is the file I/O half the parsers deliberately
-//! leave out; the runtime's reload transactions own turning a parsed layer
-//! into live state.
+//! the runtime to apply. This is the file I/O half the parsers leave out; the
+//! runtime's reload transactions own turning a parsed layer into live state.
 //!
 //! Themes are a folder, not a file: each one is a `themes/<name>.kdl`, and
 //! `koshi.kdl`'s `theme "<name>"` line picks which. The name `default`, a
@@ -125,14 +124,10 @@ fn load_app(path: &Path, warnings: &mut Vec<String>) -> Option<AppConfigFile> {
 /// Returns `None`, which leaves koshi's built-in colors in place, when `name`
 /// is [`DEFAULT_THEME`], is not a plain file name, or names a file that is
 /// absent, unreadable, or fails to parse. Every one of those but the first is
-/// recorded in `warnings`: asking for the built-in theme by name is a normal
-/// choice, while asking for a theme koshi could not load is a surprise the
-/// user should see explained.
+/// recorded in `warnings`.
 ///
-/// Unlike the files loaded by [`read`], the theme file is opened directly and
-/// its absence reported: `koshi.kdl` and `keybinding.kdl` are optional, so
-/// missing is silent and normal there, but a theme koshi was *told* to use and
-/// cannot find is worth a line in the log.
+/// The theme file is opened directly and its absence reported, where a missing
+/// `koshi.kdl` or `keybinding.kdl` is silent — those two are optional.
 fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<PartialThemeConfig> {
     if name == DEFAULT_THEME {
         return None;

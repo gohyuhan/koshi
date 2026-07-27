@@ -8,10 +8,9 @@
 //!
 //! Events are append-only facts, never hidden commands — nothing here requests
 //! a mutation. Events cross process boundaries (IPC watchers, plugin host,
-//! storage), so every variant and payload contains only serde-friendly,
-//! cross-process-meaningful types. **No `Instant`** — it is not `Serialize` and
-//! is opaque across processes; timestamps use `SystemTime`. No raw OS handles
-//! and no `&mut` references.
+//! storage), so every variant and payload holds only serde-friendly types that
+//! mean the same thing in another process. No `Instant` — timestamps use
+//! `SystemTime`. No raw OS handles and no `&mut` references.
 //!
 //! Privacy is structural: each input payload variant encodes the classified
 //! context and the resulting [`PrivacyTier`] together, and every non-public
@@ -118,9 +117,8 @@ pub enum Event {
     // Selection and copy.
     /// The active selection changed (or was cleared).
     ///
-    /// There is no separate entered/exited event: a selection appearing IS
-    /// entering visual mode and it clearing IS leaving, so this one event
-    /// already carries the fact.
+    /// There is no separate entered/exited event: a selection appearing is
+    /// entering visual mode, and it clearing is leaving.
     SelectionChanged(SelectionChanged),
     /// A selection was copied to a clipboard target.
     Copied(Copied),
@@ -273,8 +271,7 @@ pub struct TabClosed {
 /// Payload for [`Event::TabFocused`].
 ///
 /// A client's active tab is per-client state, so the payload names the client
-/// whose view switched — with several clients attached, `tab_id` alone could
-/// not say whose.
+/// whose view switched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabFocused {
     /// The client whose active tab changed.
@@ -355,10 +352,10 @@ pub struct ConfigReloadFailed {
 
 /// The input mode a client is in.
 ///
-/// Visual mode is deliberately absent: an input mode decides what a keystroke
-/// does, and visual mode never interprets one — every key clears the selection
-/// and reaches the program. Highlighted text is reported by
-/// [`Event::SelectionChanged`], not here.
+/// Visual mode is not one of these: a highlight changes nothing about how a key
+/// is interpreted. A key bound to a koshi shortcut still fires it; a key that
+/// reaches the pane's program clears that pane's highlight on the way. The
+/// highlight itself is reported by [`Event::SelectionChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
     /// Normal keybinding interpretation.
@@ -392,10 +389,9 @@ pub struct KeybindingMatched {
 
 /// The privacy tier the runtime computes for an input event before delivery.
 ///
-/// Tier is authoritative over plugin capability: capability can only narrow
-/// what a subscriber sees, never widen past the tier. [`SensitiveBlocked`] is a
-/// unit variant by design — it carries no content, so sensitive text cannot be
-/// attached to an event that must never leave core.
+/// Tier wins over plugin capability: a capability can only narrow what a
+/// subscriber sees, never widen past the tier. [`SensitiveBlocked`] is a unit
+/// variant and carries no content.
 ///
 /// [`SensitiveBlocked`]: PrivacyTier::SensitiveBlocked
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,8 +430,8 @@ pub enum TypedPayload {
 }
 
 impl TypedPayload {
-    /// The [`PrivacyTier`] this payload encodes. Delivery and filtering compare
-    /// against this single mapping instead of re-matching the variants.
+    /// The [`PrivacyTier`] this payload encodes. Delivery and filtering read it
+    /// from here.
     #[must_use]
     pub const fn tier(&self) -> PrivacyTier {
         match self {
@@ -705,8 +701,7 @@ pub struct CommandRejected {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionChanged {
     /// The client whose selection changed. A selection belongs to one client:
-    /// two clients viewing the same pane select independently, so the pane
-    /// alone cannot say whose selection this is.
+    /// two clients viewing the same pane select independently.
     pub client_id: ClientId,
     /// The pane the selection is in.
     pub pane_id: PaneId,
@@ -719,9 +714,8 @@ pub struct SelectionChanged {
 /// Carries only the byte length of the copied text, never the text itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Copied {
-    /// The client that copied. A copy belongs to one client, and for
-    /// [`CopyTarget::Osc52`] it names the terminal that received the escape:
-    /// OSC 52 reaches one client's outer terminal, not every attached one.
+    /// The client that copied. For [`CopyTarget::Osc52`] this names the one
+    /// outer terminal the escape reached.
     pub client_id: ClientId,
     /// The pane the text was copied from.
     pub pane_id: PaneId,

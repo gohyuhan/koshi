@@ -11,8 +11,7 @@ use koshi_core::ids::PaneId;
 use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 
 /// Owns the [`PaneRecord`] of every pane in one session, keyed by id. The map
-/// is private: records go in and out only through the methods below, so the
-/// "one id, one record" invariant has a single chokepoint.
+/// is private; records go in and out only through the methods below.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaneRegistry {
     records: HashMap<PaneId, PaneRecord>,
@@ -52,10 +51,9 @@ impl PaneRegistry {
     /// Mutable access to a record for in-place field edits (title, lifecycle,
     /// exit status, …).
     ///
-    /// `id` is read-only — the record exposes it through [`PaneRecord::id`] but
-    /// not as a mutable field — so a record can never desync from its map key
-    /// through this handle. Changing a pane's id is therefore a remove under the
-    /// old id followed by an insert under the new one, never an in-place edit.
+    /// `id` is read-only: the record exposes it through [`PaneRecord::id`] but
+    /// not as a mutable field. Changing a pane's id is a remove under the old id
+    /// followed by an insert under the new one.
     pub fn get_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.records.get_mut(&pane_id)
     }

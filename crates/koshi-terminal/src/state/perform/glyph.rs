@@ -23,14 +23,12 @@ impl TerminalState {
     /// event (control bytes, CSI / ESC / OSC, DCS hook/unhook), since anything
     /// other than a printed glyph ends the run a continuation could attach to.
     ///
-    /// One edge is deliberately not covered: a malformed CSI that vte routes to
-    /// its internal `CsiIgnore` state (e.g. `CSI 1 < m`, a private marker after a
-    /// parameter) terminates straight to ground with NO `Perform` callback at
-    /// all, so there is nothing to hook here. A combining mark printed afterward
-    /// folds onto the preceding glyph — which matches xterm/alacritty, since the
-    /// ignored sequence neither moved the cursor nor printed, so the mark still
-    /// belongs to the cell left of the (unmoved) cursor. Harmless (the base cell
-    /// is bounds-checked); flagged here so it is a known, accepted behavior.
+    /// One edge is not covered: a malformed CSI that vte routes to its internal
+    /// `CsiIgnore` state (e.g. `CSI 1 < m`, a private marker after a parameter)
+    /// terminates straight to ground with no `Perform` callback, so there is
+    /// nothing to hook. A combining mark printed afterward folds onto the
+    /// preceding glyph, matching xterm/alacritty: the ignored sequence neither
+    /// moved the cursor nor printed.
     pub(super) fn reset_cluster(&mut self) {
         self.cluster.clear();
         self.cluster_base = None;
@@ -222,13 +220,12 @@ impl TerminalState {
 
     /// Install `base` at (`row`, `col`), first clearing any wide glyph the write
     /// would split so the wide-pair invariant always holds. This is the single
-    /// path EVERY base/continuation write goes through (a fresh base, an in-place
-    /// widen, a wrapped widen), so no call site can forget to clear and orphan a
-    /// half. `base` already carries its display width (1 or 2), character,
-    /// combining marks, and style. A width-2 base also lays its width-0
-    /// continuation placeholder at `col + 1` (after clearing whatever pair sat
-    /// there); a width-1 base writes `col` alone. Cursor and cluster bookkeeping
-    /// stay with the caller, since they differ per write site.
+    /// path EVERY base/continuation write goes through: a fresh base, an
+    /// in-place widen, a wrapped widen. `base` already carries its width (1 or
+    /// 2), character, combining marks, and style. A width-2 base also lays its
+    /// width-0 continuation placeholder at `col + 1`, after clearing whatever
+    /// pair sat there; a width-1 base writes `col` alone. Cursor and cluster
+    /// bookkeeping stay with the caller, since they differ per write site.
     pub(super) fn place_glyph(&mut self, row: u16, col: u16, base: Cell) {
         let (_, cols) = self.active_grid().dimensions();
         // A wide glyph needs its continuation column in bounds. In a pane too
@@ -277,8 +274,7 @@ impl TerminalState {
     /// with no continuation to its right, or a continuation with no base to its
     /// left — is blanked in the current pen background. Scanned left-to-right so
     /// a freshly blanked base cascades to clear its now-orphaned continuation on
-    /// the next column. Keeps a renderer (or later logic) that trusts `width`
-    /// from drawing an erased wide glyph or a stray continuation.
+    /// the next column.
     pub(super) fn normalize_wide_pairs(&mut self, row: u16) {
         let (_, cols) = self.active_grid().dimensions();
         let fill = self.active_render().style.bg_fill();

@@ -1,9 +1,9 @@
 //! Process lifecycle and spawn types.
 //!
 //! These types live in `koshi-core` so the PTY layer, pane layer, and session
-//! close policy all share one definition. They are intentionally cell-agnostic
-//! and OS-agnostic: how a [`KillPolicy`] maps to actual signals or Win32 calls
-//! is the PTY layer's concern, not this module's.
+//! close policy all share one definition. They are OS-agnostic: how a
+//! [`KillPolicy`] maps to actual signals or Win32 calls is the PTY layer's
+//! concern.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -140,9 +140,10 @@ impl SpawnSpec {
 
 /// Pick the shell program path from an environment variable's value: the value
 /// when present and non-empty, else `fallback`. A set-but-empty variable
-/// (`SHELL=`) is treated as unset, so the returned path is never empty. Split out
-/// from [`SpawnSpec::default_shell`] so the fallback logic is testable without
-/// mutating the process environment.
+/// (`SHELL=`) is treated as unset, so the returned path is never empty.
+///
+/// Kept separate from [`SpawnSpec::default_shell`] so the fallback is testable
+/// without mutating the process environment.
 fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathBuf {
     PathBuf::from(
         env_value
@@ -153,8 +154,8 @@ fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathB
 
 /// A PTY window size in cells.
 ///
-/// Mirrors the cell semantics of `geometry::Size` but is a distinct type so the
-/// PTY dimension is never accidentally interchanged with a grid `Size`.
+/// Same cell semantics as `geometry::Size`, but a distinct type that does not
+/// interchange with a grid `Size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PtySize {
     /// Width in cells (columns).
@@ -165,8 +166,7 @@ pub struct PtySize {
 
 /// Serialize a [`Duration`] as a whole number of seconds.
 ///
-/// `KillPolicy` timeouts are coarse, so the sub-second part is intentionally
-/// dropped on the wire; this keeps the serialized form a plain integer.
+/// The sub-second part is dropped, so the serialized form is a plain integer.
 pub mod duration_secs {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;

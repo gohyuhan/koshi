@@ -2,11 +2,10 @@
 //! runtime hands to the renderer.
 //!
 //! The runtime owns the live, mutating state (sessions, tabs, panes, terminal
-//! grids, cursor, focus, layout). The renderer only draws. To keep those two
-//! apart — no mid-frame tearing, no renderer-driven mutation — the runtime
-//! freezes the current instant into a [`RenderSnapshot`] and passes it over.
-//! The renderer reads the snapshot and nothing else; it cannot reach the
-//! engine, so it cannot change it.
+//! grids, cursor, focus, layout). The renderer only draws. The runtime freezes
+//! the current instant into a [`RenderSnapshot`] and passes it over; the
+//! renderer reads the snapshot and nothing else, so it cannot reach or change
+//! the engine.
 //!
 //! Everything here is a plain data package: scalar copies of the live state,
 //! plus the screen [`Grid`] behind an [`Arc`] so cloning a built snapshot
@@ -179,10 +178,8 @@ pub struct PaneSnapshot {
 /// visible row.
 ///
 /// The highlight is resolved to the rendered window's own rows and columns
-/// before it gets here, so the renderer never has to know how a selection is
-/// stored or how far the view is scrolled — it paints the rows it is handed.
-/// Rows are in ascending order, and a row the highlight does not touch has no
-/// entry.
+/// before it gets here, so the renderer paints the rows it is handed. Rows are
+/// in ascending order, and a row the highlight does not touch has no entry.
 ///
 /// A highlight running from mid-way along row 4 to mid-way along row 6 of an
 /// 80-column pane arrives as `[(4, 12, 79), (5, 0, 79), (6, 0, 33)]`: the first
@@ -227,10 +224,9 @@ pub struct CursorSnapshot {
 
 /// How the outer terminal's cursor should look for one frame.
 ///
-/// The distinction that matters is between a pane that *asked* for a look and a
-/// pane that asked for nothing: only the first may override the cursor the user
-/// configured in their own terminal. A plain shell never sends DECSCUSR, so
-/// focusing one must not repaint the user's blinking bar into a steady block.
+/// Only a pane that asked for a look overrides the cursor the user configured
+/// in their own terminal. A plain shell never sends DECSCUSR, so focusing one
+/// leaves the user's cursor alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     /// The pane asked for no style — the user's own configured cursor stands.
@@ -352,7 +348,7 @@ pub struct HintBinding {
 }
 
 /// Plugin-contributed UI for one frame. All slots are empty for a stock,
-/// plugin-free Koshi; UI tasks populate them once the plugin host lands.
+/// plugin-free Koshi.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PluginUiSnapshot {
     /// Segments injected into the statusline slots.
@@ -365,23 +361,21 @@ pub struct PluginUiSnapshot {
     pub overlays: Vec<OverlayView>,
 }
 
-/// A plugin-contributed statusline or tabline segment. Placeholder shape; UI
-/// tasks flesh it out.
+/// A plugin-contributed statusline or tabline segment. Placeholder shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// The segment's rendered text.
     pub text: String,
 }
 
-/// A plugin-contributed notification. Placeholder shape; UI tasks flesh it out.
+/// A plugin-contributed notification. Placeholder shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationView {
     /// The notification's rendered text.
     pub text: String,
 }
 
-/// A plugin-contributed floating overlay. Placeholder shape; UI tasks flesh it
-/// out.
+/// A plugin-contributed floating overlay. Placeholder shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayView {
     /// The overlay's rendered text.

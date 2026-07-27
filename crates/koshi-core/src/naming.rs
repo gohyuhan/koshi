@@ -7,8 +7,7 @@
 //! or `T`) and the adjective and noun come from the same language's
 //! 50-entry word lists — English, Japanese, or Traditional Chinese — e.g.
 //! `T-swift-otter`, `T-しずか-りす`, or `T-快樂-書房`. A name never mixes
-//! languages. Names render at the UI layer (never inside a PTY grid), so the
-//! mixed scripts carry no terminal-width constraint here.
+//! languages. Names render at the UI layer, never inside a PTY grid.
 //!
 //! The pick is random: each call starts at a random combination and walks the
 //! language x adjective x noun space in a coprime stride from there, returning
@@ -304,9 +303,8 @@ fn generate_name_from(kind: NameKind, is_taken: impl Fn(&str) -> bool, start: us
     }
 }
 
-/// A random index in `0..bound`, drawn from the standard library's randomly
-/// seeded hasher state — each call builds a fresh [`RandomState`] and uses its
-/// hash output as the entropy source, so no external RNG dependency is needed.
+/// A random index in `0..bound`. Each call builds a fresh [`RandomState`] and
+/// uses its hash output as the entropy source.
 fn random_index(bound: usize) -> usize {
     let entropy = RandomState::new().build_hasher().finish();
     (entropy % bound as u64) as usize

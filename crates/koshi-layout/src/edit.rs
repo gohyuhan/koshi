@@ -3,8 +3,7 @@
 //!
 //! Every edit is pure: it borrows the current tree and returns a new one,
 //! leaving the input untouched. A failed edit returns an error and changes
-//! nothing, so callers can validate-and-apply in one step — there is no
-//! half-edited tree to roll back.
+//! nothing; there is no half-edited tree.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
@@ -164,8 +163,7 @@ pub struct RemovalInfo {
     /// focus-repair candidate — it visually took over the closed pane's
     /// space — and together the entries cover every pane whose PTY needs a
     /// resize. Collapsed stack members are never listed: their one-row
-    /// header strip is Koshi-owned chrome, not pane content, so crossing the
-    /// old rect with it neither absorbs space nor makes a focus target.
+    /// header strip is Koshi-owned chrome, not pane content.
     pub absorbed_by: Vec<PaneId>,
 }
 
@@ -187,8 +185,7 @@ pub struct RemovalInfo {
 /// `tab_rect` is the rect the tree currently solves into; it anchors the
 /// returned [`RemovalInfo`] geometry. `min` is the effective per-pane minimum
 /// content size, so the before/after solves here agree with the caller's own
-/// solve on which panes are suppressed — the removed pane's `old_rect` and the
-/// absorbers are measured against the same floor the tab is displayed at.
+/// solve on which panes are suppressed.
 ///
 /// # Errors
 ///

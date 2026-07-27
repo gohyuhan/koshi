@@ -19,10 +19,8 @@
 //! Three kinds are left out.
 //!
 //! - **Faster than a person acts** — terminal content ticking over, a mouse
-//!   moving, a key resolving to a command, a window edge being dragged. One
-//!   session would bury the file in thousands of them. They belong in the
-//!   in-memory event ring (`koshi debug events`), which is built for that
-//!   volume.
+//!   moving, a key resolving to a command, a window edge being dragged. They go
+//!   to the in-memory event ring (`koshi debug events`) instead.
 //! - **Announcements** — an event whose completion has its own event, so one
 //!   user action stays one line. [`koshi_core::event::Event::PaneClosing`]
 //!   starts what [`koshi_core::event::Event::PaneRemoved`] finishes; only the

@@ -5,9 +5,9 @@
 //! rectangles — only these relative constraints — so the same tree re-solves
 //! cleanly at any terminal size.
 //!
-//! The constraint vocabulary is complete from day one: declarative layouts
-//! need the full set, and adding kinds later would force a solver rewrite.
-//! All sizing is discrete cell math; nothing is stored as a bare percentage.
+//! Every variant is kept even where unused: adding a kind later forces a solver
+//! rewrite. All sizing is discrete cell math; nothing is stored as a bare
+//! percentage.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,8 @@ pub enum SizeConstraint {
 }
 
 /// A rejected constraint value. Construction is the validation boundary:
-/// values from config or commands go through the constructors below, so a
-/// constraint that exists is always meaningful to the solver.
+/// values from config or commands go through the constructors below, so every
+/// constraint that exists is solvable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ConstraintError {
     /// A flex weight of zero would claim no share at all.

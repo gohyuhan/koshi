@@ -67,9 +67,9 @@ fn line_bytes_skips_wide_glyph_continuation_placeholders() {
 #[test]
 fn pushing_within_both_caps_retains_every_row_in_order() {
     let mut sb = bounded(10, 1000);
-    sb.push_line(line("one"), RowEnd::Hard);
-    sb.push_line(line("two"), RowEnd::Hard);
-    sb.push_line(line("three"), RowEnd::Hard);
+    sb.push_row(&line("one"), RowEnd::Hard);
+    sb.push_row(&line("two"), RowEnd::Hard);
+    sb.push_row(&line("three"), RowEnd::Hard);
     assert_eq!(sb.len(), 3);
     assert_eq!(retained(&sb), vec!["one", "two", "three"]);
     assert_eq!(sb.dropped_lines(), 0);
@@ -80,10 +80,10 @@ fn pushing_within_both_caps_retains_every_row_in_order() {
 #[test]
 fn exceeding_the_line_cap_drops_oldest_first() {
     let mut sb = bounded(3, 100_000);
-    sb.push_line(line("L0"), RowEnd::Hard); // dropped by the fourth push
-    sb.push_line(line("L1"), RowEnd::Hard);
-    sb.push_line(line("L2"), RowEnd::Hard);
-    sb.push_line(line("L3"), RowEnd::Hard);
+    sb.push_row(&line("L0"), RowEnd::Hard); // dropped by the fourth push
+    sb.push_row(&line("L1"), RowEnd::Hard);
+    sb.push_row(&line("L2"), RowEnd::Hard);
+    sb.push_row(&line("L3"), RowEnd::Hard);
     assert_eq!(sb.len(), 3);
     assert_eq!(retained(&sb), vec!["L1", "L2", "L3"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -96,9 +96,9 @@ fn exceeding_the_byte_cap_drops_oldest_until_within_budget() {
     // Four-byte rows, a ten-byte cap: a third row pushes the total to 12 and
     // forces exactly one drop back to 8.
     let mut sb = bounded(100_000, 10);
-    sb.push_line(line("aaaa"), RowEnd::Hard);
-    sb.push_line(line("bbbb"), RowEnd::Hard);
-    sb.push_line(line("cccc"), RowEnd::Hard);
+    sb.push_row(&line("aaaa"), RowEnd::Hard);
+    sb.push_row(&line("bbbb"), RowEnd::Hard);
+    sb.push_row(&line("cccc"), RowEnd::Hard);
     assert_eq!(sb.len(), 2);
     assert_eq!(retained(&sb), vec!["bbbb", "cccc"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -111,7 +111,7 @@ fn a_lone_row_larger_than_the_byte_cap_is_kept_not_dropped() {
     // The `len > 1` guard means the byte cap never empties the buffer: a single
     // oversized row is retained even though it busts the budget.
     let mut sb = bounded(100_000, 2);
-    sb.push_line(line("oversized"), RowEnd::Hard);
+    sb.push_row(&line("oversized"), RowEnd::Hard);
     assert_eq!(sb.len(), 1);
     assert_eq!(sb.dropped_lines(), 0);
     assert_eq!(sb.byte_total, 9);
@@ -122,8 +122,8 @@ fn a_later_push_drops_the_retained_oversized_row() {
     // Once a second row arrives the guard no longer applies, so the oversized
     // row is dropped to bring the total back under the cap.
     let mut sb = bounded(100_000, 2);
-    sb.push_line(line("oversized"), RowEnd::Hard); // 9 bytes, kept by the guard
-    sb.push_line(line("x"), RowEnd::Hard); // 1 byte: total 10, len 2 -> drop the front
+    sb.push_row(&line("oversized"), RowEnd::Hard); // 9 bytes, kept by the guard
+    sb.push_row(&line("x"), RowEnd::Hard); // 1 byte: total 10, len 2 -> drop the front
     assert_eq!(sb.len(), 1);
     assert_eq!(retained(&sb), vec!["x"]);
     assert_eq!(sb.dropped_lines(), 1);
@@ -135,7 +135,7 @@ fn a_later_push_drops_the_retained_oversized_row() {
 fn the_line_cap_can_drop_to_empty_unlike_the_byte_cap() {
     // The line cap has no `len > 1` guard, so a zero cap retains nothing.
     let mut sb = bounded(0, 100_000);
-    sb.push_line(line("gone"), RowEnd::Hard);
+    sb.push_row(&line("gone"), RowEnd::Hard);
     assert!(sb.is_empty());
     assert_eq!(sb.dropped_lines(), 1);
     assert_eq!(sb.dropped_bytes(), 4);
@@ -146,7 +146,7 @@ fn the_line_cap_can_drop_to_empty_unlike_the_byte_cap() {
 fn byte_total_stays_equal_to_the_sum_of_retained_rows() {
     let mut sb = bounded(3, 100_000);
     for s in ["alpha", "beta", "gamma", "delta", "epsilon"] {
-        sb.push_line(line(s), RowEnd::Hard);
+        sb.push_row(&line(s), RowEnd::Hard);
     }
     let expected: usize = sb.lines().iter().map(|(row, _)| sb.line_bytes(row)).sum();
     assert_eq!(sb.byte_total, expected);
@@ -155,9 +155,9 @@ fn byte_total_stays_equal_to_the_sum_of_retained_rows() {
 #[test]
 fn dropped_tallies_accumulate_across_many_drops() {
     let mut sb = bounded(1, 100_000); // every push past the first drops one row
-    sb.push_line(line("aa"), RowEnd::Hard); // 2 bytes
-    sb.push_line(line("bbb"), RowEnd::Hard); // 3 bytes, drops "aa"
-    sb.push_line(line("c"), RowEnd::Hard); // 1 byte, drops "bbb"
+    sb.push_row(&line("aa"), RowEnd::Hard); // 2 bytes
+    sb.push_row(&line("bbb"), RowEnd::Hard); // 3 bytes, drops "aa"
+    sb.push_row(&line("c"), RowEnd::Hard); // 1 byte, drops "bbb"
     assert_eq!(sb.len(), 1);
     assert_eq!(retained(&sb), vec!["c"]);
     assert_eq!(sb.dropped_lines(), 2);
@@ -167,8 +167,8 @@ fn dropped_tallies_accumulate_across_many_drops() {
 #[test]
 fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
     let mut sb = bounded(1, 100_000); // line cap of 1 forces a drop
-    sb.push_line(line("aa"), RowEnd::Hard);
-    sb.push_line(line("bbb"), RowEnd::Hard); // drops "aa": dropped_lines 1, dropped_bytes 2
+    sb.push_row(&line("aa"), RowEnd::Hard);
+    sb.push_row(&line("bbb"), RowEnd::Hard); // drops "aa": dropped_lines 1, dropped_bytes 2
     assert_eq!(sb.dropped_lines(), 1);
 
     sb.clear();
@@ -183,14 +183,165 @@ fn clear_empties_the_buffer_but_keeps_the_drop_tallies() {
 #[test]
 fn total_pushed_counts_every_push_and_survives_a_clear() {
     let mut sb = bounded(2, 1000); // line cap 2: a push that drops still counts
-    sb.push_line(line("a"), RowEnd::Hard);
-    sb.push_line(line("b"), RowEnd::Hard);
-    sb.push_line(line("c"), RowEnd::Hard); // drops "a"; the push itself still counts
+    sb.push_row(&line("a"), RowEnd::Hard);
+    sb.push_row(&line("b"), RowEnd::Hard);
+    sb.push_row(&line("c"), RowEnd::Hard); // drops "a"; the push itself still counts
     assert_eq!(sb.total_pushed(), 3);
 
     sb.clear();
     assert_eq!(sb.total_pushed(), 3); // an erase never rewinds the counter
 
-    sb.push_line(line("d"), RowEnd::Hard);
+    sb.push_row(&line("d"), RowEnd::Hard);
     assert_eq!(sb.total_pushed(), 4);
+}
+
+/// A row of `text` padded out to `width` with default blanks, the shape every
+/// row arrives in from the screen.
+fn padded(text: &str, width: usize) -> Vec<Cell> {
+    let mut row = line(text);
+    row.resize(width, Cell::blank());
+    row
+}
+
+#[test]
+fn a_hard_row_drops_the_blanks_padding_it_out_to_the_screen_width() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&padded("README.md", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 9);
+    assert_eq!(retained(&sb), vec!["README.md".to_string()]);
+}
+
+#[test]
+fn a_trimmed_row_releases_the_memory_and_does_not_just_hide_it() {
+    // A row shortened in place keeps the allocation its padding needed, so the
+    // trim has to hand that memory back for the saving to be real.
+    //
+    // `Vec` promises capacity at least the length, never exactly it, so this
+    // asks that the padding's room is gone rather than for an exact figure.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&padded("hi", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 2);
+    assert!(
+        stored.capacity() < 200,
+        "the 200-cell allocation was kept: capacity {}",
+        stored.capacity()
+    );
+}
+
+#[test]
+fn a_soft_wrapped_row_keeps_every_cell() {
+    // A soft-wrapped row filled the width, so its trailing cells are content.
+    // Shortening one would move where a reflow re-joins the logical line.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&padded("ab", 6), RowEnd::Soft);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 6);
+}
+
+#[test]
+fn a_wide_glyph_wrap_row_keeps_its_spacer() {
+    // The final blank stands in for the wide glyph that starts the next row.
+    // Dropping it would pull that glyph one column left after a reflow.
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&padded("ab", 6), RowEnd::SoftWide);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 6);
+}
+
+#[test]
+fn a_background_colored_blank_is_content_and_survives() {
+    // A prompt segment painting color into blank cells: the color is the
+    // content, so those cells stay even though they hold no character.
+    let mut red = Style::default();
+    red.set_bg(crate::style::Color::Indexed(1));
+    let mut row = line("ab");
+    row.push(Cell::blank_with(red));
+    row.resize(200, Cell::blank());
+
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&row, RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[2].style().bg(), crate::style::Color::Indexed(1));
+}
+
+#[test]
+fn a_wide_glyphs_continuation_cell_is_content_and_survives() {
+    // The zero-width right half of a CJK glyph is not a default blank, so the
+    // glyph is never cut in half by the trim.
+    let mut row = vec![
+        Cell::new('漢', 2, Style::default()),
+        Cell::new(' ', 0, Style::default()),
+    ];
+    row.resize(200, Cell::blank());
+
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&row, RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].width(), 0);
+}
+
+#[test]
+fn a_row_of_nothing_but_padding_stores_no_cells() {
+    let mut sb = bounded(10, 1_000_000);
+    sb.push_row(&padded("", 200), RowEnd::Hard);
+
+    let (stored, _) = &sb.lines()[0];
+    assert!(stored.is_empty());
+    assert_eq!(sb.len(), 1); // the blank line itself is still a line
+}
+
+#[test]
+fn a_reflow_rebuild_trims_the_same_way_a_push_does() {
+    // Reflow replaces history wholesale, so it must not put the padding back.
+    let mut sb = bounded(10, 1_000_000);
+    sb.replace_lines(vec![
+        (padded("one", 200), RowEnd::Hard),
+        (padded("ab", 200), RowEnd::Soft),
+    ]);
+
+    let (hard, _) = &sb.lines()[0];
+    let (soft, _) = &sb.lines()[1];
+    assert_eq!(hard.len(), 3);
+    assert_eq!(soft.len(), 200);
+}
+
+#[test]
+fn a_reflow_rebuild_releases_the_memory_the_padding_held() {
+    // Reflow shortens rows it already owns, so a resize hands the padding's
+    // room back the same way a push does. Capacity is asked to have shrunk
+    // rather than to equal the length, which `Vec` never promises.
+    let mut sb = bounded(10, 1_000_000);
+    sb.replace_lines(vec![(padded("hi", 200), RowEnd::Hard)]);
+
+    let (stored, _) = &sb.lines()[0];
+    assert_eq!(stored.len(), 2);
+    assert!(
+        stored.capacity() < 200,
+        "the 200-cell allocation was kept: capacity {}",
+        stored.capacity()
+    );
+}
+
+#[test]
+fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
+    // The cap counts characters. Before the trim a 200-column row of `hi`
+    // charged 200 against it; now it charges the 2 the line actually holds, so
+    // a given cap keeps the amount of text it names.
+    let mut sb = bounded(1000, 20);
+    for _ in 0..10 {
+        sb.push_row(&padded("hi", 200), RowEnd::Hard);
+    }
+    assert_eq!(sb.len(), 10);
+    assert_eq!(sb.byte_total, 20);
+    assert_eq!(sb.dropped_lines(), 0);
 }

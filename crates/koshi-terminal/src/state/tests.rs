@@ -388,9 +388,9 @@ fn state_with_history() -> TerminalState {
         *state.active_grid_mut().cell_mut(1, col as u16).unwrap() =
             Cell::new(ch, 1, Style::default());
     }
-    state.scrollback.push_line(line("h0."), RowEnd::Hard);
-    state.scrollback.push_line(line("h1."), RowEnd::Hard);
-    state.scrollback.push_line(line("h2."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h0."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h1."), RowEnd::Hard);
+    state.scrollback.push_row(&line("h2."), RowEnd::Hard);
     state
 }
 
@@ -461,17 +461,36 @@ fn scrolled_view_with_empty_history_follows_live() {
 }
 
 #[test]
-fn scrolled_view_pads_narrow_history_rows_with_the_live_background() {
-    // A history row captured 2 wide on a now-3-wide screen; the app has set a
-    // background pen (SGR 48), so the padding carries it, not the default.
+fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
+    // A history row holding `ab` on a 3-wide screen: its third cell was a
+    // default blank and is not stored. The app has since set a background pen
+    // (SGR 48), which must not reach back and repaint that column — the cell
+    // was default when the line scrolled off, and scrolling back shows the
+    // line as it was, not as the running program currently paints.
     let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
     state.primary_render.style.set_bg(Color::Indexed(4));
-    state.scrollback.push_line(line("ab"), RowEnd::Hard);
+    state.scrollback.push_row(&line("ab"), RowEnd::Hard);
 
     let (grid, _) = state.scrolled_view(1);
     let padded = grid.cell(0, 2).unwrap();
-    let mut expected = Style::default();
-    expected.set_bg(Color::Indexed(4)); // bg-only fill: fg and attrs stay default
     assert_eq!(padded.ch(), ' ');
-    assert_eq!(padded.style(), expected);
+    assert_eq!(padded.style(), Style::default());
+}
+
+#[test]
+fn scrolled_view_keeps_a_history_rows_own_background() {
+    // The other half: color a program actually painted into a blank cell is
+    // content, so it is stored and drawn — a full-width colored bar in history
+    // still shows its color after scrolling back.
+    let mut state = TerminalState::new(PtySize { cols: 3, rows: 2 });
+    let mut red = Style::default();
+    red.set_bg(Color::Indexed(1));
+    state
+        .scrollback
+        .push_row(&vec![Cell::blank_with(red); 3], RowEnd::Hard);
+
+    let (grid, _) = state.scrolled_view(1);
+    for col in 0..3 {
+        assert_eq!(grid.cell(0, col).unwrap().style().bg(), Color::Indexed(1));
+    }
 }

@@ -3,11 +3,9 @@
 
 use std::time::Duration;
 
-/// Cap on a tab's most-recently-focused pane list. Each tab keeps the panes
-/// it focused, newest first and one entry per pane; once it holds this many,
-/// recording another drops the oldest. Bounds per-tab memory over a
-/// long-lived session while keeping the recent "where was I" trail that focus
-/// recovery walks.
+/// Cap on a tab's most-recently-focused pane list. Each tab keeps the panes it
+/// focused, newest first and one entry per pane; once it holds this many,
+/// recording another drops the oldest.
 pub const MAX_TAB_FOCUS_MRU: u16 = 16;
 
 /// Default grace period for a `Graceful` close: how long the model waits for a

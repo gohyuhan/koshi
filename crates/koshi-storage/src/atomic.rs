@@ -1,27 +1,27 @@
-//! Atomic file replacement. Writes a file so a reader never sees it
-//! half-written: stage the new bytes in a temp sibling, flush them to disk,
-//! then rename the temp over the target. `rename` swaps the destination in one
-//! step on every platform, so the target is always either the whole old file
-//! or the whole new one — never a truncated mix, even if the process dies
-//! mid-write.
+//! Atomic file replacement. A reader never sees a half-written file: the new
+//! bytes are staged in a temp sibling, flushed to disk, then renamed over the
+//! target. `rename` swaps the destination in one step on every platform, so
+//! the target holds either the whole old file or the whole new one, even if
+//! the process dies mid-write.
 //!
-//! The temp is created with [`tempfile`]: a unique name, opened with `O_EXCL`
-//! (never follows a symlink or truncates an existing file) and — on Unix —
-//! mode `0600`. [`write_atomic`] documents the full contract: per-platform
-//! permission handling, symlink replacement, and the failure cases.
+//! The temp comes from [`tempfile`]: a unique name, opened with `O_EXCL` so it
+//! never follows a symlink or truncates an existing file, and mode `0600` on
+//! Unix.
 //!
-//! The rename is atomic on every platform. On Unix the target's directory is
-//! fsynced afterward so the rename survives a crash; on Windows the rename's
+//! On Unix the target's directory is fsynced after the rename. On Windows
 //! durability rests on the filesystem's own journaling, and a replace racing
 //! another writer is retried briefly so concurrent writes converge.
 //!
-//! The target's directory is trusted: anyone who can write that directory can
-//! replace the file directly, with or without this helper, so koshi only
-//! writes under its own user-private directories.
+//! Nothing here guards the target's directory: anyone who can write that
+//! directory can replace the file directly. koshi writes only under its own
+//! user-private directories.
+//!
+//! [`write_atomic`] carries the full contract: per-platform permission
+//! handling, symlink replacement, and the failure cases.
 //!
 //! Example: `write_atomic("keybinding.kdl", new)` stages a private temp beside
 //! `keybinding.kdl`, fsyncs it, then renames it onto `keybinding.kdl`. A crash
-//! before the rename leaves the intact old `keybinding.kdl`; the partial bytes
+//! before the rename leaves the old `keybinding.kdl` intact; the partial bytes
 //! sit only in the temp sibling, which normal error paths remove and a hard
 //! kill can leave behind as a stray private file — never in the target.
 
@@ -42,19 +42,18 @@ mod tests;
 /// when `dst` is an existing regular file (Unix; a new file keeps the private
 /// `0600` default), fsyncs it, renames it over `dst`, then fsyncs the directory
 /// (Unix). A relative `dst` is resolved against the current directory once at
-/// entry. If any step up to and including the rename fails the temp is removed
+/// entry. If any step up to and including the rename fails, the temp is removed
 /// and `dst` is left untouched.
 ///
-/// A symlink at `dst` is replaced by a regular file, the same as `rename`; the
-/// replacement counts as a new file and stays private, never inheriting the
+/// A symlink at `dst` is replaced by a regular file, the same as `rename`. The
+/// replacement counts as a new file and stays private; it never inherits the
 /// mode of the file the link pointed at.
 ///
-/// On Windows, replacing a read-only file fails with an error (the OS forbids
-/// it; on Unix the directory's permissions govern, not the file's own mode), as
-/// does a path past the OS path-length limit — in both cases `dst` is left
-/// untouched.
+/// On Windows, replacing a read-only file fails, as does a path past the OS
+/// path-length limit; `dst` is left untouched in both cases. On Unix the
+/// directory's permissions govern, not the file's own mode.
 ///
-/// Returns [`StorageError::Io`] if the write is not durably persisted; a
+/// Returns [`StorageError::Io`] if the write is not durably persisted. A
 /// directory-fsync failure surfaces here even though `dst` may already hold the
 /// new bytes.
 ///
@@ -98,9 +97,9 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Renames the staged temp over `dst`. Unix `rename` replaces the target in one
-/// step even while other writers hold it, so a single attempt suffices. A failed
-/// persist drops the returned temp, removing it, so `dst` is left untouched.
+/// Renames the staged temp over `dst` in a single attempt: Unix `rename`
+/// replaces the target in one step even while other writers hold it. A failed
+/// persist drops the temp, removing it, so `dst` is left untouched.
 #[cfg(not(windows))]
 fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
     tmp.persist(dst)
@@ -108,12 +107,12 @@ fn persist_over(tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
         .map_err(|e| io_err(format!("replace {}: {}", dst.display(), e.error)))
 }
 
-/// Renames the staged temp over `dst`. Windows refuses to replace a file another
-/// writer is momentarily renaming over, failing with `ERROR_ACCESS_DENIED` /
-/// `ERROR_SHARING_VIOLATION`; the rename is retried with a short backoff so
-/// concurrent atomic writes all converge. A directory at `dst` is a permanent
-/// block, reported at once. A failed persist drops the temp, so `dst` is
-/// untouched.
+/// Renames the staged temp over `dst`, retrying up to 25 times with a growing
+/// backoff. Windows refuses to replace a file another writer is momentarily
+/// renaming over, failing with `ERROR_ACCESS_DENIED` /
+/// `ERROR_SHARING_VIOLATION`; those are retried. A directory at `dst` is a
+/// permanent block and is reported at once. A failed persist drops the temp,
+/// so `dst` is untouched.
 #[cfg(windows)]
 fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> {
     const MAX_ATTEMPTS: u32 = 25;
@@ -141,12 +140,10 @@ fn persist_over(mut tmp: NamedTempFile, dst: &Path) -> Result<(), StorageError> 
 /// regular file, or `None` for anything else, so the temp's private `0600`
 /// default stands.
 ///
-/// Uses `symlink_metadata` (does not follow links) and inherits only from a
-/// regular file: any other node at `dst` — a symlink, FIFO, socket, or device —
-/// is destroyed by the rename, so its replacement is a new file and keeps the
-/// private default rather than that node's mode. Custom POSIX ACLs are not
-/// cloned — `std` has no API for them, and koshi creates only plain user-owned
-/// files.
+/// Uses `symlink_metadata`, which does not follow links, and inherits only
+/// from a regular file. Any other node at `dst` — a symlink, FIFO, socket, or
+/// device — is destroyed by the rename, so its replacement is a new file and
+/// keeps the private default. Custom POSIX ACLs are not cloned.
 ///
 /// Example: `dst` exists at `0644` → returns `Some(0644)` so the replaced file
 /// keeps `0644` instead of the temp's `0600`; a missing `dst` → `None`; `dst` a
@@ -163,15 +160,14 @@ fn target_permissions(dst: &Path) -> Result<Option<fs::Permissions>, StorageErro
 
 /// The mode to give the temp on Windows: always `None`. The only permission
 /// `std` models there is the read-only flag, and a read-only target cannot be
-/// replaced at all (the rename fails), so there is nothing to preserve.
+/// replaced at all — the rename fails.
 #[cfg(not(unix))]
 fn target_permissions(_dst: &Path) -> Result<Option<fs::Permissions>, StorageError> {
     Ok(None)
 }
 
-/// Fsyncs `dst`'s directory so the rename entry is durable — without it a crash
-/// right after the rename can lose it, leaving the old file. Unix only; Windows
-/// has no portable directory fsync (returns `Ok`).
+/// Fsyncs `dst`'s directory so the rename entry survives a crash. Unix only;
+/// Windows has no portable directory fsync and returns `Ok`.
 #[cfg(unix)]
 fn fsync_parent_dir(dst: &Path) -> Result<(), StorageError> {
     let dir = fs::File::open(parent_dir(dst))
@@ -185,10 +181,10 @@ fn fsync_parent_dir(_dst: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// `dst`'s directory, so the temp is created on the same filesystem as `dst`
-/// and the rename stays atomic. `dst` arrives absolute (relative paths are
-/// anchored on entry); the `.` fallback covers a path with no parent (a
-/// filesystem root), where the later rename fails and reports the error.
+/// `dst`'s directory, which puts the temp on the same filesystem as `dst` so
+/// the rename stays atomic. `dst` arrives absolute; relative paths are anchored
+/// on entry. The `.` fallback covers a path with no parent, a filesystem root,
+/// where the later rename fails and reports the error.
 fn parent_dir(dst: &Path) -> &Path {
     dst.parent().unwrap_or(Path::new("."))
 }

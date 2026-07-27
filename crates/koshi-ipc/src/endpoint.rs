@@ -32,9 +32,9 @@ use crate::protocol::ConnectionToken;
 /// `koshi-` namespace that same check requires; a pipe has no filesystem
 /// path, so `runtime_dir` goes unused there.
 ///
-/// Every consumer derives the address through here — the `KOSHI_SOCKET`
-/// variable injected into spawned panes today, the listener bind when it
-/// lands — so all of them always name the same place.
+/// Every consumer derives the address through here, including the
+/// `KOSHI_SOCKET` variable injected into spawned panes, so they all name the
+/// same place.
 #[must_use]
 pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
     #[cfg(unix)]
@@ -54,9 +54,8 @@ pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
 /// What the endpoint file holds.
 ///
 /// Decoding rejects any field it does not know, so a misspelled name is an
-/// error rather than a field that quietly keeps its default. The derived
-/// `Debug` prints the token as `***`; the real secret reaches only the file
-/// itself, through `Serialize`.
+/// error. The derived `Debug` prints the token as `***`; the real secret
+/// reaches only the file itself, through `Serialize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointFile {

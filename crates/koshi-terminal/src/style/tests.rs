@@ -180,3 +180,93 @@ fn attr_flags_getters_return_each_set_flag() {
     assert!(attrs.strike());
     assert!(!attrs.overline());
 }
+
+#[test]
+fn every_flag_can_be_set_at_once() {
+    // All nine attributes on together: any storage that let two attributes
+    // share a slot would lose one of them here.
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_italic(true);
+    style.set_underline(UnderlineStyle::Dashed);
+    style.set_reverse(true);
+    style.set_faint(true);
+    style.set_blink(true);
+    style.set_conceal(true);
+    style.set_strike(true);
+    style.set_overline(true);
+
+    let attrs = style.attrs();
+    assert!(attrs.bold());
+    assert!(attrs.italic());
+    assert_eq!(attrs.underline(), UnderlineStyle::Dashed);
+    assert!(attrs.reverse());
+    assert!(attrs.faint());
+    assert!(attrs.blink());
+    assert!(attrs.conceal());
+    assert!(attrs.strike());
+    assert!(attrs.overline());
+}
+
+#[test]
+fn every_underline_style_survives_the_other_flags_being_set() {
+    // Each style written while all eight booleans are on: it must read back
+    // intact and must not disturb any of them.
+    for underline in [
+        UnderlineStyle::None,
+        UnderlineStyle::Single,
+        UnderlineStyle::Double,
+        UnderlineStyle::Curly,
+        UnderlineStyle::Dotted,
+        UnderlineStyle::Dashed,
+    ] {
+        let mut style = Style::default();
+        style.set_bold(true);
+        style.set_italic(true);
+        style.set_reverse(true);
+        style.set_faint(true);
+        style.set_blink(true);
+        style.set_conceal(true);
+        style.set_strike(true);
+        style.set_overline(true);
+        style.set_underline(underline);
+
+        let attrs = style.attrs();
+        assert_eq!(attrs.underline(), underline);
+        assert!(attrs.bold());
+        assert!(attrs.italic());
+        assert!(attrs.reverse());
+        assert!(attrs.faint());
+        assert!(attrs.blink());
+        assert!(attrs.conceal());
+        assert!(attrs.strike());
+        assert!(attrs.overline());
+    }
+}
+
+#[test]
+fn setting_a_new_underline_style_replaces_the_previous_one() {
+    // The styles are mutually exclusive, so the last one written is the one
+    // that shows — a cell never draws two underlines.
+    let mut style = Style::default();
+    style.set_underline(UnderlineStyle::Dashed);
+    style.set_underline(UnderlineStyle::Single);
+    assert_eq!(style.attrs().underline(), UnderlineStyle::Single);
+    style.set_underline(UnderlineStyle::None);
+    assert_eq!(style.attrs().underline(), UnderlineStyle::None);
+}
+
+#[test]
+fn clearing_one_flag_leaves_the_others_alone() {
+    // Turning an attribute off must clear exactly that attribute.
+    let mut style = Style::default();
+    style.set_bold(true);
+    style.set_italic(true);
+    style.set_strike(true);
+    style.set_bold(false);
+
+    let attrs = style.attrs();
+    assert!(!attrs.bold());
+    assert!(attrs.italic());
+    assert!(attrs.strike());
+}

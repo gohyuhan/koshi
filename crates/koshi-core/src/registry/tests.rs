@@ -16,12 +16,11 @@ use uuid::Uuid;
 /// Insert an entry with none of the ownership checks
 /// [`register`](ActionRegistry::register) makes, and bump the version.
 ///
-/// `user:` macros are a later feature and have no registration path, and a
-/// plugin may not carry a [`Sequence`](ActionHandlerRef::Sequence) handler, so a
-/// sequence entry cannot be built through the public surface. Resolution tests
-/// need one to exercise the macro route. Reaching the private fields is what
-/// keeps this here rather than beside those tests: this module is a child of
-/// `registry`.
+/// `user:` references have no registration path, and a plugin may not carry a
+/// [`Sequence`](ActionHandlerRef::Sequence) handler, so a sequence entry cannot
+/// be built through the public surface. Resolution tests need one to exercise
+/// the macro route, and this module is a child of `registry`, so it can reach
+/// the private fields.
 pub(crate) fn insert_unchecked(
     registry: &mut ActionRegistry,
     action: ActionRef,

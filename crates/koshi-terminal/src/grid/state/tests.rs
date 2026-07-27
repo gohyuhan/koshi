@@ -8,6 +8,39 @@ fn default_grid(rows: u16, cols: u16) -> Grid {
     Grid::blank(rows, cols, Style::default())
 }
 
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn a_cell_is_forty_bytes() {
+    // One cell is stored per grid slot and per scrollback column, so its size
+    // sets how much memory a pane's history costs: at a 10 000-line cap and 200
+    // columns, every extra byte per cell is another 2 MB per pane.
+    assert_eq!(std::mem::size_of::<Cell>(), 40);
+}
+
+#[test]
+fn a_cell_without_continuations_equals_one_that_had_none_added() {
+    // `None` is the only representation of "no continuations", which is what
+    // keeps the derived equality exact.
+    let mut cell = Cell::new('e', 1, Style::default());
+    cell.push_combining('\u{301}');
+    assert_eq!(cell.combining(), &['\u{301}']);
+    assert_ne!(cell, Cell::new('e', 1, Style::default()));
+}
+
+#[test]
+fn continuations_accumulate_in_arrival_order() {
+    let mut cell = Cell::new('a', 1, Style::default());
+    assert_eq!(cell.combining(), &[] as &[char]);
+    cell.push_combining('\u{301}');
+    cell.push_combining('\u{308}');
+    assert_eq!(cell.combining(), &['\u{301}', '\u{308}']);
+    // Cloning deep-copies the continuations rather than sharing them.
+    let mut clone = cell.clone();
+    clone.push_combining('\u{327}');
+    assert_eq!(cell.combining(), &['\u{301}', '\u{308}']);
+    assert_eq!(clone.combining(), &['\u{301}', '\u{308}', '\u{327}']);
+}
+
 /// A text rendering style (pen) with the given background color — used to test
 /// background-color-erase (BCE) operations that fill erased cells with the pen's color.
 fn bg(color: Color) -> Style {

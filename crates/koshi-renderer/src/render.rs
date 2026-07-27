@@ -18,8 +18,8 @@
 //! for any pane, a centered "terminal too small" overlay replaces the pane
 //! render for that frame. When the client's viewport is larger than the size
 //! the layout was solved for, the whole frame is centered and the surrounding
-//! margin is filled with a dim letterbox. Plugin-contributed segments (empty
-//! here) are injected once the plugin host lands.
+//! margin is filled with a dim letterbox. Nothing here draws
+//! plugin-contributed segments.
 
 pub mod state;
 
@@ -175,8 +175,8 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
 /// How the outer terminal's cursor should look this frame:
 /// [`Shaped`](CursorStyle::Shaped) with what the focused pane asked for via
 /// DECSCUSR, or [`UserDefault`](CursorStyle::UserDefault) when it asked for
-/// nothing — a plain shell never sends DECSCUSR, and its cursor is whatever the
-/// user configured, not a block koshi invented.
+/// nothing — a plain shell never sends DECSCUSR, so its cursor stays whatever
+/// the user configured.
 ///
 /// `None` — meaning "leave the cursor as it is" — only when there is no focused
 /// terminal pane to speak for it: no focused pane at all, or a plugin pane,
@@ -187,10 +187,8 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
 /// terminal (crossterm's `SetCursorStyle`), which is what makes vim's
 /// insert-mode bar show as a bar instead of a block.
 ///
-/// Deliberately not gated on the cursor being visible or the view being scrolled
-/// back: a cursor that is not drawn has no look to get wrong, and re-deriving
-/// [`cursor_position`]'s guard chain here would be a second copy of it to keep in
-/// step.
+/// Not gated on the cursor being visible or the view being scrolled back: a
+/// cursor that is not drawn has no look to get wrong.
 #[must_use]
 pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<CursorStyle> {
     let pane = find_pane(snapshot, snapshot.client.focused_pane?)?;
@@ -547,9 +545,8 @@ pub(crate) fn content_rect(area: RatatuiRect, effective: Size) -> RatatuiRect {
 }
 
 /// Fill the letterbox margin — the cells of `area` outside the centered
-/// `content` rect — with a dim backdrop, so the space around a layout smaller
-/// than the viewport reads as an intentional letterbox. Does nothing when the
-/// content fills the whole area.
+/// `content` rect — with a dim backdrop. Does nothing when the content fills the
+/// whole area.
 ///
 /// The margin is the four bands around `content`; [`render_frame`] already
 /// blanked every cell with `Clear`, so restyling is enough. [`Buffer::set_style`]

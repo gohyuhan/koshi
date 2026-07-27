@@ -4,9 +4,8 @@
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
 //! interpreted by one of Koshi's modal layers (resize, pane, tab, scroll).
 //! It is client-scoped: two clients attached to the same session hold
-//! independent modes. This is the richer modal state the client tracks, as
-//! distinct from the command layer's binary lock toggle (`SetLockMode`), which
-//! flips into and out of [`LockMode::Locked`].
+//! independent modes. The command layer's `SetLockMode` is a binary toggle
+//! that only moves a client into and out of [`LockMode::Locked`].
 
 use serde::{Deserialize, Serialize};
 

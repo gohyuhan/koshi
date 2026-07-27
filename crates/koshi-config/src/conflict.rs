@@ -610,11 +610,9 @@ fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
 /// open — so it can never be a chord *of* a sequence, and a sequence holding
 /// it can never fire.
 ///
-/// Position does not matter, and that is the whole rule. `<C-l> x` unlocks at
-/// the first chord; `<C-x> <C-l>` opens fine and then unlocks at the second,
-/// so `core:new-tab` bound to it would never run and the hint bar would offer
-/// a continuation that silently unlocks instead. A one-chord `<C-l>` is the
-/// unlock binding itself and stays live.
+/// Position does not matter. `<C-l> x` unlocks at the first chord; `<C-x>
+/// <C-l>` opens fine and then unlocks at the second, so whatever it binds never
+/// runs. A one-chord `<C-l>` is the unlock binding itself and stays live.
 fn holds_reserved_unlock(
     mode: &ModeName,
     key: &KeySequence,
@@ -668,12 +666,11 @@ fn leader_is_typeable(leader: Leader) -> bool {
 /// Per-layer warnings for one user-authored layer. An unregistered mode
 /// warns once and its bindings are skipped — the whole overlay is inactive
 /// until the mode registers. A binding a higher layer removes is skipped
-/// silently: the removal is the user's own authored intent, not a surprise
-/// to surface. Each remaining binding gets at most one cannot-fire warning,
-/// most specific reason first: the resolver's refusal, then the
-/// reserved-chord bypass, then the chord-depth cap. Only a binding that
-/// participates in firing is checked for a typeable opening chord, since a
-/// dead binding steals nothing.
+/// silently: the removal is the user's own authored intent. Each remaining
+/// binding gets at most one cannot-fire warning, most specific reason first:
+/// the resolver's refusal, then the reserved-chord bypass, then the chord-depth
+/// cap. Only a binding that participates in firing is checked for a typeable
+/// opening chord, since a dead binding steals nothing.
 #[expect(clippy::too_many_arguments)]
 fn scan_layer(
     layer: &KeyMapLayer,

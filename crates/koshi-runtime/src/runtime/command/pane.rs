@@ -822,7 +822,8 @@ impl Server {
     /// source's default pane, and must be a terminal pane that is live — a
     /// plugin pane, which has no PTY, and a pane that has exited, is closing,
     /// or is gone all take no input ([`RejectReason::InvalidState`]). A plugin
-    /// source is denied pending the `pane_write` capability.
+    /// source is [`RejectReason::Unauthorized`]: it has no `pane_write`
+    /// capability.
     ///
     /// The write is a side effect that changes no session state, so a
     /// successful write commits no events; the child's response returns
@@ -836,7 +837,7 @@ impl Server {
         args: &WriteToPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         // Plugin input injection requires the `pane_write` capability granted
-        // by the plugin host; until that lands a plugin source is denied.
+        // by the plugin host; a plugin source is denied.
         if matches!(source, CommandSource::Plugin { .. }) {
             return Err(Rejection::new(
                 RejectReason::Unauthorized,
@@ -909,8 +910,7 @@ impl Server {
     /// an already-viewed tab sizes to its current viewers and designates no one
     /// (the pane just appears, no view moves); an unviewed tab defaults to the
     /// session's sole client, and a session with several attached clients is
-    /// [`RejectReason::TargetAmbiguous`] (a bystander is never switched to satisfy
-    /// a command that named no client).
+    /// [`RejectReason::TargetAmbiguous`].
     ///
     /// `candidate` is the post-split tree fit is judged against. Fails
     /// [`RejectReason::MinSize`] when the split cannot fit the chosen viewport,
@@ -918,7 +918,8 @@ impl Server {
     /// `target_client`, or the issuer) is not attached here — a wrong explicit
     /// target is rejected outright, never falling back — and
     /// [`RejectReason::InvalidState`] when the tab has no viewer and the session
-    /// has no attached client at all.
+    /// has no attached client at all. A bystander client is never switched to
+    /// satisfy a command that named none.
     fn resolve_new_pane_viewport(
         session: &Session,
         tab_id: TabId,

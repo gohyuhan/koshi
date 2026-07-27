@@ -41,17 +41,16 @@ pub enum MouseEncoding {
 /// editor switches it to tell its modes apart: vim draws a [`Block`][Self::Block]
 /// while it is in normal mode and a [`Bar`][Self::Bar] while it is inserting.
 ///
-/// There is deliberately no `Default` variant, and the stored shape is an
-/// `Option`: a pane that has never sent DECSCUSR has asked for *nothing*, which
-/// is not the same as asking for a block. Only a pane that actually requested a
-/// shape may override the cursor the user configured in their own terminal.
+/// There is no `Default` variant, and the stored shape is an `Option`: a pane
+/// that has never sent DECSCUSR has asked for nothing, and only a pane that
+/// requested a shape overrides the cursor the user configured in their own
+/// terminal.
 ///
-/// Whether the cursor *blinks* is likewise not part of this. DECSCUSR carries
-/// the shape and the blink together in one value (`2` = steady block, `1` =
-/// blinking block), but `?12` (att610) sets blinking on its own — so blinking is
-/// one piece of state with two writers, read back through
+/// Blinking is not part of this. DECSCUSR carries the shape and the blink
+/// together in one value (`2` = steady block, `1` = blinking block), but `?12`
+/// (att610) sets blinking on its own. Blinking is therefore one piece of state
+/// with two writers, read back through
 /// [`TerminalState::cursor_blink`](crate::state::TerminalState::cursor_blink).
-/// Storing a second blink flag here would let the two disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
     /// A box filling the whole cell.

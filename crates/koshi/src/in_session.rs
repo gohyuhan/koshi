@@ -8,9 +8,7 @@
 //! them once at startup. `KOSHI` absent means the CLI runs outside any
 //! session (external mode). `KOSHI` present means the CLI claims in-session
 //! identity, so the required variables must be present and well-formed; a
-//! broken remainder is reported as an error rather than silently treated as
-//! external mode, so a corrupted pane environment never makes a command
-//! target the wrong place.
+//! broken remainder is an error, never silently treated as external mode.
 //!
 //! The connection secret is not part of the environment: the CLI reads the
 //! token from the session's endpoint file (`EndpointFile` in `koshi-ipc`)
