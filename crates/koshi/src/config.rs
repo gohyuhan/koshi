@@ -29,10 +29,13 @@ use std::path::Path;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
 use koshi_config::keybinding::parse_keybindings;
-use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig};
+use koshi_config::layer::{
+    merge_client, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
+};
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
-use koshi_config::types::DEFAULT_THEME;
+use koshi_config::types::{ClientConfig, DEFAULT_THEME};
+use koshi_core::geometry::Direction;
 use koshi_layout::template::ProfileTemplate;
 
 #[cfg(test)]
@@ -77,6 +80,33 @@ pub fn load() -> (LoadedConfig, Vec<String>) {
         keybindings: load_keybindings(&dir.join("keybinding.kdl"), &mut warnings),
     };
     (loaded, warnings)
+}
+
+/// Read and parse `koshi.kdl` alone, skipping the theme and the keymap.
+///
+/// The verb path of the `koshi` binary needs one setting out of the config
+/// directory — `layout.new-pane-direction` — and `koshi.kdl` is the only file
+/// that can carry it, so a `koshi new-pane` reads that file and nothing else.
+/// Absent, unreadable, or unparseable yields `None`, which folds to the
+/// built-in defaults. Warnings are dropped: a CLI verb prints its command's
+/// result, not a config report.
+#[must_use]
+pub fn load_app_layer() -> Option<PartialKoshiConfig> {
+    let dir = koshi_paths::config_dir()?;
+    let mut warnings = Vec::new();
+    load_app(&dir.join("koshi.kdl"), &mut warnings).map(|file| file.layer)
+}
+
+/// The split direction a pane-opening verb uses when `--direction` is absent:
+/// `app`'s `layout.new-pane-direction` folded onto the built-in defaults. The
+/// CLI is a client, so it folds the viewer-owned sections exactly as a viewer
+/// does. `None` — no config directory, no `koshi.kdl`, or a file that did not
+/// parse — gives the built-in [`Direction::Right`].
+#[must_use]
+pub fn new_pane_direction(app: Option<PartialKoshiConfig>) -> Direction {
+    merge_client(ClientConfig::default(), app.into_iter().collect())
+        .layout
+        .new_pane_direction
 }
 
 /// The file's text, or `None` when it is absent (not an error) or unreadable.

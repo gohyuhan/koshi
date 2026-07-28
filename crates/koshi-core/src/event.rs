@@ -70,12 +70,12 @@ pub enum Event {
     TerminalTooSmallExited(TerminalTooSmallExited),
     /// Configuration reload succeeded and was atomically swapped in.
     ConfigReloaded(ConfigReloaded),
-    /// Configuration reload failed; the previous config remains active.
-    ConfigReloadFailed(ConfigReloadFailed),
 
     // Input modes and keybindings.
     /// The active input mode changed (normal or locked).
     InputModeChanged(InputModeChanged),
+    /// A client's mouse-select mode was turned on or off.
+    MouseSelectChanged(MouseSelectChanged),
     /// A keybinding matched and resolved to a command.
     KeybindingMatched(KeybindingMatched),
 
@@ -156,8 +156,8 @@ impl Event {
             Event::TerminalTooSmallEntered(_) => "TerminalTooSmallEntered",
             Event::TerminalTooSmallExited(_) => "TerminalTooSmallExited",
             Event::ConfigReloaded(_) => "ConfigReloaded",
-            Event::ConfigReloadFailed(_) => "ConfigReloadFailed",
             Event::InputModeChanged(_) => "InputModeChanged",
+            Event::MouseSelectChanged(_) => "MouseSelectChanged",
             Event::KeybindingMatched(_) => "KeybindingMatched",
             Event::PaneTyped(_) => "PaneTyped",
             Event::PaneEnterPressed(_) => "PaneEnterPressed",
@@ -337,15 +337,6 @@ pub struct ConfigReloaded {
     pub session_id: SessionId,
 }
 
-/// Payload for [`Event::ConfigReloadFailed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigReloadFailed {
-    /// The session whose config reload failed.
-    pub session_id: SessionId,
-    /// Human-facing diagnostic.
-    pub reason: String,
-}
-
 // ============================================================================
 // Input modes and keybindings
 // ============================================================================
@@ -372,6 +363,16 @@ pub struct InputModeChanged {
     pub client_id: ClientId,
     /// The mode now in effect.
     pub mode: InputMode,
+}
+
+/// Payload for [`Event::MouseSelectChanged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseSelectChanged {
+    /// The client whose mouse-select mode changed. Mouse select is
+    /// client-scoped: clients sharing a session hold independent modes.
+    pub client_id: ClientId,
+    /// Whether the client now grabs the mouse for text selection.
+    pub on: bool,
 }
 
 /// Payload for [`Event::KeybindingMatched`].

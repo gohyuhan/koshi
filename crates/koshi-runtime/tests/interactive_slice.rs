@@ -7,13 +7,16 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_client::input::KeyOutcome;
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
+use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
+use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -27,14 +30,7 @@ fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        rx,
-        tx,
-        Direction::Right,
-    )
+    Server::new(backend, snapshot_provider, storage, rx, tx)
 }
 
 /// Receive the next event of the wanted shape, ignoring any earlier ones, or
@@ -144,14 +140,21 @@ fn typed_keys_write_to_the_focused_pane() {
         .expect("bootstrap");
     let pane_id = fake.spawned_panes()[0];
 
-    // `ls` + Enter, key by key: none is bound, so each falls through to the
-    // focused pane and is written as it is pressed.
+    // `ls` + Enter, key by key. The viewer resolves each one, binds none of
+    // them, and hands the press to the session, which writes it to the focused
+    // pane as it is made.
+    let mut viewer = koshi_client::Client::new(
+        client_id,
+        VIEWPORT,
+        rt.subscribe(EventFilter::All),
+        TerminalCleanupGuard::new(),
+    );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
-        rt.handle_key_input(
-            client_id,
-            KeyChord::new(ModFlags::NONE, key),
-            Instant::now(),
-        );
+        let chord = KeyChord::new(ModFlags::NONE, key);
+        match viewer.resolve_key(chord, Instant::now()) {
+            KeyOutcome::PassThrough(chord) => rt.handle_key_press(client_id, chord),
+            other => panic!("`{chord}` binds nothing, so it passes through; got {other:?}"),
+        }
     }
 
     assert_eq!(

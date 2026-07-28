@@ -13,10 +13,18 @@ the whole app file for that launch.
 
 Settings use blocks. `theme` is top-level.
 
+**Whose settings they are:** some belong to the session and are shared by every
+terminal looking at it; the rest belong to the terminal you are sitting at,
+which reads its own `koshi.kdl`, `themes/<name>.kdl`, and `keybinding.kdl`. Two
+terminals showing one session can differ on those. Each section below says
+which.
+
 ## `theme`
 
 `theme "midnight"` loads `themes/midnight.kdl`. Missing, invalid, omitted, or
-`"default"` themes use built-in colors. See [theme.md](theme.md).
+`"default"` themes use built-in colors. Each terminal reads this for itself, so
+two terminals showing one session can wear different colors. See
+[theme.md](theme.md).
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -24,12 +32,20 @@ Settings use blocks. `theme` is top-level.
 
 ## `pane`
 
+The session reads these: panes are the session's, so every terminal looking at
+it sees the same sizes.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `min-cols` | integer — smallest width a pane may shrink to | `2` | ≥ 0.1.0 |
 | `min-rows` | integer — smallest height a pane may shrink to | `1` | ≥ 0.1.0 |
 
 ## `scrollback`
+
+`max-lines` and `max-bytes` size the history the session keeps, so every
+terminal looking at the session gets the same amount. `scroll-on-input` is about
+what one terminal's view does, but the session applies it from its own
+`koshi.kdl` — so it too is the same for everyone.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -41,9 +57,11 @@ Settings use blocks. `theme` is top-level.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `new-pane-direction` | `"left"` \| `"right"` \| `"up"` \| `"down"` — where a new pane opens when the command does not say | `"right"` | ≥ 0.1.0 |
+| `new-pane-direction` | `"left"` \| `"right"` \| `"up"` \| `"down"` — which side `new-pane` opens on, both the keybinding and `koshi new-pane`. Read by each client for itself, so two terminals viewing one session can differ. The `new-pane-<side>` keybindings and an explicit `--direction` name their own side and ignore this | `"right"` | ≥ 0.1.0 |
 
 ## `mouse`
+
+Each terminal reads these for itself, since the mouse is its own.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -53,11 +71,17 @@ Settings use blocks. `theme` is top-level.
 
 ## `copy`
 
+Each terminal reads this for itself: the copy is made where the selection was
+dragged.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `trim-trailing-whitespace` | boolean — drop trailing blanks from copied lines | `#true` | ≥ 0.1.0 |
 
 ## `terminal`
+
+The session reads these: it starts the programs in the panes, so it is the one
+that decides what they are told.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -66,6 +90,8 @@ Settings use blocks. `theme` is top-level.
 | `default-shell` | string — the shell to launch | your `$SHELL` (`%COMSPEC%` on Windows) | ≥ 0.1.0 |
 
 ## `logging`
+
+Neither side owns these: every koshi process reads them for its own log file.
 
 Koshi writes `logs/koshi-log-<session-id>.log` below the state directory.
 Disabled logging creates no log file.
@@ -82,7 +108,8 @@ severity. Logs store ids and byte counts, not typed or copied text.
 
 ## `update`
 
-Self-update settings. A bad value here drops the whole `koshi.kdl` for that
+Self-update settings. Each installed koshi reads these from its own `koshi.kdl`
+and updates itself. A bad value here drops the whole `koshi.kdl` for that
 launch.
 
 | Key | Value / type | Default | Since |

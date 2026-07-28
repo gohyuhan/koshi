@@ -59,6 +59,10 @@ fn lifecycle_events_roundtrip() {
         client_id: ClientId::new(),
         mode: InputMode::Locked,
     }));
+    roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    }));
 }
 
 #[test]
@@ -86,10 +90,6 @@ fn move_suppression_and_reload_events_roundtrip() {
     }));
     roundtrip(&Event::ConfigReloaded(ConfigReloaded {
         session_id: SessionId::new(),
-    }));
-    roundtrip(&Event::ConfigReloadFailed(ConfigReloadFailed {
-        session_id: SessionId::new(),
-        reason: "parse error".to_string(),
     }));
 }
 
@@ -461,18 +461,18 @@ fn event_variant_names_are_canonical() {
             "ConfigReloaded",
         ),
         (
-            Event::ConfigReloadFailed(ConfigReloadFailed {
-                session_id: SessionId::new(),
-                reason: "parse error".to_string(),
-            }),
-            "ConfigReloadFailed",
-        ),
-        (
             Event::InputModeChanged(InputModeChanged {
                 client_id: ClientId::new(),
                 mode: InputMode::Normal,
             }),
             "InputModeChanged",
+        ),
+        (
+            Event::MouseSelectChanged(MouseSelectChanged {
+                client_id: ClientId::new(),
+                on: true,
+            }),
+            "MouseSelectChanged",
         ),
         (
             Event::KeybindingMatched(KeybindingMatched {

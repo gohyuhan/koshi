@@ -5,7 +5,9 @@
 use clap::error::ErrorKind;
 use clap::CommandFactory;
 use clap::Parser;
+use koshi_config::app_config::parse_app_config;
 use koshi_core::action::{core_action_seeds, ActionHandlerRef};
+use std::path::Path;
 
 use super::*;
 
@@ -22,10 +24,18 @@ fn command(argv: &[&str]) -> CliCommand {
     parse(argv).command.expect("argv must carry a subcommand")
 }
 
-/// The `(action, command)` pair the subcommand of `argv` maps to.
+/// The `(action, command)` pair the subcommand of `argv` maps to, for a CLI
+/// with no `koshi.kdl` — its `layout.new-pane-direction` is the built-in
+/// `Right`.
 fn action_of(argv: &[&str]) -> (ActionRef, Command) {
+    action_of_for(argv, Direction::Right)
+}
+
+/// [`action_of`] for a CLI whose own `layout.new-pane-direction` is
+/// `new_pane_direction`.
+fn action_of_for(argv: &[&str], new_pane_direction: Direction) -> (ActionRef, Command) {
     command(argv)
-        .to_action(&ResolvedTargets::default())
+        .to_action(&ResolvedTargets::default(), new_pane_direction)
         .expect("argv must map to an action")
 }
 
@@ -361,7 +371,10 @@ fn keys_queries_map_to_no_action() {
         vec!["koshi", "keys", "conflicts"],
         vec!["koshi", "keys", "validate", "f.kdl"],
     ] {
-        assert_eq!(command(&argv).to_action(&ResolvedTargets::default()), None);
+        assert_eq!(
+            command(&argv).to_action(&ResolvedTargets::default(), Direction::Right),
+            None
+        );
     }
 }
 
@@ -704,6 +717,67 @@ fn new_pane_direction_and_stacked_conflict() {
     assert_eq!(err.exit_code(), 2);
 }
 
+/// The CLI is a client: with no `--direction` it opens the pane the way this
+/// machine's `koshi.kdl` says, through the real `koshi.kdl` parser and the
+/// real client fold. A CLI that ignored the file would split `Right` here.
+#[test]
+fn new_pane_without_a_direction_flag_follows_the_config_file() {
+    let file = parse_app_config(
+        Path::new("koshi.kdl"),
+        "version 1\nlayout {\n    new-pane-direction \"down\"\n}\n",
+    )
+    .expect("the fixture parses");
+    let configured = crate::config::new_pane_direction(Some(file.layer));
+    assert_eq!(configured, Direction::Down, "the file's own value");
+
+    let (_, mapped) = action_of_for(&["koshi", "new-pane"], configured);
+    assert_eq!(
+        mapped,
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            tab: None,
+            direction: Direction::Down,
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
+        })
+    );
+}
+
+/// An explicit `--direction` beats the file, and `run` reads the file the same
+/// way `new-pane` does.
+#[test]
+fn an_explicit_direction_flag_wins_over_the_config_file() {
+    let (_, mapped) = action_of_for(
+        &["koshi", "new-pane", "--direction", "left"],
+        Direction::Down,
+    );
+    let Command::NewPane(args) = mapped else {
+        panic!("new-pane maps to NewPane");
+    };
+    assert_eq!(args.direction, Direction::Left);
+
+    let (_, mapped) = action_of_for(&["koshi", "run", "--", "htop"], Direction::Down);
+    let Command::RunCommandPane(args) = mapped else {
+        panic!("run maps to RunCommandPane");
+    };
+    assert_eq!(args.direction, Direction::Down);
+}
+
+/// No config directory, no `koshi.kdl`, or a file that did not parse: the fold
+/// leaves the built-in `Right`.
+#[test]
+fn no_config_file_leaves_the_built_in_split_direction() {
+    assert_eq!(crate::config::new_pane_direction(None), Direction::Right);
+
+    let (_, mapped) = action_of(&["koshi", "new-pane"]);
+    let Command::NewPane(args) = mapped else {
+        panic!("new-pane maps to NewPane");
+    };
+    assert_eq!(args.direction, Direction::Right);
+}
+
 #[test]
 fn new_pane_parses_session_tab_and_client_targets() {
     let client_flag = format!("client-{}", fixed_uuid());
@@ -740,7 +814,7 @@ fn new_pane_tab_given_as_an_id_reaches_the_command_without_a_lookup() {
         Command::NewPane(NewPaneArgs {
             source: None,
             tab: Some(TabId::from_uuid(fixed_uuid())),
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             cwd: None,
             command: None,
@@ -820,7 +894,7 @@ fn every_direction_value_parses_to_its_core_direction() {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(*expected),
+                direction: *expected,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -1175,7 +1249,7 @@ fn run_takes_an_optional_source_pane() {
             cwd: None,
             source: Some(PaneId::from_uuid(fixed_uuid())),
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         })
@@ -1262,7 +1336,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(Direction::Right),
+                direction: Direction::Right,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -1275,7 +1349,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::NewPane(NewPaneArgs {
                 source: Some(pane),
                 tab: None,
-                direction: None,
+                direction: Direction::Right,
                 stacked: true,
                 cwd: None,
                 command: None,
@@ -1412,7 +1486,7 @@ fn action_subcommands_map_to_their_exact_commands() {
                 cwd: None,
                 source: None,
                 tab: None,
-                direction: None,
+                direction: Direction::Right,
                 stacked: true,
                 client: None,
             }),
@@ -1495,7 +1569,7 @@ fn non_action_subcommands_map_to_none() {
     ];
     for argv in argvs {
         assert_eq!(
-            command(argv).to_action(&ResolvedTargets::default()),
+            command(argv).to_action(&ResolvedTargets::default(), Direction::Right),
             None,
             "for {argv:?}"
         );
@@ -1688,7 +1762,7 @@ fn run_accepts_an_empty_program_token() {
             cwd: None,
             source: None,
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         })

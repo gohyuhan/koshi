@@ -13,6 +13,7 @@
 pub mod app_config;
 pub mod conflict;
 pub mod error;
+pub mod hints;
 pub mod key;
 pub mod key_sequence;
 pub mod keybinding;

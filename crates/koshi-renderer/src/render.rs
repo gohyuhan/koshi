@@ -6,9 +6,9 @@
 //! section — scroll position and mode tag), the **pane area** in the middle (a
 //! bordered box per visible pane, the focused pane's border highlighted), and
 //! the **keybinding hint bar** on the bottom row — a koshi-owned row painted by
-//! [`crate::statusline_hints`] from the snapshot's per-mode keybinding data.
-//! Both chrome rows are filled with the theme's bar background before anything
-//! is drawn on them.
+//! [`crate::statusline_hints`] from the per-mode keybinding data the caller
+//! passes in. Both chrome rows are filled with the theme's bar background
+//! before anything is drawn on them.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -31,12 +31,14 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::PaneId;
+use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::{
-    ClientSnapshot, CursorStyle, FrameLayout, PaneSnapshot, RenderSnapshot, SelectionSpans,
+    ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, RenderSnapshot,
+    SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
@@ -51,7 +53,20 @@ use crate::theme::Theme;
 /// pane (`all_suppressed`), draws only a centered too-small overlay and
 /// returns, skipping the panes and both chrome rows. Does nothing for a
 /// zero-size area.
-pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+///
+/// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
+/// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
+/// multi-chord sequence it has open, and the pane its pointer is over together
+/// with where its tab strip is scrolled.
+pub fn render_frame(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    hints: &KeymapHints,
+    pending: Option<&KeySequence>,
+    viewer: ViewerChrome,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -84,13 +99,13 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         y: content.y,
     };
 
-    draw_panes(snapshot, offset, buf);
+    draw_panes(snapshot, theme, viewer.hovered_pane, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
-    draw_stack_headers(snapshot, offset, buf);
+    draw_stack_headers(snapshot, theme, offset, buf);
 
     // Fill multi-client margins before chrome; the tabline and hint bar own
     // the outer rows and must remain visible over the letterbox.
-    draw_letterbox(area, content, &snapshot.theme, buf);
+    draw_letterbox(area, content, theme, buf);
 
     let tabline = RatatuiRect {
         x: area.x,
@@ -98,7 +113,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
         width: area.width,
         height: 1,
     };
-    draw_tabline(snapshot.layout(), tabline, buf);
+    draw_tabline(snapshot.layout(viewer), theme, tabline, buf);
 
     if area.height >= 2 {
         let hint_bar = RatatuiRect {
@@ -107,7 +122,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buff
             width: area.width,
             height: 1,
         };
-        draw_hint_bar(snapshot, hint_bar, buf);
+        draw_hint_bar(hints, theme, pending, hint_bar, buf);
     }
 }
 
@@ -213,11 +228,17 @@ fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
 /// Draw a bordered box for every visible pane in the active tab, coloring the
 /// focused pane's border (and an unfocused hovered pane's), writing the pane's
 /// resolved title into its top border line, and — when the pane is scrolled
-/// back — its scroll position into its bottom border. `offset` shifts each pane
-/// into the centered content rect.
-fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
+/// back — its scroll position into its bottom border. `hovered` is the pane the
+/// viewer's pointer is over; `offset` shifts each pane into the centered
+/// content rect.
+fn draw_panes(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    hovered: Option<PaneId>,
+    offset: Point,
+    buf: &mut Buffer,
+) {
     let focused = snapshot.client.focused_pane;
-    let hovered = snapshot.client.hovered_pane;
     for slot in &snapshot.session.active_tab.layout_solved {
         if !slot.visible {
             continue;
@@ -225,11 +246,11 @@ fn draw_panes(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
         // Focus keeps its own color; the hover color marks only an unfocused
         // pane the wheel would scroll, so the focused pane never turns purple.
         let style = if Some(slot.pane_id) == focused {
-            border_focused_style(&snapshot.theme)
+            border_focused_style(theme)
         } else if Some(slot.pane_id) == hovered {
-            border_hover_style(&snapshot.theme)
+            border_hover_style(theme)
         } else {
-            border_unfocused_style(&snapshot.theme)
+            border_unfocused_style(theme)
         };
         let rect = place(slot.rect, offset);
         Block::new()
@@ -428,8 +449,8 @@ fn cell_color(color: CellColor) -> Color {
 /// arrow and the pane title on the left, a `[position/total]` indicator
 /// right-aligned, over a theme-filled row that marks the strip as
 /// koshi-owned. `offset` shifts each strip into the centered content rect.
-fn draw_stack_headers(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer) {
-    let style = stack_header_style(&snapshot.theme);
+fn draw_stack_headers(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, buf: &mut Buffer) {
+    let style = stack_header_style(theme);
     for header in &snapshot.session.active_tab.stack_headers {
         let rect = place(header.rect, offset);
         if rect.width == 0 || rect.height == 0 {

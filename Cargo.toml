@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/koshi",
+    "crates/koshi-client",
     "crates/koshi-core",
     "crates/koshi-error",
     "crates/koshi-runtime",

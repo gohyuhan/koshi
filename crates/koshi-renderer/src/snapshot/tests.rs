@@ -71,7 +71,12 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
             view_offset: 0,
         }),
         reverse_video: false,
+        mouse_tracking: MouseTracking::Off,
+        alt_scroll: false,
+        on_alt_screen: false,
         selection: None,
+        has_selection: false,
+        view_top_row: 0,
         scrollback: ScrollbackMeta {
             truncated: false,
             retained_lines: 0,
@@ -83,11 +88,8 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         viewport: Size { cols: 80, rows: 24 },
         active_tab: tab_id,
         focused_pane: Some(pane_id),
-        hovered_pane: None,
         lock_mode: LockMode::Normal,
         mouse_select: false,
-        pending_sequence: None,
-        tabline_offset: None,
     };
 
     RenderSnapshot {
@@ -95,8 +97,6 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         panes: vec![pane],
         client,
         plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
     }
 }
 

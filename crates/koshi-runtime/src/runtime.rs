@@ -14,7 +14,6 @@ pub mod command;
 pub mod discovery;
 pub mod driver;
 pub mod event;
-pub(crate) mod hints;
 pub mod input;
 pub mod mouse;
 pub mod pty_forward;

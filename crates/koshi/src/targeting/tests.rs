@@ -413,7 +413,9 @@ fn in_session_tab_id_routes_home_and_rides_into_the_command() {
         panic!("expected the home route, got {route:?}");
     };
     assert_eq!(targets, ResolvedTargets::default());
-    let (_, mapped) = command.to_action(&targets).expect("close-tab is an action");
+    let (_, mapped) = command
+        .to_action(&targets, koshi_core::geometry::Direction::Right)
+        .expect("close-tab is an action");
     assert_eq!(
         mapped,
         koshi_core::command::Command::CloseTab(koshi_core::command::CloseTabArgs {

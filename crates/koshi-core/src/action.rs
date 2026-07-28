@@ -424,8 +424,8 @@ fn core_seed(
 pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 
 /// The hint-bar label for `core:mouse-select` while the mode is **on**. The
-/// snapshot swaps [`MOUSE_SELECT_HINT`] for this on the acting client's live
-/// state.
+/// viewer swaps [`MOUSE_SELECT_HINT`] for this as it paints each frame, for as
+/// long as mouse-select is on.
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
 /// The built-in action table, loaded into the runtime registry at startup.

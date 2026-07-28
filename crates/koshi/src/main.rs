@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use koshi::cli::{ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets};
+use koshi::config;
 use koshi::config_command;
 use koshi::discovery::{self, Discovered};
 use koshi::error::CliError;
@@ -91,14 +92,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // environment reports itself rather than as a missing daemon.
     let in_session = InSessionContext::from_env()?;
 
+    // This CLI is a client, so it reads its own `layout.new-pane-direction`
+    // out of `koshi.kdl` and puts it on the pane-opening verbs that were given
+    // no `--direction`. The session holds no split direction to fall back on.
+    let new_pane_direction = config::new_pane_direction(config::load_app_layer());
+
     // The action verbs travel a socket as commands; the remaining verbs
     // (discovery listings, lifecycle) have their own serving layers. The
     // probe with default targets only asks "is this an action verb" — the
     // real command is built after routing resolves the targets.
-    let is_action = cli
-        .command
-        .as_ref()
-        .is_some_and(|command| command.to_action(&ResolvedTargets::default()).is_some());
+    let is_action = cli.command.as_ref().is_some_and(|command| {
+        command
+            .to_action(&ResolvedTargets::default(), new_pane_direction)
+            .is_some()
+    });
     if !is_action {
         return Err(CliError::IpcUnavailable {
             detail: "this command is not served over the control socket yet".to_string(),
@@ -113,13 +120,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Route::InSession(targets) => {
             let context = in_session.expect("an in-session route needs the pane identity");
             let (_, command) = cli_command
-                .to_action(&targets)
+                .to_action(&targets, new_pane_direction)
                 .expect("checked to be an action verb above");
             ipc_client::submit_in_session(&context, command)?
         }
         Route::External { session, targets } => {
             let (_, command) = cli_command
-                .to_action(&targets)
+                .to_action(&targets, new_pane_direction)
                 .expect("checked to be an action verb above");
             ipc_client::submit_external(session, command)?
         }

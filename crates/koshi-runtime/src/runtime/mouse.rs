@@ -1,409 +1,43 @@
-//! Outer mouse routing: hit-test a click against the client's own frame and act
-//! on the region it lands on.
+//! What the session does with a mouse event the viewer already decided.
 //!
-//! Peer of [`crate::runtime::input`] for the pointer. A decoded
-//! [`MouseInput`] carries a cell in the client's screen space; the runtime
-//! solves where that client's surfaces sit, asks
-//! [`hit_test`](fn@koshi_renderer::hit_test) what sits under the cell, and
-//! turns the answer into a command, a tab-strip scroll, or a mouse report
-//! handed to the program in the pane.
+//! The viewer that received the event answers it against the frame it last
+//! painted: which pane the pointer is over, which region it landed on, which
+//! gesture is under way. Nothing here hit-tests, and no mouse event arrives
+//! here raw. What reaches the session is one of these calls, each naming its
+//! target explicitly:
 //!
-//! The solve is redone per event, so the hit-test always reads the layout the
-//! client is looking at. What it produces is an [`OwnedFrameLayout`]: the
-//! solved rects, the tab bar, and the client's own view state, and never the
-//! panes' contents — classifying a cell needs no grid, title, or highlight.
+//! - [`scroll_pane_view`](Server::scroll_pane_view) moves a client's scrollback
+//!   view of one pane;
+//! - [`forward_mouse_to_pane`](Server::forward_mouse_to_pane) hands an event to
+//!   the program in one pane as a mouse report;
+//! - [`write_alt_scroll_arrows`](Server::write_alt_scroll_arrows) sends cursor
+//!   arrows for the alternate-scroll translation of a wheel tick;
+//! - [`drag_resize`](Server::drag_resize) moves one pane border a cell at a
+//!   time and reports how far it got.
 //!
-//! What each region does on a left press: a **tab** focuses that tab; a
-//! **scroll arrow** peeks the tab strip toward its side; a **stack header**
-//! focuses that pane; **pane content** focuses the pane if the click is not
-//! already in the focused one, and otherwise goes through to the program; a
-//! **pane border** begins a resize drag; the bare **tabline** begins a
-//! peek-drag. A **drag** then moves the grabbed border, scrolls the strip, or
-//! goes to the program — whichever gesture the press began; a **wheel** steps
-//! the tab strip over the tabline and scrolls a pane elsewhere (below); a
-//! **release** ends a drag or reaches the program. The hint bar is ignored.
+//! Focus and every selection change arrive as ordinary commands through
+//! [`Server::submit_command`], validated like any command typed at the CLI.
 //!
-//! Anything koshi does not consume is forwarded to the program in the focused
-//! pane, encoded as the mouse report its current mode asked for (see
-//! [`encode_mouse`](fn@koshi_terminal::mouse_report::encode_mouse)) — this is
-//! what lets a mouse-aware TUI in a pane receive clicks, drags, and motion.
-//!
-//! A **wheel over a pane** targets the pane under the pointer (not the focused
-//! one), by precedence: a highlight in that pane holds the view and scrolls
-//! koshi's own scrollback; a program asking for the mouse gets the wheel as a
-//! report; an alternate-screen program with alternate-scroll mode (`?1007`) on
-//! gets cursor arrow keys; otherwise the pane's scrollback scrolls, or the wheel
-//! is ignored, per [`mouse.wheel`](koshi_config::types::MouseConfig::wheel). A
-//! buttonless **move** tracks which pane the pointer is over on the client's
-//! [`hovered_pane`](koshi_session::client::Client::hovered_pane), so the
-//! renderer can mark the wheel's target.
-//!
-//! A border drag resizes through the same [`Command::ResizePane`] the resize
-//! keybinding uses, one cell per cell the pointer crosses, so the border tracks
-//! the pointer live. The tracked cell advances only when a resize is accepted:
-//! pushing the pointer past a pane's minimum size leaves the border pinned at
-//! that limit, and a reverse drag moves it the instant the pointer crosses back.
-//!
-//! Scrolling the tab strip is a per-client view change (it never moves focus or
-//! touches session state), so it mutates only the client's
-//! [`tabline_offset`](koshi_session::client::Client::tabline_offset) and repaints.
+//! **Each call re-reads the live state it needs at the moment it acts**, so a
+//! program that changed a mouse mode, switched screens, or hit its minimum size
+//! since the frame the viewer decided from is still answered correctly.
 
-use std::time::{Instant, SystemTime};
-
-use koshi_config::types::WheelScroll;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, ResizePaneArgs, TabTarget, VisualCommand,
+    Command, CommandEnvelope, CommandResult, CommandSource, ResizePaneArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, Point};
-use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
-use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
-use koshi_layout::mode::LayoutMode;
-use koshi_pane::pane::state::PaneKind;
-use koshi_renderer::snapshot::{FrameLayout, OwnedFrameLayout};
-use koshi_renderer::{
-    hit_test, pane_content_rect, pane_local_cell, tabline_first_visible, HitRegion,
-};
-use koshi_session::client::{ClickCount, ResizeDragState, TablineDragState};
-use koshi_terminal::mouse_report::{encode_mouse, reports};
+use koshi_core::geometry::Direction;
+use koshi_core::ids::{ClientId, CommandId, PaneId};
+use koshi_core::mouse::{reports, MouseInput, MouseKind};
+use koshi_renderer::pane_cell_clamped;
+use koshi_renderer::snapshot::ViewerChrome;
+use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
-use crate::runtime::render_schedule::InvalidationReason;
-use crate::runtime::selection::CLICK_THRESHOLD;
+use std::time::SystemTime;
+
 use crate::server::Server;
 
-/// Cells of horizontal drag that scroll the tab strip by one tab.
-const TABLINE_DRAG_STEP: i32 = 6;
-
 impl Server {
-    /// Route one decoded mouse event from `client_id`.
-    ///
-    /// Koshi acts on what it owns — a click on a tab, a border, the tab strip —
-    /// and hands everything else to the program in the pane under the pointer,
-    /// encoded as a mouse report when that program asked for one. A press or
-    /// wheel solves the layout to hit-test it; a drag or release consults the
-    /// stored drag first; a buttonless move solves it to find the pane under
-    /// the pointer, and solves it again only when the program in that pane
-    /// asked to be told about moves.
-    pub fn handle_mouse_input(&mut self, client_id: ClientId, mouse: MouseInput, now: Instant) {
-        match mouse.kind {
-            MouseKind::Press(MouseButton::Left) => {
-                if let Some((frame, region)) = self.frame_hit(client_id, mouse.at) {
-                    self.mouse_left_press(client_id, frame.layout(), region, mouse, now);
-                }
-            }
-            MouseKind::Scroll(direction) => {
-                if let Some((frame, region)) = self.frame_hit(client_id, mouse.at) {
-                    self.set_hover(client_id, pane_under(&region));
-                    self.route_wheel(client_id, frame.layout(), region, direction, mouse);
-                }
-            }
-            MouseKind::Drag(MouseButton::Left) => {
-                // A press begins exactly one gesture: a border drag resizes, a
-                // tabline drag scrolls, a content drag selects, and any other
-                // drag is the program's.
-                if self
-                    .client_mut(client_id)
-                    .is_some_and(|client| client.pending_resize_drag().is_some())
-                {
-                    self.drag_resize_to(client_id, mouse.at);
-                } else if self
-                    .client_mut(client_id)
-                    .is_some_and(|client| client.tabline_drag().is_some())
-                {
-                    self.drag_tabline_to(client_id, mouse.at.x);
-                } else if self
-                    .client_mut(client_id)
-                    .is_some_and(|client| client.selection_drag().is_some())
-                {
-                    self.drag_selection_to(client_id, mouse.at, now);
-                } else {
-                    self.forward_mouse_to_pane(client_id, mouse);
-                }
-            }
-            MouseKind::Release(_) => {
-                // A release that ends a koshi drag is koshi's; any other release
-                // belongs to the program under the pointer.
-                let ending_drag = self.client_mut(client_id).is_some_and(|client| {
-                    client.pending_resize_drag().is_some()
-                        || client.tabline_drag().is_some()
-                        || client.selection_drag().is_some()
-                });
-                self.end_tabline_drag(client_id);
-                self.end_resize_drag(client_id);
-                self.end_selection_drag(client_id);
-                if !ending_drag {
-                    self.forward_mouse_to_pane(client_id, mouse);
-                }
-            }
-            MouseKind::Motion => {
-                // A buttonless move is the hover signal: track which pane the
-                // pointer is over, then forward the move if the program wants it.
-                self.update_hover(client_id, mouse.at);
-                self.forward_mouse_to_pane(client_id, mouse);
-            }
-            MouseKind::Press(_) | MouseKind::Drag(_) => {
-                self.forward_mouse_to_pane(client_id, mouse);
-            }
-        }
-    }
-
-    /// Solve where the client's surfaces sit and classify the cell `at` landed
-    /// on, or `None` when there is no frame to solve.
-    ///
-    /// Builds a [`OwnedFrameLayout`], not a full frame: classifying a cell
-    /// reads the solved layout, the tab bar, and the client's own view state,
-    /// and never the contents of a pane.
-    fn frame_hit(&self, client_id: ClientId, at: Point) -> Option<(OwnedFrameLayout, HitRegion)> {
-        let frame = self.build_layout(client_id)?;
-        let region = hit_test(frame.layout(), at);
-        Some((frame, region))
-    }
-
-    /// Act on a left press over `region`.
-    fn mouse_left_press(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        region: HitRegion,
-        mouse: MouseInput,
-        now: Instant,
-    ) {
-        match region {
-            HitRegion::Tab { tab_id } => self.mouse_focus_tab(client_id, tab_id),
-            HitRegion::TablineScrollLeft { to } | HitRegion::TablineScrollRight { to } => {
-                self.set_tabline_offset(client_id, Some(to));
-            }
-            HitRegion::PaneContent { pane_id } => {
-                self.click_pane_content(client_id, pane_id, mouse, now);
-            }
-            HitRegion::StackHeader { pane_id } => self.mouse_focus_pane(client_id, pane_id),
-            HitRegion::PaneBorder { pane_id, side } => {
-                // Only a real divider — one with an adjacent pane to resize
-                // against — begins a resize. The tab-edge outer frame and the
-                // boundary above a collapsed stack header have no neighbor.
-                if self.config.mouse.border_resize
-                    && self.border_has_neighbor(client_id, pane_id, side)
-                {
-                    self.begin_resize_drag(client_id, pane_id, side, mouse.at);
-                }
-            }
-            HitRegion::Tabline => self.begin_tabline_drag(client_id, frame, mouse.at.x),
-            HitRegion::Statusline | HitRegion::None => {}
-        }
-    }
-
-    /// Whether the border on `side` of `pane_id` is a real divider the client
-    /// can drag — one with an adjacent pane to resize against, per the layout
-    /// tree. The tab-edge outer frame and the boundary above a collapsed stack
-    /// header have no neighbor, so they cannot be dragged; a zoomed view draws
-    /// no dividers at all — its visible frame is the outer edge — so nothing is
-    /// draggable until the client is back in the tiled view.
-    fn border_has_neighbor(&self, client_id: ClientId, pane_id: PaneId, side: Direction) -> bool {
-        let Some(session) = self.session_for_client(client_id) else {
-            return false;
-        };
-        let Some(client) = session.clients.get(client_id) else {
-            return false;
-        };
-        if matches!(
-            client.layout_mode(client.active_tab()),
-            LayoutMode::Fullscreen { .. }
-        ) {
-            return false;
-        }
-        let Some(tab) = session.tabs.get(&client.active_tab()) else {
-            return false;
-        };
-        koshi_layout::resize::has_adjacent_border(tab.layout(), pane_id, side)
-    }
-
-    /// Route a click on a pane's content: a click on a pane the client has not
-    /// focused focuses it; a click on the pane it is already in goes through to
-    /// the program when that program asked for mouse events, and otherwise
-    /// begins a text selection. A first click focuses, a second acts.
-    ///
-    /// **A mouse-aware program keeps the mouse.** `vim`, `htop`, and `lazygit`
-    /// turn mouse reporting on and act on clicks themselves, so a drag inside
-    /// one is theirs; a plain shell asks for nothing, so a drag there is a
-    /// selection. Which one it is is read from the pane's live mouse mode at the
-    /// moment of the press, so it follows a program turning reporting on and off.
-    ///
-    /// **Mouse-select mode takes the mouse back.** With the client's
-    /// `mouse-select` mode on, a drag begins a koshi selection even over a
-    /// mouse-aware program — the way to highlight and copy text out of a
-    /// full-screen `vim` or `htop`. It is a key-driven mode rather than a mouse
-    /// modifier because the outer terminal reserves `Shift`+drag for its own
-    /// selection and never forwards it to koshi.
-    fn click_pane_content(
-        &mut self,
-        client_id: ClientId,
-        pane_id: PaneId,
-        mouse: MouseInput,
-        now: Instant,
-    ) {
-        if Some(pane_id) != self.typed_pane(client_id) {
-            self.mouse_focus_pane(client_id, pane_id);
-        } else if self.pane_reports_mouse(pane_id, mouse.kind)
-            && !self.client_grabs_mouse(client_id)
-        {
-            self.forward_mouse_to_pane(client_id, mouse);
-        } else {
-            let clicks = self.record_click(client_id, MouseButton::Left, now);
-            self.begin_selection_drag(client_id, pane_id, mouse.at, clicks, mouse.mods);
-        }
-    }
-
-    /// Whether `client_id` has `mouse-select` mode on, so a drag is a koshi
-    /// selection even when the pane's program asked for the mouse.
-    fn client_grabs_mouse(&self, client_id: ClientId) -> bool {
-        self.session_for_client(client_id)
-            .and_then(|session| session.clients.get(client_id))
-            .is_some_and(koshi_session::client::Client::mouse_select)
-    }
-
-    /// Whether the program in `pane_id` asked to be told about `kind`.
-    ///
-    /// The cheap check the press path makes before deciding whether a gesture is
-    /// the program's or koshi's: it reads the pane's mouse mode alone and builds
-    /// no frame.
-    fn pane_reports_mouse(&self, pane_id: PaneId, kind: MouseKind) -> bool {
-        self.terminal_engines
-            .get(&pane_id)
-            .is_some_and(|engine| reports(engine.state().mouse_tracking(), kind))
-    }
-
-    /// Record a press into this client's run of clicks and report what it makes:
-    /// one click, two, or three. See
-    /// [`MouseState::press`](koshi_session::client::MouseState::press).
-    fn record_click(
-        &mut self,
-        client_id: ClientId,
-        button: MouseButton,
-        now: Instant,
-    ) -> ClickCount {
-        self.client_mut(client_id)
-            .map_or(ClickCount::Single, |client| {
-                client.mouse_state_mut().press(button, now, CLICK_THRESHOLD)
-            })
-    }
-
-    /// Hand `mouse` to the program in the pane it belongs to, encoded as the
-    /// report that pane's mouse mode asked for.
-    ///
-    /// A button gesture is captured: the press picks the focused pane under the
-    /// pointer, and the drags and release that follow go to that same pane even
-    /// as the pointer leaves it, clamped to its edges. A bare move goes to the
-    /// focused pane under the pointer. A drag or release with no capture — the
-    /// press was koshi's, or it focused nothing — is dropped, so no program ever
-    /// sees a release without its press.
-    ///
-    /// The pane's tracking level is checked before the layout is solved, so a
-    /// bare move over a pane in no mouse mode solves nothing here.
-    ///
-    /// An event that is written also drops this client's highlight in that
-    /// pane: input reaching the pane's child leaves visual mode.
-    fn forward_mouse_to_pane(&mut self, client_id: ClientId, mouse: MouseInput) {
-        let captured = self.mouse_capture(client_id);
-        // A release ends the capture, whether or not it forwards. Which button
-        // released cannot be trusted (some terminals report every release as the
-        // left button), so any release clears.
-        if matches!(mouse.kind, MouseKind::Release(_)) {
-            self.set_mouse_capture(client_id, None);
-        }
-        let (pane_id, clamp, kind) = match mouse.kind {
-            MouseKind::Press(_) | MouseKind::Motion => {
-                match self.focused_terminal_pane(client_id) {
-                    Some(pane) => (pane, false, mouse.kind),
-                    None => return,
-                }
-            }
-            // A captured drag or release is re-stamped with the button its press
-            // named — the event's own button is unreliable, so the program sees
-            // the same button it saw go down.
-            MouseKind::Drag(_) | MouseKind::Release(_) => match captured {
-                Some((pane, button)) => (pane, true, with_button(mouse.kind, button)),
-                None => return,
-            },
-            MouseKind::Scroll(_) => return,
-        };
-        // Cheap gate before the layout is solved: does the program want this event?
-        let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
-            (
-                engine.state().mouse_tracking(),
-                engine.state().mouse_encoding(),
-            )
-        }) else {
-            return;
-        };
-        if !reports(tracking, kind) {
-            return;
-        }
-        let Some(frame) = self.build_layout(client_id) else {
-            return;
-        };
-        let Some((col, row)) = pane_cell(frame.layout(), pane_id, mouse.at, clamp) else {
-            return;
-        };
-        if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
-            let _ = self.pty_backend().write(pane_id, &bytes);
-            self.clear_selection_on_pane_input(client_id, pane_id);
-            // Capture with the press's own button — reliable, unlike a later
-            // drag's or release's.
-            if let MouseKind::Press(button) = mouse.kind {
-                self.set_mouse_capture(client_id, Some((pane_id, button)));
-            }
-        }
-    }
-
-    /// The client's focused pane when it is a terminal, found without solving the
-    /// layout — the cheap check the forward path makes before any real work.
-    fn focused_terminal_pane(&self, client_id: ClientId) -> Option<PaneId> {
-        let session = self.session_for_client(client_id)?;
-        let client = session.clients.get(client_id)?;
-        let pane_id = client.focused_pane(client.active_tab())?;
-        matches!(session.panes.get(pane_id)?.kind(), PaneKind::Terminal).then_some(pane_id)
-    }
-
-    /// The pane and pressed button this client's held mouse gesture is captured
-    /// to, if any.
-    fn mouse_capture(&self, client_id: ClientId) -> Option<(PaneId, MouseButton)> {
-        self.session_for_client(client_id)?
-            .clients
-            .get(client_id)?
-            .mouse_capture()
-    }
-
-    /// Set or clear this client's mouse capture.
-    fn set_mouse_capture(&mut self, client_id: ClientId, capture: Option<(PaneId, MouseButton)>) {
-        if let Some(client) = self.client_mut(client_id) {
-            client.set_mouse_capture(capture);
-        }
-    }
-
-    /// Dispatch a `FocusTab` for a clicked tab. The client is named explicitly,
-    /// so the switch moves this client's view and no other.
-    fn mouse_focus_tab(&mut self, client_id: ClientId, tab_id: TabId) {
-        self.dispatch_mouse(
-            client_id,
-            Command::FocusTab(FocusTabArgs {
-                target: TabTarget::Id(tab_id),
-                client: Some(client_id),
-            }),
-        );
-    }
-
-    /// Dispatch a `FocusPane` for a clicked pane.
-    fn mouse_focus_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
-        self.dispatch_mouse(
-            client_id,
-            Command::FocusPane(FocusPaneArgs {
-                target: FocusTarget::Pane(pane_id),
-                client: Some(client_id),
-            }),
-        );
-    }
-
     /// Envelope and dispatch a command attributed to `client_id`'s mouse,
     /// returning the runtime's result.
     fn dispatch_mouse_command(&mut self, client_id: ClientId, command: Command) -> CommandResult {
@@ -416,103 +50,36 @@ impl Server {
         self.dispatch(envelope)
     }
 
-    /// Envelope and dispatch a command attributed to `client_id`'s mouse.
-    fn dispatch_mouse(&mut self, client_id: ClientId, command: Command) {
-        let _ = self.dispatch_mouse_command(client_id, command);
-    }
-
     /// Dispatch a selection command attributed to `client_id`'s mouse. The
     /// selection layer's route into the command pipeline, so a highlight lands
     /// through the same dispatch every other mutation does.
     pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, command: VisualCommand) {
-        self.dispatch_mouse(client_id, Command::Visual(command));
+        let _ = self.dispatch_mouse_command(client_id, Command::Visual(command));
     }
 
-    /// Anchor a tab-strip peek-drag at column `anchor_x`, recording the first
-    /// visible tab at that instant so drag motion scrolls relative to it.
-    fn begin_tabline_drag(&mut self, client_id: ClientId, frame: FrameLayout<'_>, anchor_x: u16) {
-        let anchor_first_visible = tabline_first_visible(frame);
-        if let Some(client) = self.client_mut(client_id) {
-            client.set_tabline_drag(Some(TablineDragState {
-                anchor_x,
-                anchor_first_visible,
-            }));
-        }
-    }
-
-    /// Scroll the tab strip to follow an in-flight drag whose pointer is now at
-    /// column `x`. Dragging right moves the strip right (revealing earlier
-    /// tabs); one tab per [`TABLINE_DRAG_STEP`] cells.
-    fn drag_tabline_to(&mut self, client_id: ClientId, x: u16) {
-        let Some(client) = self.client_mut(client_id) else {
-            return;
-        };
-        let Some(drag) = client.tabline_drag() else {
-            return;
-        };
-        let delta = i32::from(drag.anchor_x) - i32::from(x);
-        let steps = delta / TABLINE_DRAG_STEP;
-        let target = (drag.anchor_first_visible as i32 + steps).max(0) as usize;
-        client.set_tabline_offset(Some(target));
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
-    }
-
-    /// End any in-flight tab-strip drag, leaving the scrolled position as it is.
-    fn end_tabline_drag(&mut self, client_id: ClientId) {
-        if let Some(client) = self.client_mut(client_id) {
-            if client.tabline_drag().is_some() {
-                client.set_tabline_drag(None);
-            }
-        }
-    }
-
-    /// Begin a pane-border resize drag: record the grabbed pane, its border
-    /// `side`, and the press cell `at` that the first drag move measures from.
-    fn begin_resize_drag(
+    /// Move `pane`'s `side` border `count` cells, `step` at a time, and report
+    /// how many cells were actually taken.
+    ///
+    /// Each cell goes through the same [`Command::ResizePane`] the resize
+    /// keybinding uses, so a fast drag that jumps several cells fills right up
+    /// to a pane's minimum size. The first refused step is the wall: every
+    /// further step that way fails too, so the walk stops there and the count
+    /// names the cells that really moved.
+    ///
+    /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
+    pub fn drag_resize(
         &mut self,
         client_id: ClientId,
-        pane_id: PaneId,
+        pane: PaneId,
         side: Direction,
-        at: Point,
-    ) {
-        if let Some(client) = self.client_mut(client_id) {
-            client.update_pending_resize_drag(Some(ResizeDragState {
-                pane: pane_id,
-                side,
-                last: at,
-            }));
-        }
-    }
-
-    /// Move the grabbed border to follow a drag whose pointer is now at `at`.
-    ///
-    /// Applies the move one cell at a time toward the border, through the same
-    /// [`Command::ResizePane`] path the resize keybinding uses, so a fast drag
-    /// that jumps several cells fills right up to a pane's minimum size instead
-    /// of being refused whole. The tracked cell advances only over the cells that
-    /// were accepted; the first refused step is the wall, so the border pins
-    /// there and a reverse drag moves it the instant the pointer crosses back.
-    fn drag_resize_to(&mut self, client_id: ClientId, at: Point) {
-        let Some(drag) = self
-            .client_mut(client_id)
-            .and_then(|client| client.pending_resize_drag().copied())
-        else {
-            return;
-        };
-        let total = resize_delta(drag.side, drag.last, at);
-        if total == 0 {
-            return;
-        }
-        // One cell per step, in the pointer's direction, stopping at the first
-        // refused step — that is the wall, and every further step this way fails
-        // too, so the anchor stays on the cells that actually moved.
-        let step = total.signum();
-        let mut applied: u16 = 0;
-        for _ in 0..total.unsigned_abs() {
+        step: i16,
+        count: u16,
+    ) -> u16 {
+        let mut applied = 0;
+        for _ in 0..count {
             let command = Command::ResizePane(ResizePaneArgs {
-                pane: Some(drag.pane),
-                direction: drag.side,
+                pane: Some(pane),
+                direction: side,
                 size: step,
             });
             if !matches!(
@@ -523,152 +90,56 @@ impl Server {
             }
             applied += 1;
         }
-        if applied > 0 {
-            if let Some(client) = self.client_mut(client_id) {
-                let last = advance_toward(drag.side, drag.last, at, applied);
-                client.update_pending_resize_drag(Some(ResizeDragState { last, ..drag }));
-            }
-        }
+        applied
     }
 
-    /// End any in-flight pane-border resize drag.
-    fn end_resize_drag(&mut self, client_id: ClientId) {
-        if let Some(client) = self.client_mut(client_id) {
-            if client.pending_resize_drag().is_some() {
-                client.update_pending_resize_drag(None);
-            }
-        }
-    }
-
-    /// Step the tab strip one tab on a wheel `direction`, but only when the
-    /// wheel is over the tabline row.
-    fn scroll_over_tabline(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        region: HitRegion,
-        direction: ScrollDirection,
-    ) {
-        let over_tabline = matches!(
-            region,
-            HitRegion::Tabline
-                | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
-        );
-        if !over_tabline {
-            return;
-        }
-        let first = tabline_first_visible(frame);
-        let target = match direction {
-            ScrollDirection::Up | ScrollDirection::Left => first.saturating_sub(1),
-            ScrollDirection::Down | ScrollDirection::Right => first + 1,
-        };
-        self.set_tabline_offset(client_id, Some(target));
-    }
-
-    /// Route a wheel tick over `region`. Over the tab strip it steps the strip;
-    /// over a pane's content that pane is the target; over any other chrome the
-    /// client's focused pane is. The target is then scrolled by
-    /// [`wheel_on_pane`](Self::wheel_on_pane)'s precedence.
-    fn route_wheel(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        region: HitRegion,
-        direction: ScrollDirection,
-        mouse: MouseInput,
-    ) {
-        if matches!(
-            region,
-            HitRegion::Tabline
-                | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
-        ) {
-            self.scroll_over_tabline(client_id, frame, region, direction);
-            return;
-        }
-        let target = match region {
-            HitRegion::PaneContent { pane_id } => Some(pane_id),
-            _ => self.focused_terminal_pane(client_id),
-        };
-        if let Some(pane_id) = target {
-            self.wheel_on_pane(client_id, frame, pane_id, direction, mouse);
-        }
-    }
-
-    /// Act on a wheel tick aimed at `pane_id`, by precedence: a highlight in the
-    /// pane holds the view and scrolls koshi's own scrollback; else a program
-    /// asking for the mouse gets the wheel as a report; else an alternate-screen
-    /// program with `?1007` on gets cursor arrow keys; else the
-    /// [`wheel`](koshi_config::types::MouseConfig::wheel) config decides — scroll
-    /// koshi's scrollback (the default) or do nothing.
-    fn wheel_on_pane(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        pane_id: PaneId,
-        direction: ScrollDirection,
-        mouse: MouseInput,
-    ) {
-        let lines = usize::from(self.config.mouse.scroll_lines);
-        if self.pane_has_selection(client_id, pane_id) {
-            self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
-        } else if self.pane_reports_mouse(pane_id, MouseKind::Scroll(direction)) {
-            self.forward_wheel_to_pane(frame, pane_id, direction, mouse);
-        } else if self.pane_alt_scroll(pane_id) {
-            self.send_alt_scroll_keys(pane_id, direction, lines);
-        } else {
-            match self.config.mouse.wheel {
-                WheelScroll::ScrollScrollback => {
-                    self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
-                }
-                WheelScroll::Ignore => {}
-            }
-        }
-    }
-
-    /// Scroll `client_id`'s koshi scrollback view of `pane_id` by the wheel
-    /// `direction`. A vertical wheel moves the view; a horizontal wheel leaves
-    /// the scrollback alone.
+    /// Move `client_id`'s koshi scrollback view of `pane_id` by `lines`, up into
+    /// history or back down toward live output, and report the line its top row
+    /// now shows.
     ///
     /// Koshi scrollback exists only on the primary screen, so a pane on the
     /// alternate screen scrolls nothing: the alternate screen keeps no history,
     /// and storing an offset there would surface as an unexpectedly scrolled-back
-    /// shell once the full-screen program exits back to the primary.
-    fn wheel_scroll_scrollback(
+    /// shell once the full-screen program exits back to the primary. The screen
+    /// is read here, at the moment of the move, so a pane that switched screens
+    /// since the frame the viewer decided from is still answered correctly.
+    ///
+    /// The returned line is the same number [`PaneSnapshot::view_top_row`] would
+    /// carry for the next frame, so a caller can tell a view that moved from one
+    /// already at its limit. `None` names a pane with no terminal.
+    ///
+    /// [`PaneSnapshot::view_top_row`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row
+    pub fn scroll_pane_view(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
-        direction: ScrollDirection,
+        up: bool,
         lines: usize,
-    ) {
-        if !self.pane_on_primary(pane_id) {
-            return;
+    ) -> Option<u64> {
+        if self.pane_on_primary(pane_id) {
+            if up {
+                self.scroll_up(client_id, pane_id, lines);
+            } else {
+                self.scroll_down(client_id, pane_id, lines);
+            }
         }
-        match direction {
-            ScrollDirection::Up => self.scroll_up(client_id, pane_id, lines),
-            ScrollDirection::Down => self.scroll_down(client_id, pane_id, lines),
-            ScrollDirection::Left | ScrollDirection::Right => {}
-        }
+        self.view_top_row(client_id, pane_id)
     }
 
-    /// Whether this client has a highlight up in `pane_id`.
-    fn pane_has_selection(&self, client_id: ClientId, pane_id: PaneId) -> bool {
-        self.session_for_client(client_id)
+    /// The line `client_id`'s view of `pane_id` shows on its top row, or `None`
+    /// when the pane has no terminal.
+    fn view_top_row(&self, client_id: ClientId, pane_id: PaneId) -> Option<u64> {
+        let offset = self
+            .session_for_client(client_id)
             .and_then(|session| session.clients.get(client_id))
-            .is_some_and(|client| client.selection(pane_id).is_some())
-    }
-
-    /// Whether `pane_id`'s program is on the alternate screen with alternate-
-    /// scroll mode (`?1007`) on — the state in which a wheel tick becomes cursor
-    /// arrow keys.
-    fn pane_alt_scroll(&self, pane_id: PaneId) -> bool {
-        self.terminal_engines.get(&pane_id).is_some_and(|engine| {
-            let state = engine.state();
-            state.alt_scroll() && state.active_screen() == Screen::Alternate
-        })
+            .map_or(0, |client| client.scroll_offset(pane_id));
+        let state = self.terminal_engines.get(&pane_id)?.state();
+        Some(
+            state
+                .scrollback()
+                .total_pushed()
+                .saturating_sub(state.effective_view_offset(offset) as u64),
+        )
     }
 
     /// Whether `pane_id`'s program is on the primary screen — the only screen
@@ -679,183 +150,95 @@ impl Server {
             .is_some_and(|engine| engine.state().active_screen() == Screen::Primary)
     }
 
-    /// Hand a wheel tick to the program in `pane_id`, encoded as the mouse report
-    /// its mode asked for. The pane's tracking level was already checked by
-    /// [`wheel_on_pane`](Self::wheel_on_pane), so a program in no mouse mode is
-    /// never reached here.
+    /// Hand `mouse` to the program in `pane_id`, encoded as the mouse report
+    /// that pane's mode asks for.
     ///
-    /// The pointer's cell is clamped into the pane, so a wheel that landed on
-    /// chrome (a border, the status line) and was routed to the focused pane
-    /// still reaches it at the nearest edge, the same way a captured drag does —
-    /// a wheel over no pane goes to the focused one.
-    fn forward_wheel_to_pane(
+    /// The tracking level and encoding are read here, at the moment of the
+    /// write, so a program that turned mouse reporting off since the frame the
+    /// viewer decided from receives nothing.
+    ///
+    /// The pointer's cell is clamped into the pane, so an event that landed on
+    /// chrome (a border, the status line) or left the pane mid-drag still
+    /// reaches it at the nearest edge.
+    ///
+    /// An event that is written also drops this client's highlight in that pane:
+    /// input reaching the pane's child leaves visual mode.
+    ///
+    /// Returns whether a report was handed to the pane's writer. It is `false`
+    /// when the pane is gone, when its live tracking no longer asks for this
+    /// event, when the layout no longer places the pane, and when the pane
+    /// refuses the bytes — so the caller records a gesture only for a press the
+    /// pane accepted.
+    pub fn forward_mouse_to_pane(
         &mut self,
-        frame: FrameLayout<'_>,
+        client_id: ClientId,
         pane_id: PaneId,
-        direction: ScrollDirection,
         mouse: MouseInput,
-    ) {
+    ) -> bool {
         let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
             (
                 engine.state().mouse_tracking(),
                 engine.state().mouse_encoding(),
             )
         }) else {
-            return;
+            return false;
         };
-        let kind = MouseKind::Scroll(direction);
-        let Some((col, row)) = pane_cell(frame, pane_id, mouse.at, true) else {
-            return;
-        };
-        if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
-            let _ = self.pty_backend().write(pane_id, &bytes);
+        if !reports(tracking, mouse.kind) {
+            return false;
         }
+        let Some(frame) = self.build_layout(client_id) else {
+            return false;
+        };
+        // A mouse report addresses the program's own grid, whose top-left
+        // content cell is `(1, 1)`.
+        let Some((col, row)) =
+            pane_cell_clamped(frame.layout(ViewerChrome::default()), pane_id, mouse.at)
+                .map(|(col, row)| (col + 1, row + 1))
+        else {
+            return false;
+        };
+        let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) else {
+            return false;
+        };
+        let written = self.pty_backend().write(pane_id, &bytes).is_ok();
+        // A wheel tick is not input the program's child typed, so it leaves
+        // a highlight standing; a click, drag, or release is.
+        if !matches!(mouse.kind, MouseKind::Scroll(_)) {
+            self.clear_selection_on_pane_input(client_id, pane_id);
+        }
+        written
     }
 
-    /// Send `lines` cursor arrow keys to `pane_id` for a wheel tick — the
-    /// alternate-scroll (`?1007`) translation. Up sends up-arrows, down sends
-    /// down-arrows; a horizontal wheel sends nothing. The byte form follows the
-    /// program's cursor-key mode: `ESC O A` under application keys, `ESC [ A`
-    /// otherwise.
-    fn send_alt_scroll_keys(&mut self, pane_id: PaneId, direction: ScrollDirection, lines: usize) {
-        let letter = match direction {
-            ScrollDirection::Up => b'A',
-            ScrollDirection::Down => b'B',
-            ScrollDirection::Left | ScrollDirection::Right => return,
-        };
-        let Some(app_keys) = self
-            .terminal_engines
-            .get(&pane_id)
-            .map(|engine| engine.state().app_cursor_keys())
-        else {
+    /// Send `count` cursor arrow keys to `pane_id` for a wheel tick — the
+    /// alternate-scroll (`?1007`) translation. `up` sends up-arrows, otherwise
+    /// down-arrows.
+    ///
+    /// The pane must still be on the alternate screen with alternate scroll on,
+    /// read here at the moment of the write: a pane whose program left the
+    /// alternate screen since the frame the viewer decided from receives
+    /// nothing, so the arrows cannot reach the shell underneath and recall its
+    /// history.
+    ///
+    /// The byte form follows the program's cursor-key mode (DECCKM), read at the
+    /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
+    pub fn write_alt_scroll_arrows(&mut self, pane_id: PaneId, up: bool, count: usize) {
+        let letter = if up { b'A' } else { b'B' };
+        let Some(app_keys) = self.terminal_engines.get(&pane_id).and_then(|engine| {
+            let state = engine.state();
+            (state.alt_scroll() && state.active_screen() == Screen::Alternate)
+                .then(|| state.app_cursor_keys())
+        }) else {
             return;
         };
         let intro: &[u8] = if app_keys { b"\x1bO" } else { b"\x1b[" };
-        let mut bytes = Vec::with_capacity(lines * 3);
-        for _ in 0..lines {
+        let mut bytes = Vec::with_capacity(count * 3);
+        for _ in 0..count {
             bytes.extend_from_slice(intro);
             bytes.push(letter);
         }
         if !bytes.is_empty() {
             let _ = self.pty_backend().write(pane_id, &bytes);
         }
-    }
-
-    /// Update this client's hovered pane from a pointer at `at`, solving the
-    /// layout to hit-test it. Repaints only when the hovered pane actually
-    /// changes, so a move within one pane draws nothing.
-    fn update_hover(&mut self, client_id: ClientId, at: Point) {
-        let hovered = self
-            .frame_hit(client_id, at)
-            .and_then(|(_, region)| pane_under(&region));
-        self.set_hover(client_id, hovered);
-    }
-
-    /// Set this client's hovered pane, repainting only when it changed so a move
-    /// within one pane costs nothing.
-    fn set_hover(&mut self, client_id: ClientId, hovered: Option<PaneId>) {
-        let changed = self.client_mut(client_id).is_some_and(|client| {
-            let changed = client.hovered_pane() != hovered;
-            if changed {
-                client.set_hovered_pane(hovered);
-            }
-            changed
-        });
-        if changed {
-            self.render_scheduler
-                .invalidate(InvalidationReason::StatusChanged);
-        }
-    }
-
-    /// Set this client's tab-strip peek offset and repaint. The renderer clamps
-    /// the index to a valid window, so an over-far target is harmless.
-    fn set_tabline_offset(&mut self, client_id: ClientId, offset: Option<usize>) {
-        let Some(client) = self.client_mut(client_id) else {
-            return;
-        };
-        client.set_tabline_offset(offset);
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
-    }
-}
-
-/// Cells the pointer at `to` has moved from `from` toward the grabbed `side`,
-/// signed for [`Command::ResizePane`]: positive grows the pane (its border moves
-/// outward), negative shrinks it. Left/right borders read the x axis, up/down
-/// borders read the y axis; motion on the other axis is ignored.
-fn resize_delta(side: Direction, from: Point, to: Point) -> i16 {
-    let outward = match side {
-        Direction::Right => i32::from(to.x) - i32::from(from.x),
-        Direction::Left => i32::from(from.x) - i32::from(to.x),
-        Direction::Down => i32::from(to.y) - i32::from(from.y),
-        Direction::Up => i32::from(from.y) - i32::from(to.y),
-    };
-    outward.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
-}
-
-/// The cell `n` cells from `from` toward `to` along `side`'s axis — where the
-/// drag anchor lands after `n` accepted single-cell resizes. Moving toward the
-/// pointer keeps the anchor correct for both a grow and a shrink. Saturating, so
-/// a border at a viewport edge cannot wrap below zero.
-fn advance_toward(side: Direction, from: Point, to: Point, n: u16) -> Point {
-    match side {
-        Direction::Left | Direction::Right => Point {
-            x: step_toward(from.x, to.x, n),
-            ..from
-        },
-        Direction::Up | Direction::Down => Point {
-            y: step_toward(from.y, to.y, n),
-            ..from
-        },
-    }
-}
-
-/// The 1-based cell inside `pane_id` that `at` maps to. With `clamp`, a point
-/// outside the pane is pulled to its nearest edge, so a captured drag that left
-/// the pane still selects to the edge; without it, an outside point is [`None`].
-fn pane_cell(
-    frame: FrameLayout<'_>,
-    pane_id: PaneId,
-    at: Point,
-    clamp: bool,
-) -> Option<(u16, u16)> {
-    if !clamp {
-        return pane_local_cell(frame, pane_id, at);
-    }
-    let rect = pane_content_rect(frame, pane_id)?;
-    let right = rect.origin.x + rect.size.cols.saturating_sub(1);
-    let bottom = rect.origin.y + rect.size.rows.saturating_sub(1);
-    let x = at.x.clamp(rect.origin.x, right);
-    let y = at.y.clamp(rect.origin.y, bottom);
-    Some((x - rect.origin.x + 1, y - rect.origin.y + 1))
-}
-
-/// `kind` with its button replaced by `button`. Only a drag or release carries a
-/// button koshi re-stamps from the capture; other kinds are returned unchanged.
-fn with_button(kind: MouseKind, button: MouseButton) -> MouseKind {
-    match kind {
-        MouseKind::Drag(_) => MouseKind::Drag(button),
-        MouseKind::Release(_) => MouseKind::Release(button),
-        other => other,
-    }
-}
-
-/// The pane a hit-tested `region` sits in, or `None` when it is chrome. Only a
-/// pane's own content counts as hovering that pane — the wheel scrolls it and
-/// the renderer marks its border.
-fn pane_under(region: &HitRegion) -> Option<PaneId> {
-    match region {
-        HitRegion::PaneContent { pane_id } => Some(*pane_id),
-        _ => None,
-    }
-}
-
-/// `from` moved `n` cells toward `to`, saturating at zero.
-fn step_toward(from: u16, to: u16, n: u16) -> u16 {
-    if to >= from {
-        from.saturating_add(n)
-    } else {
-        from.saturating_sub(n)
     }
 }
 

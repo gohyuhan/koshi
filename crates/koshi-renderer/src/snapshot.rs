@@ -14,23 +14,36 @@
 //! detached client is served by the separate session-persistence path.
 //!
 //! This module defines the *shape*. The runtime-side builder fills it from
-//! live state; renderer modules draw only these fields. This DTO is their
-//! contract.
+//! live state and renderer modules draw from it. This DTO is their contract.
+//!
+//! A frame also carries a few fields nothing draws: the terminal modes on
+//! [`PaneSnapshot`] that say where a mouse event over a pane goes, and the line
+//! number its top visible row is. A viewer copies them into a [`MouseFrame`] as
+//! it paints and answers the next mouse event from that.
+//!
+//! Two things about a frame come from the viewer instead, as a
+//! [`ViewerChrome`]: the pane its pointer is over, and where its tab strip is
+//! scrolled to. The session stores neither.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
-use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
-use crate::theme::Theme;
+/// The hint-bar data types live with the keymap that produces them; the
+/// renderer only draws them, and re-exports them here so a caller painting a
+/// frame resolves them from one place.
+pub use koshi_config::hints::{HintBinding, KeymapHints};
+
+/// What a pane runs, as [`PaneSlot::kind`] reports it. Re-exported so a caller
+/// reading a frame resolves it from here.
+pub use koshi_pane::pane::state::PaneKind;
 
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
@@ -49,43 +62,64 @@ pub struct RenderSnapshot {
     /// Plugin-contributed UI (statusline/tabline segments, notifications,
     /// overlays). Empty for a stock, plugin-free Koshi.
     pub plugin_ui: PluginUiSnapshot,
-    /// The keybinding data the hint bar draws for the client's current mode.
-    pub keymap_hints: KeymapHints,
-    /// The resolved chrome theme every koshi-owned surface draws its colors
-    /// from this frame.
-    pub theme: Theme,
 }
 
 impl RenderSnapshot {
-    /// Borrow the parts of this frame that say where things sit.
+    /// Borrow the parts of this frame that say where things sit, with `viewer`
+    /// supplying the two the session does not hold.
     #[must_use]
-    pub fn layout(&self) -> FrameLayout<'_> {
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
-            theme: &self.theme,
+            viewer,
         }
     }
 }
 
-/// Where a frame's surfaces sit, borrowed: the session with its solved active
-/// tab, the viewing client, and the theme. Carries no pane content.
+/// The two things about a frame the viewer decides, not the session: which pane
+/// its pointer is over, and where its tab strip is scrolled to.
 ///
-/// This is what hit-testing a mouse cell and solving the tabline read. A
-/// caller that already holds a [`RenderSnapshot`] borrows one out of it with
+/// Both belong to one viewer and change on a pointer move. Neither is stored on
+/// the session or carried in a snapshot; the viewer hands them in when it
+/// hit-tests a frame and again when it paints one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ViewerChrome {
+    /// The pane the viewer's pointer is over, or `None` over koshi's own chrome.
+    /// The renderer draws an *unfocused* pane under the pointer in the hover
+    /// color so the wheel target is visible; the focused pane keeps its focus
+    /// color.
+    pub hovered_pane: Option<PaneId>,
+    /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
+    /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
+    /// without changing focus. The renderer windows the tab list from this and
+    /// clamps an index past the last tab.
+    pub tabline_offset: Option<usize>,
+}
+
+/// Where a frame's surfaces sit, borrowed: the session with its solved active
+/// tab, the viewing client, and the viewer's own chrome state. Carries no pane
+/// content and no colors.
+///
+/// This is what hit-testing a mouse cell and solving the tabline read. Both
+/// answer in cells, and a cell's position does not depend on what color it is
+/// painted, so no theme reaches here — the colors are applied only where
+/// something is actually drawn.
+///
+/// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
 /// [`RenderSnapshot::layout`]; a caller answering a mouse event builds these
-/// three on their own and skips every pane's grid, title, and highlight.
+/// on their own and skips every pane's grid, title, and highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
     pub session: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: &'a ClientSnapshot,
-    /// The resolved chrome theme every koshi-owned surface draws with.
-    pub theme: &'a Theme,
+    /// The viewer's pointer and tab-strip state.
+    pub viewer: ViewerChrome,
 }
 
-/// The owned form of [`FrameLayout`], for a caller that builds these three
+/// The owned form of [`FrameLayout`], for a caller that builds these two
 /// itself instead of borrowing them out of a [`RenderSnapshot`].
 ///
 /// Answering a mouse event needs to know where the surfaces are and nothing
@@ -97,18 +131,94 @@ pub struct OwnedFrameLayout {
     pub session: SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: ClientSnapshot,
-    /// The resolved chrome theme every koshi-owned surface draws with.
-    pub theme: Theme,
 }
 
 impl OwnedFrameLayout {
-    /// Borrow these three as a [`FrameLayout`].
+    /// Borrow these two as a [`FrameLayout`], with `viewer` supplying the rest.
     #[must_use]
-    pub fn layout(&self) -> FrameLayout<'_> {
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
-            theme: &self.theme,
+            viewer,
+        }
+    }
+}
+
+/// A painted frame cut down to what answering a mouse event reads: where the
+/// surfaces sit, plus the few per-pane fields that say which line each pane's
+/// top row shows and where an event over it goes.
+///
+/// It carries no cells, no cursor and no titles, so a viewer holding one
+/// between paints holds no pane's [`Grid`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseFrame {
+    /// The session being viewed, including its solved active tab.
+    pub session: SessionSnapshot,
+    /// The viewing client's own state (viewport, focus, lock mode).
+    pub client: ClientSnapshot,
+    /// One entry per pane the frame carried content for, matched to a
+    /// [`PaneSlot`] by id.
+    pub panes: Vec<MousePane>,
+}
+
+impl MouseFrame {
+    /// Borrow the parts of this frame that say where things sit, with `viewer`
+    /// supplying the two the session does not hold.
+    #[must_use]
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
+        FrameLayout {
+            session: &self.session,
+            client: &self.client,
+            viewer,
+        }
+    }
+}
+
+impl From<RenderSnapshot> for MouseFrame {
+    /// Takes the frame by value, so the session and client parts move across and
+    /// only the per-pane entries are built: one [`Vec`] of [`Copy`] structs.
+    fn from(snapshot: RenderSnapshot) -> Self {
+        Self {
+            panes: snapshot.panes.iter().map(MousePane::from).collect(),
+            session: snapshot.session,
+            client: snapshot.client,
+        }
+    }
+}
+
+/// One pane as a mouse event reads it: which pane, which line its top visible
+/// row is, and what decides where a wheel tick over it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MousePane {
+    /// The pane this entry describes, matched to a [`PaneSlot`] by id.
+    pub id: PaneId,
+    /// The absolute line number of the pane's top visible row, copied from
+    /// [`PaneSnapshot::view_top_row`].
+    pub view_top_row: u64,
+    /// Which mouse events the pane's program asked to be told about, copied
+    /// from [`PaneSnapshot::mouse_tracking`].
+    pub mouse_tracking: MouseTracking,
+    /// Whether alternate-scroll mode (`?1007`) is on, copied from
+    /// [`PaneSnapshot::alt_scroll`].
+    pub alt_scroll: bool,
+    /// Whether the pane is showing the alternate screen, copied from
+    /// [`PaneSnapshot::on_alt_screen`].
+    pub on_alt_screen: bool,
+    /// Whether the viewing client has a highlight in the pane, copied from
+    /// [`PaneSnapshot::has_selection`].
+    pub has_selection: bool,
+}
+
+impl From<&PaneSnapshot> for MousePane {
+    fn from(pane: &PaneSnapshot) -> Self {
+        Self {
+            id: pane.id,
+            view_top_row: pane.view_top_row,
+            mouse_tracking: pane.mouse_tracking,
+            alt_scroll: pane.alt_scroll,
+            on_alt_screen: pane.on_alt_screen,
+            has_selection: pane.has_selection,
         }
     }
 }
@@ -205,7 +315,14 @@ pub struct PaneSlot {
 }
 
 /// One pane's content: what the renderer paints inside the matching
-/// [`PaneSlot`]'s content rect.
+/// [`PaneSlot`]'s content rect, plus what a mouse event over this pane is
+/// answered from.
+///
+/// Those last fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
+/// [`alt_scroll`](Self::alt_scroll), [`on_alt_screen`](Self::on_alt_screen),
+/// [`has_selection`](Self::has_selection) and
+/// [`view_top_row`](Self::view_top_row) are copied into a [`MousePane`] as the
+/// frame is painted, and that is what the viewer's decision reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
@@ -223,10 +340,32 @@ pub struct PaneSnapshot {
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
     pub reverse_video: bool,
+    /// Which mouse events the pane's program asked to be told about
+    /// (`?9`/`?1000`/`?1002`/`?1003`). An event a pane asked for is the
+    /// program's; anything it did not ask for is koshi's.
+    pub mouse_tracking: MouseTracking,
+    /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
+    /// wheel tick becomes cursor arrow keys.
+    pub alt_scroll: bool,
+    /// Whether the pane is showing the alternate screen. The alternate screen
+    /// keeps no scrollback, so there is no view to scroll there.
+    pub on_alt_screen: bool,
+    /// The absolute line number of the top row this frame shows for the pane —
+    /// the same numbering [`koshi_core::command::GridPos::row`] uses, counting
+    /// every line the pane has ever pushed into scrollback.
+    ///
+    /// A press on the pane's `n`-th visible row names line `view_top_row + n`.
+    /// Absolute line numbers never move, so that answer keeps naming the same
+    /// text after more output arrives.
+    pub view_top_row: u64,
     /// The viewing client's highlighted text in this pane, already cut down to
     /// the rows this frame shows. `None` when the client has nothing highlighted
     /// here, or when the highlight is entirely outside the visible rows.
     pub selection: Option<SelectionSpans>,
+    /// Whether the viewing client has a highlight in this pane at all, including
+    /// one scrolled entirely out of the visible rows, where
+    /// [`selection`](Self::selection) is `None`.
+    pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: ScrollbackMeta,
 }
@@ -339,69 +478,15 @@ pub struct ClientSnapshot {
     /// no focusable pane. The renderer highlights the pane whose
     /// [`PaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane: Option<PaneId>,
-    /// The pane the client's pointer is hovering over, or `None` when it is over
-    /// chrome. The renderer draws an *unfocused* pane under the pointer in the
-    /// hover color so the wheel target is visible; the focused pane keeps its
-    /// focus color.
-    pub hovered_pane: Option<PaneId>,
-    /// The client's input mode (drives the mode tag and keybind resolution).
+    /// The client's input mode, as the session has it: it drives the mode tag,
+    /// decides whether a paste from the client's own terminal reaches the pane,
+    /// and is what `koshi list-clients` reports.
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
-    /// so both can be on at once.
+    /// so both can be on at once. The viewer also reads it off a painted frame
+    /// to decide whether a press in a mouse-aware pane begins a highlight.
     pub mouse_select: bool,
-    /// The chords of a multi-chord binding pressed so far, or `None` when no
-    /// sequence is pending. The hint bar switches from the mode's top-level
-    /// hints to the continuations of this prefix while it is `Some`.
-    pub pending_sequence: Option<KeySequence>,
-    /// This client's tabline scroll position: `None` follows the active tab —
-    /// the tab strip always scrolls to reveal it — while `Some(i)` peeks from
-    /// tab index `i` without changing focus. The renderer windows the tab list
-    /// from this; mouse scroll, arrow clicks, and drag set it.
-    pub tabline_offset: Option<usize>,
-}
-
-/// The keybinding data behind the hint bar, projected for one client's
-/// current input mode.
-///
-/// Everything is plain data resolved by the runtime: the merged keymap's
-/// bindings for the mode, each already joined to its action's display name.
-/// The per-mode collections travel behind [`Arc`]s — the runtime computes
-/// them once per keymap change, and every frame's snapshot shares them by
-/// reference.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KeymapHints {
-    /// Every binding in the client's current mode, sorted by key sequence.
-    pub entries: Arc<Vec<HintBinding>>,
-    /// Display labels for prefix chords whose sequence group is untouched
-    /// defaults (`<C-p>` → `PANE`). A group with any user-authored entry, or
-    /// a user removal under it, ignores this and shows a `+N` marker instead.
-    pub prefix_labels: Arc<BTreeMap<KeyChord, String>>,
-    /// Every key a user surface removed in the current mode. A removal under
-    /// a labeled prefix voids the label: the shipped name no longer describes
-    /// the group.
-    pub removed: Arc<BTreeSet<KeySequence>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision: the bar shows a conflict marker, and the hints listed are
-    /// the reverted-to defaults.
-    pub reverted: bool,
-}
-
-/// One binding the hint bar can show: a key sequence, the display name of the
-/// action it fires, and the flags the bar's grouping and ordering read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HintBinding {
-    /// The chords pressed to fire the binding.
-    pub sequence: KeySequence,
-    /// The bound action's human-facing name, from its registry metadata.
-    pub label: String,
-    /// Whether a user surface authored the winning entry (a default shows
-    /// `false`). Any `true` entry under a prefix voids the prefix's label.
-    pub user_set: bool,
-    /// Whether the bar must keep this hint visible ahead of every other —
-    /// set on the reserved unlock binding in locked mode, which truncation
-    /// never drops.
-    pub pinned: bool,
 }
 
 /// Plugin-contributed UI for one frame. All slots are empty for a stock,

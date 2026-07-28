@@ -5,14 +5,14 @@
 
 use super::*;
 
+use crate::snapshot::{FrameLayout, ViewerChrome};
+
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{
-    ClientSnapshot, KeymapHints, PluginUiSnapshot, SessionSnapshot, TabMeta, TabSnapshot,
-};
+use crate::snapshot::{ClientSnapshot, PluginUiSnapshot, SessionSnapshot, TabMeta, TabSnapshot};
 
 /// Build a tabline-only snapshot. `tabs` are `(name, active)`; there are no
 /// panes, since the tabline reads only the session name, the tab metadata, and
@@ -23,7 +23,7 @@ fn snap(
     tabline_offset: Option<usize>,
     lock_mode: LockMode,
     mouse_select: bool,
-) -> RenderSnapshot {
+) -> Frame {
     let tab_id = TabId::new();
     let tabs_metadata = tabs
         .iter()
@@ -36,7 +36,7 @@ fn snap(
         })
         .collect();
     let viewport = Size { cols: 200, rows: 1 };
-    RenderSnapshot {
+    let snapshot = RenderSnapshot {
         session: SessionSnapshot {
             id: SessionId::new(),
             name: session.to_string(),
@@ -57,15 +57,31 @@ fn snap(
             viewport,
             active_tab: tab_id,
             focused_pane: None,
-            hovered_pane: None,
             lock_mode,
             mouse_select,
-            pending_sequence: None,
-            tabline_offset,
         },
         plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints: KeymapHints::default(),
-        theme: Theme::default(),
+    };
+    Frame {
+        snapshot,
+        chrome: ViewerChrome {
+            hovered_pane: None,
+            tabline_offset,
+        },
+    }
+}
+
+/// One fixture frame: what the session handed out, plus the tab-strip position
+/// the viewer paints it with.
+struct Frame {
+    snapshot: RenderSnapshot,
+    chrome: ViewerChrome,
+}
+
+impl Frame {
+    /// Where this frame's surfaces sit, as the tabline reads them.
+    fn layout(&self) -> FrameLayout<'_> {
+        self.snapshot.layout(self.chrome)
     }
 }
 
@@ -86,17 +102,17 @@ fn area(width: u16) -> RatatuiRect {
 }
 
 /// Paint the tabline into a fresh one-row buffer of `width` cells.
-fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
+fn draw(frame: &Frame, width: u16) -> Buffer {
     let a = area(width);
     let mut buf = Buffer::empty(a);
-    draw_tabline(snapshot.layout(), a, &mut buf);
+    draw_tabline(frame.layout(), &Theme::default(), a, &mut buf);
     buf
 }
 
 /// Solve the tabline for `snapshot` over `area`, taking the whole frame so a
 /// test can pass a snapshot fixture straight in.
-fn solve_tabline(snapshot: &RenderSnapshot, area: RatatuiRect) -> TablineLayout {
-    tabline_layout(snapshot.layout(), area)
+fn solve_tabline(frame: &Frame, area: RatatuiRect) -> TablineLayout {
+    tabline_layout(frame.layout(), area)
 }
 
 /// The symbol at cell `x` of the single rendered row.
@@ -471,4 +487,68 @@ fn draw_paints_the_left_scroll_arrow_when_a_tab_is_hidden_left() {
     assert!(buf[(4 + BADGE, 0)].modifier.contains(Modifier::BOLD));
     // And the right arrow marks tab 2 hidden off the right.
     assert_eq!(cell(&buf, 17 + BADGE), "▶");
+}
+
+#[test]
+fn an_absurdly_long_name_saturates_instead_of_wrapping() {
+    // Session and tab names are unbounded strings — a profile file can set one
+    // of any length. Measuring must saturate at the widest a `u16` holds, so a
+    // name past that reads as "wider than the row" rather than wrapping around
+    // to a small number and being laid out as if it fit.
+    let huge = "x".repeat(usize::from(u16::MAX) + 64);
+    assert_eq!(text_width(&huge), u16::MAX);
+
+    // The solve still answers, and gives the oversized name no more than the
+    // row it has to fit in.
+    let frame = snap(&huge, &[("one", true)], None, LockMode::Normal, false);
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 1,
+    };
+    let layout = tabline_layout(frame.layout(), area);
+    assert!(
+        layout.session_width <= 40,
+        "the session block never claims more than the row: {}",
+        layout.session_width
+    );
+}
+
+#[test]
+fn text_width_counts_display_cells_not_bytes_or_chars() {
+    // The solve places blocks in terminal cells, so measuring must use display
+    // width. "漢字" is 2 chars and 6 bytes but occupies 4 cells; an emoji is
+    // 1 char and 4 bytes but occupies 2; a combining mark adds none.
+    assert_eq!(text_width("漢字"), 4);
+    assert_eq!(text_width("🦀"), 2);
+    assert_eq!(
+        text_width("e\u{0301}"),
+        1,
+        "e + combining acute is one cell"
+    );
+    assert_eq!(text_width(""), 0);
+}
+
+#[test]
+fn the_version_badge_is_kept_at_exactly_enough_room_and_dropped_one_cell_short() {
+    // The badge is all-or-nothing: it fits or it goes whole, never clipped.
+    // This pins the `<=` boundary of that decision, which is the comparison the
+    // session block's width is solved from.
+    let fixture = snap("s", &[("one", true)], None, LockMode::Normal, false);
+    let frame = fixture.layout();
+
+    let full = session_texts(frame, u16::MAX);
+    let badge_width = text_width(&format!("[v{KOSHI_VERSION}] "));
+    let exactly_enough = text_width(&full.name) + badge_width;
+
+    assert!(
+        session_texts(frame, exactly_enough).badge.is_some(),
+        "room for both means both: {exactly_enough} cells"
+    );
+
+    assert!(
+        session_texts(frame, exactly_enough - 1).badge.is_none(),
+        "one cell short drops the badge whole rather than clipping it"
+    );
 }

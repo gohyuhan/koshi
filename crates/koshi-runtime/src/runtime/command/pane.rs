@@ -81,10 +81,12 @@ impl Server {
         let edited = if args.stacked {
             add_to_stack(tab.layout(), target.source_pane, new_pane_id)
         } else {
-            let direction = args
-                .direction
-                .unwrap_or(self.config.layout.new_pane_direction);
-            split_leaf(tab.layout(), target.source_pane, new_pane_id, direction)
+            split_leaf(
+                tab.layout(),
+                target.source_pane,
+                new_pane_id,
+                args.direction,
+            )
         };
         let candidate = edited.map_err(|_| Rejection::bare(RejectReason::TargetNotFound))?;
 
@@ -329,14 +331,6 @@ impl Server {
         for client in session.clients.list_attached_mut() {
             client.set_scroll_offset(pane_id, 0);
             client.clear_selection(pane_id);
-            // A drag selecting in this pane has nothing left to select: the
-            // gesture ends with the pane rather than outliving it.
-            if client
-                .selection_drag()
-                .is_some_and(|drag| drag.pane == pane_id)
-            {
-                client.set_selection_drag(None);
-            }
         }
     }
 

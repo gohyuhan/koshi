@@ -16,71 +16,36 @@
 //!
 //! `Server::build_layout` is the same work stopping short of the panes: it
 //! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
-//! grid, title, highlight, or hint bar. Mouse hit-testing and selection drags
-//! read only that much, and they run on every pointer move.
+//! grid, title, or highlight. Writing a mouse report to a pane reads only that
+//! much.
+//!
+//! A snapshot carries no hint-bar data: the viewer draws that bar from its own
+//! keymap, so nothing here resolves hints.
 
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use koshi_config::types::{RgbColor, ThemeConfig};
-use koshi_core::action::{MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_with_mode_min, SolveResult};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, HintBinding, KeymapHints, OwnedFrameLayout, PaneSlot,
-    PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans,
-    SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, OwnedFrameLayout, PaneSlot, PaneSnapshot,
+    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
+    TabSnapshot,
 };
-use koshi_renderer::theme::Theme;
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order;
 use koshi_terminal::state::Screen;
-use ratatui::style::Color;
 
 use crate::server::Server;
-
-/// Resolve a config theme into the renderer [`Theme`] the snapshot carries:
-/// each palette role's `#RRGGBB` value becomes the matching truecolor field.
-/// For example, a theme with `ramp_start "#ff0000"` yields a `Theme` whose
-/// first tab ribbon paints red. Resolving the default config theme yields
-/// exactly [`Theme::default`], so a default config reproduces the stock look.
-#[must_use]
-pub fn resolve_theme(config: &ThemeConfig) -> Theme {
-    let colors = &config.colors;
-    Theme {
-        ramp_start: rgb_channels(colors.ramp_start),
-        ramp_end: rgb_channels(colors.ramp_end),
-        on_ramp: rgb_color(colors.on_ramp),
-        on_ramp_dim: rgb_color(colors.on_ramp_dim),
-        accent: rgb_color(colors.accent),
-        on_accent: rgb_color(colors.on_accent),
-        border_focused: rgb_color(colors.border_focused),
-        border_unfocused: rgb_color(colors.border_unfocused),
-        border_hover: rgb_color(colors.border_hover),
-        stack_header_fg: rgb_color(colors.stack_header_fg),
-        stack_header_bg: rgb_color(colors.stack_header_bg),
-        letterbox: rgb_color(colors.letterbox),
-        bar_bg: rgb_color(colors.bar_bg),
-    }
-}
-
-/// A config color's `(r, g, b)` channels, for the theme's ramp endpoints.
-fn rgb_channels(color: RgbColor) -> (u8, u8, u8) {
-    (color.r, color.g, color.b)
-}
-
-/// A config color as a ratatui truecolor.
-fn rgb_color(color: RgbColor) -> Color {
-    Color::Rgb(color.r, color.g, color.b)
-}
 
 impl Server {
     /// Freeze the world the way `client_id` sees it into a [`RenderSnapshot`].
@@ -117,25 +82,19 @@ impl Server {
             panes,
             client: layout.client,
             plugin_ui: PluginUiSnapshot::default(),
-            keymap_hints: mouse_select_hints(
-                self.keymap_hints.hints_for(client.lock_mode()),
-                client.mouse_select(),
-            ),
-            theme: layout.theme,
         })
     }
 
     /// Freeze only where `client_id`'s surfaces sit: the solved layout, the tab
-    /// bar's metadata, the client's own view state, and the theme.
+    /// bar's metadata, and the client's own view state.
     ///
     /// Returns `None` on the same terms as
     /// [`build_snapshot`](Self::build_snapshot) — no attached client with that
     /// id, or its viewed tab has gone.
     ///
     /// This is [`build_snapshot`](Self::build_snapshot) without the per-pane
-    /// content: no grid, no title, no highlight resolution, no hint bar. Mouse
-    /// hit-testing and selection drags read only these fields, and they run on
-    /// every pointer move.
+    /// content: no grid, no title, no highlight resolution. Placing a forwarded
+    /// mouse report in its pane reads only these fields.
     pub(crate) fn build_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
@@ -160,8 +119,9 @@ impl Server {
         //
         // `suppressed` is indexed before the walk, not scanned inside it: a tab
         // with no room suppresses every pane it holds, so scanning it per pane
-        // would cost pane-count squared on a path that runs for every pointer
-        // move.
+        // would cost pane-count squared on a path that runs for every painted
+        // frame and for every mouse event forwarded to a pane that asked for
+        // the mouse.
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes
@@ -218,15 +178,9 @@ impl Server {
                 viewport: client.viewport(),
                 active_tab: active_tab_id,
                 focused_pane: client.focused_pane(active_tab_id),
-                hovered_pane: client.hovered_pane(),
                 lock_mode: client.lock_mode(),
                 mouse_select: client.mouse_select(),
-                pending_sequence: client
-                    .pending_key_sequence()
-                    .map(|pending| pending.sequence.clone()),
-                tabline_offset: client.tabline_offset(),
             },
-            theme: self.theme,
         })
     }
 
@@ -241,8 +195,9 @@ impl Server {
     /// from absolute line numbers to the rows this frame actually shows.
     ///
     /// A pane with no terminal engine — a plugin pane, or one not yet spawned —
-    /// gets `grid_view = None` and a hidden cursor; the renderer draws no cells
-    /// for it.
+    /// gets `grid_view = None`, a hidden cursor, and no mouse mode at all: the
+    /// renderer draws no cells for it, and a wheel over it asks nothing of a
+    /// program.
     #[allow(clippy::needless_pass_by_value)]
     fn pane_snapshot(
         &self,
@@ -263,7 +218,12 @@ impl Server {
                 },
                 grid_view: None,
                 reverse_video: false,
+                mouse_tracking: MouseTracking::Off,
+                alt_scroll: false,
+                on_alt_screen: false,
                 selection: None,
+                has_selection: false,
+                view_top_row: 0,
                 scrollback: ScrollbackMeta {
                     truncated: false,
                     retained_lines: 0,
@@ -300,10 +260,17 @@ impl Server {
                 blink: state.cursor_blink(),
                 shape: state.cursor_shape(),
             },
+            has_selection: selection.is_some(),
             selection: selection
                 .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
+            // The same line number `selection_spans` resolves its rows against:
+            // the window's top row shows line `total_pushed - view_offset`.
+            view_top_row: scrollback.total_pushed().saturating_sub(view_offset as u64),
             grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),
+            mouse_tracking: state.mouse_tracking(),
+            alt_scroll: state.alt_scroll(),
+            on_alt_screen: state.active_screen() == Screen::Alternate,
             scrollback: ScrollbackMeta {
                 truncated: scrollback.dropped_lines() > 0,
                 retained_lines: scrollback.len(),
@@ -344,36 +311,6 @@ impl Server {
         self.sessions
             .values_mut()
             .find(|session| session.panes.get(pane_id).is_some())
-    }
-}
-
-/// Flip the `core:mouse-select` hint to its "on" label when the acting client
-/// has mouse-select mode on, so the hint bar reads `Mouse Unselect` while it is
-/// active — the way `core:lock`/`core:unlock` flip across the lock modes. Off,
-/// the hints pass through untouched; on, only the mouse-select entry's label
-/// changes (a rebound or duplicated binding still matches, since the label is
-/// the action's, not the key's).
-fn mouse_select_hints(hints: KeymapHints, on: bool) -> KeymapHints {
-    if !on {
-        return hints;
-    }
-    let entries: Vec<HintBinding> = hints
-        .entries
-        .iter()
-        .map(|entry| {
-            if entry.label == MOUSE_SELECT_HINT {
-                HintBinding {
-                    label: MOUSE_UNSELECT_HINT.to_string(),
-                    ..entry.clone()
-                }
-            } else {
-                entry.clone()
-            }
-        })
-        .collect();
-    KeymapHints {
-        entries: Arc::new(entries),
-        ..hints
     }
 }
 

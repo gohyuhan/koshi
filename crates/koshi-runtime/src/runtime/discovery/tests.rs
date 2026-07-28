@@ -32,7 +32,6 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, tx)
 }
@@ -120,7 +119,7 @@ fn a_command_pane_reports_its_argv_program_first() {
             cwd: None,
             source: Some(root_pane),
             tab: None,
-            direction: Some(Direction::Right),
+            direction: Direction::Right,
             stacked: false,
             client: None,
         }),

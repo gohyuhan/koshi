@@ -3,8 +3,8 @@
 //!
 //! A [`Server`] owns the sessions and their layout trees, the per-pane
 //! terminal engines, the shared PTY backend, the action registry, and the
-//! service handles the event loop drives. The view side lives in
-//! [`Client`](crate::client::Client); the two halves talk only through the
+//! service handles the event loop drives. The view side lives in its own
+//! crate, `koshi-client`; the two halves talk only through the
 //! server's doors — [`Server::submit_command`] carries a client's command in,
 //! [`Server::subscribe`] carries the emitted events out — so the server never
 //! reads client view state and a client never mutates session or pane data.
@@ -17,17 +17,17 @@ use std::{
     },
 };
 
-use koshi_config::types::KoshiConfig;
+use koshi_config::layer::PartialKoshiConfig;
+use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::logging::event_log::log_event;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
-use koshi_renderer::theme::Theme;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
@@ -37,20 +37,18 @@ use crate::{
     runtime::{
         bus::{EventBus, EventFilter},
         event::RuntimeEvent,
-        hints::KeymapHintCatalog,
-        reload::ConfigLayers,
+        reload::{fold_client, fold_server},
         render_schedule::RenderScheduler,
-        snapshot::resolve_theme,
     },
 };
 
 /// The authoritative half of one koshi process: owns the sessions and their
 /// layout trees, the per-pane terminal engines, the shared PTY backend, the
 /// action registry, and the service handles the event loop drives. One
-/// process holds exactly one. The view side — viewport, rendering, the
-/// subscribed event feed — lives in [`Client`](crate::client::Client), which
-/// reaches session state only through [`submit_command`](Self::submit_command)
-/// and [`subscribe`](Self::subscribe).
+/// process holds exactly one. The view side — viewport, rendering, the colors
+/// chrome is painted in, the subscribed event feed — lives in the
+/// `koshi-client` crate, which reaches session state only through
+/// [`submit_command`](Self::submit_command) and [`subscribe`](Self::subscribe).
 pub struct Server {
     /// Every session in this process, keyed by id. Each session owns its tabs,
     /// layout trees, pane registry, and clients.
@@ -86,24 +84,19 @@ pub struct Server {
     /// table and extended by plugins as they load. The dispatcher is its only
     /// writer.
     pub(crate) action_registry: ActionRegistry,
-    /// The user's stored config overrides, one layer per config file. A
-    /// file's reload transaction replaces its own layer.
-    pub(crate) config_layers: ConfigLayers,
-    /// The effective config: the built-in defaults with the stored user
-    /// layers folded on. Recomputed by every reload transaction; consumers
-    /// read current values from here — except the keymap, whose merged
-    /// lookup table is [`keymap_hints`](Self::keymap_hints) (the
-    /// `keybindings.modes` section here holds the folded layer data the
-    /// merge consumes, not the merge result).
-    pub(crate) config: KoshiConfig,
-    /// Per-mode hint-bar data resolved from the merged keymap and the action
-    /// registry, shared by reference with each frame's snapshot. Seeded from
-    /// the built-in defaults and rebuilt whenever the keymap inputs change —
-    /// a keybinding reload or a registry refresh.
-    pub(crate) keymap_hints: KeymapHintCatalog,
-    /// The resolved chrome theme copied onto each frame's snapshot. Resolved
-    /// from the effective config's theme; a theme reload replaces it.
-    pub(crate) theme: Theme,
+    /// The user's stored `koshi.kdl` overrides. The only config file whose
+    /// settings a session keeps; the theme and the keybindings are each
+    /// viewer's own. Replaced whole by a `koshi.kdl` reload.
+    pub(crate) app_layer: PartialKoshiConfig,
+    /// The session's effective config: the built-in defaults with the stored
+    /// app layer folded on, keeping the sections one session shares across
+    /// every viewer. Recomputed by every `koshi.kdl` reload.
+    pub(crate) config: ServerConfig,
+    /// The viewer-owned sections the session itself reads, folded from the
+    /// same app layer. Each viewer folds its own copy from its own files; this
+    /// one backs the session-side handling of `scrollback.scroll_on_input`.
+    /// Recomputed by every `koshi.kdl` reload.
+    pub(crate) client_config: ClientConfig,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -134,21 +127,20 @@ pub struct Server {
 impl Server {
     /// Build a server with no sessions, no terminal engines, no subscribers, a
     /// fresh render scheduler, and an action registry holding the built-in
-    /// actions, holding the given PTY backend, service handles, event inbox,
-    /// and the default split direction for new panes. The direction seeds the
-    /// initial app config layer; a `koshi.kdl` reload replaces it.
+    /// actions, holding the given PTY backend, service handles, and event
+    /// inbox. Both effective configs start at the built-in defaults, over an
+    /// empty app layer that [`load_startup_config`](Self::load_startup_config)
+    /// and every `koshi.kdl` reload replace.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
         snapshot_provider: Arc<dyn SnapshotProvider>,
         storage: Arc<dyn Storage>,
         inbox_rx: Receiver<RuntimeEvent>,
         inbox_tx: Sender<RuntimeEvent>,
-        default_new_pane_direction: Direction,
     ) -> Self {
-        let action_registry = ActionRegistry::new();
-        let config_layers =
-            ConfigLayers::with_default_new_pane_direction(default_new_pane_direction);
-        let config = config_layers.effective();
+        let app_layer = PartialKoshiConfig::default();
+        let config = fold_server(&app_layer);
+        let client_config = fold_client(&app_layer);
         Server {
             sessions: HashMap::new(),
             pty_backend,
@@ -159,9 +151,7 @@ impl Server {
             snapshot_provider,
             storage,
             ipc_server: None,
-            keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
-            theme: resolve_theme(&config.theme),
-            action_registry,
+            action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
             inbox_tx,
@@ -169,8 +159,9 @@ impl Server {
             immediate_shutdown: false,
             quit_requested: false,
             host_writes: HashMap::new(),
-            config_layers,
+            app_layer,
             config,
+            client_config,
         }
     }
 
@@ -179,6 +170,15 @@ impl Server {
     /// requests a session/pane mutation.
     pub fn submit_command(&mut self, envelope: CommandEnvelope) -> CommandResult {
         self.dispatch(envelope)
+    }
+
+    /// Mark the chrome stale so the next poll repaints it. The viewer calls
+    /// this after a key changed something only it can see — an opened or
+    /// closed sequence, a mode switch — since the hint bar and mode tag are
+    /// drawn from the viewer's own state.
+    pub fn invalidate_status(&mut self) {
+        self.render_scheduler
+            .invalidate(crate::runtime::render_schedule::InvalidationReason::StatusChanged);
     }
 
     /// The server→client door: register a subscriber for the events `filter`

@@ -3,10 +3,16 @@
 //! Koshi builds its effective config from ordered layers —
 //! `built-in defaults → user → session → CLI flags` — where a later
 //! layer overrides an earlier one field by field. Each override layer is a
-//! [`PartialKoshiConfig`]: a mirror of [`KoshiConfig`] whose every field is
-//! wrapped in [`Option`], so a layer carries only the
-//! fields it sets. [`merge`] starts from a full base config (normally the
-//! defaults) and applies each partial in order.
+//! [`PartialKoshiConfig`]: a mirror of the whole file whose every field is
+//! wrapped in [`Option`], so a layer carries only the fields it sets.
+//!
+//! One file parses into one layer, and the two sides fold that same layer
+//! separately: [`merge_server`] reads the sections a session owns and
+//! [`merge_client`] reads the sections a viewer owns. Each starts from a full
+//! base config (normally the defaults) and applies each partial in order.
+//! `scrollback` is the one section both read — its caps go to the session, its
+//! follow behavior to the viewer. [`ConfigLayers`] holds one layer per config
+//! file and folds them in a fixed order.
 //!
 //! Merge grain is deep and field-level for struct sections: a layer that sets
 //! `scrollback.max_lines` leaves `scrollback.max_bytes` at the lower layer's
@@ -26,23 +32,106 @@ use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::key::Leader;
 use crate::types::{
-    ColorPalette, CopyConfig, KeybindingsConfig, KoshiConfig, LayoutDefaults, LoggingConfig,
+    ClientConfig, ColorPalette, CopyConfig, KeybindingsConfig, LayoutDefaults, LoggingConfig,
     ModeBindings, ModeName, MouseConfig, PaneConfig, PluginActivation, PluginActivationConfig,
-    RgbColor, ScrollbackConfig, TerminalConfig, ThemeConfig, UpdateConfig, WheelScroll,
+    RgbColor, ScrollbackLimits, ScrollbackView, ServerConfig, TerminalConfig, ThemeConfig,
+    UpdateConfig, WheelScroll,
 };
 
-/// Folds `layers` onto `base` in order and returns the effective config.
+/// Folds `layers` onto `base` in order and returns the session's effective
+/// settings, reading only the sections a session owns.
 ///
 /// `base` is the fully-populated lowest layer, normally
-/// [`KoshiConfig::default`](crate::types::KoshiConfig::default). Each layer in
-/// `layers` is applied in sequence, so later entries win on any field they set.
-/// Merging never fails: an empty layer leaves the config unchanged.
-pub fn merge(base: KoshiConfig, layers: Vec<PartialKoshiConfig>) -> KoshiConfig {
+/// [`ServerConfig::default`](crate::types::ServerConfig::default). Each layer
+/// in `layers` is applied in sequence, so later entries win on any field they
+/// set. Merging never fails: an empty layer leaves the config unchanged.
+///
+/// A layer's viewer-owned sections (theme, keybindings, mouse, copy, layout,
+/// plugins, update) are skipped here and folded by [`merge_client`] instead.
+pub fn merge_server(base: ServerConfig, layers: Vec<PartialKoshiConfig>) -> ServerConfig {
     let mut config = base;
     for layer in layers {
-        layer.apply(&mut config);
+        layer.apply_server(&mut config);
     }
     config
+}
+
+/// Folds `layers` onto `base` in order and returns one viewer's effective
+/// settings, reading only the sections a viewer owns.
+///
+/// The counterpart of [`merge_server`] over the same layers: a layer's
+/// session-owned sections (pane floor, scrollback caps, terminal environment)
+/// are skipped here.
+pub fn merge_client(base: ClientConfig, layers: Vec<PartialKoshiConfig>) -> ClientConfig {
+    let mut config = base;
+    for layer in layers {
+        layer.apply_client(&mut config);
+    }
+    config
+}
+
+/// The stored config overrides, one layer per config file, folded onto the
+/// built-in defaults to produce the effective config.
+///
+/// One file fills one layer, so replacing a file's settings replaces its layer
+/// alone and leaves the others as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigLayers {
+    /// The `koshi.kdl` app-settings layer.
+    app: PartialKoshiConfig,
+    /// The color-theme file's layer; only its theme section is set.
+    theme: PartialKoshiConfig,
+    /// The `keybinding.kdl` layer; only its keybindings section is set.
+    keybindings: PartialKoshiConfig,
+}
+
+impl ConfigLayers {
+    /// Layers built from the three parsed config files. A file given as `None`
+    /// contributes an empty layer, leaving the lower layers untouched.
+    ///
+    /// `theme` and `keybindings` each go into their own layer holding that
+    /// section alone, and `app`'s theme and keybinding sections are dropped, so
+    /// a color or a binding always comes from the file that owns it. Parsing
+    /// `koshi.kdl` cannot fill either section, so the drop bites only on a
+    /// hand-built value.
+    #[must_use]
+    pub fn from_files(
+        app: Option<PartialKoshiConfig>,
+        theme: Option<PartialThemeConfig>,
+        keybindings: Option<PartialKeybindingsConfig>,
+    ) -> Self {
+        let mut app = app.unwrap_or_default();
+        app.theme = None;
+        app.keybindings = None;
+        ConfigLayers {
+            app,
+            theme: PartialKoshiConfig {
+                theme,
+                ..PartialKoshiConfig::default()
+            },
+            keybindings: PartialKoshiConfig {
+                keybindings,
+                ..PartialKoshiConfig::default()
+            },
+        }
+    }
+
+    /// Fold the stored layers onto the built-in defaults, keeping the sections
+    /// one viewer owns.
+    ///
+    /// The dedicated theme and keybinding layers fold after the app layer, so
+    /// their sections win over a same-named section in the app file.
+    #[must_use]
+    pub fn effective_client(&self) -> ClientConfig {
+        merge_client(
+            ClientConfig::default(),
+            vec![
+                self.app.clone(),
+                self.theme.clone(),
+                self.keybindings.clone(),
+            ],
+        )
+    }
 }
 
 /// Overwrites `field` with `value` when the layer set one, leaving it
@@ -53,9 +142,13 @@ fn merge_field<T>(field: &mut T, value: Option<T>) {
     }
 }
 
-/// One config layer: [`KoshiConfig`] with every section optional. A section
-/// left `None` leaves the lower layers untouched;
-/// a section set to `Some` applies its own per-field overrides.
+/// One config layer: every section of one config file, each optional. A
+/// section left `None` leaves the lower layers untouched; a section set to
+/// `Some` applies its own per-field overrides.
+///
+/// One layer covers both sides' sections, because one file does:
+/// [`merge_server`] reads the [`ServerConfig`] ones and [`merge_client`] reads
+/// the [`ClientConfig`] ones.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialKoshiConfig {
     /// Pane sizing overrides.
@@ -83,14 +176,26 @@ pub struct PartialKoshiConfig {
 }
 
 impl PartialKoshiConfig {
-    /// Applies each present section's overrides onto `config`.
-    fn apply(self, config: &mut KoshiConfig) {
+    /// Applies the session-owned sections' overrides onto `config`, ignoring
+    /// every viewer-owned section this layer carries.
+    fn apply_server(self, config: &mut ServerConfig) {
         if let Some(pane) = self.pane {
             pane.apply(&mut config.pane);
         }
         if let Some(scrollback) = self.scrollback {
-            scrollback.apply(&mut config.scrollback);
+            scrollback.apply_limits(&mut config.scrollback);
         }
+        if let Some(terminal) = self.terminal {
+            terminal.apply(&mut config.terminal);
+        }
+        if let Some(logging) = self.logging {
+            logging.apply(&mut config.logging);
+        }
+    }
+
+    /// Applies the viewer-owned sections' overrides onto `config`, ignoring
+    /// every session-owned section this layer carries.
+    fn apply_client(self, config: &mut ClientConfig) {
         if let Some(keybindings) = self.keybindings {
             keybindings.apply(&mut config.keybindings);
         }
@@ -106,8 +211,8 @@ impl PartialKoshiConfig {
         if let Some(copy) = self.copy {
             copy.apply(&mut config.copy);
         }
-        if let Some(terminal) = self.terminal {
-            terminal.apply(&mut config.terminal);
+        if let Some(scrollback) = self.scrollback {
+            scrollback.apply_view(&mut config.scrollback);
         }
         if let Some(theme) = self.theme {
             theme.apply(&mut config.theme);
@@ -180,9 +285,14 @@ pub struct PartialScrollbackConfig {
 }
 
 impl PartialScrollbackConfig {
-    fn apply(self, target: &mut ScrollbackConfig) {
+    /// The caps half, folded onto the session's buffer limits.
+    fn apply_limits(self, target: &mut ScrollbackLimits) {
         merge_field(&mut target.max_lines, self.max_lines);
         merge_field(&mut target.max_bytes, self.max_bytes);
+    }
+
+    /// The view half, folded onto one viewer's follow behavior.
+    fn apply_view(self, target: &mut ScrollbackView) {
         merge_field(&mut target.scroll_on_input, self.scroll_on_input);
     }
 }
@@ -222,7 +332,7 @@ impl PartialKeybindingsConfig {
 /// Layout default overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialLayoutDefaults {
-    /// Direction a new pane spawns when the command omits one.
+    /// Direction a new pane spawns relative to the focused pane.
     pub new_pane_direction: Option<Direction>,
 }
 

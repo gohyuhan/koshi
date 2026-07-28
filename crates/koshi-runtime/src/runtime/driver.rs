@@ -33,11 +33,19 @@ impl Server {
                 let events = self.handle_child_exit(pane_id, status, exited_at);
                 self.publish_events(&events);
             }
-            RuntimeEvent::KeyInput { client_id, chord } => {
-                self.handle_key_input(client_id, chord, Instant::now());
+            // A raw chord is the viewer's to read: it holds the keymap, the
+            // input mode and any open sequence, and hands the session either a
+            // resolved action or a press to write. One arriving here belongs to
+            // no attached viewer, and the session has no keymap to judge it
+            // with, so it is dropped rather than guessed at.
+            RuntimeEvent::KeyInput { client_id, .. } => {
+                tracing::debug!(%client_id, "dropping a key no attached viewer resolved");
             }
-            RuntimeEvent::MouseInput { client_id, mouse } => {
-                self.handle_mouse_input(client_id, mouse, Instant::now());
+            // A mouse event is the viewer's for the same reason: only the frame
+            // it painted says which pane the pointer is over and which gesture
+            // is under way. One arriving here belongs to no attached viewer.
+            RuntimeEvent::MouseInput { client_id, .. } => {
+                tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
             RuntimeEvent::HostPaste { client_id, text } => {
                 self.handle_host_paste(client_id, &text);
@@ -66,7 +74,10 @@ impl Server {
                 let events = self.handle_client_resize(client_id, size);
                 self.publish_events(&events);
             }
-            RuntimeEvent::Timer => self.expire_key_sequences(Instant::now()),
+            // The only deadline the session ever woke for was a key sequence's,
+            // and that sequence now lives on the viewer, which expires it
+            // itself. The variant stays as the loop's generic wake-up.
+            RuntimeEvent::Timer => {}
             RuntimeEvent::Ipc { envelope, reply } => {
                 let result = self.submit_command(envelope);
                 // A closed reply channel means the connection thread is gone;

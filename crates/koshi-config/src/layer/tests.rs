@@ -1,5 +1,6 @@
-//! Tests for config layering: precedence, deep field-level merge, and the
-//! whole-value replace of collection fields.
+//! Tests for config layering: precedence, deep field-level merge, the
+//! whole-value replace of collection fields, and the split that folds one
+//! parsed layer onto the session and the viewer separately.
 
 use std::collections::BTreeMap;
 
@@ -8,19 +9,28 @@ use koshi_core::key::{Key, KeyChord, ModFlags};
 
 use super::*;
 use crate::types::{
-    ActivationAction, ActivationScope, KeymapOptIn, KoshiConfig, ModeBindings, ModeName, RgbColor,
+    ActivationAction, ActivationScope, KeymapOptIn, ModeBindings, ModeName, RgbColor,
 };
 
 #[test]
 fn empty_layer_changes_nothing() {
-    let merged = merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()]);
-    assert_eq!(merged, KoshiConfig::default());
+    let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert_eq!(server, ServerConfig::default());
+
+    let client = merge_client(ClientConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert_eq!(client, ClientConfig::default());
 }
 
 #[test]
 fn no_layers_returns_base() {
-    let merged = merge(KoshiConfig::default(), vec![]);
-    assert_eq!(merged, KoshiConfig::default());
+    assert_eq!(
+        merge_server(ServerConfig::default(), vec![]),
+        ServerConfig::default()
+    );
+    assert_eq!(
+        merge_client(ClientConfig::default(), vec![]),
+        ClientConfig::default()
+    );
 }
 
 #[test]
@@ -33,7 +43,7 @@ fn single_field_override_keeps_sibling() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let merged = merge_server(ServerConfig::default(), vec![layer]);
 
     assert_eq!(merged.scrollback.max_lines, 5_000);
     // Sibling untouched: keeps the default.
@@ -58,7 +68,7 @@ fn later_layer_wins_on_same_field() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![user, session]);
+    let merged = merge_server(ServerConfig::default(), vec![user, session]);
 
     assert_eq!(merged.scrollback.max_lines, 20_000);
     assert_eq!(merged.scrollback.max_bytes, 32 * 1024 * 1024);
@@ -85,7 +95,7 @@ fn a_field_a_later_layer_leaves_unset_keeps_the_middle_layers_override() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![middle, last]);
+    let merged = merge_server(ServerConfig::default(), vec![middle, last]);
 
     assert_eq!(merged.scrollback.max_lines, 7_000);
     assert_eq!(merged.pane.min_cols, 3);
@@ -107,12 +117,14 @@ fn sections_from_different_layers_combine() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![user, session]);
+    let layers = vec![user, session];
+    let server = merge_server(ServerConfig::default(), layers.clone());
+    let client = merge_client(ClientConfig::default(), layers);
 
-    assert_eq!(merged.pane.min_cols, 10);
-    assert_eq!(merged.pane.min_rows, 1);
-    assert_eq!(merged.mouse.scroll_lines, 7);
-    assert!(merged.mouse.border_resize);
+    assert_eq!(server.pane.min_cols, 10);
+    assert_eq!(server.pane.min_rows, 1);
+    assert_eq!(client.mouse.scroll_lines, 7);
+    assert!(client.mouse.border_resize);
 }
 
 #[test]
@@ -128,12 +140,13 @@ fn copy_and_terminal_scalar_overrides() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    let client = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert!(merged.copy.copy_on_select); // internal default kept
-    assert!(!merged.copy.trim_trailing_whitespace); // overridden to false
-    assert_eq!(merged.terminal.term, "screen-256color");
-    assert_eq!(merged.terminal.colorterm, "truecolor"); // default kept
+    assert!(client.copy.copy_on_select); // internal default kept
+    assert!(!client.copy.trim_trailing_whitespace); // overridden to false
+    assert_eq!(server.terminal.term, "screen-256color");
+    assert_eq!(server.terminal.colorterm, "truecolor"); // default kept
 }
 
 #[test]
@@ -146,7 +159,7 @@ fn terminal_default_shell_sets_inner_value() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let merged = merge_server(ServerConfig::default(), vec![layer]);
     assert_eq!(merged.terminal.default_shell, Some("/bin/zsh".to_string()));
 }
 
@@ -158,7 +171,7 @@ fn layout_direction_override() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
 
     assert_eq!(merged.layout.new_pane_direction, Direction::Down);
 }
@@ -176,8 +189,8 @@ fn deep_theme_color_override_keeps_other_roles() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
-    let default_palette = KoshiConfig::default().theme.colors;
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let default_palette = ClientConfig::default().theme.colors;
 
     assert_eq!(merged.theme.colors.accent, overridden);
     // Every other role keeps its default.
@@ -196,14 +209,20 @@ fn logging_override_sets_enabled_level_and_format() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    // Logging is process-local: both sides read the same section, each for its
+    // own log file.
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    let client = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert!(merged.logging.enabled);
-    assert_eq!(merged.logging.level, LogLevel::Error);
-    assert_eq!(merged.logging.format, LogFormat::Json);
+    assert!(server.logging.enabled);
+    assert_eq!(server.logging.level, LogLevel::Error);
+    assert_eq!(server.logging.format, LogFormat::Json);
+    assert!(client.logging.enabled);
+    assert_eq!(client.logging.level, LogLevel::Error);
+    assert_eq!(client.logging.format, LogFormat::Json);
 
     // An absent logging section leaves the defaults (disabled, warning, pretty).
-    let untouched = merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()]);
+    let untouched = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
     assert!(!untouched.logging.enabled);
     assert_eq!(untouched.logging.level, LogLevel::Warning);
     assert_eq!(untouched.logging.format, LogFormat::Pretty);
@@ -236,7 +255,7 @@ fn logging_config_resolves_partial_over_defaults() {
 
 #[test]
 fn modes_replaced_wholesale() {
-    let mut base = KoshiConfig::default();
+    let mut base = ClientConfig::default();
     base.keybindings
         .modes
         .insert(ModeName::new("normal"), ModeBindings::default());
@@ -250,7 +269,7 @@ fn modes_replaced_wholesale() {
         }),
         ..Default::default()
     };
-    let merged = merge(base, vec![layer]);
+    let merged = merge_client(base, vec![layer]);
 
     // The whole map is replaced: the base's "normal" entry is gone.
     assert_eq!(merged.keybindings.modes.len(), 1);
@@ -274,7 +293,7 @@ fn unlock_alternative_layers_as_a_nested_option() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![set]);
+    let merged = merge_client(ClientConfig::default(), vec![set]);
     assert_eq!(merged.keybindings.unlock_alternative, Some(alternative));
 
     // A later layer can set the value back to "keep the built-in unlock key".
@@ -285,12 +304,12 @@ fn unlock_alternative_layers_as_a_nested_option() {
         }),
         ..Default::default()
     };
-    let cleared = merge(merged, vec![clear]);
+    let cleared = merge_client(merged, vec![clear]);
     assert_eq!(cleared.keybindings.unlock_alternative, None);
 
     // A layer that leaves the field unset keeps the lower layer's value.
     assert_eq!(
-        merge(KoshiConfig::default(), vec![PartialKoshiConfig::default()])
+        merge_client(ClientConfig::default(), vec![PartialKoshiConfig::default()])
             .keybindings
             .unlock_alternative,
         None
@@ -306,7 +325,7 @@ fn keybindings_scalars_keep_untouched_siblings() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
 
     assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
     assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
@@ -327,7 +346,131 @@ fn plugin_entries_replaced_wholesale() {
         }),
         ..Default::default()
     };
-    let merged = merge(KoshiConfig::default(), vec![layer]);
+    let merged = merge_client(ClientConfig::default(), vec![layer]);
 
     assert_eq!(merged.plugins.entries, vec![entry]);
+}
+
+#[test]
+fn the_scrollback_section_splits_its_caps_from_its_follow_behavior() {
+    // One `scrollback` block in the file, read by both sides: the caps bound
+    // the buffer the session owns, `scroll-on-input` is the viewer's own
+    // follow behavior.
+    let layer = PartialKoshiConfig {
+        scrollback: Some(PartialScrollbackConfig {
+            max_lines: Some(500),
+            max_bytes: Some(1_024),
+            scroll_on_input: Some(false),
+        }),
+        ..Default::default()
+    };
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+
+    assert_eq!(server.scrollback.max_lines, 500);
+    assert_eq!(server.scrollback.max_bytes, 1_024);
+    assert!(!client.scrollback.scroll_on_input);
+}
+
+#[test]
+fn each_side_folds_only_its_own_sections() {
+    // One layer carrying both sides' sections folds each onto only its own
+    // side: a viewer cannot set the shell a session spawns, and a session
+    // cannot set a viewer's colors.
+    let layer = PartialKoshiConfig {
+        terminal: Some(PartialTerminalConfig {
+            term: None,
+            colorterm: None,
+            default_shell: Some(Some("/bin/fish".to_string())),
+        }),
+        theme: Some(PartialThemeConfig {
+            name: Some("midnight".to_string()),
+            colors: None,
+        }),
+        ..Default::default()
+    };
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+
+    // Each side took its own section.
+    assert_eq!(server.terminal.default_shell, Some("/bin/fish".to_string()));
+    assert_eq!(client.theme.name, "midnight");
+
+    // Neither side's untouched fields moved: the other side's section did not
+    // leak in, and the section it does own kept its defaults elsewhere.
+    assert_eq!(server.terminal.term, "xterm-256color");
+    assert_eq!(server.terminal.colorterm, "truecolor");
+    assert_eq!(client.theme.colors, ClientConfig::default().theme.colors);
+}
+
+#[test]
+fn config_layers_from_no_files_is_the_empty_default() {
+    assert_eq!(
+        ConfigLayers::from_files(None, None, None),
+        ConfigLayers::default()
+    );
+    assert_eq!(
+        ConfigLayers::default().effective_client(),
+        ClientConfig::default()
+    );
+}
+
+#[test]
+fn config_layers_drop_the_app_layers_theme_and_keybinding_sections() {
+    // The colors belong to the theme file and the bindings to
+    // `keybinding.kdl`. With no theme file present, an app layer carrying a
+    // theme section must still resolve to the built-in palette rather than
+    // slipping its own colors in.
+    let layers = ConfigLayers::from_files(
+        Some(PartialKoshiConfig {
+            theme: Some(PartialThemeConfig {
+                name: Some("smuggled".to_string()),
+                colors: Some(PartialColorPalette {
+                    accent: Some(RgbColor::new(1, 2, 3)),
+                    ..PartialColorPalette::default()
+                }),
+            }),
+            keybindings: Some(PartialKeybindingsConfig {
+                max_chord_depth: Some(0),
+                ..PartialKeybindingsConfig::default()
+            }),
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+
+    let client = layers.effective_client();
+    assert_eq!(client.theme, ClientConfig::default().theme);
+    assert_eq!(client.keybindings, ClientConfig::default().keybindings);
+    // Its own sections still apply.
+    assert_eq!(client.layout.new_pane_direction, Direction::Down);
+}
+
+#[test]
+fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
+    let layers = ConfigLayers::from_files(
+        Some(PartialKoshiConfig {
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        Some(PartialThemeConfig {
+            name: Some("ocean".to_string()),
+            colors: None,
+        }),
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(4),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    let client = layers.effective_client();
+    assert_eq!(client.layout.new_pane_direction, Direction::Down);
+    assert_eq!(client.theme.name, "ocean");
+    assert_eq!(client.keybindings.max_chord_depth, 4);
 }

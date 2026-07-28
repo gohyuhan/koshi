@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::{Color, Modifier, Style};
@@ -22,29 +22,30 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
 use crate::render::bar_style;
-use crate::snapshot::{KeymapHints, RenderSnapshot};
+use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
-/// Paint one chrome-owned hint row.
-pub fn draw_hint_bar(snapshot: &RenderSnapshot, area: RatatuiRect, buf: &mut Buffer) {
+/// Paint one chrome-owned hint row from `hints` — the viewer's keybinding data
+/// for the mode it is in.
+pub fn draw_hint_bar(
+    hints: &KeymapHints,
+    theme: &Theme,
+    pending: Option<&KeySequence>,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let theme = &snapshot.theme;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.
     Clear.render(area, buf);
     buf.set_style(area, bar_style(theme));
 
-    let hints = &snapshot.keymap_hints;
-    let pending = snapshot
-        .client
-        .pending_sequence
-        .as_ref()
-        .map_or(&[][..], |sequence| sequence.chords());
+    let pending = pending.map_or(&[][..], KeySequence::chords);
     let mut right_edge = area.right();
     if hints.reverted {
         let marker = Line::from(Span::styled(REVERT_MARKER, revert_style()));

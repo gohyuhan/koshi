@@ -1,0 +1,766 @@
+//! Tests for the viewer half: construction, viewport updates, the settings and
+//! colors it reads from its own config files, the keymap it validates before
+//! trusting, and the hints one frame is painted from.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc;
+
+use koshi_config::hints::KeyMatch;
+use koshi_config::key::Leader;
+use koshi_config::layer::{PartialColorPalette, PartialLayoutDefaults};
+use koshi_config::types::{
+    BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
+};
+use koshi_core::action::{ActionRef, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
+use koshi_core::event::MouseSelectChanged;
+use koshi_core::geometry::Direction;
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::resolve::ActionArgs;
+use koshi_observability::cleanup::TerminalCleanupGuard;
+
+use super::*;
+
+fn new_client() -> (Client, mpsc::SyncSender<Event>) {
+    let (tx, rx) = mpsc::sync_channel(8);
+    let client = Client::new(
+        ClientId::new(),
+        Size { cols: 80, rows: 24 },
+        rx,
+        TerminalCleanupGuard::new(),
+    );
+    (client, tx)
+}
+
+/// A viewer that read a theme file painting the focused border `color`.
+fn with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Event>) {
+    let (mut client, tx) = new_client();
+    client.load_startup_config(None, Some(focused_border(color)), None);
+    (client, tx)
+}
+
+/// A theme file whose focused-border role is `color`.
+fn focused_border(color: RgbColor) -> PartialThemeConfig {
+    PartialThemeConfig {
+        name: None,
+        colors: Some(PartialColorPalette {
+            border_focused: Some(color),
+            ..PartialColorPalette::default()
+        }),
+    }
+}
+
+/// A `keybinding.kdl` binding `<C-y>` to `core:new-tab` in `normal` mode.
+fn binds_ctrl_y() -> PartialKeybindingsConfig {
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y'))),
+        BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    }
+}
+
+#[test]
+fn a_new_client_holds_its_id_viewport_and_guard() {
+    let (client, _tx) = new_client();
+    assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
+    let _ = client.cleanup_guard();
+}
+
+#[test]
+fn set_viewport_records_the_new_size() {
+    let (mut client, _tx) = new_client();
+    client.set_viewport(Size {
+        cols: 120,
+        rows: 40,
+    });
+    assert_eq!(
+        client.viewport(),
+        Size {
+            cols: 120,
+            rows: 40,
+        }
+    );
+}
+
+#[test]
+fn a_theme_file_recolors_the_chrome_the_next_frame_paints_with() {
+    let (client, _tx) = with_focused_border(RgbColor::new(1, 2, 3));
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(1, 2, 3)
+    );
+    assert_eq!(
+        client.config().theme.colors.border_focused,
+        RgbColor::new(1, 2, 3),
+        "and the stored settings carry it too"
+    );
+}
+
+#[test]
+fn a_theme_files_name_reaches_the_viewers_settings() {
+    let (mut client, _tx) = new_client();
+
+    client.load_startup_config(
+        None,
+        Some(PartialThemeConfig {
+            name: Some("midnight".to_owned()),
+            colors: Some(PartialColorPalette {
+                accent: Some(RgbColor::new(9, 8, 7)),
+                ..PartialColorPalette::default()
+            }),
+        }),
+        None,
+    );
+
+    assert_eq!(client.config().theme.name, "midnight");
+    assert_eq!(client.config().theme.colors.accent, RgbColor::new(9, 8, 7));
+}
+
+#[test]
+fn a_default_config_client_paints_the_stock_colors() {
+    let (client, _tx) = new_client();
+    assert_eq!(*client.theme(), Theme::default());
+    assert_eq!(*client.config(), ClientConfig::default());
+}
+
+#[test]
+fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
+    // `koshi.kdl` carries sections both halves read. The viewer must fold its
+    // own out of the same file, or a configured split direction and wheel
+    // behavior would silently never apply.
+    let (mut client, _tx) = new_client();
+    assert_eq!(
+        client.config().layout.new_pane_direction,
+        Direction::Right,
+        "the built-in default"
+    );
+
+    client.load_startup_config(
+        Some(PartialKoshiConfig {
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            mouse: Some(koshi_config::layer::PartialMouseConfig {
+                border_resize: None,
+                scroll_lines: Some(7),
+                wheel: Some(WheelScroll::Ignore),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+
+    assert_eq!(client.config().layout.new_pane_direction, Direction::Down);
+    assert_eq!(client.config().mouse.scroll_lines, 7);
+    assert_eq!(client.config().mouse.wheel, WheelScroll::Ignore);
+}
+
+#[test]
+fn the_last_load_wins_when_settings_are_read_twice() {
+    // The colors a frame paints with must track the newest settings, not the
+    // first ones seen.
+    let (mut client, _tx) = new_client();
+
+    client.load_startup_config(None, Some(focused_border(RgbColor::new(1, 1, 1))), None);
+    client.load_startup_config(None, Some(focused_border(RgbColor::new(2, 2, 2))), None);
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(2, 2, 2)
+    );
+}
+
+#[test]
+fn loading_no_files_at_all_leaves_the_built_in_settings() {
+    // A run with no config files resolves to the same settings a fresh viewer
+    // holds — the palette is recomputed, not accumulated.
+    let (mut client, _tx) = new_client();
+    let before = *client.theme();
+
+    let report = client.load_startup_config(None, None, None);
+
+    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(*client.theme(), before);
+    assert_eq!(*client.config(), ClientConfig::default());
+}
+
+#[test]
+fn extreme_palette_values_survive_the_round_trip() {
+    // The palette's endpoints are plain bytes; black and white must map
+    // through unchanged rather than being clamped or shifted.
+    let (mut client, _tx) = new_client();
+
+    client.load_startup_config(
+        None,
+        Some(PartialThemeConfig {
+            name: None,
+            colors: Some(PartialColorPalette {
+                border_focused: Some(RgbColor::new(0, 0, 0)),
+                border_unfocused: Some(RgbColor::new(0xff, 0xff, 0xff)),
+                ramp_start: Some(RgbColor::new(0, 0, 0)),
+                ramp_end: Some(RgbColor::new(0xff, 0xff, 0xff)),
+                ..PartialColorPalette::default()
+            }),
+        }),
+        None,
+    );
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(0, 0, 0)
+    );
+    assert_eq!(
+        client.theme().border_unfocused,
+        ratatui::style::Color::Rgb(0xff, 0xff, 0xff)
+    );
+    assert_eq!(client.theme().ramp_start, (0, 0, 0));
+    assert_eq!(client.theme().ramp_end, (0xff, 0xff, 0xff));
+}
+
+#[test]
+fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
+    let (mut client, _tx) = new_client();
+    let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        None,
+        "nothing is bound to `<C-y>` out of the box"
+    );
+    // `<C-p>` opens the shipped pane group, so the viewer is mid-sequence.
+    client.resolve_key(
+        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+        std::time::Instant::now(),
+    );
+    assert!(client.pending_sequence().is_some());
+
+    let report = client.load_startup_config(None, None, Some(binds_ctrl_y()));
+
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Apply
+    );
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
+    assert!(
+        client.pending_sequence().is_none(),
+        "held chords reached for bindings the new keymap may not have"
+    );
+}
+
+#[test]
+fn a_keybinding_file_can_move_the_leader_the_defaults_hang_off() {
+    let (mut client, _tx) = new_client();
+    let ctrl_p = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('p')));
+    let alt_p = KeySequence::from(KeyChord::new(ModFlags::ALT, Key::Char('p')));
+    assert!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_p)
+            .prefix
+    );
+
+    client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            leader: Some(Leader::Mods(ModFlags::ALT)),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &alt_p)
+            .prefix
+    );
+    assert!(
+        !client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_p)
+            .prefix
+    );
+}
+
+#[test]
+fn a_refused_keybinding_file_leaves_both_the_keymap_and_the_settings_on_the_built_ins() {
+    // `max_chord_depth` 0 would stop every binding from resolving, the
+    // locked-mode unlock included, so the whole file is refused. The folded
+    // settings must keep describing the keymap actually in use.
+    let (mut client, _tx) = new_client();
+    let ctrl_p = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('p')));
+
+    let report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(0),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Reject
+    );
+    assert_eq!(
+        client.config().keybindings,
+        KeybindingsConfig::default(),
+        "the refused file's settings must not describe the running keymap"
+    );
+    assert!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_p)
+            .prefix,
+        "the shipped two-chord defaults still open under `<C-p>`"
+    );
+}
+
+#[test]
+fn a_refused_keybinding_file_leaves_an_open_sequence_alone() {
+    // Only a keymap that actually swapped retires the bindings the held chords
+    // reach for. A refusal changes no binding, so the sequence being typed
+    // still means what it meant and stays open.
+    let (mut client, _tx) = new_client();
+    client.resolve_key(
+        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+        std::time::Instant::now(),
+    );
+
+    client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(0),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert_eq!(
+        client
+            .pending_sequence()
+            .map(|sequence| sequence.chords().to_vec()),
+        Some(vec![KeyChord::new(ModFlags::CTRL, Key::Char('p'))])
+    );
+}
+
+#[test]
+fn a_good_keybinding_file_still_applies_after_a_refused_one() {
+    // A refusal must leave the viewer usable, not wedged: the next file it
+    // reads applies normally.
+    let (mut client, _tx) = new_client();
+    let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
+
+    client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(0),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+    let report = client.load_startup_config(None, None, Some(binds_ctrl_y()));
+
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Apply
+    );
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
+fn a_keybinding_file_cannot_smuggle_colors_in_through_koshi_kdl() {
+    // `koshi.kdl`'s theme section is dropped, so with no theme file present the
+    // viewer paints the built-in palette rather than the app file's colors.
+    let (mut client, _tx) = new_client();
+
+    client.load_startup_config(
+        Some(PartialKoshiConfig {
+            theme: Some(PartialThemeConfig {
+                name: Some("smuggled".to_owned()),
+                colors: Some(PartialColorPalette {
+                    border_focused: Some(RgbColor::new(9, 9, 9)),
+                    ..PartialColorPalette::default()
+                }),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+
+    assert_eq!(*client.theme(), Theme::default());
+    assert_eq!(client.config().theme, ClientConfig::default().theme);
+}
+
+#[test]
+fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
+    // Binding the reserved unlock chord in locked mode is fatal: the file is
+    // refused whole and the guaranteed escape stays live.
+    let (mut client, _tx) = new_client();
+    let unlock_key = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        unlock_key.clone(),
+        BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+
+    let report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Reject
+    );
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Locked, &unlock_key)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("unlock").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
+fn a_refused_keybinding_file_still_applies_the_theme_beside_it() {
+    // The three files are read in one call; one being refused must not take
+    // the others down with it.
+    let (mut client, _tx) = new_client();
+
+    client.load_startup_config(
+        None,
+        Some(focused_border(RgbColor::new(4, 5, 6))),
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(0),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(4, 5, 6)
+    );
+}
+
+#[test]
+fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
+    let (mut client, _tx) = new_client();
+    let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
+
+    client.load_startup_config(None, None, Some(binds_ctrl_y()));
+    assert!(client
+        .keymap
+        .match_sequence(LockMode::Normal, &ctrl_y)
+        .exact
+        .is_some());
+
+    client.load_startup_config(None, None, Some(PartialKeybindingsConfig::default()));
+
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        None,
+        "the first file's binding must not survive the second"
+    );
+}
+
+#[test]
+fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_ins() {
+    // An absent `keybinding.kdl` means its defaults stand, so a binding an
+    // earlier load installed stops resolving.
+    let (mut client, _tx) = new_client();
+    let ctrl_y = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('y')));
+
+    client.load_startup_config(None, None, Some(binds_ctrl_y()));
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
+
+    let report = client.load_startup_config(None, None, None);
+
+    assert!(report.is_none(), "no keybinding file means no report");
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(LockMode::Normal, &ctrl_y)
+            .exact,
+        None,
+        "the earlier file's binding must not outlive it"
+    );
+    assert_eq!(*client.config(), ClientConfig::default());
+}
+
+#[test]
+fn a_low_chord_depth_drops_every_binding_longer_than_it() {
+    let (mut client, _tx) = new_client();
+    let long = KeySequence::new(
+        KeyChord::new(ModFlags::CTRL, Key::Char('y')),
+        vec![KeyChord::new(ModFlags::NONE, Key::Char('x'))],
+    );
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        long.clone(),
+        BoundAction {
+            action: ActionRef::core("new-tab").expect("valid core action name"),
+            args: ActionArgs::None,
+        },
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+
+    let report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(1),
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    // Depth 1 applies — with a warning naming the unreachable binding.
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Apply
+    );
+    // The overlong binding is transparent: no exact match, and its first chord
+    // is not a live prefix, so it falls through to the pane.
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Normal, &long),
+        KeyMatch::default()
+    );
+    // The shipped two-chord defaults fall the same way.
+    assert_eq!(
+        client.keymap.match_sequence(
+            LockMode::Normal,
+            &KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('p')))
+        ),
+        KeyMatch::default()
+    );
+    // The one-chord unlock is untouched.
+    assert_eq!(
+        client
+            .keymap
+            .match_sequence(
+                LockMode::Locked,
+                &KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)
+            )
+            .exact,
+        Some(BoundAction {
+            action: ActionRef::core("unlock").expect("valid core action name"),
+            args: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
+fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it() {
+    let (mut client, _tx) = new_client();
+    let quit = KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('q')));
+    assert!(client
+        .keymap
+        .match_sequence(LockMode::Normal, &quit)
+        .exact
+        .is_some());
+    assert!(client
+        .keymap
+        .match_sequence(LockMode::Locked, &quit)
+        .exact
+        .is_some());
+
+    let mut removed = BTreeSet::new();
+    removed.insert(quit.clone());
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed,
+        },
+    );
+    let report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    assert_eq!(
+        report.expect("a keybinding file was given").verdict(),
+        KeymapVerdict::Apply
+    );
+    assert_eq!(
+        client.keymap.match_sequence(LockMode::Normal, &quit),
+        KeyMatch::default()
+    );
+    assert!(client.keymap_hints().removed.contains(&quit));
+    // Locked mode's own quit binding is untouched: removal is scoped to the
+    // mode that declares it.
+    assert!(client
+        .keymap
+        .match_sequence(LockMode::Locked, &quit)
+        .exact
+        .is_some());
+}
+
+#[test]
+fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
+    let (client, _tx) = new_client();
+
+    let off = client.frame_hints(false);
+    let on = client.frame_hints(true);
+
+    assert!(off
+        .entries
+        .iter()
+        .any(|entry| entry.label == MOUSE_SELECT_HINT));
+    assert!(!off
+        .entries
+        .iter()
+        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
+    assert!(on
+        .entries
+        .iter()
+        .any(|entry| entry.label == MOUSE_UNSELECT_HINT));
+    assert!(!on
+        .entries
+        .iter()
+        .any(|entry| entry.label == MOUSE_SELECT_HINT));
+    // Only that one entry changes: everything else is the same list.
+    assert_eq!(off.entries.len(), on.entries.len());
+    assert_eq!(off.removed, on.removed);
+    assert_eq!(off.reverted, on.reverted);
+}
+
+#[test]
+fn frame_hints_follow_the_viewers_own_mode() {
+    let (mut client, _tx) = new_client();
+    let normal = client.frame_hints(false);
+    client.set_lock_mode(LockMode::Locked);
+    let locked = client.frame_hints(false);
+
+    assert_eq!(normal.entries.len(), 22, "the shipped normal-mode bindings");
+    // The reserved unlock (pinned) plus the quit and mouse-select chords.
+    assert_eq!(locked.entries.len(), 3);
+    assert!(locked
+        .entries
+        .iter()
+        .any(|entry| entry.label == "Unlock" && entry.pinned));
+    assert!(locked
+        .entries
+        .iter()
+        .any(|entry| entry.label == "Quit" && !entry.pinned));
+}
+
+#[test]
+fn a_mouse_select_report_for_this_viewer_flips_its_own_copy() {
+    // The viewer routes a mouse press against its own copy of the mode, so the
+    // session's report is what has to move it — both ways.
+    let (mut client, tx) = new_client();
+    assert!(!client.mouse_select(), "a fresh viewer selects nothing");
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: client.id(),
+        on: true,
+    }))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert!(client.mouse_select(), "the report turned it on");
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: client.id(),
+        on: false,
+    }))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert!(!client.mouse_select(), "the second report turned it off");
+}
+
+#[test]
+fn a_mouse_select_report_for_another_viewer_is_ignored() {
+    // Mouse select is client-scoped: two viewers of one session hold their own,
+    // and a subscription carries every client's events.
+    let (mut client, tx) = new_client();
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    }))
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the event was seen");
+    assert!(!client.mouse_select(), "and it was not applied here");
+}

@@ -12,6 +12,7 @@ pub mod statusline_hints;
 pub mod theme;
 
 pub use hit_test::{
-    hit_test, pane_content_rect, pane_local_cell, tabline_first_visible, HitRegion,
+    hit_test, pane_cell_clamped, pane_content_rect, pane_local_cell, tabline_first_visible,
+    HitRegion,
 };
 pub use render::{cursor_position, cursor_style, render_frame};

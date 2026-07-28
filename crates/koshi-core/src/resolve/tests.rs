@@ -53,6 +53,25 @@ const CLI_ONLY: [&str; 5] = [
     "write-to-pane",
 ];
 
+/// The `layout.new-pane-direction` the resolving client holds throughout this
+/// module. It is not `Right`, so a row expecting it cannot pass on a hardcoded
+/// stock default.
+const CLIENT_SPLIT: Direction = Direction::Up;
+
+/// A `new-pane` request carrying [`CLIENT_SPLIT`]: what `core:new-pane` builds
+/// for a client on that setting.
+fn new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        source: None,
+        tab: None,
+        direction: CLIENT_SPLIT,
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    }
+}
+
 /// Every binding-invocable `Available` core action, the arguments it is
 /// invoked with, and the exact command it must produce. Together with
 /// [`CLI_ONLY`] this covers the whole `Available` seed set, pinned by
@@ -63,7 +82,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
         (
             "new-pane",
             ActionArgs::None,
-            Command::NewPane(NewPaneArgs::default()),
+            Command::NewPane(new_pane_args()),
         ),
         (
             "new-pane-left",
@@ -71,7 +90,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(Direction::Left),
+                direction: Direction::Left,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -84,7 +103,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(Direction::Down),
+                direction: Direction::Down,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -97,7 +116,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(Direction::Up),
+                direction: Direction::Up,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -110,7 +129,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: Some(Direction::Right),
+                direction: Direction::Right,
                 stacked: false,
                 cwd: None,
                 command: None,
@@ -123,7 +142,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::NewPane(NewPaneArgs {
                 source: None,
                 tab: None,
-                direction: None,
+                direction: CLIENT_SPLIT,
                 stacked: true,
                 cwd: None,
                 command: None,
@@ -279,7 +298,7 @@ fn available_table() -> Vec<(&'static str, ActionArgs, Command)> {
                 cwd: None,
                 source: None,
                 tab: None,
-                direction: Some(Direction::Down),
+                direction: Direction::Down,
                 stacked: false,
                 client: None,
             }),
@@ -379,7 +398,7 @@ fn available_table_matches_seeds() {
 fn every_available_action_resolves_to_its_exact_command() {
     let registry = ActionRegistry::new();
     for (name, args, expected) in available_table() {
-        let plan = resolve_action(&core(name), &args, &registry)
+        let plan = resolve_action(&core(name), &args, &registry, CLIENT_SPLIT)
             .unwrap_or_else(|err| panic!("core:{name} must resolve, got {err}"));
         assert_eq!(plan, DispatchPlan::Command(expected), "core:{name}");
     }
@@ -394,7 +413,9 @@ fn resolved_command_kind_matches_the_seeded_handler() {
         let ActionHandlerRef::CoreCommand(kind) = metadata.handler else {
             panic!("core:{name} must dispatch a core command");
         };
-        let Ok(DispatchPlan::Command(command)) = resolve_action(&action, &args, &registry) else {
+        let Ok(DispatchPlan::Command(command)) =
+            resolve_action(&action, &args, &registry, CLIENT_SPLIT)
+        else {
             panic!("core:{name} must resolve to a command");
         };
         assert_eq!(command.kind(), kind, "core:{name}");
@@ -413,7 +434,7 @@ fn coming_soon_actions_are_refused() {
     assert_eq!(coming_soon.len(), 7);
     for action in coming_soon {
         assert_eq!(
-            resolve_action(&action, &ActionArgs::None, &registry),
+            resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
             Err(ResolveError::ComingSoon {
                 action: action.clone()
             }),
@@ -451,7 +472,7 @@ fn unregistered_action_is_an_orphan() {
     let action = ActionRef::plugin(plugin_id(1), "open-status").expect("valid name");
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry),
+        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::Unregistered {
             action: action.clone()
         })
@@ -474,7 +495,7 @@ fn plugin_action_routes_to_its_own_host_call() {
         stacked: false,
     };
     assert_eq!(
-        resolve_action(&action, &args, &registry),
+        resolve_action(&action, &args, &registry, CLIENT_SPLIT),
         Ok(DispatchPlan::PluginHostCall {
             plugin: owner,
             action,
@@ -498,14 +519,14 @@ fn cli_only_actions_are_refused_with_and_without_arguments() {
     for name in CLI_ONLY {
         let action = core(name);
         assert_eq!(
-            resolve_action(&action, &ActionArgs::None, &registry),
+            resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
             Err(ResolveError::ArgsMismatch {
                 action: action.clone()
             }),
             "core:{name} given no arguments"
         );
         assert_eq!(
-            resolve_action(&action, &some_args, &registry),
+            resolve_action(&action, &some_args, &registry, CLIENT_SPLIT),
             Err(ResolveError::ArgsMismatch {
                 action: action.clone()
             }),
@@ -514,7 +535,7 @@ fn cli_only_actions_are_refused_with_and_without_arguments() {
     }
     let run = core("run");
     assert_eq!(
-        resolve_action(&run, &ActionArgs::None, &registry),
+        resolve_action(&run, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::ArgsMismatch { action: run })
     );
 }
@@ -533,7 +554,8 @@ fn arguments_belonging_to_another_action_are_refused() {
                 direction: None,
                 stacked: false,
             },
-            &registry
+            &registry,
+            CLIENT_SPLIT
         ),
         Err(ResolveError::ArgsMismatch {
             action: action.clone()
@@ -547,9 +569,9 @@ fn a_sequence_resolves_each_step_in_order() {
     let macro_ref = user("split-and-lock");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry),
+        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Ok(DispatchPlan::Sequence(vec![
-            DispatchPlan::Command(Command::NewPane(NewPaneArgs::default())),
+            DispatchPlan::Command(Command::NewPane(new_pane_args())),
             DispatchPlan::Command(Command::SetLockMode(LockModeArgs {
                 locked: true,
                 client: None
@@ -567,7 +589,7 @@ fn a_sequence_halts_on_the_first_failing_step() {
     let macro_ref = user("lock-then-copy");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry),
+        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::ComingSoon {
             action: core("copy-selection"),
         })
@@ -588,7 +610,8 @@ fn a_sequence_given_arguments_is_refused() {
                 direction: None,
                 stacked: false,
             },
-            &registry
+            &registry,
+            CLIENT_SPLIT
         ),
         Err(ResolveError::ArgsMismatch {
             action: macro_ref.clone()
@@ -602,7 +625,7 @@ fn a_self_referencing_macro_exhausts_the_depth_budget() {
     let registry = registry_with_macro("loop", vec![macro_ref.clone()]);
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry),
+        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::SequenceTooDeep {
             action: macro_ref.clone()
         })
@@ -615,7 +638,7 @@ fn a_chain_of_exactly_max_depth_sequences_resolves() {
 
     // The leaf action sits one level below the deepest sequence, and resolves:
     // the budget counts the sequences entered, not the actions reached.
-    let mut plan = resolve_action(&outermost, &ActionArgs::None, &registry)
+    let mut plan = resolve_action(&outermost, &ActionArgs::None, &registry, CLIENT_SPLIT)
         .expect("a chain at the documented limit must resolve");
     for _ in 0..MAX_SEQUENCE_DEPTH - 1 {
         let DispatchPlan::Sequence(mut steps) = plan else {
@@ -641,7 +664,7 @@ fn a_chain_one_sequence_past_max_depth_is_refused() {
     let (registry, outermost) = registry_with_macro_chain(MAX_SEQUENCE_DEPTH + 1);
 
     assert_eq!(
-        resolve_action(&outermost, &ActionArgs::None, &registry),
+        resolve_action(&outermost, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::SequenceTooDeep {
             // The macro at the deepest allowed level is the one refused.
             action: user(&format!("m{MAX_SEQUENCE_DEPTH}")),
@@ -660,7 +683,7 @@ fn run_never_carries_a_cwd_or_env_from_its_caller() {
     };
 
     let Ok(DispatchPlan::Command(Command::RunCommandPane(built))) =
-        resolve_action(&core("run"), &args, &registry)
+        resolve_action(&core("run"), &args, &registry, CLIENT_SPLIT)
     else {
         panic!("core:run must resolve to a run-command-pane command");
     };
@@ -736,7 +759,7 @@ fn coming_soon_status_is_checked_before_args_mismatch() {
     };
 
     assert_eq!(
-        resolve_action(&action, &wrong_args, &registry),
+        resolve_action(&action, &wrong_args, &registry, CLIENT_SPLIT),
         Err(ResolveError::ComingSoon {
             action: action.clone()
         })
@@ -756,7 +779,7 @@ fn coming_soon_status_is_checked_before_the_plugin_route() {
     insert_unchecked(&mut registry, action.clone(), metadata);
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry),
+        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::ComingSoon { action })
     );
 }
@@ -767,7 +790,7 @@ fn an_empty_sequence_resolves_to_an_empty_plan() {
     let macro_ref = user("noop");
 
     assert_eq!(
-        resolve_action(&macro_ref, &ActionArgs::None, &registry),
+        resolve_action(&macro_ref, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Ok(DispatchPlan::Sequence(vec![]))
     );
 }
@@ -784,7 +807,7 @@ fn plugin_action_forwards_no_arguments_untouched() {
         .expect("plugin registers its own action");
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry),
+        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Ok(DispatchPlan::PluginHostCall {
             plugin: owner,
             action,
@@ -817,7 +840,7 @@ fn an_unhandled_core_action_name_falls_through_to_args_mismatch() {
     );
 
     assert_eq!(
-        resolve_action(&action, &ActionArgs::None, &registry),
+        resolve_action(&action, &ActionArgs::None, &registry, CLIENT_SPLIT),
         Err(ResolveError::ArgsMismatch { action })
     );
 }
@@ -837,7 +860,7 @@ fn command_kind_alone_cannot_pick_the_command() {
         ActionHandlerRef::CoreCommand(CommandKind::SetLockMode)
     );
     assert_ne!(
-        resolve_action(&core("lock"), &ActionArgs::None, &registry),
-        resolve_action(&core("unlock"), &ActionArgs::None, &registry),
+        resolve_action(&core("lock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
+        resolve_action(&core("unlock"), &ActionArgs::None, &registry, CLIENT_SPLIT),
     );
 }

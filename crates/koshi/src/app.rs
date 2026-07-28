@@ -8,6 +8,7 @@
 //! to the server, and repaints when the render scheduler says a frame is due.
 //! Ctrl-Q, or the shell exiting, ends the loop.
 
+use std::collections::VecDeque;
 use std::io;
 use std::ops::ControlFlow;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -30,16 +31,24 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
-use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_client::input::KeyOutcome;
+use koshi_client::mouse::MouseAction;
+use koshi_client::Client;
+use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, CommandId, SessionId};
+use koshi_core::key::KeySequence;
+use koshi_core::mouse::MouseKind;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
+use koshi_renderer::snapshot::{
+    CursorStyle, KeymapHints, MouseFrame, RenderSnapshot, ViewerChrome,
+};
+use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
-use koshi_runtime::client::Client;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::bus::EventFilter;
@@ -53,11 +62,30 @@ use crate::keys::decode_key;
 /// Paints a render snapshot into ratatui's frame buffer via the widget trait —
 /// the only way to reach the frame's buffer, and exactly the shape
 /// [`render_frame`] expects.
-struct SnapshotWidget<'a>(&'a RenderSnapshot);
+struct SnapshotWidget<'a> {
+    /// The frame the session handed out.
+    snapshot: &'a RenderSnapshot,
+    /// The colors this viewer paints koshi's chrome in.
+    theme: &'a Theme,
+    /// The hint-bar data for the mode this viewer is in.
+    hints: &'a KeymapHints,
+    /// The multi-chord sequence this viewer has open.
+    pending: Option<&'a KeySequence>,
+    /// The pane this viewer's pointer is over, and where its tab strip sits.
+    viewer: ViewerChrome,
+}
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame(self.0, area, buf);
+        render_frame(
+            self.snapshot,
+            self.theme,
+            self.hints,
+            self.pending,
+            self.viewer,
+            area,
+            buf,
+        );
     }
 }
 
@@ -150,29 +178,14 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::with_sink(pty_sink));
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let mut server = Server::new(
+    let mut server = session(
         backend,
         snapshot_provider,
         storage,
         inbox_rx,
         inbox_tx.clone(),
-        // The stock default; the loaded config below supplies the real one.
-        Direction::Right,
+        loaded.app.clone(),
     );
-
-    // Apply the config (loaded before tracing above) before genesis, so the
-    // first session already sees the configured split direction, theme, and
-    // keymap. A rejected keybinding file leaves the built-in keymap in place.
-    // `keybinding.kdl` is the one file that can be read and then refused, so it
-    // is the one with an outcome to report. App settings and the theme are typed
-    // values that always apply, so the line above already accounts for them.
-    match server.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
-        Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
-            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
-        }
-        Some(_) => tracing::info!("keybinding.kdl applied"),
-        None => {}
-    }
 
     let (cols, rows) =
         size().inspect_err(|error| tracing::error!(%error, "could not read the terminal size"))?;
@@ -228,7 +241,7 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // server's events and holds the cleanup guard, since the outer terminal
     // it restores is the client's.
     let events_rx = server.subscribe(EventFilter::All);
-    let mut client = Client::new(client_id, viewport, events_rx, cleanup);
+    let mut client = viewer(client_id, viewport, events_rx, cleanup, loaded);
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
@@ -240,6 +253,51 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     teardown(&mut server, outcome)
         .inspect_err(|error| tracing::error!(%error, "the render loop failed"))?;
     Ok(())
+}
+
+/// Build the session half and apply `app`, the parsed `koshi.kdl` layer, in one
+/// step.
+///
+/// Runs before genesis, so the first session already sees the configured shell
+/// and pane floor. `app` is `None` when the file is absent or failed to load.
+/// The colors, the keymap, and the split direction new panes open in are each
+/// viewer's own; [`viewer`] applies those.
+fn session(
+    pty_backend: Arc<dyn PtyBackend>,
+    snapshot_provider: Arc<dyn SnapshotProvider>,
+    storage: Arc<dyn Storage>,
+    inbox_rx: mpsc::Receiver<RuntimeEvent>,
+    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    app: Option<koshi_config::layer::PartialKoshiConfig>,
+) -> Server {
+    let mut server = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, inbox_tx);
+    server.load_startup_config(app);
+    server
+}
+
+/// Build the viewer half and apply `loaded`'s viewer-owned files, in one step.
+///
+/// It folds its own settings, resolves its chrome colors, and validates its own
+/// keymap, so the palette a frame is painted in and the keys it answers are
+/// this terminal's. `keybinding.kdl` is the one file that can be read and then
+/// refused, so it is the one whose outcome is logged; app settings and the
+/// theme are typed values that always apply.
+fn viewer(
+    client_id: ClientId,
+    viewport: Size,
+    events: mpsc::Receiver<koshi_core::event::Event>,
+    cleanup: TerminalCleanupGuard,
+    loaded: crate::config::LoadedConfig,
+) -> Client {
+    let mut client = Client::new(client_id, viewport, events, cleanup);
+    match client.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
+        Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
+            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
+        }
+        Some(_) => tracing::info!("keybinding.kdl applied"),
+        None => {}
+    }
+    client
 }
 
 /// Create koshi's on-disk home for this run: the config directory, at its
@@ -335,11 +393,16 @@ fn run_loop<B: Backend>(
 ) -> Result<(), B::Error> {
     let mut last_title = String::new();
     let mut last_cursor = None;
+    // The frame the viewer is looking at, cut down to what a wheel tick reads:
+    // no cells, so nothing here keeps a pane's grid alive between paints. It is
+    // replaced at each paint. Before the first paint there is none, and a wheel
+    // tick arriving in that window is dropped.
+    let mut last_frame: Option<MouseFrame> = None;
     loop {
         let now = Instant::now();
         let next = earliest(
-            earliest(server.next_render_wakeup(now), server.next_key_wakeup(now)),
-            server.next_selection_scroll_wakeup(now),
+            earliest(server.next_render_wakeup(now), client.next_key_wakeup(now)),
+            client.next_mouse_wakeup(now),
         );
         let event = match next {
             Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
@@ -354,16 +417,18 @@ fn run_loop<B: Backend>(
         };
         let mut quit = false;
         if let Some(event) = event {
-            quit |= apply_event(server, client, event).is_break();
+            quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
         // Apply anything else already queued before painting one frame.
         while let Ok(event) = server.inbox_rx().try_recv() {
-            quit |= apply_event(server, client, event).is_break();
+            quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
-        // The embedded client renders from server snapshots, so the events its
-        // subscription delivers are discarded here; the discard keeps its
-        // bounded queue from filling.
-        client.discard_events();
+        // Everything the subscription delivered that no key press already took:
+        // a mode change asked for from outside — `koshi lock --client` — lands
+        // here, so it is in the mode the ambiguity deadline below is read in
+        // and in the frame painted after it. It also empties the bounded queue
+        // on a batch with no keys in it.
+        client.apply_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
         // They draw nothing and do not change renderer state.
@@ -376,15 +441,21 @@ fn run_loop<B: Backend>(
         if quit || server.quit_requested() {
             break;
         }
-        server.expire_key_sequences(Instant::now());
-        server.expire_selection_scrolls(Instant::now());
+        fire_expired_key_sequence(server, client, Instant::now());
+        // A selection drag held past a pane's edge keeps scrolling while the
+        // pointer sits still, so the clock drives it.
+        if let Some(frame) = last_frame.as_ref() {
+            let actions = client.expire_mouse_scroll(Instant::now(), frame);
+            apply_mouse_actions(server, client, frame, actions);
+        }
         if server.poll_render(Instant::now()) {
             render(
                 terminal,
                 server,
-                client.id(),
+                client,
                 &mut last_title,
                 &mut last_cursor,
+                &mut last_frame,
             )?;
         }
         if !server.has_active_panes() {
@@ -394,16 +465,162 @@ fn run_loop<B: Backend>(
     Ok(())
 }
 
-/// Hand one inbox event to the server, first letting the client record its
-/// own terminal's new size when the event is that client's resize. Returns
-/// [`ControlFlow::Break`] when the event is a quit request, so the loop stops.
-fn apply_event(server: &mut Server, client: &mut Client, event: RuntimeEvent) -> ControlFlow<()> {
+/// Fire the viewer's open key sequence if its ambiguity deadline has passed at
+/// `now`.
+///
+/// A sequence that is both a complete binding and a longer one's prefix fires
+/// when its deadline passes. The viewer holds it, so it decides; the session
+/// only runs what comes back — with this viewer's own default split side, the
+/// same one its key presses are answered with.
+///
+/// The action's report of what it changed about this viewer is taken back
+/// straight away: a `core:lock` fired here publishes the new input mode as it
+/// runs, after the batch's own take, so without this the hint bar would be
+/// painted in the mode the viewer just left.
+fn fire_expired_key_sequence(server: &mut Server, client: &mut Client, now: Instant) {
+    let Some(bound) = client.expire_key_sequence(now) else {
+        return;
+    };
+    let direction = client.config().layout.new_pane_direction;
+    server.handle_bound_action(client.id(), bound, direction);
+    server.invalidate_status();
+    client.apply_events();
+}
+
+/// Hand one inbox event to the server, after the client has taken the parts
+/// that are its own: a key it must resolve, a wheel tick it must route, its
+/// terminal's new size, and the end of a selection gesture its own paste key
+/// finished. `last_frame` is the frame the viewer is looking at, or
+/// `None` before the first paint. Returns [`ControlFlow::Break`] when the event
+/// is a quit request, so the loop stops.
+fn apply_event(
+    server: &mut Server,
+    client: &mut Client,
+    event: RuntimeEvent,
+    last_frame: Option<&MouseFrame>,
+) -> ControlFlow<()> {
+    // A key belongs to the viewer that received it: the keymap, the input mode
+    // and any open sequence all live there, so it decides what the press means
+    // and the session only ever sees the answer — a resolved action, or a
+    // press to write.
+    if let RuntimeEvent::KeyInput { client_id, chord } = event {
+        if client_id == client.id() {
+            // The mode this key is read in must be the mode the session last
+            // reported. A `core:lock` earlier in this same batch published the
+            // change into the subscription as it ran, so taking it now is what
+            // makes the very next key see the new mode.
+            client.apply_events();
+            match client.resolve_key(chord, Instant::now()) {
+                KeyOutcome::Fire(bound) => {
+                    let direction = client.config().layout.new_pane_direction;
+                    server.handle_bound_action(client_id, bound, direction);
+                }
+                KeyOutcome::PassThrough(chord) => {
+                    // The key belongs to the program in the pane, so a selection
+                    // gesture over it is over.
+                    client.end_mouse_selection();
+                    server.handle_key_press(client_id, chord);
+                }
+                // Held or dropped: nothing reaches the session, but the hint
+                // bar and mode tag are drawn from viewer state, so the frame
+                // is stale either way.
+                KeyOutcome::Pending | KeyOutcome::Discard => {}
+            }
+            server.invalidate_status();
+            return ControlFlow::Continue(());
+        }
+    }
+    // A mouse event belongs to the viewer too: the frame it painted says which
+    // pane the pointer is over, what that pane's program asked for, and which
+    // gesture is under way, and its own `mouse` and `copy` settings say what
+    // each of those means. The session only runs what comes back.
+    if let RuntimeEvent::MouseInput { client_id, mouse } = event {
+        if client_id == client.id() {
+            if let Some(frame) = last_frame {
+                // The mode this event is routed in must be the mode the
+                // session last reported. A `core:mouse-select` earlier in this
+                // same batch published its change into the subscription as it
+                // ran, so taking it now is what makes this event route the new
+                // way.
+                client.apply_events();
+                let tab = frame.client.active_tab;
+                let before = client.chrome(tab);
+                let actions = client.handle_mouse(mouse, frame, Instant::now());
+                apply_mouse_actions(server, client, frame, actions);
+                // The hovered pane and the tab strip's position are painted from
+                // viewer state, which no session mutation marks stale.
+                if client.chrome(tab) != before {
+                    server.invalidate_status();
+                }
+            }
+            return ControlFlow::Continue(());
+        }
+    }
     if let RuntimeEvent::Resize { client_id, size } = &event {
         if *client_id == client.id() {
             client.set_viewport(*size);
         }
     }
+    // The user pressed their terminal's paste key, so the text is theirs and it
+    // goes to the program in the pane: a selection gesture over it is over. Only
+    // this viewer's own paste ends it — a write arriving from anywhere else does
+    // not touch the gesture.
+    if let RuntimeEvent::HostPaste { client_id, .. } = &event {
+        if *client_id == client.id() {
+            client.end_mouse_selection();
+        }
+    }
     server.handle_runtime_event(event)
+}
+
+/// Ask the session to run everything the viewer decided one mouse event means,
+/// in the order it decided them. `frame` is the frame the viewer decided
+/// against, which a scroll's answer is re-measured over.
+fn apply_mouse_actions(
+    server: &mut Server,
+    client: &mut Client,
+    frame: &MouseFrame,
+    actions: Vec<MouseAction>,
+) {
+    let client_id = client.id();
+    let mut queue: VecDeque<MouseAction> = actions.into();
+    while let Some(action) = queue.pop_front() {
+        match action {
+            MouseAction::Scroll { pane, up, lines } => {
+                let top = server.scroll_pane_view(client_id, pane, up, lines);
+                queue.extend(client.note_scroll_applied(pane, top, frame));
+            }
+            MouseAction::Forward { pane, mouse } => {
+                let written = server.forward_mouse_to_pane(client_id, pane, mouse);
+                // A gesture is captured once the pane's program has seen the
+                // press that began it.
+                if let (true, MouseKind::Press(button)) = (written, mouse.kind) {
+                    client.note_press_forwarded(pane, button);
+                }
+            }
+            MouseAction::AltScrollArrows { pane, up, count } => {
+                server.write_alt_scroll_arrows(pane, up, count);
+            }
+            MouseAction::Resize {
+                pane,
+                side,
+                step,
+                count,
+            } => {
+                let applied = server.drag_resize(client_id, pane, side, step, count);
+                client.note_resize_applied(applied);
+            }
+            MouseAction::Command(command) => {
+                let envelope = CommandEnvelope::new(
+                    CommandId::new(),
+                    CommandSource::mouse(client_id),
+                    SystemTime::now(),
+                    command,
+                );
+                let _ = server.submit_command(envelope);
+            }
+        }
+    }
 }
 
 fn earliest(
@@ -423,14 +640,20 @@ fn earliest(
 /// the backend so a test can render into an in-memory buffer; the title and
 /// cursor-style escapes go to the real stdout and are skipped when unchanged,
 /// so frames that move nothing emit nothing.
+///
+/// A [`MouseFrame`] of what it painted is left in `last_frame`, which is what
+/// the viewer answers a wheel tick from. Painting is also how the viewer learns
+/// which tab it is on, so a tab-strip peek made on another tab is thrown away
+/// here.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     server: &Server,
-    client_id: ClientId,
+    client: &mut Client,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
+    last_frame: &mut Option<MouseFrame>,
 ) -> Result<(), B::Error> {
-    let Some(snapshot) = server.build_snapshot(client_id) else {
+    let Some(snapshot) = server.build_snapshot(client.id()) else {
         return Ok(());
     };
     let title = window_title(&snapshot);
@@ -450,13 +673,37 @@ fn render<B: Backend>(
         }
         *last_cursor = cursor;
     }
+    // The hint bar is drawn from the viewer's own keymap and its own mode; the
+    // one thing it takes from the frame is whether mouse-select is on, which
+    // decides the label that entry wears.
+    let hints = client.frame_hints(snapshot.client.mouse_select);
+    // The viewer now sees which tab it is on, whatever moved it there — a click,
+    // a keybinding, an IPC command, a closed tab. A tab-strip peek made on
+    // another tab is thrown away here, so switching back to that tab starts from
+    // it rather than from the peek.
+    client.note_active_tab(snapshot.client.active_tab);
+    // The hovered pane and the tab strip's position are the viewer's own, so the
+    // frame the session handed out says nothing about either.
+    let viewer = client.chrome(snapshot.client.active_tab);
     terminal.draw(|frame| {
         let area = frame.area();
-        frame.render_widget(SnapshotWidget(&snapshot), area);
+        frame.render_widget(
+            SnapshotWidget {
+                snapshot: &snapshot,
+                theme: client.theme(),
+                hints: &hints,
+                pending: client.pending_sequence(),
+                viewer,
+            },
+            area,
+        );
         if let Some(position) = cursor_position(&snapshot, area) {
             frame.set_cursor_position(position);
         }
     })?;
+    // The mouse-sized part of what was just painted. Everything the mouse does
+    // not read — every pane's grid handle, cursor, and title — is dropped here.
+    *last_frame = Some(MouseFrame::from(snapshot));
     Ok(())
 }
 

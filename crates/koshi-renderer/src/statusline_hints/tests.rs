@@ -9,15 +9,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::key::{Key, KeySequence, ModFlags, NamedKey};
-use koshi_core::lock::LockMode;
-use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{
-    ClientSnapshot, HintBinding, PluginUiSnapshot, SessionSnapshot, TabSnapshot,
-};
+use crate::snapshot::HintBinding;
 
 /// A `Ctrl`-modified character chord.
 fn ctrl(key: char) -> KeyChord {
@@ -64,45 +58,18 @@ fn hints(
     }
 }
 
-/// A skeletal snapshot carrying only what the hint bar reads: the hints and
-/// the client's pending sequence.
-fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapshot {
-    let tab_id = TabId::new();
-    RenderSnapshot {
-        session: SessionSnapshot {
-            id: SessionId::new(),
-            name: String::new(),
-            active_tab: TabSnapshot {
-                id: tab_id,
-                name: String::new(),
-                layout_solved: Vec::new(),
-                effective_size: Size { cols: 80, rows: 24 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                all_suppressed: false,
-            },
-            tabs_metadata: Vec::new(),
-        },
-        panes: Vec::new(),
-        client: ClientSnapshot {
-            id: ClientId::new(),
-            viewport: Size { cols: 80, rows: 24 },
-            active_tab: tab_id,
-            focused_pane: None,
-            hovered_pane: None,
-            lock_mode: LockMode::Normal,
-            mouse_select: false,
-            pending_sequence: pending,
-            tabline_offset: None,
-        },
-        plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints,
-        theme: Theme::default(),
-    }
+/// Draw the bar into a fresh one-row buffer of `width` cells.
+fn draw(hints: &KeymapHints, width: u16) -> Buffer {
+    draw_themed(hints, &Theme::default(), width)
 }
 
-/// Draw the bar into a fresh one-row buffer of `width` cells.
-fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
+/// Draw in `theme`'s colors with an open sequence.
+fn draw_themed_pending(
+    hints: &KeymapHints,
+    theme: &Theme,
+    pending: &KeySequence,
+    width: u16,
+) -> Buffer {
     let area = RatatuiRect {
         x: 0,
         y: 0,
@@ -110,7 +77,34 @@ fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
         height: 1,
     };
     let mut buf = Buffer::empty(area);
-    draw_hint_bar(snapshot, area, &mut buf);
+    draw_hint_bar(hints, theme, Some(pending), area, &mut buf);
+    buf
+}
+
+/// Draw with an open sequence, which the viewer owns and hands to the bar.
+fn draw_pending(hints: &KeymapHints, pending: &KeySequence, width: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width,
+        height: 1,
+    };
+    let mut buf = Buffer::empty(area);
+    draw_hint_bar(hints, &Theme::default(), Some(pending), area, &mut buf);
+    buf
+}
+
+/// Paint the hint bar in `theme`'s colors, for the tests that check which
+/// color a piece of the bar takes.
+fn draw_themed(hints: &KeymapHints, theme: &Theme, width: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width,
+        height: 1,
+    };
+    let mut buf = Buffer::empty(area);
+    draw_hint_bar(hints, theme, None, area, &mut buf);
     buf
 }
 
@@ -145,14 +139,14 @@ fn pane_fixture(user_close: bool) -> KeymapHints {
 
 #[test]
 fn idle_shows_leaf_hints_and_labeled_default_group() {
-    let snapshot = snap(pane_fixture(false), None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  l  Lock  p  PANE");
+    let bar = pane_fixture(false);
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  l  Lock  p  PANE");
 }
 
 #[test]
 fn modifier_key_and_action_ribbons_use_the_group_ramp_stop() {
-    let snapshot = snap(pane_fixture(false), None);
-    let buf = draw(&snapshot, 80);
+    let bar = pane_fixture(false);
+    let buf = draw(&bar, 80);
     // One modifier group → the ramp's purple end everywhere in it: the
     // header as text color, the key block as background, the label block as
     // the dimmed background.
@@ -199,9 +193,9 @@ fn human_modifier_groups_fold_same_action_keys() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, None);
+    let bar = keymap;
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw(&bar, 80)),
         " Ctrl +  ←↓  Focus Pane  Alt +  hj  Focus Pane"
     );
 }
@@ -220,8 +214,8 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, None);
-    let buf = draw(&snapshot, 80);
+    let bar = keymap;
+    let buf = draw(&bar, 80);
     assert_eq!(
         row_text(&buf),
         " Ctrl +  l  Lock  Shift +  Tab  Previous Tab  Tab  Next Tab"
@@ -241,8 +235,8 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
 
 #[test]
 fn user_entry_under_prefix_swaps_label_for_count() {
-    let snapshot = snap(pane_fixture(true), None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  l  Lock  p  +2");
+    let bar = pane_fixture(true);
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  l  Lock  p  +2");
 }
 
 #[test]
@@ -258,8 +252,8 @@ fn removal_under_prefix_swaps_label_for_count() {
         vec![seq(&[ctrl('p'), plain('x')])],
         false,
     );
-    let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  +1");
+    let bar = keymap;
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  p  +1");
 }
 
 #[test]
@@ -273,15 +267,16 @@ fn unlabeled_group_shows_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  t  +2");
+    let bar = keymap;
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  t  +2");
 }
 
 #[test]
 fn pending_prefix_shows_breadcrumb_and_continuations() {
-    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
+    let pending = seq(&[ctrl('p')]);
+    let bar = pane_fixture(false);
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&bar, &pending, 80)),
         " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane"
     );
 }
@@ -291,15 +286,17 @@ fn pending_prefix_with_no_continuations_shows_bare_breadcrumb_and_no_groups() {
     // The user pressed a chord that isn't a prefix of anything bound: no
     // matching entries means no label and no continuation groups — just the
     // breadcrumb and arrow, with no panic on the now-empty group list.
-    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('z')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  z  ▶");
+    let pending = seq(&[ctrl('z')]);
+    let bar = pane_fixture(false);
+    assert_eq!(row_text(&draw_pending(&bar, &pending, 80)), " Ctrl +  z  ▶");
 }
 
 #[test]
 fn customized_pending_prefix_uses_count_not_shipped_label() {
-    let snapshot = snap(pane_fixture(true), Some(seq(&[ctrl('p')])));
+    let pending = seq(&[ctrl('p')]);
+    let bar = pane_fixture(true);
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&bar, &pending, 80)),
         " Ctrl +  p  +2  ▶  n  New Pane  x  Close Pane"
     );
 }
@@ -317,9 +314,10 @@ fn pending_prefix_without_label_shows_derived_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, Some(seq(&[ctrl('t')])));
+    let pending = seq(&[ctrl('t')]);
+    let bar = keymap;
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&bar, &pending, 80)),
         " Ctrl +  t  +1  ▶  n  New Tab"
     );
 }
@@ -345,8 +343,12 @@ fn nested_group_inside_pending_shows_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, Some(seq(&[ctrl('p')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  PANE  ▶  n  +2");
+    let pending = seq(&[ctrl('p')]);
+    let bar = keymap;
+    assert_eq!(
+        row_text(&draw_pending(&bar, &pending, 80)),
+        " Ctrl +  p  PANE  ▶  n  +2"
+    );
 }
 
 #[test]
@@ -360,8 +362,8 @@ fn chord_bound_and_extended_shows_action_with_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, None);
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  Pane Menu +1");
+    let bar = keymap;
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  p  Pane Menu +1");
 }
 
 #[test]
@@ -375,23 +377,20 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, None);
+    let bar = keymap;
     // Wide: pinned first despite `<C-a>` sorting lower.
-    assert_eq!(
-        row_text(&draw(&snapshot, 80)),
-        " Ctrl +  g  Unlock  a  Aardvark"
-    );
+    assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  g  Unlock  a  Aardvark");
     // Narrow: only the pinned hint fits; the dropped one leaves a `…`.
-    assert_eq!(row_text(&draw(&snapshot, 19)), " Ctrl +  g  Unlock…");
+    assert_eq!(row_text(&draw(&bar, 19)), " Ctrl +  g  Unlock…");
 }
 
 #[test]
 fn truncation_drops_whole_trailing_hints() {
-    let snapshot = snap(pane_fixture(false), None);
+    let bar = pane_fixture(false);
     // Shared `Ctrl +` header plus the first ribbon is 17 cells; the second
     // ribbon needs 9 more, so below 26 it is dropped whole behind a `…`.
-    assert_eq!(row_text(&draw(&snapshot, 25)), " Ctrl +  l  Lock …");
-    assert_eq!(row_text(&draw(&snapshot, 26)), " Ctrl +  l  Lock  p  PANE");
+    assert_eq!(row_text(&draw(&bar, 25)), " Ctrl +  l  Lock …");
+    assert_eq!(row_text(&draw(&bar, 26)), " Ctrl +  l  Lock  p  PANE");
 }
 
 #[test]
@@ -400,8 +399,8 @@ fn revert_marker_holds_right_edge_and_hints_stop_short() {
         reverted: true,
         ..pane_fixture(false)
     };
-    let snapshot = snap(keymap, None);
-    let buf = draw(&snapshot, 30);
+    let bar = keymap;
+    let buf = draw(&bar, 30);
     let row = row_text(&buf);
     assert_eq!(row, " Ctrl +  l  Lock …      keys!");
     // Marker text holds the right edge, with one background-padding cell.
@@ -410,7 +409,7 @@ fn revert_marker_holds_right_edge_and_hints_stop_short() {
 
 #[test]
 fn empty_mode_blanks_the_row() {
-    let snapshot = snap(hints(Vec::new(), &[], Vec::new(), false), None);
+    let bar = hints(Vec::new(), &[], Vec::new(), false);
     let area = RatatuiRect {
         x: 0,
         y: 0,
@@ -420,7 +419,7 @@ fn empty_mode_blanks_the_row() {
     let mut buf = Buffer::empty(area);
     // Pre-fill the row: the bar owns it, so stale cells must be cleared.
     buf.set_string(0, 0, "X".repeat(20), Style::default());
-    draw_hint_bar(&snapshot, area, &mut buf);
+    draw_hint_bar(&bar, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
     // Blank of text, but not of color: the row still carries the bar
     // background, so an empty mode reads as a bar rather than a hole.
@@ -431,7 +430,7 @@ fn empty_mode_blanks_the_row() {
 
 #[test]
 fn zero_size_area_draws_nothing() {
-    let snapshot = snap(pane_fixture(false), None);
+    let bar = pane_fixture(false);
     let area = RatatuiRect {
         x: 0,
         y: 0,
@@ -444,7 +443,7 @@ fn zero_size_area_draws_nothing() {
         width: 10,
         height: 1,
     });
-    draw_hint_bar(&snapshot, area, &mut buf);
+    draw_hint_bar(&bar, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
 }
 
@@ -452,15 +451,16 @@ fn zero_size_area_draws_nothing() {
 /// theme's accent pair and a group's key block sits on the custom ramp.
 #[test]
 fn a_custom_theme_recolors_the_bar() {
-    let mut snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
-    snapshot.theme = Theme {
+    let pending = seq(&[ctrl('p')]);
+    let bar = pane_fixture(false);
+    let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
         accent: Color::Rgb(0x00, 0xff, 0x00),
         on_accent: Color::Rgb(0x01, 0x02, 0x03),
         ..Theme::default()
     };
-    let buf = draw(&snapshot, 80);
+    let buf = draw_themed_pending(&bar, &theme, &pending, 80);
     // Row: " Ctrl +  p  PANE  ▶  n  New Pane …". The breadcrumb's `Ctrl +`
     // is accent text; its key block is on-accent text on the accent.
     assert_eq!(buf[(1, 0)].fg, Color::Rgb(0x00, 0xff, 0x00));

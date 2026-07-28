@@ -6,9 +6,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use koshi_config::types::{RgbColor, ThemeConfig};
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
@@ -16,15 +15,12 @@ use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::PluginUiSnapshot;
-use koshi_renderer::theme::Theme;
 use koshi_session::client::{Client, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use ratatui::style::Color;
 
-use super::resolve_theme;
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
@@ -40,7 +36,6 @@ fn new_runtime() -> Server {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     )
 }
 
@@ -139,139 +134,34 @@ fn build_snapshot_maps_session_tab_and_client() {
     assert_eq!(snap.plugin_ui, PluginUiSnapshot::default());
 
     // No sequence pends before a prefix key is pressed.
-    assert_eq!(snap.client.pending_sequence, None);
 }
 
 #[test]
-fn build_snapshot_carries_the_hints_for_the_clients_mode() {
+fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
+    // The viewer resolves its own hint bar from these two, so a frame that
+    // dropped either would paint the wrong labels.
     let mut rt = new_runtime();
     let (session, session_id, _tab_id, _pane_id, client_id) =
         session_with_client(Size { cols: 80, rows: 24 });
     rt.sessions.insert(session_id, session);
 
-    // Normal mode: the shipped normal-mode bindings surface as hint data.
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     assert_eq!(snap.client.lock_mode, LockMode::Normal);
-    assert_eq!(snap.keymap_hints.entries.len(), 22);
-    assert!(!snap.keymap_hints.reverted);
+    assert!(!snap.client.mouse_select);
 
-    // Locked mode: the same frame path now carries only the pinned unlock.
-    rt.sessions
+    let client = rt
+        .sessions
         .get_mut(&session_id)
         .expect("session")
         .clients
         .get_mut(client_id)
-        .expect("client")
-        .update_lock_mode(LockMode::Locked);
+        .expect("client");
+    client.update_lock_mode(LockMode::Locked);
+    client.toggle_mouse_select();
+
     let snap = rt.build_snapshot(client_id).expect("snapshot");
     assert_eq!(snap.client.lock_mode, LockMode::Locked);
-    // The reserved unlock (pinned) plus the quit and mouse-select chords.
-    assert_eq!(snap.keymap_hints.entries.len(), 3);
-    assert!(snap
-        .keymap_hints
-        .entries
-        .iter()
-        .any(|entry| entry.label == "Unlock" && entry.pinned));
-    assert!(snap
-        .keymap_hints
-        .entries
-        .iter()
-        .any(|entry| entry.label == "Quit" && !entry.pinned));
-}
-
-#[test]
-fn mouse_select_mode_flips_its_hint_label() {
-    let mut rt = new_runtime();
-    let (session, session_id, _tab_id, _pane_id, client_id) =
-        session_with_client(Size { cols: 80, rows: 24 });
-    rt.sessions.insert(session_id, session);
-
-    let has_label = |rt: &mut Server, label: &str| {
-        rt.build_snapshot(client_id)
-            .expect("snapshot")
-            .keymap_hints
-            .entries
-            .iter()
-            .any(|entry| entry.label == label)
-    };
-
-    // Off: the hint invites turning selection on.
-    assert!(has_label(&mut rt, "Mouse Select"));
-    assert!(!has_label(&mut rt, "Mouse Unselect"));
-
-    // On: the same binding's hint flips to the off action, the way lock flips
-    // to unlock.
-    rt.sessions
-        .get_mut(&session_id)
-        .expect("session")
-        .clients
-        .get_mut(client_id)
-        .expect("client")
-        .toggle_mouse_select();
-    assert!(has_label(&mut rt, "Mouse Unselect"));
-    assert!(!has_label(&mut rt, "Mouse Select"));
-}
-
-#[test]
-fn build_snapshot_carries_the_runtime_theme() {
-    let mut rt = new_runtime();
-    let (session, session_id, _tab_id, _pane_id, client_id) =
-        session_with_client(Size { cols: 80, rows: 24 });
-    rt.sessions.insert(session_id, session);
-
-    // A fresh runtime carries the stock theme.
-    let snap = rt.build_snapshot(client_id).expect("snapshot");
-    assert_eq!(snap.theme, Theme::default());
-
-    // A replaced runtime theme reaches the next frame.
-    let custom = Theme {
-        ramp_start: (0xff, 0x00, 0x00),
-        ..Theme::default()
-    };
-    rt.theme = custom;
-    let snap = rt.build_snapshot(client_id).expect("snapshot");
-    assert_eq!(snap.theme, custom);
-}
-
-/// Resolving the default config theme yields exactly the renderer's default
-/// theme: the two crates' stock palettes never drift apart.
-#[test]
-fn resolving_the_default_config_theme_is_the_default_theme() {
-    assert_eq!(resolve_theme(&ThemeConfig::default()), Theme::default());
-}
-
-/// Each palette role lands on its matching theme field as a truecolor.
-#[test]
-fn resolve_theme_maps_every_palette_role() {
-    let mut config = ThemeConfig::default();
-    config.colors.ramp_start = RgbColor::new(0x01, 0x02, 0x03);
-    config.colors.ramp_end = RgbColor::new(0x04, 0x05, 0x06);
-    config.colors.on_ramp = RgbColor::new(0x07, 0x08, 0x09);
-    config.colors.on_ramp_dim = RgbColor::new(0x0a, 0x0b, 0x0c);
-    config.colors.accent = RgbColor::new(0x0d, 0x0e, 0x0f);
-    config.colors.on_accent = RgbColor::new(0x10, 0x11, 0x12);
-    config.colors.border_focused = RgbColor::new(0x13, 0x14, 0x15);
-    config.colors.border_unfocused = RgbColor::new(0x16, 0x17, 0x18);
-    config.colors.border_hover = RgbColor::new(0x22, 0x23, 0x24);
-    config.colors.stack_header_fg = RgbColor::new(0x19, 0x1a, 0x1b);
-    config.colors.stack_header_bg = RgbColor::new(0x1c, 0x1d, 0x1e);
-    config.colors.letterbox = RgbColor::new(0x1f, 0x20, 0x21);
-    config.colors.bar_bg = RgbColor::new(0x25, 0x26, 0x27);
-
-    let theme = resolve_theme(&config);
-    assert_eq!(theme.ramp_start, (0x01, 0x02, 0x03));
-    assert_eq!(theme.ramp_end, (0x04, 0x05, 0x06));
-    assert_eq!(theme.on_ramp, Color::Rgb(0x07, 0x08, 0x09));
-    assert_eq!(theme.on_ramp_dim, Color::Rgb(0x0a, 0x0b, 0x0c));
-    assert_eq!(theme.accent, Color::Rgb(0x0d, 0x0e, 0x0f));
-    assert_eq!(theme.on_accent, Color::Rgb(0x10, 0x11, 0x12));
-    assert_eq!(theme.border_focused, Color::Rgb(0x13, 0x14, 0x15));
-    assert_eq!(theme.border_unfocused, Color::Rgb(0x16, 0x17, 0x18));
-    assert_eq!(theme.border_hover, Color::Rgb(0x22, 0x23, 0x24));
-    assert_eq!(theme.stack_header_fg, Color::Rgb(0x19, 0x1a, 0x1b));
-    assert_eq!(theme.stack_header_bg, Color::Rgb(0x1c, 0x1d, 0x1e));
-    assert_eq!(theme.letterbox, Color::Rgb(0x1f, 0x20, 0x21));
-    assert_eq!(theme.bar_bg, Color::Rgb(0x25, 0x26, 0x27));
+    assert!(snap.client.mouse_select);
 }
 
 #[test]
@@ -671,6 +561,11 @@ fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
     );
 
     assert_eq!(spans(&rt, client), None, "nothing of it is on screen");
+    assert!(
+        rt.build_snapshot(client).expect("snapshot").panes[0].has_selection,
+        "the client still holds a highlight in the pane, so the wheel still \
+         scrolls koshi's own view"
+    );
 }
 
 #[test]

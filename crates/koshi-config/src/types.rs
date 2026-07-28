@@ -1,10 +1,16 @@
 //! The typed configuration schema and its built-in defaults.
 //!
-//! [`KoshiConfig`] is the whole in-memory config tree the runtime reads. Every
-//! field has a default via [`Default`], so Koshi runs with zero user config;
-//! [`KoshiConfig::default`] is the baseline that user overrides layer onto. This
-//! module owns the schema and defaults only. The sibling [`layer`](crate::layer)
-//! module folds override layers onto these defaults,
+//! The tree is split by who reads it: [`ServerConfig`] holds what one session
+//! shares across every viewer (the layout floor, scrollback caps, the child
+//! environment), and [`ClientConfig`] holds what one viewer decides for itself
+//! (keybindings, theme, mouse, copy). Both come from the same `koshi.kdl`;
+//! each side folds only the sections it owns, so a viewer cannot set the shell
+//! a session spawns and a session cannot set a viewer's colors.
+//!
+//! Every field has a default via [`Default`], so Koshi runs with zero user
+//! config, and each side's `default()` is the baseline user overrides layer
+//! onto. This module owns the schema and defaults only. The sibling
+//! [`layer`](crate::layer) module folds override layers onto these defaults,
 //! [`keybinding`](crate::keybinding) parses keybinding-file KDL, and
 //! [`migration`](crate::migration) validates versioned files and moves them
 //! through adjacent schemas. Disk discovery and reading live in the binary.
@@ -32,17 +38,51 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// names one whose `themes/<name>.kdl` cannot be loaded.
 pub const DEFAULT_THEME: &str = "default";
 
-/// The complete configuration tree. Each field is an independent section with
-/// its own defaults, so a user file that sets one section leaves the rest at the
-/// built-in defaults.
+/// The settings the session host reads: the shared layout floor, the
+/// scrollback buffers it owns, the environment it spawns children into, and
+/// its own log file.
+///
+/// One session has one of these however many viewers are attached, because
+/// every field here describes something all of them share. A viewer's own
+/// preferences are [`ClientConfig`], and the two are read from the same
+/// `koshi.kdl` — each side folding the sections it owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KoshiConfig {
+pub struct ServerConfig {
     /// The schema version this config was written against.
     pub version: u32,
-    /// Pane sizing and framing defaults.
+    /// Pane sizing floor for the shared layout.
     pub pane: PaneConfig,
     /// Per-pane scrollback history caps.
-    pub scrollback: ScrollbackConfig,
+    pub scrollback: ScrollbackLimits,
+    /// Terminal environment presented to child processes.
+    pub terminal: TerminalConfig,
+    /// Log-file behavior for this process.
+    pub logging: LoggingConfig,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            version: SCHEMA_VERSION,
+            pane: PaneConfig::default(),
+            scrollback: ScrollbackLimits::default(),
+            terminal: TerminalConfig::default(),
+            logging: LoggingConfig::default(),
+        }
+    }
+}
+
+/// The settings one viewer reads: how its keyboard and mouse are interpreted,
+/// what it paints with, and what it does with copied text.
+///
+/// Each attached viewer holds its own, read from the `koshi.kdl` on the
+/// machine it runs on, so two viewers of one session can bind different keys
+/// and paint different colors. The settings the session itself needs are
+/// [`ServerConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientConfig {
+    /// The schema version this config was written against.
+    pub version: u32,
     /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
     pub keybindings: KeybindingsConfig,
     /// Defaults applied when creating layouts.
@@ -53,28 +93,26 @@ pub struct KoshiConfig {
     pub mouse: MouseConfig,
     /// Selection and clipboard behavior.
     pub copy: CopyConfig,
-    /// Terminal environment presented to child processes.
-    pub terminal: TerminalConfig,
+    /// How this viewer's scrollback view follows live output.
+    pub scrollback: ScrollbackView,
     /// Color theme.
     pub theme: ThemeConfig,
-    /// Log-file behavior.
+    /// Log-file behavior for this process.
     pub logging: LoggingConfig,
     /// Self-update checking behavior.
     pub update: UpdateConfig,
 }
 
-impl Default for KoshiConfig {
+impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             version: SCHEMA_VERSION,
-            pane: PaneConfig::default(),
-            scrollback: ScrollbackConfig::default(),
             keybindings: KeybindingsConfig::default(),
             layout: LayoutDefaults::default(),
             plugins: PluginActivationConfig::default(),
             mouse: MouseConfig::default(),
             copy: CopyConfig::default(),
-            terminal: TerminalConfig::default(),
+            scrollback: ScrollbackView::default(),
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
             update: UpdateConfig::default(),
@@ -124,13 +162,30 @@ impl Default for PaneConfig {
     }
 }
 
-/// Per-pane scrollback history caps.
+/// Per-pane scrollback history caps. The buffer these bound lives in the
+/// pane's terminal engine, so one pane has one set of caps however many
+/// viewers it has.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScrollbackConfig {
+pub struct ScrollbackLimits {
     /// Maximum retained lines per pane.
     pub max_lines: usize,
     /// Maximum retained bytes of scrollback text per pane.
     pub max_bytes: usize,
+}
+
+impl Default for ScrollbackLimits {
+    fn default() -> Self {
+        Self {
+            max_lines: 10_000,
+            max_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
+/// How one viewer's scrollback view behaves. Held per viewer, so two viewers
+/// of the same pane can follow live output differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbackView {
     /// Whether input you send to a pane snaps its view back to the newest line
     /// when you had scrolled up into history. On for a live feel: type or paste
     /// and the view jumps to the prompt. Off to stay parked in history while the
@@ -139,11 +194,9 @@ pub struct ScrollbackConfig {
     pub scroll_on_input: bool,
 }
 
-impl Default for ScrollbackConfig {
+impl Default for ScrollbackView {
     fn default() -> Self {
         Self {
-            max_lines: 10_000,
-            max_bytes: 32 * 1024 * 1024,
             scroll_on_input: true,
         }
     }
@@ -403,9 +456,10 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
 /// Defaults applied when creating panes and layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDefaults {
-    /// Direction a new pane spawns relative to the focused pane when the command
-    /// omits one. The CLI new-pane command and the `new-pane-<direction>`
-    /// actions name their own direction and bypass it.
+    /// Direction a new pane spawns relative to the focused pane. Each client —
+    /// a viewer and the `koshi` CLI alike — reads its own copy and puts it on
+    /// every new-pane command it sends. The `new-pane-<direction>` actions and
+    /// an explicit `--direction` name their own direction and bypass it.
     pub new_pane_direction: Direction,
 }
 

@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 
-use koshi_core::geometry::Direction;
 use koshi_core::ids::PaneId;
 use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
@@ -33,7 +32,6 @@ fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<Runtime
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, fake, tx)
 }

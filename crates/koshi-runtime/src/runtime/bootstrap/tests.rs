@@ -6,10 +6,12 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
+use koshi_layout::tree::LayoutNode;
 use koshi_pty::error::PtyError;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -28,7 +30,6 @@ fn runtime() -> (Server, Arc<FakePtyBackend>) {
         Arc::new(NullStorage),
         rx,
         tx,
-        Direction::Right,
     );
     (runtime, fake)
 }
@@ -56,6 +57,32 @@ fn a_profile_opens_its_tab_and_panes() {
     let tab = session.tabs.values().next().expect("one tab");
     assert_eq!(tab.layout().leaf_panes().len(), 2, "two panes in the tab");
     assert_eq!(rt.pty_handles.len(), 2, "both panes' PTYs are parked");
+}
+
+#[test]
+fn a_profile_keeps_the_split_direction_it_declares() {
+    // A profile states each split in the file — `vertical {}` here — so no
+    // `layout.new-pane-direction` setting can turn it sideways. The session is
+    // given a `koshi.kdl` naming the opposite direction to prove it.
+    let (mut rt, _fake) = runtime();
+    rt.load_startup_config(Some(PartialKoshiConfig {
+        layout: Some(PartialLayoutDefaults {
+            new_pane_direction: Some(Direction::Right),
+        }),
+        ..PartialKoshiConfig::default()
+    }));
+
+    let tmpl = template("version 1\ntab {\n    vertical {\n        pane\n        pane\n    }\n}");
+    let _client = rt
+        .bootstrap_profile(SessionId::new(), tmpl, viewport(), SystemTime::UNIX_EPOCH)
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let tab = session.tabs.values().next().expect("one tab");
+    let LayoutNode::Split(split) = tab.layout() else {
+        panic!("the tab's root is the profile's split");
+    };
+    assert_eq!(split.direction, SplitDirection::Vertical);
 }
 
 #[test]

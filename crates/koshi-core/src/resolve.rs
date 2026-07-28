@@ -21,7 +21,12 @@
 //! — and refusing a session with several attached clients and no named target —
 //! happens in the runtime's command handlers, which see the issuing
 //! [`CommandSource`](crate::command::CommandSource). Resolution is a pure
-//! function of the reference, its arguments, and the registry.
+//! function of the reference, its arguments, the registry, and the caller's own
+//! split direction.
+//!
+//! The split direction is a value, not a decision made here: the caller reads
+//! its own `layout.new-pane-direction` and passes it in, and a pane-opening
+//! action that names no side of its own is built with it.
 //!
 //! # Routes
 //!
@@ -84,8 +89,8 @@ pub enum ActionArgs {
         program: PathBuf,
         /// Arguments passed to the program, excluding `argv[0]`.
         args: Vec<String>,
-        /// Split direction for the new pane; `None` uses the runtime's
-        /// default split direction.
+        /// Split direction for the new pane; `None` uses the direction the
+        /// resolving client passes in.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
         stacked: bool,
@@ -176,6 +181,11 @@ impl DomainError for ResolveError {
 
 /// Turn an action reference and its arguments into the plan that runs it.
 ///
+/// `new_pane_direction` is the caller's own `layout.new-pane-direction`
+/// setting. Actions that open a pane without naming a direction —
+/// `core:new-pane`, `core:run` without one — build their command with it, so
+/// the command that leaves the caller already says where the pane goes.
+///
 /// # Errors
 /// - [`ResolveError::Unregistered`] if `action` names no entry in `registry`.
 /// - [`ResolveError::ComingSoon`] if the runtime has no handler for it yet.
@@ -186,8 +196,9 @@ pub fn resolve_action(
     action: &ActionRef,
     args: &ActionArgs,
     registry: &ActionRegistry,
+    new_pane_direction: Direction,
 ) -> Result<DispatchPlan, ResolveError> {
-    resolve_at_depth(action, args, registry, 0)
+    resolve_at_depth(action, args, registry, new_pane_direction, 0)
 }
 
 /// [`resolve_action`] carrying the count of sequences entered to reach `action`.
@@ -195,6 +206,7 @@ fn resolve_at_depth(
     action: &ActionRef,
     args: &ActionArgs,
     registry: &ActionRegistry,
+    new_pane_direction: Direction,
     depth: usize,
 ) -> Result<DispatchPlan, ResolveError> {
     let metadata = registry
@@ -210,7 +222,9 @@ fn resolve_at_depth(
     }
 
     match &metadata.handler {
-        ActionHandlerRef::CoreCommand(_) => resolve_core(action, args).map(DispatchPlan::Command),
+        ActionHandlerRef::CoreCommand(_) => {
+            resolve_core(action, args, new_pane_direction).map(DispatchPlan::Command)
+        }
         ActionHandlerRef::PluginHostCall(plugin) => Ok(DispatchPlan::PluginHostCall {
             plugin: *plugin,
             action: action.clone(),
@@ -237,6 +251,7 @@ fn resolve_at_depth(
                     step,
                     &ActionArgs::None,
                     registry,
+                    new_pane_direction,
                     depth + 1,
                 )?);
             }
@@ -250,16 +265,21 @@ fn resolve_at_depth(
 /// The name and the arguments are matched together, so an argument shape that
 /// belongs to a different action falls through to
 /// [`ResolveError::ArgsMismatch`]. Targets are left `None` for the runtime to
-/// resolve against the command's source.
+/// resolve against the command's source. `new_pane_direction` fills the split
+/// direction of every pane-opening action that does not state one itself.
 ///
 /// The action's [`CommandKind`](crate::command::CommandKind) is not consulted:
 /// three actions share `FocusTab` and two share `SetLockMode`, so the
 /// discriminant cannot say which command to build. It stays on the metadata as
 /// the introspection surface.
-fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, ResolveError> {
+fn resolve_core(
+    action: &ActionRef,
+    args: &ActionArgs,
+    new_pane_direction: Direction,
+) -> Result<Command, ResolveError> {
     let command = match (action.name.as_str(), args) {
         // --- Panes ---
-        ("new-pane", ActionArgs::None) => Command::NewPane(NewPaneArgs::default()),
+        ("new-pane", ActionArgs::None) => new_pane_toward(new_pane_direction),
         ("new-pane-left", ActionArgs::None) => new_pane_toward(Direction::Left),
         ("new-pane-down", ActionArgs::None) => new_pane_toward(Direction::Down),
         ("new-pane-up", ActionArgs::None) => new_pane_toward(Direction::Up),
@@ -267,7 +287,7 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
         ("new-pane-stacked", ActionArgs::None) => Command::NewPane(NewPaneArgs {
             source: None,
             tab: None,
-            direction: None,
+            direction: new_pane_direction,
             stacked: true,
             cwd: None,
             command: None,
@@ -343,7 +363,7 @@ fn resolve_core(action: &ActionRef, args: &ActionArgs) -> Result<Command, Resolv
             cwd: None,
             source: None,
             tab: None,
-            direction: *direction,
+            direction: direction.unwrap_or(new_pane_direction),
             stacked: *stacked,
             client: None,
         }),
@@ -363,7 +383,7 @@ fn new_pane_toward(direction: Direction) -> Command {
     Command::NewPane(NewPaneArgs {
         source: None,
         tab: None,
-        direction: Some(direction),
+        direction,
         stacked: false,
         cwd: None,
         command: None,

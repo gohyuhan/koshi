@@ -93,7 +93,14 @@ pub enum RuntimeEvent {
         /// Canonical chord used for keymap lookup.
         chord: KeyChord,
     },
-    /// One decoded outer-terminal mouse event awaiting hit-testing and routing.
+    /// One decoded outer-terminal mouse event awaiting the viewer's answer.
+    /// Carries the event alone: which pane it lands on, which gesture it
+    /// continues, and what it means are all read from the frame the viewer
+    /// painted.
+    ///
+    /// It travels the same inbox as [`KeyInput`](Self::KeyInput) so the two stay
+    /// in the order the user produced them: toggling mouse-select and then
+    /// pressing must be answered in that order.
     MouseInput {
         /// Client whose terminal produced the mouse event.
         client_id: ClientId,

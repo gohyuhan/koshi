@@ -377,8 +377,14 @@ impl<'a> TextView<'a> {
 /// When `trim_trailing_whitespace` is true, trailing blanks are dropped from
 /// each finished line — the padding right of the text is the screen's, not the
 /// text's — but not inside a soft-wrapped row, where spaces continue onto the
-/// next row. When false, every selected blank is preserved. A row that no
-/// longer exists is skipped.
+/// next row. When false, every selected blank is preserved.
+///
+/// Only the rows the view still holds are read:
+/// [`TextView::first_row`]`..=`[`TextView::last_row`]. A selection reaching past
+/// either end yields the text of the rows that are there, and one whose ends are
+/// both outside yields the empty string. On a view holding rows 500..=1023, a
+/// selection from row 0 to row `u64::MAX` reads rows 500 through 1023 and
+/// nothing else.
 #[must_use]
 pub fn selection_text(
     view: &TextView<'_>,
@@ -392,7 +398,10 @@ pub fn selection_text(
     let block = matches!(selection.kind, SelectionKind::Block);
     let mut out = String::new();
     let mut any_row_written = false;
-    for row in start.row..=end.row {
+    // Clamped to the rows the view holds: a selection can name any row number,
+    // and walking the ones outside would read nothing while taking as long as
+    // the numbers are far apart.
+    for row in start.row.max(view.first_row())..=end.row.min(view.last_row()) {
         let Some((cells, row_end)) = view.row(row) else {
             continue;
         };

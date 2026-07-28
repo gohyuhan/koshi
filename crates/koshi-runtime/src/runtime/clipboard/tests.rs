@@ -4,7 +4,6 @@
 
 use std::sync::{mpsc, Arc};
 
-use koshi_core::geometry::Direction;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -25,7 +24,6 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, tx)
 }
@@ -96,7 +94,7 @@ fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
     let (mut rt, _tx) = new_runtime();
     let client = ClientId::new();
 
-    rt.copy_to_clipboard(client, "hello");
+    rt.copy_to_clipboard(client, CopyTarget::Osc52, "hello");
 
     assert_eq!(rt.take_host_writes(client), Some(osc52_copy("hello")));
     // The queue is drained by the take, so a second take finds nothing.
@@ -108,10 +106,22 @@ fn two_copies_to_one_client_queue_both_sequences_in_order() {
     let (mut rt, _tx) = new_runtime();
     let client = ClientId::new();
 
-    rt.copy_to_clipboard(client, "one");
-    rt.copy_to_clipboard(client, "two");
+    rt.copy_to_clipboard(client, CopyTarget::Osc52, "one");
+    rt.copy_to_clipboard(client, CopyTarget::Osc52, "two");
 
     let mut expected = osc52_copy("one");
     expected.extend_from_slice(&osc52_copy("two"));
     assert_eq!(rt.take_host_writes(client), Some(expected));
+}
+
+#[test]
+fn a_copy_to_the_native_clipboard_writes_nothing_to_the_outer_terminal() {
+    // Koshi builds no native operating-system clipboard backend, so a copy
+    // naming one has nowhere to go and queues no escape.
+    let (mut rt, _tx) = new_runtime();
+    let client = ClientId::new();
+
+    rt.copy_to_clipboard(client, CopyTarget::Native, "hello");
+
+    assert_eq!(rt.take_host_writes(client), None);
 }

@@ -9,8 +9,8 @@ use super::*;
 
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    CommandRejected, ConfigReloadFailed, ConfigReloaded, Copied, EventClass, InputMode,
-    InputModeChanged, KeybindingMatched, MouseScrolled, PaneClosing, PaneCreated,
+    CommandRejected, ConfigReloaded, Copied, EventClass, InputMode, InputModeChanged,
+    KeybindingMatched, MouseScrolled, MouseSelectChanged, PaneClosing, PaneCreated,
     PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneTyped, PluginInstalled,
     PluginLoadFailed, PtyResized, RejectReason, SubscriberLagged, TypedPayload,
 };
@@ -63,26 +63,17 @@ fn pane_created_is_one_info_line_carrying_its_pane_and_tab_ids() {
 // A reload that applied is info; one that was refused is a warning, because the
 // running config is the fallback koshi keeps using. Both name their session.
 #[test]
-fn config_reload_is_info_when_it_applied_and_a_warning_when_it_was_refused() {
+fn config_reload_is_logged_at_info_naming_its_session() {
     let session_id = SessionId::new();
 
     let applied = captured(&[Event::ConfigReloaded(ConfigReloaded { session_id })]);
+
     assert!(applied.contains(r#""level":"INFO""#), "{applied}");
     assert!(
         applied.contains(r#""message":"config reloaded""#),
         "{applied}"
     );
-
-    let refused = captured(&[Event::ConfigReloadFailed(ConfigReloadFailed {
-        session_id,
-        reason: "`<C-a>` is bound twice".to_string(),
-    })]);
-    assert!(refused.contains(r#""level":"WARN""#), "{refused}");
-    assert!(
-        refused.contains(r#""message":"config reload failed; keeping the running config""#),
-        "{refused}"
-    );
-    assert!(refused.contains("`<C-a>` is bound twice"), "{refused}");
+    assert!(applied.contains(&session_id.to_string()), "{applied}");
 }
 
 // A rejection is written where the rejection is built, which every rejected
@@ -174,6 +165,20 @@ fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
     assert!(out.contains(r#""mode":"Locked""#), "{out}");
 }
 
+// Mouse select decides whether a click reaches the program in the pane, so the
+// switch is worth a line and the line says which way it went.
+#[test]
+fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
+    let out = captured(&[Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    })]);
+
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(out.contains(r#""message":"mouse select changed""#), "{out}");
+    assert!(out.contains(r#""on":true"#), "{out}");
+}
+
 // The model rule, held as a test: an event is a fact koshi anticipated, so it
 // always has a defined outcome and is never reported as an error.
 #[test]
@@ -183,9 +188,8 @@ fn no_event_is_ever_logged_as_an_error() {
             pane_id: PaneId::new(),
             tab_id: TabId::new(),
         }),
-        Event::ConfigReloadFailed(ConfigReloadFailed {
+        Event::ConfigReloaded(ConfigReloaded {
             session_id: SessionId::new(),
-            reason: "conflicting bindings".to_string(),
         }),
         Event::CommandRejected(CommandRejected {
             id: CommandId::new(),
