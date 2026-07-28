@@ -166,13 +166,9 @@ impl Server {
         .then_some(pane_id)
     }
 
-    /// Re-arm a continuous binding's prefix after it fires: the sequence minus
-    /// its final chord goes back to pending, so the next chord alone fires the
-    /// sibling binding (`<C-s> h h h` resizes three times). Only actions the
-    /// registry marks `continuous` re-arm, and only multi-chord sequences have
-    /// a prefix to hold.
-    ///
-    /// what an action does.
+    /// Run the action a viewer's keypress resolved to: look the name up in the
+    /// action table, turn it into commands, and dispatch them. The viewer
+    /// decided which binding fired; the session decides what that binding does.
     ///
     /// `new_pane_direction` is the viewer's own `layout.new-pane-direction`
     /// setting, handed in with the action: a pane-opening action that names no

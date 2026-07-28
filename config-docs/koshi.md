@@ -13,10 +13,18 @@ the whole app file for that launch.
 
 Settings use blocks. `theme` is top-level.
 
+**Whose settings they are:** some belong to the session and are shared by every
+terminal looking at it; the rest belong to the terminal you are sitting at,
+which reads its own `koshi.kdl`, `themes/<name>.kdl`, and `keybinding.kdl`. Two
+terminals showing one session can differ on those. Each section below says
+which.
+
 ## `theme`
 
 `theme "midnight"` loads `themes/midnight.kdl`. Missing, invalid, omitted, or
-`"default"` themes use built-in colors. See [theme.md](theme.md).
+`"default"` themes use built-in colors. Each terminal reads this for itself, so
+two terminals showing one session can wear different colors. See
+[theme.md](theme.md).
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -30,6 +38,11 @@ Settings use blocks. `theme` is top-level.
 | `min-rows` | integer — smallest height a pane may shrink to | `1` | ≥ 0.1.0 |
 
 ## `scrollback`
+
+`max-lines` and `max-bytes` size the history the session keeps, so every
+terminal looking at the session gets the same amount. `scroll-on-input` is about
+what one terminal's view does, but the session applies it from its own
+`koshi.kdl` — so it too is the same for everyone.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -45,6 +58,8 @@ Settings use blocks. `theme` is top-level.
 
 ## `mouse`
 
+Each terminal reads these for itself, since the mouse is its own.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `border-resize` | boolean — drag a pane border to resize it | `#true` | ≥ 0.1.0 |
@@ -52,6 +67,9 @@ Settings use blocks. `theme` is top-level.
 | `wheel` | `"scroll-scrollback"` (scroll koshi's history) \| `"ignore"` | `"scroll-scrollback"` | ≥ 0.1.0 |
 
 ## `copy`
+
+Each terminal reads this for itself: the copy is made where the selection was
+dragged.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -82,7 +100,8 @@ severity. Logs store ids and byte counts, not typed or copied text.
 
 ## `update`
 
-Self-update settings. A bad value here drops the whole `koshi.kdl` for that
+Self-update settings. Each installed koshi reads these from its own `koshi.kdl`
+and updates itself. A bad value here drops the whole `koshi.kdl` for that
 launch.
 
 | Key | Value / type | Default | Since |

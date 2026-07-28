@@ -119,8 +119,9 @@ impl Server {
         //
         // `suppressed` is indexed before the walk, not scanned inside it: a tab
         // with no room suppresses every pane it holds, so scanning it per pane
-        // would cost pane-count squared on a path that runs for every pointer
-        // move.
+        // would cost pane-count squared on a path that runs for every painted
+        // frame and for every mouse event forwarded to a pane that asked for
+        // the mouse.
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes

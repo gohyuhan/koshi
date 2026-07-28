@@ -431,6 +431,73 @@ fn a_key_for_another_client_is_not_resolved_by_this_viewer() {
 }
 
 #[test]
+fn a_lock_and_the_key_after_it_in_one_batch_leave_that_key_to_the_shell() {
+    // `<C-l>` locks the viewer, and locked mode is the only mode in which the
+    // shell sees a literal Tab — in normal mode the keymap owns Tab and
+    // switches tabs. The loop drains every queued event before it paints, so
+    // both presses can land in one batch with nothing in between; the Tab must
+    // still be read in the mode the `<C-l>` just produced.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+
+    // A second tab, so switching tabs is something that can be seen. The
+    // session moves the viewer onto the new tab, so send it back to the one
+    // holding the pane the Tab must reach.
+    let first_tab = server
+        .build_snapshot(client_id)
+        .expect("snapshot")
+        .client
+        .active_tab;
+    server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::NewTab(koshi_core::command::NewTabArgs::default()),
+    ));
+    server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::FocusTab(koshi_core::command::FocusTabArgs {
+            target: koshi_core::command::TabTarget::Id(first_tab),
+            client: Some(client_id),
+        }),
+    ));
+
+    // Back to back through the loop's own routing, with nothing applying the
+    // viewer's queued events in between.
+    press(
+        &mut server,
+        &mut client,
+        client_id,
+        KeyChord::new(ModFlags::CTRL, Key::Char('l')),
+    );
+    press(
+        &mut server,
+        &mut client,
+        client_id,
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Tab)),
+    );
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        vec![vec![9u8]],
+        "the shell got the literal Tab"
+    );
+    assert_eq!(
+        server
+            .build_snapshot(client_id)
+            .expect("snapshot")
+            .client
+            .active_tab,
+        first_tab,
+        "the Tab switched no tab"
+    );
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+}
+
+#[test]
 fn child_exit_event_removes_the_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, _client_id, pane_id) = boot(&fake);

@@ -422,9 +422,11 @@ fn run_loop<B: Backend>(
         while let Ok(event) = server.inbox_rx().try_recv() {
             quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
-        // The embedded client renders from server snapshots, so the events its
-        // subscription delivers are discarded here; the discard keeps its
-        // bounded queue from filling.
+        // Everything the subscription delivered that no key press already took:
+        // a mode change asked for from outside — `koshi lock --client` — lands
+        // here, so the hint bar and mode tag are right before the frame is
+        // painted. It also empties the bounded queue on a batch with no keys in
+        // it.
         client.apply_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
@@ -487,6 +489,11 @@ fn apply_event(
     // press to write.
     if let RuntimeEvent::KeyInput { client_id, chord } = event {
         if client_id == client.id() {
+            // The mode this key is read in must be the mode the session last
+            // reported. A `core:lock` earlier in this same batch published the
+            // change into the subscription as it ran, so taking it now is what
+            // makes the very next key see the new mode.
+            client.apply_events();
             match client.resolve_key(chord, Instant::now()) {
                 KeyOutcome::Fire(bound) => {
                     let direction = client.config().layout.new_pane_direction;

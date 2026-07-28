@@ -297,14 +297,6 @@ impl Client {
         seen
     }
 
-    /// Drop every event the subscription has delivered since the last call,
-    /// returning how many were dropped. Keeps the bounded queue from filling
-    /// while nothing consumes the feed; drops the events one by one without
-    /// collecting them.
-    pub fn discard_events(&mut self) -> usize {
-        self.events.try_iter().count()
-    }
-
     /// Borrow the outer-terminal cleanup guard.
     #[must_use]
     pub fn cleanup_guard(&self) -> &TerminalCleanupGuard {

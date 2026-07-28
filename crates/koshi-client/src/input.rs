@@ -48,16 +48,17 @@ pub enum KeyOutcome {
     /// A binding completed. The session resolves the name against its action
     /// table and dispatches it.
     Fire(BoundAction),
-    /// The chord opened or continued a multi-chord sequence, or a held
-    /// sequence swallowed a key that continues nothing. The hint bar changes;
-    /// nothing else does.
+    /// The chord opened or continued a multi-chord sequence, a held sequence
+    /// swallowed a key that continues nothing, or an `Esc` closed one. The hint
+    /// bar changes; nothing else does.
     Pending,
     /// Nothing bound the chord and the mode passes what it does not bind. The
     /// session encodes it for the focused pane, reading that pane's cursor-key
     /// mode at the instant it writes so the bytes cannot be stale.
     PassThrough(KeyChord),
-    /// Consumed with nothing to do: a modal mode that owns the keyboard, or an
-    /// `Esc` that closed a sequence.
+    /// Consumed with nothing to do: no sequence is open, the chord binds
+    /// nothing, and the mode is a modal one that owns the keyboard rather than
+    /// passing what it does not bind.
     Discard,
 }
 

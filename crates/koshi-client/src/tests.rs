@@ -1,7 +1,6 @@
 //! Tests for the viewer half: construction, viewport updates, the settings and
 //! colors it reads from its own config files, the keymap it validates before
-//! trusting, the hints one frame is painted from, and discarding the
-//! subscribed event feed.
+//! trusting, and the hints one frame is painted from.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
@@ -13,9 +12,7 @@ use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
 use koshi_core::action::{ActionRef, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
-use koshi_core::event::{LayoutChanged, TabCreated};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::TabId;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::resolve::ActionArgs;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -170,24 +167,6 @@ fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
     assert_eq!(client.config().layout.new_pane_direction, Direction::Down);
     assert_eq!(client.config().mouse.scroll_lines, 7);
     assert_eq!(client.config().mouse.wheel, WheelScroll::Ignore);
-}
-
-#[test]
-fn discard_events_drops_everything_delivered_and_counts_it() {
-    let (mut client, tx) = new_client();
-    let tab = TabId::new();
-    tx.send(Event::TabCreated(TabCreated { tab_id: tab }))
-        .expect("send into the subscription");
-    tx.send(Event::LayoutChanged(LayoutChanged { tab_id: tab }))
-        .expect("send into the subscription");
-
-    assert_eq!(client.discard_events(), 2);
-    assert_eq!(client.discard_events(), 0);
-
-    // The queue is empty again: a later event is delivered and discarded anew.
-    tx.send(Event::TabCreated(TabCreated { tab_id: tab }))
-        .expect("send into the subscription");
-    assert_eq!(client.discard_events(), 1);
 }
 
 #[test]
