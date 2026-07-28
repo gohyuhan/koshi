@@ -183,19 +183,43 @@ impl TerminalState {
     pub(super) fn clear_wrap_latch(&mut self) {
         self.active_cursor_mut().pending_wrap = false;
     }
+
+    /// Set a horizontal tab stop at the active cursor column.
+    pub(super) fn set_tab_stop(&mut self) {
+        let col = self.active_cursor().col;
+        if let Some(stop) = self.tab_stops.get_mut(col as usize) {
+            *stop = true;
+        }
+    }
+
+    /// Clear the horizontal tab stop at the active cursor column.
+    pub(super) fn clear_tab_stop(&mut self) {
+        let col = self.active_cursor().col;
+        if let Some(stop) = self.tab_stops.get_mut(col as usize) {
+            *stop = false;
+        }
+    }
+
+    /// Clear every horizontal tab stop.
+    pub(super) fn clear_all_tab_stops(&mut self) {
+        self.tab_stops.fill(false);
+    }
 }
 
-/// The next 8-column tab stop strictly after `col`, clamped to `last_col`. With
-/// stops at every multiple of 8, this rounds `col` up to the next multiple (a
-/// column already on a stop still advances a full 8), bounded by the last
-/// column. Stops are fixed at every 8th column; there is no configurable stop
-/// table. HT and CHT share this.
-pub(super) fn next_tab_stop(col: u16, last_col: u16) -> u16 {
-    col.saturating_add(8 - col % 8).min(last_col)
+/// Find the first tab stop strictly after `col`, or return `last_col`.
+pub(super) fn next_tab_stop(tab_stops: &[bool], col: u16, last_col: u16) -> u16 {
+    if col >= last_col {
+        return last_col;
+    }
+    (col + 1..=last_col)
+        .find(|&next| tab_stops.get(next as usize).copied().unwrap_or(false))
+        .unwrap_or(last_col)
 }
 
-/// The previous 8-column tab stop strictly before `col`, floored at column 0
-/// (itself a stop). A column already on a stop retreats a full 8.
-pub(super) fn prev_tab_stop(col: u16) -> u16 {
-    col.saturating_sub(1) / 8 * 8
+/// Find the first tab stop strictly before `col`, or return column zero.
+pub(super) fn prev_tab_stop(tab_stops: &[bool], col: u16) -> u16 {
+    (0..col)
+        .rev()
+        .find(|&previous| tab_stops.get(previous as usize).copied().unwrap_or(false))
+        .unwrap_or(0)
 }

@@ -11,8 +11,8 @@
 //!   span two cells, and grapheme continuations — combining marks, ZWJ
 //!   (zero-width joiner) emoji sequences, variation selectors, skin tones,
 //!   flags — fold onto the base cell.
-//! - `execute` — the C0 control bytes (raw single-byte codes below `0x20`:
-//!   newline, tab, backspace, …), including the `SI`/`SO` charset shifts.
+//! - `execute` — C0 and C1 control bytes: newline, tab, backspace, line
+//!   movement, tab-stop setup, and the `SI`/`SO` charset shifts.
 //! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
 //!   cursor moves (relative, absolute, line-relative), tab stops, erase in
 //!   display/line and erase-char, SGR text attributes (Select Graphic
@@ -21,8 +21,8 @@
 //!   (alternate screen, cursor visibility, …), and the device queries
 //!   (DA1/DA2/DA3, the DSR family, DECRQM), whose replies land on the
 //!   state's reply queue.
-//! - `esc_dispatch` — plain ESC sequences: cursor save/restore, reverse
-//!   index, and `G0`–`G3` charset designation.
+//! - `esc_dispatch` — plain ESC sequences: cursor save/restore, line movement,
+//!   tab-stop setup, terminal reset, and `G0`–`G3` charset designation.
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
 //!   carrying a text payload): the OSC 0/1/2 window title and the OSC 7
 //!   working-directory report.
@@ -35,9 +35,9 @@
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
 //! clustering and wide-glyph placement ([`glyph`]), cursor motion / scrolling
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
-//! ([`alt_screen`]), SGR ([`sgr`]), OSC parsing ([`osc`]), and CSI parameter
-//! accessors ([`params`]) — while the [`vte::Perform`] trait impl itself stays
-//! here as the dispatch surface.
+//! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
+//! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
+//! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
 use crate::grid::state::{Cell, RowEnd};
 use crate::state::{CursorShape, MouseEncoding, MouseTracking, Screen, TerminalState};
@@ -55,6 +55,7 @@ mod glyph;
 mod motion;
 mod osc;
 mod params;
+mod reset;
 mod sgr;
 
 impl vte::Perform for TerminalState {
@@ -175,10 +176,8 @@ impl vte::Perform for TerminalState {
         }
     }
 
-    /// Handle a C0 control byte: line feed (`LF`/`VT`/`FF`), carriage
-    /// return (`CR`), backspace (`BS`), tab (`HT`), charset shift
-    /// (`SO`/`SI`), or bell (`BEL`). Most move the cursor, and all end
-    /// the current grapheme cluster.
+    /// Handle C0 and C1 controls that move the cursor, manage tab stops,
+    /// select a charset slot, or ring the bell.
     fn execute(&mut self, byte: u8) {
         // A control byte ends any text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -198,14 +197,30 @@ impl vte::Perform for TerminalState {
                 self.active_cursor_mut().col = self.active_cursor().col.saturating_sub(1);
                 self.clear_wrap_latch();
             }
-            // HT: advance to the next 8-column tab stop, clamped to the grid.
+            // HT: advance to the next stored tab stop, clamped to the grid.
             0x09 => {
                 let (_, cols) = self.active_grid().dimensions();
                 let last_col = cols.saturating_sub(1);
                 let col = self.active_cursor().col;
-                self.active_cursor_mut().col = next_tab_stop(col, last_col);
+                let next = next_tab_stop(&self.tab_stops, col, last_col);
+                self.active_cursor_mut().col = next;
                 self.clear_wrap_latch();
             }
+            // IND: move down one line, scrolling at the bottom margin.
+            0x84 => {
+                self.linefeed();
+                self.clear_wrap_latch();
+            }
+            // NEL: move down one line, then return to column zero.
+            0x85 => {
+                self.linefeed();
+                self.active_cursor_mut().col = 0;
+                self.clear_wrap_latch();
+            }
+            // HTS: set a horizontal tab stop at the cursor.
+            0x88 => self.set_tab_stop(),
+            // RI: move up one line, scrolling at the top margin.
+            0x8D => self.reverse_index(),
             // SO (shift out): select G1 into the GL range for printing.
             0x0E => self.active_render_mut().gl = 1,
             // SI (shift in): select G0 into the GL range for printing.
@@ -257,8 +272,8 @@ impl vte::Perform for TerminalState {
         // the PTY. Dispatched on the exact (intermediates, action) pair, before
         // the DEC private-mode block below: that block also matches on the `?`
         // intermediate, so the device-query forms (`CSI ? Ps n`, `CSI ? Ps $ p`)
-        // must be caught here first. The `$`-form pairs leave `CSI ! p`
-        // (DECSTR) untouched.
+        // must be caught here first. `CSI ! p` continues to the soft-reset
+        // dispatch below.
         match (intermediates, action) {
             // DA1 — primary device attributes.
             (b"", 'c') => return self.device_attributes_primary(params),
@@ -279,6 +294,17 @@ impl vte::Perform for TerminalState {
             // of the sequence (`CSI Ps SP q`), not padding.
             (b" ", 'q') => return self.set_cursor_style(params),
             _ => {}
+        }
+
+        // DECSTR — soft terminal reset. `vte` represents its absent parameter
+        // as one zero value; any nonzero or additional parameter is not DECSTR.
+        if intermediates == b"!"
+            && action == 'p'
+            && params.len() <= 1
+            && first_param(params).unwrap_or(0) == 0
+        {
+            self.soft_reset();
+            return;
         }
 
         // DEC private modes carry a `?` private marker, which vte collects into
@@ -372,33 +398,37 @@ impl vte::Perform for TerminalState {
                 let row = self.active_cursor().row.saturating_sub(move_count(params));
                 self.goto(row, 0);
             }
-            // CHT — cursor forward tabulation: advance n tab stops (every 8
-            // columns until configurable stops land), clamped to the last
-            // column; a cursor already at the last column does not move.
+            // CHT — advance n stored tab stops, clamped to the last column.
             'I' => {
                 let mut col = self.active_cursor().col;
                 for _ in 0..move_count(params) {
                     if col >= last_col {
                         break;
                     }
-                    col = next_tab_stop(col, last_col);
+                    col = next_tab_stop(&self.tab_stops, col, last_col);
                 }
                 self.active_cursor_mut().col = col;
                 self.clear_wrap_latch();
             }
-            // CBT — cursor backward tabulation: retreat n tab stops, floored at
-            // column 0; a cursor already at column 0 does not move.
+            // CBT — retreat n stored tab stops, floored at column zero.
             'Z' => {
                 let mut col = self.active_cursor().col;
                 for _ in 0..move_count(params) {
                     if col == 0 {
                         break;
                     }
-                    col = prev_tab_stop(col);
+                    col = prev_tab_stop(&self.tab_stops, col);
                 }
                 self.active_cursor_mut().col = col;
                 self.clear_wrap_latch();
             }
+            // TBC — clear the current tab stop (default/0) or every stop (3).
+            // Only the first parameter applies.
+            'g' => match first_param(params).unwrap_or(0) {
+                0 => self.clear_tab_stop(),
+                3 => self.clear_all_tab_stops(),
+                _ => {}
+            },
             // ED — erase in display (cursor unmoved; an erasing mode clears the
             // wrap latch, see below).
             'J' => {
@@ -599,9 +629,8 @@ impl vte::Perform for TerminalState {
         }
     }
 
-    /// Handle an ESC sequence: charset designation (ESC `(` / `)` / `*` / `+` Fc
-    /// → G0/G1/G2/G3 with DEC line-drawing/ASCII/UK), cursor save/restore
-    /// (DECSC/DECRC: ESC `7` / `8`), or reverse index (RI: ESC `M`).
+    /// Handle charset designation, cursor save/restore, line movement,
+    /// tab-stop setup, and terminal reset ESC sequences.
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         // Any ESC sequence ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -627,8 +656,23 @@ impl vte::Perform for TerminalState {
             b'7' => self.save_cursor(),
             // DECRC — restore cursor and pen.
             b'8' => self.restore_cursor(),
+            // IND — move down one line, scrolling at the bottom margin.
+            b'D' => {
+                self.linefeed();
+                self.clear_wrap_latch();
+            }
+            // NEL — move down one line, then return to column zero.
+            b'E' => {
+                self.linefeed();
+                self.active_cursor_mut().col = 0;
+                self.clear_wrap_latch();
+            }
+            // HTS — set a horizontal tab stop at the cursor.
+            b'H' => self.set_tab_stop(),
             // RI — reverse index (reverse line feed).
             b'M' => self.reverse_index(),
+            // RIS — restore terminal display state to its initial values.
+            b'c' => self.hard_reset(),
             // Other ESC finals (charset selection, …) are not handled yet.
             _ => {}
         }

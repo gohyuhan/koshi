@@ -1,7 +1,7 @@
 //! Per-pane terminal state: screen buffers, cursor, pen style (the
 //! foreground/background color and attributes applied to newly written
-//! text), modes, title, reported working directory, scrollback, and the
-//! device-reply queue.
+//! text), modes, horizontal tab stops, title, reported working directory,
+//! scrollback, and the device-reply queue.
 //!
 //! One [`TerminalState`] backs a single terminal pane; panes never share
 //! buffers. The state travels inside a per-pane
@@ -74,6 +74,8 @@ pub struct TerminalState {
     alternate_render: RenderState,
     /// Active terminal modes (bracketed paste, mouse tracking, …).
     modes: TerminalModes,
+    /// Horizontal tab stops indexed by zero-based grid column.
+    tab_stops: Vec<bool>,
     /// The window/tab title set via OSC 0/1/2; `None` until the app sets one.
     title: Option<String>,
     /// The working directory last reported by the shell via OSC 7 (host +
@@ -132,6 +134,7 @@ impl TerminalState {
             primary_render: RenderState::fresh(),
             alternate_render: RenderState::fresh(),
             modes: TerminalModes::default(),
+            tab_stops: default_tab_stops(size.cols),
             title: None,
             reported_cwd: None,
             scrollback: Scrollback::new(limit),
@@ -141,6 +144,14 @@ impl TerminalState {
             cluster_base: None,
             replies: Vec::new(),
         }
+    }
+
+    /// Resize the tab-stop table while keeping stops in surviving columns.
+    fn resize_tab_stops(&mut self, columns: u16) {
+        let kept = self.tab_stops.len().min(columns as usize);
+        self.tab_stops.truncate(columns as usize);
+        self.tab_stops
+            .extend((kept..columns as usize).map(|column| column % 8 == 0));
     }
 
     /// Resize both screen buffers to `size`, preserving their contents.
@@ -164,6 +175,7 @@ impl TerminalState {
     pub fn resize(&mut self, size: PtySize) {
         let alternate_fill = self.alternate_render.style.bg_fill();
 
+        self.resize_tab_stops(size.cols);
         self.reflow_primary(size);
 
         // The alternate screen keeps what fits: crop off the top, pad at the
@@ -504,6 +516,11 @@ impl TerminalState {
             }
         }
     }
+}
+
+/// Build the default tab stops at columns 0, 8, 16, and every eighth column.
+fn default_tab_stops(columns: u16) -> Vec<bool> {
+    (0..columns).map(|column| column % 8 == 0).collect()
 }
 
 /// Normalize every row to exactly `cols` cells: truncate on the right or pad
