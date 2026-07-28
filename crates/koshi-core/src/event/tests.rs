@@ -532,7 +532,7 @@ fn event_cases() -> [(Event, &'static str, EventClass); 37] {
                 button: MouseButton::Left,
             }),
             "MousePressed",
-            EventClass::Lossy,
+            EventClass::Critical,
         ),
         (
             Event::MouseReleased(MouseReleased {
@@ -542,7 +542,7 @@ fn event_cases() -> [(Event, &'static str, EventClass); 37] {
                 button: MouseButton::Right,
             }),
             "MouseReleased",
-            EventClass::Lossy,
+            EventClass::Critical,
         ),
         (
             Event::MouseDragged(MouseDragged {
@@ -662,8 +662,8 @@ fn classify_maps_every_event_variant() {
         }
     }
 
-    assert_eq!(lossy, 9);
-    assert_eq!(critical, 28);
+    assert_eq!(lossy, 7);
+    assert_eq!(critical, 30);
 }
 
 #[test]
