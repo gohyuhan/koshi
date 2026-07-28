@@ -154,8 +154,6 @@ fn typed_keys_write_to_the_focused_pane() {
         client_id,
         VIEWPORT,
         rt.subscribe(EventFilter::All),
-        rt.client_config().clone(),
-        rt.keymap_catalog(),
         TerminalCleanupGuard::new(),
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {

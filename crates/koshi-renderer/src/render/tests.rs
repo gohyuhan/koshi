@@ -124,7 +124,6 @@ fn build(
             tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints: KeymapHints::default(),
     }
 }
 
@@ -143,7 +142,28 @@ fn render_with(snapshot: &RenderSnapshot, theme: &Theme, w: u16, h: u16) -> Buff
         height: h,
     };
     let mut buf = Buffer::empty(area);
-    render_frame(snapshot, theme, None, area, &mut buf);
+    render_frame(
+        snapshot,
+        theme,
+        &KeymapHints::default(),
+        None,
+        area,
+        &mut buf,
+    );
+    buf
+}
+
+/// Paint `snapshot` with `hints` in the bottom bar, for the tests that check
+/// what the hint row says.
+fn render_with_hints(snapshot: &RenderSnapshot, hints: &KeymapHints, w: u16, h: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    let mut buf = Buffer::empty(area);
+    render_frame(snapshot, &Theme::default(), hints, None, area, &mut buf);
     buf
 }
 
@@ -205,9 +225,9 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
 }
 
 #[test]
-fn hint_bar_paints_the_bottom_row_from_the_snapshot_hints() {
+fn hint_bar_paints_the_bottom_row_from_the_hints_it_is_given() {
     let pane = PaneId::new();
-    let mut snap = build(
+    let snap = build(
         "sess",
         &[("shell", true)],
         &[(pane, rect(0, 1, 40, 6), true)],
@@ -215,7 +235,7 @@ fn hint_bar_paints_the_bottom_row_from_the_snapshot_hints() {
         LockMode::Normal,
         Size { cols: 40, rows: 8 },
     );
-    snap.keymap_hints = KeymapHints {
+    let hints = KeymapHints {
         entries: Arc::new(vec![crate::snapshot::HintBinding {
             sequence: KeySequence::from(KeyChord::new(ModFlags::CTRL, Key::Char('l'))),
             label: "Lock".to_string(),
@@ -224,7 +244,7 @@ fn hint_bar_paints_the_bottom_row_from_the_snapshot_hints() {
         }]),
         ..KeymapHints::default()
     };
-    let buf = render(&snap, 40, 8);
+    let buf = render_with_hints(&snap, &hints, 40, 8);
 
     // Hint row is outside pane area: border bottom remains intact above it.
     assert_eq!(row_text(&buf, 7).trim_end(), " Ctrl +  l  Lock");
@@ -543,7 +563,14 @@ fn reused_buffer_is_blanked_before_painting() {
         }
     }
 
-    render_frame(&snap, &Theme::default(), None, area, &mut buf);
+    render_frame(
+        &snap,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        area,
+        &mut buf,
+    );
 
     // Tabline gap between the left tab list and the right status: blanked.
     assert_eq!(buf[(12, 0)].symbol(), " ");
@@ -1279,6 +1306,7 @@ fn small_and_zero_size_areas_are_safe() {
     render_frame(
         &snap,
         &Theme::default(),
+        &KeymapHints::default(),
         None,
         RatatuiRect {
             x: 0,
@@ -1386,6 +1414,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     render_frame(
         &snap,
         &Theme::default(),
+        &KeymapHints::default(),
         None,
         RatatuiRect {
             x: 0,
@@ -1438,6 +1467,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     render_frame(
         &snap,
         &Theme::default(),
+        &KeymapHints::default(),
         None,
         RatatuiRect {
             x: 0,

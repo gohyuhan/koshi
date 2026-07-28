@@ -22,14 +22,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
 use crate::render::bar_style;
-use crate::snapshot::{KeymapHints, RenderSnapshot};
+use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
 
-/// Paint one chrome-owned hint row.
+/// Paint one chrome-owned hint row from `hints` — the viewer's keybinding data
+/// for the mode it is in.
 pub fn draw_hint_bar(
-    snapshot: &RenderSnapshot,
+    hints: &KeymapHints,
     theme: &Theme,
     pending: Option<&KeySequence>,
     area: RatatuiRect,
@@ -44,7 +45,6 @@ pub fn draw_hint_bar(
     Clear.render(area, buf);
     buf.set_style(area, bar_style(theme));
 
-    let hints = &snapshot.keymap_hints;
     let pending = pending.map_or(&[][..], KeySequence::chords);
     let mut right_edge = area.right();
     if hints.reverted {

@@ -87,10 +87,6 @@ fn move_suppression_and_reload_events_roundtrip() {
     roundtrip(&Event::ConfigReloaded(ConfigReloaded {
         session_id: SessionId::new(),
     }));
-    roundtrip(&Event::ConfigReloadFailed(ConfigReloadFailed {
-        session_id: SessionId::new(),
-        reason: "parse error".to_string(),
-    }));
 }
 
 #[test]
@@ -461,13 +457,6 @@ fn event_variant_names_are_canonical() {
             "ConfigReloaded",
         ),
         (
-            Event::ConfigReloadFailed(ConfigReloadFailed {
-                session_id: SessionId::new(),
-                reason: "parse error".to_string(),
-            }),
-            "ConfigReloadFailed",
-        ),
-        (
             Event::InputModeChanged(InputModeChanged {
                 client_id: ClientId::new(),
                 mode: InputMode::Normal,
@@ -599,7 +588,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 37);
+    assert_eq!(cases.len(), 36);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
         assert_eq!(&value.name(), name);

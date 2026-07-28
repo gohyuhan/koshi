@@ -7,7 +7,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
-use koshi_config::conflict::{KeyMapLayer, KeymapVerdict, LayerOrigin};
+use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
@@ -29,7 +29,6 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 use crate::runtime::bus::EventFilter;
 use crate::server::Server;
-use koshi_config::hints::KeymapHintCatalog;
 
 fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
     let fake = Arc::new(FakePtyBackend::new());
@@ -60,8 +59,6 @@ fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
         client_id,
         Size { cols: 80, rows: 24 },
         runtime.subscribe(EventFilter::All),
-        runtime.client_config().clone(),
-        runtime.keymap_catalog(),
         TerminalCleanupGuard::new(),
     )
 }
@@ -194,7 +191,6 @@ fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
 
     // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence.
     bind_normal(
-        &mut runtime,
         &mut viewer,
         KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
         ActionRef::core("new-tab").expect("valid core action name"),
@@ -252,7 +248,6 @@ fn a_buffered_arrow_is_never_written_even_when_its_pane_flips_cursor_mode() {
     // `<Up> x` makes a bare `<Up>` a prefix, so pressing it opens a sequence
     // instead of passing straight through.
     bind_normal(
-        &mut runtime,
         &mut viewer,
         KeySequence::new(up, vec![chord(ModFlags::NONE, 'x')]),
         ActionRef::core("new-tab").expect("valid core action name"),
@@ -525,7 +520,6 @@ fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
 
     // `new-pane-stacked` ships with no default key; a user binds their own.
     bind_normal(
-        &mut runtime,
         &mut viewer,
         KeySequence::from(chord(ModFlags::ALT, 's')),
         ActionRef::core("new-pane-stacked").expect("valid name"),
@@ -697,22 +691,20 @@ fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
     assert_eq!(after.rows, before.rows);
 }
 
-/// Bind one `normal`-mode sequence to `action` via [`Server::reload_keybindings`].
+/// Bind one `normal`-mode sequence to `action` in the viewer's own keymap.
 fn bind_normal(
-    runtime: &mut Server,
     viewer: &mut ViewerClient,
     sequence: KeySequence,
     action: ActionRef,
     args: ActionArgs,
 ) {
-    bind_normal_all(runtime, viewer, vec![(sequence, action, args)]);
+    bind_normal_all(viewer, vec![(sequence, action, args)]);
 }
 
 /// Bind one `locked`-mode sequence to `action`, keeping the shipped locked
 /// bindings (the unlock chord among them) beside it — a user layer that dropped
 /// the unlock entry would be refused by conflict detection.
 fn bind_locked(
-    runtime: &mut Server,
     viewer: &mut ViewerClient,
     sequence: KeySequence,
     action: ActionRef,
@@ -732,18 +724,24 @@ fn bind_locked(
             removed: BTreeSet::new(),
         },
     );
-    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
-        modes: Some(modes),
-        ..PartialKeybindingsConfig::default()
-    });
+    let report = viewer.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
     assert_eq!(
-        outcome.report.verdict(),
+        report.expect("a keybinding file was given").verdict(),
         KeymapVerdict::Apply,
         "test setup: the candidate binding must apply cleanly"
     );
-    // The viewer resolves keys, so a rebind only takes effect once it has the
-    // new keymap — the same handoff the binary does after a config reload.
-    viewer.set_keymap(runtime.keymap_catalog());
+}
+
+/// How long the viewer waits for the next chord of an ambiguous sequence.
+fn chord_timeout(viewer: &ViewerClient) -> Duration {
+    Duration::from_millis(u64::from(viewer.config().keybindings.chord_timeout_ms))
 }
 
 /// The client's current lock mode.
@@ -758,15 +756,10 @@ fn lock_mode(runtime: &Server, client: ClientId) -> LockMode {
 }
 
 /// Bind every `(sequence, action, args)` triple in `bindings` under `normal`
-/// mode in a single [`Server::reload_keybindings`] call. A keybinding reload
-/// replaces the whole keybinding layer, so binding several sequences needs
-/// one call with every entry, not several calls that would each overwrite
-/// the last.
-fn bind_normal_all(
-    runtime: &mut Server,
-    viewer: &mut ViewerClient,
-    bindings: Vec<(KeySequence, ActionRef, ActionArgs)>,
-) {
+/// mode in one `keybinding.kdl` the viewer reads. Reading the file replaces
+/// the whole keybinding layer, so binding several sequences needs one call
+/// with every entry, not several calls that would each overwrite the last.
+fn bind_normal_all(viewer: &mut ViewerClient, bindings: Vec<(KeySequence, ActionRef, ActionArgs)>) {
     let mut keys = BTreeMap::new();
     for (sequence, action, args) in bindings {
         keys.insert(sequence, BoundAction { action, args });
@@ -779,18 +772,19 @@ fn bind_normal_all(
             removed: BTreeSet::new(),
         },
     );
-    let outcome = runtime.reload_keybindings(PartialKeybindingsConfig {
-        modes: Some(modes),
-        ..PartialKeybindingsConfig::default()
-    });
+    let report = viewer.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            modes: Some(modes),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
     assert_eq!(
-        outcome.report.verdict(),
+        report.expect("a keybinding file was given").verdict(),
         KeymapVerdict::Apply,
         "test setup: the candidate binding must apply cleanly"
     );
-    // The viewer resolves keys, so a rebind only takes effect once it has the
-    // new keymap — the same handoff the binary does after a config reload.
-    viewer.set_keymap(runtime.keymap_catalog());
 }
 
 #[test]
@@ -1207,7 +1201,6 @@ fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
         ],
     );
     bind_normal(
-        &mut runtime,
         &mut viewer,
         long.clone(),
         ActionRef::core("new-tab").expect("valid core action name"),
@@ -1251,7 +1244,6 @@ fn the_unlock_chord_escapes_a_locked_client_from_inside_an_open_sequence() {
     // opens it, so the client is locked AND mid-sequence — the state the unlock
     // guarantee has to survive.
     bind_locked(
-        &mut runtime,
         &mut viewer,
         KeySequence::new(chord(ModFlags::CTRL, 'x'), vec![chord(ModFlags::NONE, 'a')]),
         ActionRef::core("new-tab").expect("valid core action name"),
@@ -1282,7 +1274,6 @@ fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
     // merge admitted it, `<C-x>` would become a live prefix that captures the
     // keyboard and offers a hint-bar continuation that silently unlocks.
     bind_locked(
-        &mut runtime,
         &mut viewer,
         KeySequence::new(
             chord(ModFlags::CTRL, 'x'),
@@ -1325,43 +1316,11 @@ fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
 }
 
 #[test]
-fn the_unlock_chord_escapes_even_when_the_locked_keymap_lost_its_unlock_binding() {
-    let (mut runtime, _fake, client, mut viewer) = runtime();
-    let now = Instant::now();
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Locked);
-
-    // Strip locked mode's bindings out of the resolved keymap entirely — the
-    // shape a keymap layer that shadowed or removed the unlock entry would
-    // leave. The escape does not read the keymap, so it still fires.
-    let mut modes = BTreeMap::new();
-    modes.insert(
-        ModeName::new("locked"),
-        ModeBindings {
-            keys: BTreeMap::new(),
-            removed: BTreeSet::new(),
-        },
-    );
-    runtime.keymap_hints = KeymapHintCatalog::from_parts(
-        &[KeyMapLayer {
-            origin: LayerOrigin::Defaults,
-            modes,
-        }],
-        &KeybindingsConfig::default(),
-        &runtime.action_registry,
-    );
-
-    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
-    assert_eq!(lock_mode(&runtime, client), LockMode::Normal);
-}
-
-#[test]
 fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
     let (mut runtime, _fake, _client, mut viewer) = runtime();
     // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`, so
     // pressing it arms an ambiguity deadline.
     bind_normal_all(
-        &mut runtime,
         &mut viewer,
         vec![
             (
@@ -1386,7 +1345,7 @@ fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
         .len();
 
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'y'), now);
-    let deadline = now + runtime.keymap_hints.chord_timeout();
+    let deadline = now + chord_timeout(&viewer);
     expire(
         &mut runtime,
         &mut viewer,
@@ -1413,7 +1372,6 @@ fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
 fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match() {
     let (mut runtime, _fake, _client, mut viewer) = runtime();
     bind_normal_all(
-        &mut runtime,
         &mut viewer,
         vec![
             (
@@ -1438,7 +1396,7 @@ fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match
         .len();
 
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'y'), now);
-    let deadline = now + runtime.keymap_hints.chord_timeout();
+    let deadline = now + chord_timeout(&viewer);
     expire(&mut runtime, &mut viewer, deadline);
 
     assert_eq!(
@@ -1461,7 +1419,6 @@ fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline()
     // `<C-y>` alone is both a complete binding and a prefix of `<C-y> x`, so
     // pressing it opens a sequence that carries an ambiguity deadline.
     bind_normal_all(
-        &mut runtime,
         &mut viewer,
         vec![
             (
@@ -1507,7 +1464,7 @@ fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline()
 
     // The deadline decides: `<C-y>`'s own binding fires, and the client lands on
     // the new tab. Neither the held chord nor the discarded `z` was ever typed.
-    let deadline = now + runtime.keymap_hints.chord_timeout();
+    let deadline = now + chord_timeout(&viewer);
     expire(&mut runtime, &mut viewer, deadline);
     assert_eq!(
         runtime

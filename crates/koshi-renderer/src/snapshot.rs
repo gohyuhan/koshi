@@ -29,8 +29,8 @@ use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
 /// The hint-bar data types live with the keymap that produces them; the
-/// renderer only draws them, and re-exports them here so a frame's fields all
-/// resolve from one place.
+/// renderer only draws them, and re-exports them here so a caller painting a
+/// frame resolves them from one place.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
 
 /// One frozen frame: the full read-only view the renderer draws from.
@@ -50,8 +50,6 @@ pub struct RenderSnapshot {
     /// Plugin-contributed UI (statusline/tabline segments, notifications,
     /// overlays). Empty for a stock, plugin-free Koshi.
     pub plugin_ui: PluginUiSnapshot,
-    /// The keybinding data the hint bar draws for the client's current mode.
-    pub keymap_hints: KeymapHints,
 }
 
 impl RenderSnapshot {

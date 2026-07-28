@@ -12,7 +12,10 @@ use std::time::Duration;
 use ratatui::backend::TestBackend;
 
 use koshi_client::input::KeyOutcome;
-use koshi_config::types::ClientConfig;
+use koshi_config::layer::{
+    PartialColorPalette, PartialKoshiConfig, PartialTerminalConfig, PartialThemeConfig,
+};
+use koshi_config::types::RgbColor;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
@@ -26,39 +29,105 @@ use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_renderer::{hit_test, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
+use crate::config::LoadedConfig;
+
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
 /// A server driven by `fake`, plus a sender clone so a test can inject inbox
 /// events the way the input thread and forwarders do.
 fn test_server(fake: Arc<FakePtyBackend>) -> (Server, mpsc::Sender<RuntimeEvent>) {
+    test_server_with(fake, None)
+}
+
+/// The same, on the `koshi.kdl` layer `app` stands for, built the way the
+/// launch builds it — through [`session`].
+fn test_server_with(
+    fake: Arc<FakePtyBackend>,
+    app: Option<PartialKoshiConfig>,
+) -> (Server, mpsc::Sender<RuntimeEvent>) {
     let backend: Arc<dyn PtyBackend> = fake;
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    let server = Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        rx,
-        tx.clone(),
-        Direction::Right,
-    );
+    let server = session(backend, snapshot_provider, storage, rx, tx.clone(), app);
     (server, tx)
 }
 
-/// A client half for `client_id`, subscribed to `server`'s events, for tests
-/// that drive the real `run_loop`.
+#[test]
+fn the_launch_hands_the_session_the_app_config_file_it_read() {
+    // `koshi.kdl`'s session-owned settings decide what every pane runs. A
+    // launch that built the session without them would spawn the stock shell
+    // over the one the user configured.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx) = test_server_with(
+        fake.clone(),
+        Some(PartialKoshiConfig {
+            terminal: Some(PartialTerminalConfig {
+                term: None,
+                colorterm: None,
+                default_shell: Some(Some("/bin/fish".to_owned())),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+    );
+
+    server
+        .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
+        .expect("bootstrap");
+
+    let pane = fake.spawned_panes()[0];
+    let spec = fake.spawn_spec(pane).expect("spawn spec");
+    assert_eq!(spec.program, std::path::Path::new("/bin/fish"));
+}
+
+/// A client half for `client_id`, subscribed to `server`'s events, built the
+/// way the launch builds it — through [`viewer`] — for tests that drive the
+/// real `run_loop`.
 fn test_client(server: &mut Server, client_id: ClientId) -> Client {
+    test_client_with(server, client_id, LoadedConfig::default())
+}
+
+/// The same, on the config files `loaded` stands for.
+fn test_client_with(server: &mut Server, client_id: ClientId, loaded: LoadedConfig) -> Client {
     let events = server.subscribe(EventFilter::All);
-    let keymap = server.keymap_catalog();
-    Client::new(
+    viewer(
         client_id,
         VIEWPORT,
         events,
-        ClientConfig::default(),
-        keymap,
         TerminalCleanupGuard::new(),
+        loaded,
     )
+}
+
+#[test]
+fn the_launch_hands_the_viewer_the_config_files_it_read() {
+    // The viewer's settings, colors, and keymap all come from the files the
+    // launch read. A launch that built the viewer without them would paint the
+    // stock palette over the user's theme and answer the stock keys.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, _pane) = boot(&fake);
+
+    let client = test_client_with(
+        &mut server,
+        client_id,
+        LoadedConfig {
+            app: None,
+            theme: Some(PartialThemeConfig {
+                name: Some("ocean".to_owned()),
+                colors: Some(PartialColorPalette {
+                    border_focused: Some(RgbColor::new(0xff, 0, 0)),
+                    ..PartialColorPalette::default()
+                }),
+            }),
+            keybindings: None,
+        },
+    );
+
+    assert_eq!(client.config().theme.name, "ocean");
+    assert_eq!(
+        client.theme().border_focused,
+        ratatui::style::Color::Rgb(0xff, 0, 0)
+    );
 }
 
 /// A bootstrapped server with its client id and sole pane id.
@@ -94,6 +163,46 @@ fn content_point(server: &Server, client_id: ClientId, pane_id: PaneId) -> Point
         }
     }
     panic!("pane content cell");
+}
+
+#[test]
+fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
+    // The hint bar is painted from the viewer's own keymap, but which label the
+    // mouse-select entry wears depends on session state the frame carries. A
+    // frame that dropped that link would keep offering "Mouse Select" while
+    // selection was already on.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, _pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+
+    render(
+        &mut terminal,
+        &server,
+        &client,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("render");
+    assert!(screen_text(&terminal).contains("Mouse Select"));
+
+    server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::ToggleMouseSelect,
+    ));
+    render(
+        &mut terminal,
+        &server,
+        &client,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("render");
+
+    let painted = screen_text(&terminal);
+    assert!(painted.contains("Mouse Unselect"), "{painted}");
 }
 
 #[test]

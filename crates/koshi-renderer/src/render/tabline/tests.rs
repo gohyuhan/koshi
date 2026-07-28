@@ -10,9 +10,7 @@ use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{
-    ClientSnapshot, KeymapHints, PluginUiSnapshot, SessionSnapshot, TabMeta, TabSnapshot,
-};
+use crate::snapshot::{ClientSnapshot, PluginUiSnapshot, SessionSnapshot, TabMeta, TabSnapshot};
 
 /// Build a tabline-only snapshot. `tabs` are `(name, active)`; there are no
 /// panes, since the tabline reads only the session name, the tab metadata, and
@@ -63,7 +61,6 @@ fn snap(
             tabline_offset,
         },
         plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints: KeymapHints::default(),
     }
 }
 

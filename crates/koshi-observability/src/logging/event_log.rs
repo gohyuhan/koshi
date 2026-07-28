@@ -111,13 +111,6 @@ pub fn log_event(event: &Event) {
         Event::ConfigReloaded(payload) => {
             tracing::info!(session_id = %payload.session_id, "config reloaded");
         }
-        Event::ConfigReloadFailed(payload) => {
-            tracing::warn!(
-                session_id = %payload.session_id,
-                reason = %payload.reason,
-                "config reload failed; keeping the running config"
-            );
-        }
 
         // --- input mode: lock mode decides whether a key reaches koshi at all,
         // so a session that stops responding to bindings is explained here.

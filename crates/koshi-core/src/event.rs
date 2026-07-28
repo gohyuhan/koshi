@@ -70,8 +70,6 @@ pub enum Event {
     TerminalTooSmallExited(TerminalTooSmallExited),
     /// Configuration reload succeeded and was atomically swapped in.
     ConfigReloaded(ConfigReloaded),
-    /// Configuration reload failed; the previous config remains active.
-    ConfigReloadFailed(ConfigReloadFailed),
 
     // Input modes and keybindings.
     /// The active input mode changed (normal or locked).
@@ -156,7 +154,6 @@ impl Event {
             Event::TerminalTooSmallEntered(_) => "TerminalTooSmallEntered",
             Event::TerminalTooSmallExited(_) => "TerminalTooSmallExited",
             Event::ConfigReloaded(_) => "ConfigReloaded",
-            Event::ConfigReloadFailed(_) => "ConfigReloadFailed",
             Event::InputModeChanged(_) => "InputModeChanged",
             Event::KeybindingMatched(_) => "KeybindingMatched",
             Event::PaneTyped(_) => "PaneTyped",
@@ -335,15 +332,6 @@ pub struct TerminalTooSmallExited {
 pub struct ConfigReloaded {
     /// The session whose config was reloaded.
     pub session_id: SessionId,
-}
-
-/// Payload for [`Event::ConfigReloadFailed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigReloadFailed {
-    /// The session whose config reload failed.
-    pub session_id: SessionId,
-    /// Human-facing diagnostic.
-    pub reason: String,
 }
 
 // ============================================================================

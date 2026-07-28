@@ -40,7 +40,7 @@ use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::{CursorStyle, RenderSnapshot};
+use koshi_renderer::snapshot::{CursorStyle, KeymapHints, RenderSnapshot};
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::ipc_server::IpcServer;
@@ -56,11 +56,27 @@ use crate::keys::decode_key;
 /// Paints a render snapshot into ratatui's frame buffer via the widget trait —
 /// the only way to reach the frame's buffer, and exactly the shape
 /// [`render_frame`] expects.
-struct SnapshotWidget<'a>(&'a RenderSnapshot, &'a Theme, Option<&'a KeySequence>);
+struct SnapshotWidget<'a> {
+    /// The frame the session handed out.
+    snapshot: &'a RenderSnapshot,
+    /// The colors this viewer paints koshi's chrome in.
+    theme: &'a Theme,
+    /// The hint-bar data for the mode this viewer is in.
+    hints: &'a KeymapHints,
+    /// The multi-chord sequence this viewer has open.
+    pending: Option<&'a KeySequence>,
+}
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame(self.0, self.1, self.2, area, buf);
+        render_frame(
+            self.snapshot,
+            self.theme,
+            self.hints,
+            self.pending,
+            area,
+            buf,
+        );
     }
 }
 
@@ -153,29 +169,14 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::with_sink(pty_sink));
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let mut server = Server::new(
+    let mut server = session(
         backend,
         snapshot_provider,
         storage,
         inbox_rx,
         inbox_tx.clone(),
-        // The stock default; the loaded config below supplies the real one.
-        Direction::Right,
+        loaded.app.clone(),
     );
-
-    // Apply the config (loaded before tracing above) before genesis, so the
-    // first session already sees the configured split direction, theme, and
-    // keymap. A rejected keybinding file leaves the built-in keymap in place.
-    // `keybinding.kdl` is the one file that can be read and then refused, so it
-    // is the one with an outcome to report. App settings and the theme are typed
-    // values that always apply, so the line above already accounts for them.
-    match server.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
-        Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
-            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
-        }
-        Some(_) => tracing::info!("keybinding.kdl applied"),
-        None => {}
-    }
 
     let (cols, rows) =
         size().inspect_err(|error| tracing::error!(%error, "could not read the terminal size"))?;
@@ -231,19 +232,7 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // server's events and holds the cleanup guard, since the outer terminal
     // it restores is the client's.
     let events_rx = server.subscribe(EventFilter::All);
-    // The viewer's own settings, folded from the same files the session read.
-    // It resolves its chrome colors from these, so the palette a frame is
-    // painted in belongs to this terminal rather than to the session.
-    let client_config = server.client_config().clone();
-    let keymap = server.keymap_catalog();
-    let mut client = Client::new(
-        client_id,
-        viewport,
-        events_rx,
-        client_config,
-        keymap,
-        cleanup,
-    );
+    let mut client = viewer(client_id, viewport, events_rx, cleanup, loaded);
 
     // Input thread: crossterm reads block here, feeding the inbox.
     spawn_input_thread(inbox_tx, client_id);
@@ -255,6 +244,59 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     teardown(&mut server, outcome)
         .inspect_err(|error| tracing::error!(%error, "the render loop failed"))?;
     Ok(())
+}
+
+/// Build the session half and apply `app`, the parsed `koshi.kdl` layer, in one
+/// step.
+///
+/// Runs before genesis, so the first session already sees the configured split
+/// direction, shell, and pane floor. `app` is `None` when the file is absent or
+/// failed to load. The colors and the keymap are each viewer's own; [`viewer`]
+/// applies those.
+fn session(
+    pty_backend: Arc<dyn PtyBackend>,
+    snapshot_provider: Arc<dyn SnapshotProvider>,
+    storage: Arc<dyn Storage>,
+    inbox_rx: mpsc::Receiver<RuntimeEvent>,
+    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    app: Option<koshi_config::layer::PartialKoshiConfig>,
+) -> Server {
+    let mut server = Server::new(
+        pty_backend,
+        snapshot_provider,
+        storage,
+        inbox_rx,
+        inbox_tx,
+        // The stock default; `app` supplies the real one when the file set it.
+        Direction::Right,
+    );
+    server.load_startup_config(app);
+    server
+}
+
+/// Build the viewer half and apply `loaded`'s viewer-owned files, in one step.
+///
+/// It folds its own settings, resolves its chrome colors, and validates its own
+/// keymap, so the palette a frame is painted in and the keys it answers are
+/// this terminal's. `keybinding.kdl` is the one file that can be read and then
+/// refused, so it is the one whose outcome is logged; app settings and the
+/// theme are typed values that always apply.
+fn viewer(
+    client_id: ClientId,
+    viewport: Size,
+    events: mpsc::Receiver<koshi_core::event::Event>,
+    cleanup: TerminalCleanupGuard,
+    loaded: crate::config::LoadedConfig,
+) -> Client {
+    let mut client = Client::new(client_id, viewport, events, cleanup);
+    match client.load_startup_config(loaded.app, loaded.theme, loaded.keybindings) {
+        Some(report) if report.verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
+            tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
+        }
+        Some(_) => tracing::info!("keybinding.kdl applied"),
+        None => {}
+    }
+    client
 }
 
 /// Create koshi's on-disk home for this run: the config directory, at its
@@ -484,10 +526,19 @@ fn render<B: Backend>(
         }
         *last_cursor = cursor;
     }
+    // The hint bar is drawn from the viewer's own keymap and its own mode; the
+    // one thing it takes from the frame is whether mouse-select is on, which
+    // decides the label that entry wears.
+    let hints = client.frame_hints(snapshot.client.mouse_select);
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(
-            SnapshotWidget(&snapshot, client.theme(), client.pending_sequence()),
+            SnapshotWidget {
+                snapshot: &snapshot,
+                theme: client.theme(),
+                hints: &hints,
+                pending: client.pending_sequence(),
+            },
             area,
         );
         if let Some(position) = cursor_position(&snapshot, area) {

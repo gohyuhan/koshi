@@ -11,7 +11,8 @@
 //! [`merge_client`] reads the sections a viewer owns. Each starts from a full
 //! base config (normally the defaults) and applies each partial in order.
 //! `scrollback` is the one section both read — its caps go to the session, its
-//! follow behavior to the viewer.
+//! follow behavior to the viewer. [`ConfigLayers`] holds one layer per config
+//! file and folds them in a fixed order.
 //!
 //! Merge grain is deep and field-level for struct sections: a layer that sets
 //! `scrollback.max_lines` leaves `scrollback.max_bytes` at the lower layer's
@@ -67,6 +68,70 @@ pub fn merge_client(base: ClientConfig, layers: Vec<PartialKoshiConfig>) -> Clie
         layer.apply_client(&mut config);
     }
     config
+}
+
+/// The stored config overrides, one layer per config file, folded onto the
+/// built-in defaults to produce the effective config.
+///
+/// One file fills one layer, so replacing a file's settings replaces its layer
+/// alone and leaves the others as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigLayers {
+    /// The `koshi.kdl` app-settings layer.
+    app: PartialKoshiConfig,
+    /// The color-theme file's layer; only its theme section is set.
+    theme: PartialKoshiConfig,
+    /// The `keybinding.kdl` layer; only its keybindings section is set.
+    keybindings: PartialKoshiConfig,
+}
+
+impl ConfigLayers {
+    /// Layers built from the three parsed config files. A file given as `None`
+    /// contributes an empty layer, leaving the lower layers untouched.
+    ///
+    /// `theme` and `keybindings` each go into their own layer holding that
+    /// section alone, and `app`'s theme and keybinding sections are dropped, so
+    /// a color or a binding always comes from the file that owns it. Parsing
+    /// `koshi.kdl` cannot fill either section, so the drop bites only on a
+    /// hand-built value.
+    #[must_use]
+    pub fn from_files(
+        app: Option<PartialKoshiConfig>,
+        theme: Option<PartialThemeConfig>,
+        keybindings: Option<PartialKeybindingsConfig>,
+    ) -> Self {
+        let mut app = app.unwrap_or_default();
+        app.theme = None;
+        app.keybindings = None;
+        ConfigLayers {
+            app,
+            theme: PartialKoshiConfig {
+                theme,
+                ..PartialKoshiConfig::default()
+            },
+            keybindings: PartialKoshiConfig {
+                keybindings,
+                ..PartialKoshiConfig::default()
+            },
+        }
+    }
+
+    /// Fold the stored layers onto the built-in defaults, keeping the sections
+    /// one viewer owns.
+    ///
+    /// The dedicated theme and keybinding layers fold after the app layer, so
+    /// their sections win over a same-named section in the app file.
+    #[must_use]
+    pub fn effective_client(&self) -> ClientConfig {
+        merge_client(
+            ClientConfig::default(),
+            vec![
+                self.app.clone(),
+                self.theme.clone(),
+                self.keybindings.clone(),
+            ],
+        )
+    }
 }
 
 /// Overwrites `field` with `value` when the layer set one, leaving it

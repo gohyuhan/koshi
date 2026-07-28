@@ -13,7 +13,6 @@ use koshi_core::{
     command::{GridPos, Selection, SelectionKind},
     geometry::{Direction, Point, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
-    key::PendingKeySequence,
     lock::LockMode,
     mouse::MouseButton,
 };
@@ -80,7 +79,6 @@ pub struct Client {
     /// before the wheel turns. It lives on the client because each attached
     /// client has its own pointer.
     hovered_pane: Option<PaneId>,
-    pending_key_sequence: Option<PendingKeySequence>,
     /// This client's scrollback view position per pane: lines scrolled up from
     /// the live bottom. A pane absent from the map (the default) sits at the live
     /// bottom, offset `0`; only scrolled-up panes have an entry, always with a
@@ -147,7 +145,6 @@ impl Client {
             tabline_offset: None,
             tabline_drag: None,
             hovered_pane: None,
-            pending_key_sequence: None,
             scroll_by_pane: HashMap::new(),
             selection_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
@@ -281,22 +278,6 @@ impl Client {
     #[must_use]
     pub fn pending_resize_drag(&self) -> Option<&ResizeDragState> {
         self.pending_resize_drag.as_ref()
-    }
-
-    /// This client's incomplete multi-chord key sequence.
-    #[must_use]
-    pub fn pending_key_sequence(&self) -> Option<&PendingKeySequence> {
-        self.pending_key_sequence.as_ref()
-    }
-
-    /// Replace this client's incomplete multi-chord key sequence.
-    pub fn update_pending_key_sequence(&mut self, pending: Option<PendingKeySequence>) {
-        self.pending_key_sequence = pending
-    }
-
-    /// Take and clear this client's incomplete multi-chord key sequence.
-    pub fn take_pending_key_sequence(&mut self) -> Option<PendingKeySequence> {
-        self.pending_key_sequence.take()
     }
 
     /// Where this client's view of `pane_id` sits: lines scrolled up from the

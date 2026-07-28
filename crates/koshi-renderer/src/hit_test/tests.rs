@@ -13,8 +13,8 @@ use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 
 use crate::snapshot::{
-    ClientSnapshot, KeymapHints, PaneSlot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot,
-    TabMeta, TabSnapshot,
+    ClientSnapshot, PaneSlot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabMeta,
+    TabSnapshot,
 };
 
 /// A cell rect: origin `(x, y)`, size `cols x rows`.
@@ -94,7 +94,6 @@ fn snap(
             tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
-        keymap_hints: KeymapHints::default(),
     }
 }
 

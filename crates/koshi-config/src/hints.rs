@@ -13,10 +13,8 @@
 //! description, not what they are. The renderer re-exports both so a frame's
 //! fields resolve from one place.
 //!
-//! The catalog is rebuilt whenever the keymap inputs change: construction and
-//! a keybinding config load run [`KeymapHintCatalog::from_parts`] over the
-//! current layers, and a registry refresh after a plugin registers or
-//! unregisters actions re-runs it against the live action table.
+//! The catalog is built at startup by [`KeymapHintCatalog::from_parts`], from
+//! the folded keybinding layers and the action table.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

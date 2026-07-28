@@ -402,3 +402,75 @@ fn each_side_folds_only_its_own_sections() {
     assert_eq!(server.terminal.colorterm, "truecolor");
     assert_eq!(client.theme.colors, ClientConfig::default().theme.colors);
 }
+
+#[test]
+fn config_layers_from_no_files_is_the_empty_default() {
+    assert_eq!(
+        ConfigLayers::from_files(None, None, None),
+        ConfigLayers::default()
+    );
+    assert_eq!(
+        ConfigLayers::default().effective_client(),
+        ClientConfig::default()
+    );
+}
+
+#[test]
+fn config_layers_drop_the_app_layers_theme_and_keybinding_sections() {
+    // The colors belong to the theme file and the bindings to
+    // `keybinding.kdl`. With no theme file present, an app layer carrying a
+    // theme section must still resolve to the built-in palette rather than
+    // slipping its own colors in.
+    let layers = ConfigLayers::from_files(
+        Some(PartialKoshiConfig {
+            theme: Some(PartialThemeConfig {
+                name: Some("smuggled".to_string()),
+                colors: Some(PartialColorPalette {
+                    accent: Some(RgbColor::new(1, 2, 3)),
+                    ..PartialColorPalette::default()
+                }),
+            }),
+            keybindings: Some(PartialKeybindingsConfig {
+                max_chord_depth: Some(0),
+                ..PartialKeybindingsConfig::default()
+            }),
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+
+    let client = layers.effective_client();
+    assert_eq!(client.theme, ClientConfig::default().theme);
+    assert_eq!(client.keybindings, ClientConfig::default().keybindings);
+    // Its own sections still apply.
+    assert_eq!(client.layout.new_pane_direction, Direction::Down);
+}
+
+#[test]
+fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
+    let layers = ConfigLayers::from_files(
+        Some(PartialKoshiConfig {
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        Some(PartialThemeConfig {
+            name: Some("ocean".to_string()),
+            colors: None,
+        }),
+        Some(PartialKeybindingsConfig {
+            max_chord_depth: Some(4),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    let client = layers.effective_client();
+    assert_eq!(client.layout.new_pane_direction, Direction::Down);
+    assert_eq!(client.theme.name, "ocean");
+    assert_eq!(client.keybindings.max_chord_depth, 4);
+}

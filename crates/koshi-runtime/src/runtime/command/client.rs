@@ -234,7 +234,6 @@ impl Server {
         let mut scope = TransactionScope::new();
         if next != current {
             client.update_lock_mode(next);
-            client.update_pending_key_sequence(None);
             scope.emit(Event::InputModeChanged(InputModeChanged {
                 client_id,
                 mode: Self::input_mode(next),

@@ -3,11 +3,12 @@
 
 use super::*;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
 
-use koshi_config::conflict::keymap_layers;
-use koshi_config::key::Leader;
-use koshi_config::types::KeybindingsConfig;
+use koshi_config::conflict::{KeyMapLayer, LayerOrigin};
+use koshi_config::hints::KeymapHintCatalog;
+use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::registry::ActionRegistry;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 
@@ -16,19 +17,10 @@ use crate::Client;
 /// A viewer on the built-in keymap.
 fn client() -> Client {
     let (_tx, rx) = mpsc::sync_channel(8);
-    let registry = ActionRegistry::new();
-    let keybindings = KeybindingsConfig::default();
-    let keymap = koshi_config::hints::KeymapHintCatalog::from_parts(
-        &keymap_layers(None, Leader::default()),
-        &keybindings,
-        &registry,
-    );
     Client::new(
         koshi_core::ids::ClientId::new(),
         koshi_core::geometry::Size { cols: 80, rows: 24 },
         rx,
-        koshi_config::types::ClientConfig::default(),
-        keymap,
         TerminalCleanupGuard::new(),
     )
 }
@@ -124,6 +116,38 @@ fn the_unlock_chord_escapes_locked_mode_ahead_of_the_keymap() {
 }
 
 #[test]
+fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
+    // Strip locked mode's bindings out of the resolved keymap entirely — the
+    // shape a keymap layer that shadowed or removed the unlock entry would
+    // leave. The escape does not read the keymap, so it still fires.
+    let mut client = client();
+    client.set_lock_mode(LockMode::Locked);
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("locked"),
+        ModeBindings {
+            keys: BTreeMap::new(),
+            removed: BTreeSet::new(),
+        },
+    );
+    client.keymap = KeymapHintCatalog::from_parts(
+        &[KeyMapLayer {
+            origin: LayerOrigin::Defaults,
+            modes,
+        }],
+        &KeybindingsConfig::default(),
+        &ActionRegistry::new(),
+    );
+
+    let outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
+
+    let KeyOutcome::Fire(bound) = outcome else {
+        panic!("the reserved unlock always fires, got {outcome:?}");
+    };
+    assert_eq!(bound.action, ActionRef::core("unlock").expect("valid name"));
+}
+
+#[test]
 fn locked_mode_still_passes_keys_it_does_not_bind() {
     // Locked mode is pass-through: that is the whole point of it.
     let mut client = client();
@@ -173,25 +197,6 @@ fn a_prefix_only_sequence_never_wakes_the_loop() {
 fn expiring_without_a_deadline_fires_nothing() {
     let mut client = client();
     assert_eq!(client.expire_key_sequence(Instant::now()), None);
-}
-
-#[test]
-fn a_reloaded_keymap_drops_the_sequence_being_typed() {
-    let mut client = client();
-    let registry = ActionRegistry::new();
-    client.resolve_key(chord(ModFlags::CTRL, 'p'), Instant::now());
-    assert!(client.pending_sequence().is_some());
-
-    client.set_keymap(koshi_config::hints::KeymapHintCatalog::from_parts(
-        &keymap_layers(None, Leader::default()),
-        &KeybindingsConfig::default(),
-        &registry,
-    ));
-
-    assert!(
-        client.pending_sequence().is_none(),
-        "held chords reached for bindings the new keymap may not have"
-    );
 }
 
 #[test]

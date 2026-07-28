@@ -17,7 +17,7 @@ use std::{
     },
 };
 
-use koshi_config::hints::KeymapHintCatalog;
+use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
@@ -37,7 +37,7 @@ use crate::{
     runtime::{
         bus::{EventBus, EventFilter},
         event::RuntimeEvent,
-        reload::ConfigLayers,
+        reload::{fold_client, fold_server},
         render_schedule::RenderScheduler,
     },
 };
@@ -84,25 +84,20 @@ pub struct Server {
     /// table and extended by plugins as they load. The dispatcher is its only
     /// writer.
     pub(crate) action_registry: ActionRegistry,
-    /// The user's stored config overrides, one layer per config file. A
-    /// file's reload transaction replaces its own layer.
-    pub(crate) config_layers: ConfigLayers,
+    /// The user's stored `koshi.kdl` overrides. The only config file whose
+    /// settings a session keeps; the theme and the keybindings are each
+    /// viewer's own. Replaced whole by a `koshi.kdl` reload.
+    pub(crate) app_layer: PartialKoshiConfig,
     /// The session's effective config: the built-in defaults with the stored
-    /// user layers folded on, keeping the sections one session shares across
-    /// every viewer. Recomputed by every reload transaction that touches
-    /// `koshi.kdl`.
+    /// app layer folded on, keeping the sections one session shares across
+    /// every viewer. Recomputed by every `koshi.kdl` reload.
     pub(crate) config: ServerConfig,
-    /// The effective config of the viewer this process runs, folded from the
-    /// same layers. Held here while one process runs both halves; each of its
-    /// sections moves to the client as that feature's own state does — except
-    /// `scrollback.scroll_on_input`, which the session must be told because it
-    /// acts on typed input the session already handles.
+    /// The viewer-owned sections the session itself reads, folded from the
+    /// same app layer. Each viewer folds its own copy from its own files; this
+    /// one backs the session-side handling of `copy`, `mouse`,
+    /// `layout.new_pane_direction`, and `scrollback.scroll_on_input`.
+    /// Recomputed by every `koshi.kdl` reload.
     pub(crate) client_config: ClientConfig,
-    /// Per-mode hint-bar data resolved from the merged keymap and the action
-    /// registry, shared by reference with each frame's snapshot. Seeded from
-    /// the built-in defaults and rebuilt whenever the keymap inputs change —
-    /// a keybinding reload or a registry refresh.
-    pub(crate) keymap_hints: KeymapHintCatalog,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
@@ -144,11 +139,14 @@ impl Server {
         inbox_tx: Sender<RuntimeEvent>,
         default_new_pane_direction: Direction,
     ) -> Self {
-        let action_registry = ActionRegistry::new();
-        let config_layers =
-            ConfigLayers::with_default_new_pane_direction(default_new_pane_direction);
-        let config = config_layers.effective_server();
-        let client_config = config_layers.effective_client();
+        let app_layer = PartialKoshiConfig {
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(default_new_pane_direction),
+            }),
+            ..PartialKoshiConfig::default()
+        };
+        let config = fold_server(&app_layer);
+        let client_config = fold_client(&app_layer);
         Server {
             sessions: HashMap::new(),
             pty_backend,
@@ -159,8 +157,7 @@ impl Server {
             snapshot_provider,
             storage,
             ipc_server: None,
-            keymap_hints: KeymapHintCatalog::from_registry(&action_registry),
-            action_registry,
+            action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
             inbox_rx,
             inbox_tx,
@@ -168,7 +165,7 @@ impl Server {
             immediate_shutdown: false,
             quit_requested: false,
             host_writes: HashMap::new(),
-            config_layers,
+            app_layer,
             config,
             client_config,
         }
@@ -188,26 +185,6 @@ impl Server {
     pub fn invalidate_status(&mut self) {
         self.render_scheduler
             .invalidate(crate::runtime::render_schedule::InvalidationReason::StatusChanged);
-    }
-
-    /// The keymap folded from this process's parsed keybinding layers.
-    ///
-    /// Cloning is cheap (every collection is behind an `Arc`). The viewer
-    /// resolves its own keys against this; it reads the layers itself once it
-    /// owns them.
-    #[must_use]
-    pub fn keymap_catalog(&self) -> KeymapHintCatalog {
-        self.keymap_hints.clone()
-    }
-
-    /// The viewer-owned settings folded from this process's config files.
-    ///
-    /// The reload transactions here own the parsed layers, so this is where a
-    /// viewer in the same process gets its settings from; each section leaves
-    /// as that feature moves to the client.
-    #[must_use]
-    pub fn client_config(&self) -> &ClientConfig {
-        &self.client_config
     }
 
     /// The server→client door: register a subscriber for the events `filter`

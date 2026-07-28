@@ -6,9 +6,9 @@
 //! section — scroll position and mode tag), the **pane area** in the middle (a
 //! bordered box per visible pane, the focused pane's border highlighted), and
 //! the **keybinding hint bar** on the bottom row — a koshi-owned row painted by
-//! [`crate::statusline_hints`] from the snapshot's per-mode keybinding data.
-//! Both chrome rows are filled with the theme's bar background before anything
-//! is drawn on them.
+//! [`crate::statusline_hints`] from the per-mode keybinding data the caller
+//! passes in. Both chrome rows are filled with the theme's bar background
+//! before anything is drawn on them.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -37,7 +37,8 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::{
-    ClientSnapshot, CursorStyle, FrameLayout, PaneSnapshot, RenderSnapshot, SelectionSpans,
+    ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, RenderSnapshot,
+    SelectionSpans,
 };
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
@@ -52,9 +53,14 @@ use crate::theme::Theme;
 /// pane (`all_suppressed`), draws only a centered too-small overlay and
 /// returns, skipping the panes and both chrome rows. Does nothing for a
 /// zero-size area.
+///
+/// `theme`, `hints`, and `pending` come from the viewer: the colors it paints
+/// koshi's chrome in, the hint-bar data for the mode it is in, and the
+/// multi-chord sequence it has open.
 pub fn render_frame(
     snapshot: &RenderSnapshot,
     theme: &Theme,
+    hints: &KeymapHints,
     pending: Option<&KeySequence>,
     area: RatatuiRect,
     buf: &mut Buffer,
@@ -114,7 +120,7 @@ pub fn render_frame(
             width: area.width,
             height: 1,
         };
-        draw_hint_bar(snapshot, theme, pending, hint_bar, buf);
+        draw_hint_bar(hints, theme, pending, hint_bar, buf);
     }
 }
 
