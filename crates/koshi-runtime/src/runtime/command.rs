@@ -30,9 +30,10 @@ use crate::server::Server;
 use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
-        CommandSource, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveTabArgs,
-        NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, SetSelectionArgs, TabTarget,
-        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        CommandSource, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos, LockModeArgs,
+        MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, Selection,
+        SelectionKind, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
+        WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,

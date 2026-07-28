@@ -238,6 +238,26 @@ pub fn pane_local_cell(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> Op
     Some((at.x - rect.origin.x + 1, at.y - rect.origin.y + 1))
 }
 
+/// The 0-based cell inside `pane_id`'s content that client-local screen cell
+/// `at` falls on, with a cell outside that content pulled to the nearest edge.
+/// [`None`] when the pane is not drawn this frame.
+///
+/// Clamping is what lets a gesture that wandered off the pane still name a cell
+/// in it: on a pane whose content spans columns 10–49, `at.x = 70` gives column
+/// `39`, the pane's last. Both the viewer resolving a highlight and the session
+/// placing a mouse report read the cell this way, so one gesture names the same
+/// cell to both.
+#[must_use]
+pub fn pane_cell_clamped(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> Option<(u16, u16)> {
+    let rect = pane_content_rect(frame, pane_id)?;
+    let right = rect.origin.x + rect.size.cols.saturating_sub(1);
+    let bottom = rect.origin.y + rect.size.rows.saturating_sub(1);
+    Some((
+        at.x.clamp(rect.origin.x, right) - rect.origin.x,
+        at.y.clamp(rect.origin.y, bottom) - rect.origin.y,
+    ))
+}
+
 /// The metadata index of the first tab currently visible in `frame`'s tabline
 /// window.
 ///

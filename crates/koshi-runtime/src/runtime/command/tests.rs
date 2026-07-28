@@ -1914,26 +1914,28 @@ fn a_host_paste_clears_the_highlight_in_the_pasted_pane() {
 }
 
 #[test]
-fn the_copy_command_surface_rejects_the_interactive_copy_is_the_release() {
-    // `VisualCommand::Copy` is the future IPC/plugin surface and is unbuilt;
-    // a person copies by releasing the selection, which needs no command.
-    let (mut rt, _fake, _tx, _sid, client_id, _root, _pane_a, _size) = resize_fixture();
+fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
+    // A plain click ends a gesture that highlighted nothing, so the copy it
+    // dispatches finds nothing to copy. That is a no-op, not a rejection.
+    let (mut rt, _fake, _tx, _sid, client_id, _root, pane_a, _size) = resize_fixture();
 
     let env = envelope_from(
-        CommandSource::key_binding(client_id),
+        CommandSource::mouse(client_id),
         Command::Visual(VisualCommand::Copy(CopyArgs {
+            pane: pane_a,
+            trim_trailing_whitespace: true,
             target: CopyTarget::Osc52,
         })),
     );
     let command_id = env.id;
     assert_eq!(
         rt.dispatch(env),
-        CommandResult::Rejected {
+        CommandResult::Ok {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some("copy not yet implemented".to_string()),
+            emitted_events: Vec::new(),
         }
     );
+    assert_eq!(rt.take_host_writes(client_id), None);
 }
 
 /// A one-cell character highlight, for tests that care which pane a command
@@ -2987,6 +2989,8 @@ fn copy_cannot_be_issued_from_the_cli() {
     let env = envelope_from(
         source,
         Command::Visual(VisualCommand::Copy(CopyArgs {
+            pane: PaneId::new(),
+            trim_trailing_whitespace: true,
             target: CopyTarget::Osc52,
         })),
     );

@@ -26,7 +26,8 @@ use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_core::process::{ExitStatus, KillPolicy};
-use koshi_renderer::{hit_test, HitRegion};
+use koshi_renderer::snapshot::ViewerChrome;
+use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::config::LoadedConfig;
@@ -157,7 +158,9 @@ fn content_point(server: &Server, client_id: ClientId, pane_id: PaneId) -> Point
     for y in 0..snapshot.client.viewport.rows {
         for x in 0..snapshot.client.viewport.cols {
             let point = Point { x, y };
-            if hit_test(snapshot.layout(), point) == (HitRegion::PaneContent { pane_id }) {
+            if hit_test(snapshot.layout(ViewerChrome::default()), point)
+                == (HitRegion::PaneContent { pane_id })
+            {
                 return point;
             }
         }
@@ -173,13 +176,13 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     // selection was already on.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, client_id, _pane_id) = boot(&fake);
-    let client = test_client(&mut server, client_id);
+    let mut client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
 
     render(
         &mut terminal,
         &server,
-        &client,
+        &mut client,
         &mut String::new(),
         &mut None,
         &mut None,
@@ -196,7 +199,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     render(
         &mut terminal,
         &server,
-        &client,
+        &mut client,
         &mut String::new(),
         &mut None,
         &mut None,
@@ -219,12 +222,12 @@ fn pty_output_event_renders_to_the_screen() {
         },)
         .is_continue());
 
-    let client = test_client(&mut server, client_id);
+    let mut client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     render(
         &mut terminal,
         &server,
-        &client,
+        &mut client,
         &mut String::new(),
         &mut None,
         &mut None,
@@ -610,14 +613,14 @@ fn render_leaves_the_frame_it_painted_for_the_viewer() {
     // must hand it back to the loop — as a `MouseFrame`, which carries no grid.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, client_id, _pane_id) = boot(&fake);
-    let client = test_client(&mut server, client_id);
+    let mut client = test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     let mut last_frame = None;
 
     render(
         &mut terminal,
         &server,
-        &client,
+        &mut client,
         &mut String::new(),
         &mut None,
         &mut last_frame,
@@ -626,6 +629,74 @@ fn render_leaves_the_frame_it_painted_for_the_viewer() {
 
     let painted = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(last_frame, Some(MouseFrame::from(painted)));
+}
+
+#[test]
+fn painting_another_tab_throws_the_strip_peek_away() {
+    // Painting is how the viewer learns which tab it is on, so a tab switch by
+    // any route reaches it. The peek must be thrown away, not just left
+    // unapplied: coming back to the tab it was made on has to start from that
+    // tab, or the strip can be scrolled past the tab the user is looking at.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, _pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut paint = |server: &Server, client: &mut Client| {
+        render(
+            &mut terminal,
+            server,
+            client,
+            &mut String::new(),
+            &mut None,
+            &mut None,
+        )
+        .expect("render");
+    };
+
+    let first_tab = server
+        .build_snapshot(client_id)
+        .expect("snapshot")
+        .client
+        .active_tab;
+    // A wheel over the tab strip's row peeks this viewer's strip one tab along.
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    client.handle_mouse(
+        MouseInput {
+            kind: MouseKind::Scroll(ScrollDirection::Down),
+            at: Point { x: 40, y: 0 },
+            mods: ModFlags::NONE,
+        },
+        &frame,
+        Instant::now(),
+    );
+    assert_eq!(client.chrome(first_tab).tabline_offset, Some(1), "peeked");
+
+    // A new tab, which the session switches this client to.
+    server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::NewTab(koshi_core::command::NewTabArgs::default()),
+    ));
+    paint(&server, &mut client);
+
+    // Back to the tab the peek was made on.
+    server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::FocusTab(koshi_core::command::FocusTabArgs {
+            target: koshi_core::command::TabTarget::Id(first_tab),
+            client: Some(client_id),
+        }),
+    ));
+    paint(&server, &mut client);
+
+    assert_eq!(
+        client.chrome(first_tab).tabline_offset,
+        None,
+        "the peek did not come back with the tab it was made on"
+    );
 }
 
 #[test]
@@ -860,11 +931,94 @@ fn host_paste_event_writes_the_pasted_text_to_the_focused_pane() {
     );
 }
 
+/// Whether this client has a highlight in `pane_id`, read the way the renderer
+/// reads it.
+fn has_highlight(server: &Server, client_id: ClientId, pane_id: PaneId) -> bool {
+    server
+        .build_snapshot(client_id)
+        .expect("snapshot")
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("the pane is in the frame")
+        .has_selection
+}
+
+#[test]
+fn a_host_paste_ends_this_viewers_selection_gesture() {
+    // The paste key's text belongs to the program in the pane, exactly like a
+    // key that falls through, so the highlight gesture over it is over. Without
+    // that the pointer's next move would put the highlight the paste just
+    // cleared straight back up.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    server.handle_pty_output(pane_id, b"hello world");
+
+    let from = content_point(&server, client_id, pane_id);
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    let mouse = |kind, at| RuntimeEvent::MouseInput {
+        client_id,
+        mouse: MouseInput {
+            kind,
+            at,
+            mods: ModFlags::NONE,
+        },
+    };
+
+    // Press and drag: a highlight is up and the gesture is still under way.
+    let run = |server: &mut Server, client: &mut Client, event| {
+        assert!(apply_event(server, client, event, Some(&frame)).is_continue());
+    };
+    run(
+        &mut server,
+        &mut client,
+        mouse(MouseKind::Press(MouseButton::Left), from),
+    );
+    let to = Point {
+        x: from.x + 4,
+        ..from
+    };
+    run(
+        &mut server,
+        &mut client,
+        mouse(MouseKind::Drag(MouseButton::Left), to),
+    );
+    assert!(has_highlight(&server, client_id, pane_id), "highlighted");
+
+    // The user hits their terminal's paste key. The text reaches the pane's
+    // child, so the session drops the highlight.
+    run(
+        &mut server,
+        &mut client,
+        RuntimeEvent::HostPaste {
+            client_id,
+            text: "pasted".to_string(),
+        },
+    );
+    assert!(!has_highlight(&server, client_id, pane_id));
+
+    // Moving the pointer on asks for nothing: the gesture ended with the paste.
+    let further = Point {
+        x: from.x + 6,
+        ..from
+    };
+    run(
+        &mut server,
+        &mut client,
+        mouse(MouseKind::Drag(MouseButton::Left), further),
+    );
+    assert!(
+        !has_highlight(&server, client_id, pane_id),
+        "no highlight was asked for again"
+    );
+}
+
 #[test]
 fn render_for_a_client_without_a_snapshot_draws_nothing() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, _client_id, _pane_id) = boot(&fake);
-    let unknown = test_client(&mut server, ClientId::new());
+    let mut unknown = test_client(&mut server, ClientId::new());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
 
     // An unknown client resolves to no snapshot, so render early-returns and
@@ -872,7 +1026,7 @@ fn render_for_a_client_without_a_snapshot_draws_nothing() {
     render(
         &mut terminal,
         &server,
-        &unknown,
+        &mut unknown,
         &mut String::new(),
         &mut None,
         &mut None,
@@ -896,12 +1050,12 @@ fn render_emits_a_changed_cursor_style_and_records_it() {
             bytes: b"\x1b[6 q".to_vec(),
         },)
         .is_continue());
-    let client = test_client(&mut server, client_id);
+    let mut client = test_client(&mut server, client_id);
     let mut last_cursor = None;
     render(
         &mut terminal,
         &server,
-        &client,
+        &mut client,
         &mut String::new(),
         &mut last_cursor,
         &mut None,
@@ -963,4 +1117,74 @@ fn ipc_event_dispatches_the_command_and_continues() {
         LockMode::Locked,
         "the toggle-lock command dispatched by the Ipc event must take effect"
     );
+}
+
+#[test]
+fn a_press_event_reaches_the_viewer_and_its_answer_reaches_the_pane() {
+    // Every mouse event, not only the wheel, is the viewer's to answer: the
+    // loop hands it the frame it painted and runs what came back. Here the
+    // program in the focused pane asked for the mouse, so the press is written
+    // to it as a report.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    // Normal tracking with SGR encoding.
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+
+    let at = content_point(&server, client_id, pane_id);
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    let (col, row) = pane_local_cell(frame.layout(ViewerChrome::default()), pane_id, at)
+        .expect("a pane-local cell");
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse: MouseInput {
+                kind: MouseKind::Press(MouseButton::Left),
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        Some(&frame),
+    )
+    .is_continue());
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
+        "the press the viewer answered was written to the pane"
+    );
+}
+
+#[test]
+fn a_mouse_event_for_another_client_is_not_answered_by_this_viewer() {
+    // The loop routes only its own viewer's mouse. One addressed to a client
+    // this process does not drive falls through to the session, which has no
+    // frame to answer it from and drops it.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+
+    let at = content_point(&server, client_id, pane_id);
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::MouseInput {
+            client_id: ClientId::new(),
+            mouse: MouseInput {
+                kind: MouseKind::Press(MouseButton::Left),
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        Some(&frame),
+    )
+    .is_continue());
+
+    assert_eq!(fake.writes(pane_id).expect("writes"), Vec::<Vec<u8>>::new());
 }

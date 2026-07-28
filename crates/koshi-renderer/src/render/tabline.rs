@@ -97,7 +97,7 @@ pub(crate) struct TablineLayout {
 /// The right block anchors the right edge and the session block the left. If
 /// every tab fits in the gap between them, all are shown from index 0 with no
 /// arrows. Otherwise the strip scrolls: the window starts at the client's
-/// [`tabline_offset`](crate::snapshot::ClientSnapshot::tabline_offset) when it
+/// [`tabline_offset`](crate::snapshot::ViewerChrome::tabline_offset) when it
 /// is peeking, or — following the active tab — at the smallest index that keeps
 /// the active tab on screen. A one-cell arrow is reserved on each side while
 /// scrolled and drawn on whichever side still hides tabs.
@@ -155,7 +155,7 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
         .iter()
         .position(|meta| meta.active)
         .unwrap_or(0);
-    let first_visible = match frame.client.tabline_offset {
+    let first_visible = match frame.viewer.tabline_offset {
         Some(i) => i.min(count - 1),
         None => reveal_active(&widths, active, lo, hi),
     };

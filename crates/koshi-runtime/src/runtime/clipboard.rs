@@ -6,12 +6,16 @@
 //! dependency. The payload is base64 so any bytes survive the trip.
 //!
 //! `ClipboardWriter` is the seam an operating-system clipboard backend plugs
-//! into. `Osc52Clipboard` is the only writer, and `ClipboardBackend` has the
-//! single `Osc52` variant.
+//! into. `Osc52Clipboard` is the only writer koshi builds, so a copy naming
+//! `CopyTarget::Native` writes nothing.
+//!
+//! The copy command carries which clipboard it means: the viewer that decided
+//! the copy fills it in from its own `copy.clipboard` setting, and the session
+//! writes where the command says.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use koshi_config::types::ClipboardBackend;
+use koshi_core::command::CopyTarget;
 use koshi_core::ids::ClientId;
 
 use crate::server::Server;
@@ -49,18 +53,30 @@ pub(crate) fn osc52_copy(text: &str) -> Vec<u8> {
 }
 
 impl Server {
-    /// Write `text` to the clipboard backend selected by the current config.
+    /// Write `text` to the clipboard the copy command named.
     ///
-    /// OSC 52 is the only backend koshi builds today; a native backend plugs a
-    /// new `ClipboardWriter` in behind a new `ClipboardBackend` variant.
-    pub(crate) fn copy_to_clipboard(&mut self, client_id: ClientId, text: &str) {
-        match self.client_config.copy.clipboard {
-            ClipboardBackend::Osc52 => {
+    /// `target` comes from the command, which the viewer filled in from its own
+    /// `copy.clipboard` setting: two viewers of one session can send their
+    /// copies to different clipboards, so the session takes the destination from
+    /// the command rather than from its own config.
+    ///
+    /// [`CopyTarget::Osc52`] queues the escape for `client_id`'s outer terminal.
+    /// [`CopyTarget::Native`] writes nothing: koshi builds no native
+    /// operating-system clipboard backend, so there is nothing to write to.
+    pub(crate) fn copy_to_clipboard(
+        &mut self,
+        client_id: ClientId,
+        target: CopyTarget,
+        text: &str,
+    ) {
+        match target {
+            CopyTarget::Osc52 => {
                 let mut clipboard = Osc52Clipboard::default();
                 if clipboard.write(text) {
                     self.queue_host_write(client_id, &clipboard.bytes);
                 }
             }
+            CopyTarget::Native => {}
         }
     }
 }

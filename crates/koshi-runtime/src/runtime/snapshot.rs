@@ -16,8 +16,8 @@
 //!
 //! `Server::build_layout` is the same work stopping short of the panes: it
 //! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
-//! grid, title, or highlight. Mouse hit-testing and selection drags read only
-//! that much, and they run on every pointer move.
+//! grid, title, or highlight. Writing a mouse report to a pane reads only that
+//! much.
 //!
 //! A snapshot carries no hint-bar data: the viewer draws that bar from its own
 //! keymap, so nothing here resolves hints.
@@ -93,9 +93,8 @@ impl Server {
     /// id, or its viewed tab has gone.
     ///
     /// This is [`build_snapshot`](Self::build_snapshot) without the per-pane
-    /// content: no grid, no title, no highlight resolution. Mouse hit-testing
-    /// and selection drags read only these fields, and they run on every
-    /// pointer move.
+    /// content: no grid, no title, no highlight resolution. Placing a forwarded
+    /// mouse report in its pane reads only these fields.
     pub(crate) fn build_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
         let session = self.session_for_client(client_id)?;
         let client = session.clients.get(client_id)?;
@@ -178,10 +177,8 @@ impl Server {
                 viewport: client.viewport(),
                 active_tab: active_tab_id,
                 focused_pane: client.focused_pane(active_tab_id),
-                hovered_pane: client.hovered_pane(),
                 lock_mode: client.lock_mode(),
                 mouse_select: client.mouse_select(),
-                tabline_offset: client.tabline_offset(),
             },
         })
     }
@@ -225,6 +222,7 @@ impl Server {
                 on_alt_screen: false,
                 selection: None,
                 has_selection: false,
+                view_top_row: 0,
                 scrollback: ScrollbackMeta {
                     truncated: false,
                     retained_lines: 0,
@@ -264,6 +262,9 @@ impl Server {
             has_selection: selection.is_some(),
             selection: selection
                 .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
+            // The same line number `selection_spans` resolves its rows against:
+            // the window's top row shows line `total_pushed - view_offset`.
+            view_top_row: scrollback.total_pushed().saturating_sub(view_offset as u64),
             grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),
             mouse_tracking: state.mouse_tracking(),

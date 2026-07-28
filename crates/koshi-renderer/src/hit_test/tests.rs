@@ -12,6 +12,13 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_pane::pane::state::PaneKind;
 
+use crate::snapshot::ViewerChrome;
+
+/// A viewer with nothing hovered and its tab strip following the active tab.
+fn chrome() -> ViewerChrome {
+    ViewerChrome::default()
+}
+
 use crate::snapshot::{
     ClientSnapshot, PaneSlot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabMeta,
     TabSnapshot,
@@ -88,10 +95,8 @@ fn snap(
             viewport,
             active_tab: tab_id,
             focused_pane: None,
-            hovered_pane: None,
             lock_mode: LockMode::Normal,
             mouse_select: false,
-            tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
     }
@@ -121,28 +126,31 @@ fn full_pane_content_border_and_chrome() {
 
     // Inside the border → content.
     assert_eq!(
-        hit_test(s.layout(), at(20, 5)),
+        hit_test(s.layout(chrome()), at(20, 5)),
         HitRegion::PaneContent { pane_id: pane }
     );
     // Left and right border columns.
     assert_eq!(
-        hit_test(s.layout(), at(0, 5)),
+        hit_test(s.layout(chrome()), at(0, 5)),
         HitRegion::PaneBorder {
             pane_id: pane,
             side: Direction::Left
         }
     );
     assert_eq!(
-        hit_test(s.layout(), at(39, 5)),
+        hit_test(s.layout(chrome()), at(39, 5)),
         HitRegion::PaneBorder {
             pane_id: pane,
             side: Direction::Right
         }
     );
     // Top row is the tabline (drawn over the pane), off any tab ribbon here.
-    assert_eq!(hit_test(s.layout(), at(20, 0)), HitRegion::Tabline);
+    assert_eq!(hit_test(s.layout(chrome()), at(20, 0)), HitRegion::Tabline);
     // Bottom row is the hint bar.
-    assert_eq!(hit_test(s.layout(), at(20, 9)), HitRegion::Statusline);
+    assert_eq!(
+        hit_test(s.layout(chrome()), at(20, 9)),
+        HitRegion::Statusline
+    );
 }
 
 /// A layout smaller than the viewport centers, exposing the top and bottom
@@ -160,12 +168,12 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     );
 
     assert_eq!(
-        hit_test(s.layout(), at(22, 7)),
+        hit_test(s.layout(chrome()), at(22, 7)),
         HitRegion::PaneContent { pane_id: pane }
     );
     // Top border row of the pane, now below the tabline.
     assert_eq!(
-        hit_test(s.layout(), at(22, 2)),
+        hit_test(s.layout(chrome()), at(22, 2)),
         HitRegion::PaneBorder {
             pane_id: pane,
             side: Direction::Up
@@ -173,16 +181,16 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     );
     // Bottom border row of the pane, above the hint bar.
     assert_eq!(
-        hit_test(s.layout(), at(22, 11)),
+        hit_test(s.layout(chrome()), at(22, 11)),
         HitRegion::PaneBorder {
             pane_id: pane,
             side: Direction::Down
         }
     );
     // Left of the content rect → letterbox margin.
-    assert_eq!(hit_test(s.layout(), at(0, 7)), HitRegion::None);
+    assert_eq!(hit_test(s.layout(chrome()), at(0, 7)), HitRegion::None);
     // A non-chrome row above the content rect → letterbox margin.
-    assert_eq!(hit_test(s.layout(), at(22, 1)), HitRegion::None);
+    assert_eq!(hit_test(s.layout(chrome()), at(22, 1)), HitRegion::None);
 }
 
 /// A collapsed stack member's strip hit-tests to its pane.
@@ -197,7 +205,7 @@ fn stack_header_hits_its_pane() {
         &[],
     );
     assert_eq!(
-        hit_test(s.layout(), at(20, 3)),
+        hit_test(s.layout(chrome()), at(20, 3)),
         HitRegion::StackHeader { pane_id: member }
     );
 }
@@ -222,7 +230,7 @@ fn tabs_hit_by_column() {
         &[(a, "a"), (b, "b")],
     );
     let tabs = tabline_layout(
-        s.layout(),
+        s.layout(chrome()),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -234,20 +242,20 @@ fn tabs_hit_by_column() {
     assert_eq!(tabs.len(), 2);
 
     assert_eq!(
-        hit_test(s.layout(), at(tabs[0].1 + 1, 0)),
+        hit_test(s.layout(chrome()), at(tabs[0].1 + 1, 0)),
         HitRegion::Tab { tab_id: a }
     );
     assert_eq!(
-        hit_test(s.layout(), at(tabs[1].1 + 1, 0)),
+        hit_test(s.layout(chrome()), at(tabs[1].1 + 1, 0)),
         HitRegion::Tab { tab_id: b }
     );
     // The one-cell gap between the two ribbons.
     assert_eq!(
-        hit_test(s.layout(), at(tabs[1].1 - 1, 0)),
+        hit_test(s.layout(chrome()), at(tabs[1].1 - 1, 0)),
         HitRegion::Tabline
     );
     // The session block on the left.
-    assert_eq!(hit_test(s.layout(), at(1, 0)), HitRegion::Tabline);
+    assert_eq!(hit_test(s.layout(chrome()), at(1, 0)), HitRegion::Tabline);
 }
 
 /// Scroll arrows hit-test to their scroll targets, and those targets step one
@@ -259,7 +267,7 @@ fn scroll_arrows_hit_test_to_their_targets() {
 
     let ids: Vec<TabId> = (0..8).map(|_| TabId::new()).collect();
     let tabs: Vec<(TabId, &str)> = ids.iter().map(|&id| (id, "tab")).collect();
-    let mut s = snap(
+    let s = snap(
         Size { cols: 30, rows: 8 },
         Size { cols: 30, rows: 8 },
         &[],
@@ -267,7 +275,10 @@ fn scroll_arrows_hit_test_to_their_targets() {
         &tabs,
     );
     // Peek from index 2, so tabs are hidden off both sides.
-    s.client.tabline_offset = Some(2);
+    let peeking = ViewerChrome {
+        tabline_offset: Some(2),
+        ..ViewerChrome::default()
+    };
 
     let area = RatatuiRect {
         x: 0,
@@ -275,18 +286,18 @@ fn scroll_arrows_hit_test_to_their_targets() {
         width: 30,
         height: 8,
     };
-    let layout = tabline_layout(s.layout(), area);
+    let layout = tabline_layout(s.layout(peeking), area);
     let (left_x, left_to) = layout.left_arrow.expect("tabs hidden off the left");
     let (right_x, right_to) = layout.right_arrow.expect("tabs hidden off the right");
 
     assert_eq!(left_to, 1, "left arrow steps one tab toward the start");
     assert_eq!(right_to, 3, "right arrow steps one tab toward the end");
     assert_eq!(
-        hit_test(s.layout(), at(left_x, 0)),
+        hit_test(s.layout(peeking), at(left_x, 0)),
         HitRegion::TablineScrollLeft { to: 1 }
     );
     assert_eq!(
-        hit_test(s.layout(), at(right_x, 0)),
+        hit_test(s.layout(peeking), at(right_x, 0)),
         HitRegion::TablineScrollRight { to: 3 }
     );
 }
@@ -303,7 +314,10 @@ fn degenerate_frames_hit_nothing() {
         &[],
     );
     suppressed.session.active_tab.all_suppressed = true;
-    assert_eq!(hit_test(suppressed.layout(), at(20, 5)), HitRegion::None);
+    assert_eq!(
+        hit_test(suppressed.layout(chrome()), at(20, 5)),
+        HitRegion::None
+    );
 
     let zero = snap(
         Size { cols: 0, rows: 0 },
@@ -312,7 +326,7 @@ fn degenerate_frames_hit_nothing() {
         &[],
         &[],
     );
-    assert_eq!(hit_test(zero.layout(), at(0, 0)), HitRegion::None);
+    assert_eq!(hit_test(zero.layout(chrome()), at(0, 0)), HitRegion::None);
 }
 
 /// Two clients viewing the same layout at different sizes hit-test in their own
@@ -337,14 +351,14 @@ fn two_clients_hit_test_independently() {
 
     // The small client fills the viewport: (22, 7) is content.
     assert_eq!(
-        hit_test(small.layout(), at(22, 7)),
+        hit_test(small.layout(chrome()), at(22, 7)),
         HitRegion::PaneContent { pane_id: pane }
     );
     // The large client centers the layout: the same cell is content too, but a
     // cell in its margin — where the small client had content — hits nothing.
     assert_eq!(
-        hit_test(large.layout(), at(22, 7)),
+        hit_test(large.layout(chrome()), at(22, 7)),
         HitRegion::PaneContent { pane_id: pane }
     );
-    assert_eq!(hit_test(large.layout(), at(1, 7)), HitRegion::None);
+    assert_eq!(hit_test(large.layout(chrome()), at(1, 7)), HitRegion::None);
 }

@@ -76,6 +76,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         on_alt_screen: false,
         selection: None,
         has_selection: false,
+        view_top_row: 0,
         scrollback: ScrollbackMeta {
             truncated: false,
             retained_lines: 0,
@@ -87,10 +88,8 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
         viewport: Size { cols: 80, rows: 24 },
         active_tab: tab_id,
         focused_pane: Some(pane_id),
-        hovered_pane: None,
         lock_mode: LockMode::Normal,
         mouse_select: false,
-        tabline_offset: None,
     };
 
     RenderSnapshot {

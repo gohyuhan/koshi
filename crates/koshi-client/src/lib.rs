@@ -3,9 +3,9 @@
 //! A session is authoritative over tabs, panes, and the processes inside them.
 //! A viewer owns what belongs to the terminal in front of the user — its size,
 //! the settings it reads from its own config, the colors it paints koshi's own
-//! chrome with, the keymap it resolves its own keys against, and what a wheel
-//! tick over its frame means. The two talk only through the session's command
-//! door and its event feed.
+//! chrome with, the keymap it resolves its own keys against, and what every key
+//! and mouse event over its frame means. The two talk only through the session's
+//! command door and its event feed.
 //!
 //! Colors live with the viewer: the frame a session hands out says *which pane
 //! is focused*, and each viewer looks up what "focused" looks like in its own
@@ -30,10 +30,17 @@ use koshi_core::action::{MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
 use koshi_core::event::InputMode;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::MouseButton;
 use koshi_core::registry::ActionRegistry;
-use koshi_core::{event::Event, geometry::Size, ids::ClientId};
+use koshi_core::{
+    event::Event,
+    geometry::{Point, Size},
+    ids::{ClientId, PaneId, TabId},
+};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::theme::Theme;
+
+use crate::mouse::{LastPress, ResizeDrag, SelectionDrag, TablineDrag};
 
 #[cfg(test)]
 mod tests;
@@ -78,6 +85,45 @@ pub struct Client {
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending: Option<PendingKeySequence>,
+    /// The most recent mouse press, which is what tells a double click from two
+    /// separate clicks. `None` before this viewer has pressed anything.
+    last_press: Option<LastPress>,
+    /// The pane a forwarded press captured, and the button that pressed it.
+    /// While a button is held, its drags and its release go to this pane even as
+    /// the pointer leaves it, and a drag or release with no capture is not
+    /// forwarded. Set on a forwarded press; cleared on the next release.
+    ///
+    /// The stored button is the reliable one — a press always names its button,
+    /// while some terminals report every drag and release as the left button.
+    mouse_capture: Option<(PaneId, MouseButton)>,
+    /// The pane-border drag under way, held only between the press on a border
+    /// that begins it and the release that ends it.
+    resize_drag: Option<ResizeDrag>,
+    /// The cell the in-flight border drag last asked to move to, awaiting the
+    /// session's count of how many of those cells it accepted.
+    resize_pointer: Option<Point>,
+    /// The tab-strip peek-drag under way, held only between the press on the
+    /// bare strip that begins it and the release that ends it.
+    tabline_drag: Option<TablineDrag>,
+    /// Where this viewer's tab strip is scrolled, and the tab it was scrolled
+    /// on: `None` follows the active tab, `Some((tab, i))` peeks from tab index
+    /// `i` while `tab` is the active one. Recording the tab is what makes a tab
+    /// switch reveal the new tab — the peek belongs to the tab it was made on,
+    /// and [`Client::note_active_tab`] throws it away as soon as the viewer sees
+    /// a frame on another tab.
+    tabline_peek: Option<(TabId, usize)>,
+    /// The text-selection drag under way, held only between the press on a
+    /// pane's content that begins it and the release that ends it. The highlight
+    /// it produces lives on the session and outlives it.
+    selection_drag: Option<SelectionDrag>,
+    /// The line the pane's view showed on its top row when the last edge-scroll
+    /// step was asked for, awaiting the session's report of where the view
+    /// landed. Set only for a scroll the selection drag's timer asked for.
+    scroll_from_top: Option<u64>,
+    /// The pane this viewer's pointer is over, or `None` when it is over chrome
+    /// or off every pane. The renderer draws an unfocused hovered pane in the
+    /// hover color, so the wheel's target is visible before the wheel turns.
+    hovered_pane: Option<PaneId>,
     /// Restores the outer terminal when the client ends or the process
     /// panics.
     cleanup_guard: TerminalCleanupGuard,
@@ -113,6 +159,15 @@ impl Client {
             registry,
             lock_mode: LockMode::Normal,
             pending: None,
+            last_press: None,
+            mouse_capture: None,
+            resize_drag: None,
+            resize_pointer: None,
+            tabline_drag: None,
+            tabline_peek: None,
+            selection_drag: None,
+            scroll_from_top: None,
+            hovered_pane: None,
             cleanup_guard,
         }
     }

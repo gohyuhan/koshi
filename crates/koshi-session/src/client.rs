@@ -6,15 +6,14 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    time::{Duration, Instant, SystemTime},
+    time::SystemTime,
 };
 
 use koshi_core::{
-    command::{GridPos, Selection, SelectionKind},
-    geometry::{Direction, Point, Size},
+    command::Selection,
+    geometry::Size,
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
-    mouse::MouseButton,
 };
 use koshi_layout::mode::LayoutMode;
 
@@ -45,40 +44,6 @@ pub struct Client {
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
     mouse_select: bool,
-    mouse_state: MouseState,
-    /// This client's in-flight pane-border resize drag, held only between the
-    /// mouse press on a border that begins it and the release that ends it.
-    pending_resize_drag: Option<ResizeDragState>,
-    /// This client's in-flight text-selection drag, held only between the mouse
-    /// press on a pane's content that begins it and the release that ends it.
-    /// The highlight it produces outlives it in `selection_by_pane`.
-    selection_drag: Option<SelectionDragState>,
-    /// The pane a forwarded mouse press captured, and the button that pressed it.
-    /// While a button is held, its drags and its release go to this pane even as
-    /// the pointer leaves it, and a drag or release with no capture is not
-    /// forwarded. Set on a forwarded press; cleared on the next release.
-    ///
-    /// The stored button is the reliable one — a press always names its button,
-    /// while some terminals report every drag and release as the left button. So
-    /// the drag and release forwarded to the program are re-stamped with this
-    /// button, and a release clears the capture without trying to match a button
-    /// it cannot trust.
-    mouse_capture: Option<(PaneId, MouseButton)>,
-    /// This client's tabline scroll position: `None` follows the active tab —
-    /// the window always reveals it — while `Some(i)` peeks from tab index `i`
-    /// without changing focus. Mouse scroll, arrow clicks, and drag set it;
-    /// [`update_active_tab`](Self::update_active_tab) resets it to `None`, so a
-    /// tab switch always cancels a peek and reveals the new tab.
-    tabline_offset: Option<usize>,
-    /// This client's in-flight tabline peek-drag, held only between the mouse
-    /// press that begins it and the release that ends it.
-    tabline_drag: Option<TablineDragState>,
-    /// The pane this client's pointer is currently hovering over, or `None` when
-    /// it is over chrome or off every pane. The wheel scrolls this pane, and the
-    /// renderer draws its border in the hover color so the target is visible
-    /// before the wheel turns. It lives on the client because each attached
-    /// client has its own pointer.
-    hovered_pane: Option<PaneId>,
     /// This client's scrollback view position per pane: lines scrolled up from
     /// the live bottom. A pane absent from the map (the default) sits at the live
     /// bottom, offset `0`; only scrolled-up panes have an entry, always with a
@@ -118,9 +83,9 @@ pub struct Client {
 
 impl Client {
     /// A newly attached client viewing `active_tab` at `viewport`, with no
-    /// per-tab focus recorded yet, [`LockMode::Normal`], and no resize drag in
-    /// progress. `attached_at` is supplied by the caller at the attach
-    /// boundary, not read from the clock here, so it stays controllable.
+    /// per-tab focus recorded yet and in [`LockMode::Normal`]. `attached_at` is
+    /// supplied by the caller at the attach boundary, not read from the clock
+    /// here, so it stays controllable.
     #[must_use]
     pub fn new(
         id: ClientId,
@@ -138,13 +103,6 @@ impl Client {
             focus_by_tab: HashMap::new(),
             lock_mode: LockMode::Normal,
             mouse_select: false,
-            mouse_state: MouseState::default(),
-            pending_resize_drag: None,
-            selection_drag: None,
-            mouse_capture: None,
-            tabline_offset: None,
-            tabline_drag: None,
-            hovered_pane: None,
             scroll_by_pane: HashMap::new(),
             selection_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
@@ -249,37 +207,6 @@ impl Client {
         self.zoom_by_tab.retain(|_, zoomed| *zoomed != pane_id);
     }
 
-    /// This client's mouse interaction state.
-    #[must_use]
-    pub fn mouse_state(&self) -> &MouseState {
-        &self.mouse_state
-    }
-
-    /// Mutable access to this client's mouse interaction state, to record a
-    /// press into the run of clicks.
-    pub fn mouse_state_mut(&mut self) -> &mut MouseState {
-        &mut self.mouse_state
-    }
-
-    /// This client's in-flight text-selection drag, if one is under way.
-    #[must_use]
-    pub fn selection_drag(&self) -> Option<SelectionDragState> {
-        self.selection_drag
-    }
-
-    /// Begin or update (with `Some`) or end (with `None`) this client's
-    /// text-selection drag. Ending it leaves the highlight the drag made in
-    /// place — the gesture is over, the highlight is not.
-    pub fn set_selection_drag(&mut self, drag: Option<SelectionDragState>) {
-        self.selection_drag = drag;
-    }
-
-    /// This client's in-flight resize drag, if one is in progress.
-    #[must_use]
-    pub fn pending_resize_drag(&self) -> Option<&ResizeDragState> {
-        self.pending_resize_drag.as_ref()
-    }
-
     /// Where this client's view of `pane_id` sits: lines scrolled up from the
     /// live bottom. `0` — the default for any pane not scrolled up — is the
     /// newest line.
@@ -348,43 +275,6 @@ impl Client {
         self.scroll_offset(pane_id) > 0 || self.selection_by_pane.contains_key(&pane_id)
     }
 
-    /// This client's tabline scroll position: `None` follows the active tab,
-    /// `Some(i)` peeks from tab index `i`. See the field docs.
-    #[must_use]
-    pub fn tabline_offset(&self) -> Option<usize> {
-        self.tabline_offset
-    }
-
-    /// Set this client's tabline scroll position. `Some(i)` peeks from index
-    /// `i` without changing focus; `None` restores following the active tab.
-    pub fn set_tabline_offset(&mut self, offset: Option<usize>) {
-        self.tabline_offset = offset;
-    }
-
-    /// This client's in-flight tabline peek-drag, if one is under way.
-    #[must_use]
-    pub fn tabline_drag(&self) -> Option<TablineDragState> {
-        self.tabline_drag
-    }
-
-    /// The pane this client's pointer is hovering over, or `None` when it is
-    /// over chrome. See the field docs.
-    #[must_use]
-    pub fn hovered_pane(&self) -> Option<PaneId> {
-        self.hovered_pane
-    }
-
-    /// Set the pane this client's pointer is hovering over; `None` clears it.
-    pub fn set_hovered_pane(&mut self, pane_id: Option<PaneId>) {
-        self.hovered_pane = pane_id;
-    }
-
-    /// Begin or update (with `Some`) or end (with `None`) this client's tabline
-    /// peek-drag.
-    pub fn set_tabline_drag(&mut self, drag: Option<TablineDragState>) {
-        self.tabline_drag = drag;
-    }
-
     /// Update this client's lock mode.
     pub fn update_lock_mode(&mut self, lock_mode: LockMode) {
         self.lock_mode = lock_mode
@@ -423,51 +313,16 @@ impl Client {
         self.zoom_by_tab.remove(&tab_id);
     }
 
-    /// Switch this client to viewing `tab_id`.
-    ///
-    /// A tab switch always reveals the new tab: it drops any tabline peek so
-    /// the strip follows the active tab again, and ends any in-flight tabline
-    /// drag. It also ends any in-flight border-resize drag, text-selection
-    /// drag, or captured mouse gesture, whose pane is no longer on the client's
-    /// frame.
-    ///
-    /// Ending a selection drag leaves the highlight it had made: the highlight
-    /// belongs to its pane and the client finds it again on switching back.
+    /// Switch this client to viewing `tab_id`. The highlights it made in the
+    /// tab it leaves stay where they are, and it finds them again on switching
+    /// back.
     pub fn update_active_tab(&mut self, tab_id: TabId) {
         self.active_tab = tab_id;
-        self.tabline_offset = None;
-        self.tabline_drag = None;
-        self.pending_resize_drag = None;
-        self.selection_drag = None;
-        self.mouse_capture = None;
     }
 
     /// Update this client's viewport size.
     pub fn update_viewport(&mut self, viewport: Size) {
         self.viewport = viewport
-    }
-
-    /// Update this client's mouse state.
-    pub fn update_mouse_state(&mut self, mouse_state: MouseState) {
-        self.mouse_state = mouse_state
-    }
-
-    /// Update this client's in-flight resize drag.
-    pub fn update_pending_resize_drag(&mut self, pending_resize_drag: Option<ResizeDragState>) {
-        self.pending_resize_drag = pending_resize_drag
-    }
-
-    /// The pane a forwarded mouse gesture is captured to and the button that
-    /// pressed it, if a button is held.
-    #[must_use]
-    pub fn mouse_capture(&self) -> Option<(PaneId, MouseButton)> {
-        self.mouse_capture
-    }
-
-    /// Set (`Some`) or clear (`None`) the pane and button a forwarded mouse
-    /// gesture is captured to.
-    pub fn set_mouse_capture(&mut self, capture: Option<(PaneId, MouseButton)>) {
-        self.mouse_capture = capture;
     }
 }
 
@@ -542,156 +397,6 @@ impl ClientRegistry {
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
-}
-
-/// Per-client mouse interaction state: the run of clicks in progress, which is
-/// what tells a double-click from two separate clicks. It lives on the client
-/// because each attached terminal drives its own pointer independently; two
-/// clients viewing the same tab click independently.
-///
-/// The highlight a drag produces is not here: it is keyed by pane in
-/// [`Client::selection`], since it outlives the gesture that made it.
-///
-/// This is transient runtime state — re-initialized on each attach, never
-/// persisted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MouseState {
-    /// The most recent press, or `None` before this client has pressed anything.
-    last_press: Option<LastPress>,
-}
-
-impl MouseState {
-    /// Record a press of `button` at `now` and report the run of clicks it makes:
-    /// a press within `threshold` of the one before it continues the run, and one
-    /// later than that starts over.
-    ///
-    /// **The gap is the only thing that decides this.** A mouse reports a double
-    /// click as two ordinary presses — no terminal protocol carries a click
-    /// count — so the time between them is the only signal there is.
-    ///
-    /// Pressing a different button always starts a new run: a left click followed
-    /// by a quick right click is not a double click.
-    ///
-    /// Example, with a 400ms threshold: press at `0ms` →
-    /// [`Single`](ClickCount::Single); again at `120ms` →
-    /// [`Double`](ClickCount::Double); again at `260ms` →
-    /// [`Triple`](ClickCount::Triple); again at `900ms` → `Single`, the run
-    /// having lapsed. A fifth press right after a `Triple` also starts over.
-    pub fn press(&mut self, button: MouseButton, now: Instant, threshold: Duration) -> ClickCount {
-        let count = match self.last_press {
-            Some(last) if last.button != button => ClickCount::Single,
-            Some(last) if now.duration_since(last.at) >= threshold => ClickCount::Single,
-            Some(last) => match last.count {
-                ClickCount::Single => ClickCount::Double,
-                ClickCount::Double => ClickCount::Triple,
-                ClickCount::Triple => ClickCount::Single,
-            },
-            None => ClickCount::Single,
-        };
-        self.last_press = Some(LastPress {
-            button,
-            at: now,
-            count,
-        });
-        count
-    }
-}
-
-/// One recorded press: what was pressed, when, and the run it made.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LastPress {
-    /// The button that went down.
-    button: MouseButton,
-    /// When it went down.
-    at: Instant,
-    /// The run of clicks this press made.
-    count: ClickCount,
-}
-
-/// How many clicks in a row a press makes — one, two, or three — which is what
-/// picks the shape of the selection a drag then makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClickCount {
-    /// A single click: a drag from here selects characters.
-    Single,
-    /// A double click: a drag from here selects whole words.
-    Double,
-    /// A triple click: a drag from here selects whole lines.
-    Triple,
-}
-
-impl ClickCount {
-    /// The selection shape a drag from a press with this run makes.
-    #[must_use]
-    pub fn selection_kind(self) -> SelectionKind {
-        match self {
-            ClickCount::Single => SelectionKind::Character,
-            ClickCount::Double => SelectionKind::Word,
-            ClickCount::Triple => SelectionKind::Line,
-        }
-    }
-}
-
-/// Per-client state of an in-flight pane-border resize drag: the pane whose
-/// border was grabbed, which side it is, and the cell the last *applied* resize
-/// tracked to. Dragging moves that border a cell at a time to follow the
-/// pointer; `last` advances only when a resize is accepted, so pushing the
-/// pointer past a pane's minimum size leaves `last` at the wall and a reverse
-/// drag reacts at once. Held only between the border mouse-press that begins the
-/// drag and the release that ends it. It lives on the client because the gesture
-/// belongs to the one terminal performing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResizeDragState {
-    /// The pane whose border is being dragged.
-    pub pane: PaneId,
-    /// Which of the pane's borders was grabbed.
-    pub side: Direction,
-    /// The cell the last accepted resize tracked to; the next drag delta is
-    /// measured from here.
-    pub last: Point,
-}
-
-/// Per-client state of an in-flight text-selection drag: the pane being
-/// selected in, the shape the press picked, the end that stays put, and where
-/// the pointer last was. Held only between the mouse-press on a pane's content
-/// that begins the drag and the release that ends it. It lives on the client
-/// because the gesture belongs to the one terminal performing it.
-///
-/// The highlight itself is not here — it goes to
-/// [`Client::set_selection`](Client::set_selection) as the drag moves, so it
-/// survives the release that drops this state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionDragState {
-    /// The pane being selected in. The drag stays with it even when the pointer
-    /// leaves, so a drag out of a pane extends to its edge rather than jumping
-    /// to the neighbor.
-    pub pane: PaneId,
-    /// The shape the press picked — one click characters, two words, three
-    /// lines, `Alt` a block. Fixed for the whole drag.
-    pub kind: SelectionKind,
-    /// The end that stays put: where the press landed.
-    pub anchor: GridPos,
-    /// The pointer's last cell, in the client's own screen space. The scroll
-    /// timer re-reads this to keep extending while the pointer is held still
-    /// outside the pane.
-    pub at: Point,
-    /// When the view should next scroll because the pointer is being held past
-    /// the pane's top or bottom edge; `None` whenever the pointer is inside.
-    pub scroll_at: Option<Instant>,
-}
-
-/// Per-client state of an in-flight tabline peek-drag: the cell the drag
-/// anchored on and the first visible tab index at that instant. Dragging
-/// horizontally from the anchor scrolls the tab strip without changing which
-/// tab is active. Held only between the tabline mouse-press that begins the
-/// drag and the release that ends it. It lives on the client because the
-/// gesture belongs to the one terminal performing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TablineDragState {
-    /// The screen column the drag anchored on.
-    pub anchor_x: u16,
-    /// The first visible tab index when the drag began.
-    pub anchor_first_visible: usize,
 }
 
 #[cfg(test)]

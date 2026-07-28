@@ -9,7 +9,7 @@
 //!
 //! [`MouseTracking`] says which events the program in a pane asked to receive,
 //! and [`reports`] answers that question for one event. The viewer reads them
-//! off a painted frame to decide where a wheel tick goes; the session reads
+//! off a painted frame to decide where a mouse event goes; the session reads
 //! them off live state to decide what to write.
 //!
 //! A [`MouseInput`] is the mouse peer of a [`KeyChord`](crate::key::KeyChord):

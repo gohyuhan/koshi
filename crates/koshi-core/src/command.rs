@@ -468,10 +468,22 @@ pub enum CopyTarget {
 }
 
 /// Arguments for [`VisualCommand::Copy`].
+///
+/// The pane is named, never inferred, as in [`SetSelectionArgs`]: a client can
+/// have a highlight up in several panes at once, so the copy says which one it
+/// means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
+    /// The pane whose highlight is copied.
+    pub pane: PaneId,
     /// Where the copied text should go.
     pub target: CopyTarget,
+    /// Whether blanks at the end of each copied row are dropped.
+    ///
+    /// A terminal row is padded to the pane's full width with blank cells, so a
+    /// highlight over `hello` in an 80-column pane covers 75 trailing blanks.
+    /// `true` copies `hello`; `false` copies `hello` followed by those blanks.
+    pub trim_trailing_whitespace: bool,
 }
 
 /// Plugin lifecycle commands.

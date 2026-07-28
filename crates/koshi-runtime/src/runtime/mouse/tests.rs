@@ -1,31 +1,33 @@
-//! Mouse routing tests: a tab click focuses the tab and clears the peek, a
-//! scroll arrow and the wheel peek the strip, and a tabline drag scrolls it.
+//! Mouse routing tests, driven through both halves: the viewer answers each
+//! event from the frame it painted and the session executes what came back,
+//! exactly as the running binary does.
 //!
-//! Client state is read back through [`Server::build_snapshot`] — the same
-//! projection the renderer draws — so a test never reaches into private client
-//! fields.
-//!
-//! A wheel tick takes both halves: the viewer answers it from the frame it
-//! painted and the session executes what came back, so the wheel tests drive
-//! [`wheel_tick`] rather than [`Server::handle_mouse_input`].
+//! Session state is read back through [`Server::build_snapshot`] — the same
+//! projection the renderer draws — and viewer state through
+//! [`ViewerClient::chrome`], so a test never reaches into private fields of
+//! either half.
 
 use super::*;
 
+use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use koshi_client::mouse::MouseAction;
+use koshi_client::mouse::{MouseAction, TABLINE_DRAG_STEP};
 use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
-use koshi_core::command::{GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind};
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::command::{
+    FocusTabArgs, GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind, TabTarget,
+};
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::ModFlags;
-use koshi_core::mouse::ScrollDirection;
+use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
+use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
-use koshi_renderer::hit_test;
-use koshi_renderer::snapshot::MouseFrame;
+use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
+use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
@@ -37,7 +39,8 @@ fn runtime() -> (Server, ClientId) {
 }
 
 /// The viewer half for `client_id`, on the stock settings: it holds the `mouse`
-/// config and answers every wheel tick below before the session hears about it.
+/// and `copy` config and answers every mouse event below before the session
+/// hears about it.
 fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
     ViewerClient::new(
         client_id,
@@ -68,43 +71,68 @@ fn viewer_with_wheel(
     viewer
 }
 
-/// One wheel tick, the way the running binary delivers it: the viewer decides
-/// what the tick means against the frame it is looking at, and only what it
-/// decided reaches the session.
-fn wheel_tick(runtime: &mut Server, viewer: &ViewerClient, input: MouseInput) {
-    let client_id = viewer.id();
-    let frame = MouseFrame::from(runtime.build_snapshot(client_id).expect("snapshot"));
-    let Some(decision) = viewer.handle_mouse_wheel(input, &frame) else {
-        return;
-    };
-    runtime.set_hovered_pane(client_id, decision.hovered);
-    match decision.action {
-        Some(MouseAction::Scroll { pane, up, lines }) => {
-            runtime.wheel_scroll_pane(client_id, pane, up, lines);
-        }
-        Some(MouseAction::Forward { pane, mouse }) => {
-            runtime.forward_wheel_to_pane(client_id, pane, mouse);
-        }
-        Some(MouseAction::AltScrollArrows { pane, up, count }) => {
-            runtime.write_alt_scroll_arrows(pane, up, count);
-        }
-        Some(MouseAction::ScrollTabline { to }) => {
-            runtime.set_tabline_offset(client_id, Some(to));
-        }
-        None => {}
-    }
+/// One mouse event, the way the running binary delivers it: the viewer decides
+/// what it means against the frame it is looking at, and only what it decided
+/// reaches the session.
+///
+/// Timed far enough from any other that no two presses read as a double click —
+/// the runtime tells a double click from two separate clicks by the gap between
+/// them, so a test that pressed twice at the wall clock would double-click by
+/// accident. A test that wants a real double click drives [`mouse_at`] with its
+/// own instants.
+fn mouse(runtime: &mut Server, viewer: &mut ViewerClient, input: MouseInput) {
+    mouse_at(runtime, viewer, input, far_apart());
 }
 
-/// Feed one mouse event, timed far enough from any other that no two presses
-/// read as a double click.
-///
-/// The runtime tells a double click from two separate clicks by the gap between
-/// them, so a test that pressed twice at the wall clock would double-click by
-/// accident. Every event here is stamped an hour on, which no threshold reaches.
-/// A test that wants a real double click drives
-/// [`Server::handle_mouse_input`] with its own instants.
-fn mouse(runtime: &mut Server, client: ClientId, input: MouseInput) {
-    runtime.handle_mouse_input(client, input, far_apart());
+/// [`mouse`] with the instant the event happened at, for the tests that drive
+/// the click threshold themselves.
+fn mouse_at(runtime: &mut Server, viewer: &mut ViewerClient, input: MouseInput, now: Instant) {
+    let frame = MouseFrame::from(runtime.build_snapshot(viewer.id()).expect("snapshot"));
+    let actions = viewer.handle_mouse(input, &frame, now);
+    apply(runtime, viewer, &frame, actions);
+}
+
+/// Run everything the viewer decided, the way the binary's loop does.
+fn apply(
+    runtime: &mut Server,
+    viewer: &mut ViewerClient,
+    frame: &MouseFrame,
+    actions: Vec<MouseAction>,
+) {
+    let client_id = viewer.id();
+    let mut queue: VecDeque<MouseAction> = actions.into();
+    while let Some(action) = queue.pop_front() {
+        match action {
+            MouseAction::Scroll { pane, up, lines } => {
+                let top = runtime.scroll_pane_view(client_id, pane, up, lines);
+                queue.extend(viewer.note_scroll_applied(pane, top, frame));
+            }
+            MouseAction::Forward { pane, mouse } => {
+                runtime.forward_mouse_to_pane(client_id, pane, mouse);
+            }
+            MouseAction::AltScrollArrows { pane, up, count } => {
+                runtime.write_alt_scroll_arrows(pane, up, count);
+            }
+            MouseAction::Resize {
+                pane,
+                side,
+                step,
+                count,
+            } => {
+                let applied = runtime.drag_resize(client_id, pane, side, step, count);
+                viewer.note_resize_applied(applied);
+            }
+            MouseAction::Command(command) => {
+                let envelope = CommandEnvelope::new(
+                    CommandId::new(),
+                    CommandSource::mouse(client_id),
+                    SystemTime::now(),
+                    command,
+                );
+                let _ = runtime.submit_command(envelope);
+            }
+        }
+    }
 }
 
 /// An instant an hour after the last one this returned, so successive presses
@@ -150,8 +178,12 @@ fn a_content_cell(runtime: &Server, client: ClientId, pane: PaneId) -> (Point, u
     for y in 0..viewport.rows {
         for x in 0..viewport.cols {
             let at = Point { x, y };
-            if hit_test(snapshot.layout(), at) == (HitRegion::PaneContent { pane_id: pane }) {
-                let (col, row) = pane_local_cell(snapshot.layout(), pane, at).expect("local cell");
+            if hit_test(snapshot.layout(ViewerChrome::default()), at)
+                == (HitRegion::PaneContent { pane_id: pane })
+            {
+                let (col, row) =
+                    pane_local_cell(snapshot.layout(ViewerChrome::default()), pane, at)
+                        .expect("local cell");
                 return (at, col, row);
             }
         }
@@ -181,59 +213,117 @@ fn add_tab(runtime: &mut Server, client: ClientId) {
 /// from `min_x`.
 fn find_on_tabline(
     runtime: &Server,
-    client: ClientId,
+    viewer: &ViewerClient,
     min_x: u16,
     pred: impl Fn(HitRegion) -> bool,
 ) -> u16 {
-    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let snapshot = runtime.build_snapshot(viewer.id()).expect("snapshot");
+    let chrome = viewer.chrome(snapshot.client.active_tab);
     (min_x..snapshot.client.viewport.cols)
-        .find(|&x| pred(hit_test(snapshot.layout(), Point { x, y: 0 })))
+        .find(|&x| pred(hit_test(snapshot.layout(chrome), Point { x, y: 0 })))
         .expect("a matching tabline cell")
 }
 
-fn offset(runtime: &Server, client: ClientId) -> Option<usize> {
-    runtime
-        .build_snapshot(client)
+/// Where the viewer's tab strip is scrolled to, for the tab it is showing.
+fn offset(runtime: &Server, viewer: &ViewerClient) -> Option<usize> {
+    let snapshot = runtime.build_snapshot(viewer.id()).expect("snapshot");
+    viewer.chrome(snapshot.client.active_tab).tabline_offset
+}
+
+/// Scroll the viewer's tab strip to index `to` by wheeling over the strip, the
+/// only way a viewer's peek moves.
+fn peek_to(runtime: &mut Server, viewer: &mut ViewerClient, to: usize) {
+    // Each tick steps one tab; walking down from the far end lands on any index
+    // whatever the strip was showing.
+    let tabs = runtime
+        .build_snapshot(viewer.id())
         .expect("snapshot")
-        .client
-        .tabline_offset
+        .session
+        .tabs_metadata
+        .len();
+    for _ in 0..tabs {
+        mouse(
+            runtime,
+            viewer,
+            wheel(ScrollDirection::Up, Point { x: 0, y: 0 }),
+        );
+    }
+    for _ in 0..to {
+        mouse(
+            runtime,
+            viewer,
+            wheel(ScrollDirection::Down, Point { x: 0, y: 0 }),
+        );
+    }
+    assert_eq!(offset(runtime, viewer), Some(to), "the peek was set up");
 }
 
 #[test]
 fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
     let (mut runtime, client) = runtime();
-    add_tab(&mut runtime, client); // two tabs; the new one is active
+    for _ in 0..30 {
+        add_tab(&mut runtime, client); // overflow the 80-column strip
+    }
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    // Start a peek anchored at tab 0 so it stays on the strip regardless of how
-    // wide the auto-generated session and tab names happen to render, then click
-    // that (now inactive) tab.
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(0));
-    let snapshot = runtime.build_snapshot(client).unwrap();
+    // Peek from tab 0 so it is on the strip regardless of how wide the
+    // auto-generated session and tab names happen to render, then click that
+    // (now inactive) tab.
+    peek_to(&mut runtime, &mut viewer, 0);
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
     let first_tab = snapshot
         .session
         .tabs_metadata
         .iter()
         .find(|meta| meta.index == 0)
-        .unwrap()
+        .expect("a first tab")
         .id;
-    let x = find_on_tabline(&runtime, client, 0, |region| {
+    let x = find_on_tabline(&runtime, &viewer, 0, |region| {
         region == HitRegion::Tab { tab_id: first_tab }
     });
 
-    mouse(&mut runtime, client, press(x, 0));
+    mouse(&mut runtime, &mut viewer, press(x, 0));
 
-    let snapshot = runtime.build_snapshot(client).unwrap();
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
     assert_eq!(
         snapshot.client.active_tab, first_tab,
         "clicked tab is active"
     );
-    assert_eq!(
-        snapshot.client.tabline_offset, None,
-        "peek cleared on switch"
+    assert_eq!(offset(&runtime, &viewer), None, "peek cleared on switch");
+}
+
+#[test]
+fn a_tab_switch_by_any_route_reveals_the_new_tab() {
+    // The peek belongs to the tab it was made on, so a switch driven from
+    // anywhere — here a `focus-tab` command, not a click — reveals the new tab.
+    let (mut runtime, client) = runtime();
+    for _ in 0..30 {
+        add_tab(&mut runtime, client);
+    }
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 3);
+
+    let first_tab = runtime
+        .build_snapshot(client)
+        .expect("snapshot")
+        .session
+        .tabs_metadata
+        .iter()
+        .find(|meta| meta.index == 0)
+        .expect("a first tab")
+        .id;
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(first_tab),
+            client: Some(client),
+        }),
     );
+    let _ = runtime.dispatch(envelope);
+
+    assert_eq!(offset(&runtime, &viewer), None, "the peek did not survive");
 }
 
 #[test]
@@ -242,26 +332,23 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
     for _ in 0..30 {
         add_tab(&mut runtime, client); // overflow the 80-column strip
     }
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(0));
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 0);
 
-    let x = find_on_tabline(&runtime, client, 0, |region| {
+    let x = find_on_tabline(&runtime, &viewer, 0, |region| {
         matches!(region, HitRegion::TablineScrollRight { .. })
     });
-    let to = match hit_test(
-        runtime.build_snapshot(client).unwrap().layout(),
-        Point { x, y: 0 },
-    ) {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let chrome = viewer.chrome(snapshot.client.active_tab);
+    let to = match hit_test(snapshot.layout(chrome), Point { x, y: 0 }) {
         HitRegion::TablineScrollRight { to } => to,
         other => panic!("expected a right scroll arrow, got {other:?}"),
     };
 
-    mouse(&mut runtime, client, press(x, 0));
+    mouse(&mut runtime, &mut viewer, press(x, 0));
 
     assert!(to > 0, "the right arrow scrolls toward the end");
-    assert_eq!(offset(&runtime, client), Some(to));
+    assert_eq!(offset(&runtime, &viewer), Some(to));
 }
 
 #[test]
@@ -270,27 +357,24 @@ fn wheel_over_the_tabline_steps_the_offset() {
     for _ in 0..30 {
         add_tab(&mut runtime, client);
     }
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(0));
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 0);
 
-    let x = find_on_tabline(&runtime, client, 0, |region| {
+    let x = find_on_tabline(&runtime, &viewer, 0, |region| {
         matches!(
             region,
             HitRegion::Tab { .. } | HitRegion::TablineScrollRight { .. }
         )
     });
-    let viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(
+    mouse(
         &mut runtime,
-        &viewer,
+        &mut viewer,
         wheel(ScrollDirection::Down, Point { x, y: 0 }),
     );
 
     assert_eq!(
-        offset(&runtime, client),
+        offset(&runtime, &viewer),
         Some(1),
         "wheel down steps one tab"
     );
@@ -302,21 +386,18 @@ fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
     for _ in 0..30 {
         add_tab(&mut runtime, client);
     }
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(2));
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 2);
 
     // Row 10 is pane content, not the tabline.
-    let viewer = viewer_for(&mut runtime, client);
-    wheel_tick(
+    mouse(
         &mut runtime,
-        &viewer,
+        &mut viewer,
         wheel(ScrollDirection::Down, Point { x: 40, y: 10 }),
     );
 
     assert_eq!(
-        offset(&runtime, client),
+        offset(&runtime, &viewer),
         Some(2),
         "offset unchanged off-row"
     );
@@ -328,15 +409,13 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
     for _ in 0..30 {
         add_tab(&mut runtime, client);
     }
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(2));
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 2);
 
     // Buttonless motion over the tabline scrolls nothing and begins no drag.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Motion,
             at: Point { x: 5, y: 0 },
@@ -346,7 +425,7 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
     // A right press over a tab is neither a focus nor a scroll.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Press(MouseButton::Right),
             at: Point { x: 5, y: 0 },
@@ -355,37 +434,22 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
     );
 
     assert_eq!(
-        offset(&runtime, client),
+        offset(&runtime, &viewer),
         Some(2),
         "ignored events do not scroll"
     );
-    assert!(
-        runtime.client_mut(client).unwrap().tabline_drag().is_none(),
+
+    // No drag began: a left drag now scrolls nothing either.
+    mouse(
+        &mut runtime,
+        &mut viewer,
+        drag(5 + TABLINE_DRAG_STEP as u16, 0),
+    );
+    assert_eq!(
+        offset(&runtime, &viewer),
+        Some(2),
         "ignored events begin no drag"
     );
-}
-
-#[test]
-fn pressing_a_bare_tabline_cell_begins_a_drag() {
-    let (mut runtime, client) = runtime();
-    for _ in 0..30 {
-        add_tab(&mut runtime, client);
-    }
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_offset(Some(0));
-
-    let x = find_on_tabline(&runtime, client, 10, |region| region == HitRegion::Tabline);
-    mouse(&mut runtime, client, press(x, 0));
-
-    let drag = runtime
-        .client_mut(client)
-        .unwrap()
-        .tabline_drag()
-        .expect("the press began a drag");
-    assert_eq!(drag.anchor_x, x);
-    assert_eq!(drag.anchor_first_visible, 0);
 }
 
 #[test]
@@ -394,47 +458,40 @@ fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
     for _ in 0..30 {
         add_tab(&mut runtime, client);
     }
-    // Arm a drag anchored at column 40 with first-visible 2, as a press would.
-    runtime
-        .client_mut(client)
-        .unwrap()
-        .set_tabline_drag(Some(TablineDragState {
-            anchor_x: 40,
-            anchor_first_visible: 2,
-        }));
+    let mut viewer = viewer_for(&mut runtime, client);
+    peek_to(&mut runtime, &mut viewer, 2);
+
+    // Press a bare tabline cell far enough along the row that a two-step drag
+    // to its left stays on screen.
+    let anchor_x = find_on_tabline(&runtime, &viewer, 2 * TABLINE_DRAG_STEP as u16, |region| {
+        region == HitRegion::Tabline
+    });
+    mouse(&mut runtime, &mut viewer, press(anchor_x, 0));
 
     // Drag left by two steps' worth of cells: scroll two tabs toward the end.
-    let x = 40 - 2 * TABLINE_DRAG_STEP as u16;
-    mouse(
-        &mut runtime,
-        client,
-        MouseInput {
-            kind: MouseKind::Drag(MouseButton::Left),
-            at: Point { x, y: 0 },
-            mods: ModFlags::NONE,
-        },
+    let x = anchor_x - 2 * TABLINE_DRAG_STEP as u16;
+    mouse(&mut runtime, &mut viewer, drag(x, 0));
+    assert_eq!(
+        offset(&runtime, &viewer),
+        Some(4),
+        "two steps past anchor 2"
     );
-    assert_eq!(offset(&runtime, client), Some(4), "two steps past anchor 2");
 
     // Release ends the drag, leaving the scrolled offset.
-    mouse(
-        &mut runtime,
-        client,
-        MouseInput {
-            kind: MouseKind::Release(MouseButton::Left),
-            at: Point { x, y: 0 },
-            mods: ModFlags::NONE,
-        },
-    );
-    assert!(
-        runtime.client_mut(client).unwrap().tabline_drag().is_none(),
-        "release ended the drag"
-    );
+    mouse(&mut runtime, &mut viewer, release());
     assert_eq!(
-        offset(&runtime, client),
+        offset(&runtime, &viewer),
         Some(4),
         "offset stays after release"
     );
+
+    // And a later drag with no press behind it scrolls nothing.
+    mouse(
+        &mut runtime,
+        &mut viewer,
+        drag(anchor_x + 2 * TABLINE_DRAG_STEP as u16, 0),
+    );
+    assert_eq!(offset(&runtime, &viewer), Some(4), "release ended the drag");
 }
 
 fn drag(x: u16, y: u16) -> MouseInput {
@@ -491,7 +548,8 @@ fn find_vertical_border(runtime: &Server, client: ClientId) -> (Point, PaneId, D
     let center = viewport.cols / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for x in 0..viewport.cols {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        if let HitRegion::PaneBorder { pane_id, side } =
+            hit_test(snapshot.layout(ViewerChrome::default()), Point { x, y })
         {
             if matches!(side, Direction::Left | Direction::Right)
                 && best.is_none_or(|(bx, ..)| center.abs_diff(x) < center.abs_diff(bx))
@@ -535,52 +593,18 @@ fn outward_edge_x(side: Direction, viewport_cols: u16) -> u16 {
 }
 
 #[test]
-fn resize_delta_grows_toward_each_border_and_ignores_the_other_axis() {
-    let from = Point { x: 10, y: 10 };
-    // Right border: pointer rightward grows, leftward shrinks.
-    assert_eq!(
-        resize_delta(Direction::Right, from, Point { x: 13, y: 10 }),
-        3
-    );
-    assert_eq!(
-        resize_delta(Direction::Right, from, Point { x: 8, y: 10 }),
-        -2
-    );
-    // Left border: pointer leftward grows.
-    assert_eq!(
-        resize_delta(Direction::Left, from, Point { x: 7, y: 10 }),
-        3
-    );
-    assert_eq!(
-        resize_delta(Direction::Left, from, Point { x: 12, y: 10 }),
-        -2
-    );
-    // Down border: pointer downward grows.
-    assert_eq!(
-        resize_delta(Direction::Down, from, Point { x: 10, y: 14 }),
-        4
-    );
-    // Up border: pointer upward grows.
-    assert_eq!(resize_delta(Direction::Up, from, Point { x: 10, y: 6 }), 4);
-    // A left/right border ignores vertical motion.
-    assert_eq!(
-        resize_delta(Direction::Right, from, Point { x: 10, y: 20 }),
-        0
-    );
-}
-
-#[test]
 fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_x(side, cell.x, 3), cell.y),
     );
 
@@ -594,17 +618,18 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
 #[test]
 fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
 
     // Drag three cells inward to shrink the pane.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(inward_x(side, cell.x, 3), cell.y),
     );
     assert_eq!(
@@ -617,7 +642,7 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
     // more: the anchor followed the pointer, so it is not a sudden jump.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(inward_x(side, cell.x, 4), cell.y),
     );
     assert_eq!(
@@ -630,31 +655,24 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
 #[test]
 fn a_release_ends_the_resize_drag_so_a_later_drag_does_nothing() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_x(side, cell.x, 2), cell.y),
     );
     let after_drag = pane_cols(&runtime, client, pane);
 
-    mouse(&mut runtime, client, release());
-    assert!(
-        runtime
-            .client_mut(client)
-            .unwrap()
-            .pending_resize_drag()
-            .is_none(),
-        "release cleared the resize drag"
-    );
+    mouse(&mut runtime, &mut viewer, release());
 
     // With no resize drag in progress, a stray drag resizes nothing.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_x(side, cell.x, 6), cell.y),
     );
     assert_eq!(
@@ -667,20 +685,21 @@ fn a_release_ends_the_resize_drag_so_a_later_drag_does_nothing() {
 #[test]
 fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
     let viewport_cols = runtime.build_snapshot(client).unwrap().client.viewport.cols;
 
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
 
     // One big jump past the wall: the drag is applied a cell at a time, so it
     // grows the pane as far as the neighbor can donate instead of refusing the
     // whole move.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_edge_x(side, viewport_cols), cell.y),
     );
     let grown = pane_cols(&runtime, client, pane);
@@ -693,7 +712,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
     // anchor sits at the wall and nothing more moves.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_edge_x(side, viewport_cols), cell.y),
     );
     assert_eq!(
@@ -704,47 +723,11 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
 
     // Reverse straight back to the original border cell: the anchor held at the
     // wall, so the pane shrinks back with no dead zone.
-    mouse(&mut runtime, client, drag(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, drag(cell.x, cell.y));
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before,
         "a reverse drag returns the border to where it started, no lag"
-    );
-}
-
-#[test]
-fn advance_toward_moves_the_anchor_toward_the_pointer_and_saturates() {
-    let from = Point { x: 3, y: 3 };
-    // Steps toward the pointer's coordinate on the border's own axis.
-    assert_eq!(
-        advance_toward(Direction::Right, from, Point { x: 9, y: 3 }, 2),
-        Point { x: 5, y: 3 }
-    );
-    assert_eq!(
-        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 2),
-        Point { x: 1, y: 3 }
-    );
-    assert_eq!(
-        advance_toward(Direction::Down, from, Point { x: 3, y: 9 }, 2),
-        Point { x: 3, y: 5 }
-    );
-    assert_eq!(
-        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 2),
-        Point { x: 3, y: 1 }
-    );
-    // A left/right border reads only x; the pointer's y is ignored.
-    assert_eq!(
-        advance_toward(Direction::Right, from, Point { x: 9, y: 99 }, 2),
-        Point { x: 5, y: 3 }
-    );
-    // Saturating: an anchor near an edge cannot wrap below zero.
-    assert_eq!(
-        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 10),
-        Point { x: 0, y: 3 }
-    );
-    assert_eq!(
-        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 10),
-        Point { x: 3, y: 0 }
     );
 }
 
@@ -788,7 +771,8 @@ fn find_horizontal_border(runtime: &Server, client: ClientId) -> (Point, PaneId,
     let center = viewport.rows / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for y in 1..viewport.rows - 1 {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        if let HitRegion::PaneBorder { pane_id, side } =
+            hit_test(snapshot.layout(ViewerChrome::default()), Point { x, y })
         {
             if matches!(side, Direction::Up | Direction::Down)
                 && best.is_none_or(|(by, ..)| center.abs_diff(y) < center.abs_diff(by))
@@ -819,7 +803,8 @@ fn find_outer_vertical_frame(runtime: &Server, client: ClientId) -> (Point, Pane
     let y = viewport.rows / 2;
     let mut best: Option<(u16, PaneId, Direction)> = None;
     for x in 0..viewport.cols {
-        if let HitRegion::PaneBorder { pane_id, side } = hit_test(snapshot.layout(), Point { x, y })
+        if let HitRegion::PaneBorder { pane_id, side } =
+            hit_test(snapshot.layout(ViewerChrome::default()), Point { x, y })
         {
             if matches!(side, Direction::Left | Direction::Right)
                 && best.is_none_or(|(bx, ..)| x > bx)
@@ -835,15 +820,16 @@ fn find_outer_vertical_frame(runtime: &Server, client: ClientId) -> (Point, Pane
 #[test]
 fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused_vertical(&mut runtime, client);
 
     let (cell, pane, side) = find_horizontal_border(&runtime, client);
     let before = pane_rows(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(cell.x, outward_y(side, cell.y, 3)),
     );
 
@@ -857,6 +843,7 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
 #[test]
 fn grabbing_the_outer_frame_starts_no_resize() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_outer_vertical_frame(&runtime, client);
@@ -869,18 +856,10 @@ fn grabbing_the_outer_frame_starts_no_resize() {
 
     // The outer frame sits at the tab edge and cannot move, so grabbing it starts
     // no resize drag.
-    mouse(&mut runtime, client, press(cell.x, cell.y));
-    assert!(
-        runtime
-            .client_mut(client)
-            .unwrap()
-            .pending_resize_drag()
-            .is_none(),
-        "the outer frame is not draggable, so no resize drag begins"
-    );
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
 
     // A drag inward after that changes nothing either.
-    mouse(&mut runtime, client, drag(cell.x - 3, cell.y));
+    mouse(&mut runtime, &mut viewer, drag(cell.x - 3, cell.y));
     assert_eq!(
         pane_cols(&runtime, client, pane),
         before,
@@ -891,6 +870,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
 #[test]
 fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
     let (_, pane, _) = find_vertical_border(&runtime, client);
     let tiled_cols = pane_cols(&runtime, client, pane);
@@ -910,17 +890,9 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     // visible under a zoom, so no resize begins, the zoom stands, and the
     // hidden tiled layout is untouched.
     let (cell, _, _) = find_vertical_border(&runtime, client);
-    mouse(&mut runtime, client, press(cell.x, cell.y));
-    assert!(
-        runtime
-            .client_mut(client)
-            .unwrap()
-            .pending_resize_drag()
-            .is_none(),
-        "a zoomed view has no draggable border, so no resize drag begins"
-    );
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
 
-    mouse(&mut runtime, client, drag(cell.x - 3, cell.y));
+    mouse(&mut runtime, &mut viewer, drag(cell.x - 3, cell.y));
     assert!(
         matches!(
             runtime.client_mut(client).unwrap().layout_mode(active_tab),
@@ -947,12 +919,13 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
 #[test]
 fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     // The program turns on normal tracking with SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, press(at.x, at.y));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -964,10 +937,11 @@ fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
 #[test]
 fn a_click_forwards_nothing_when_the_program_wants_no_mouse() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, press(at.x, at.y));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -979,16 +953,17 @@ fn a_click_forwards_nothing_when_the_program_wants_no_mouse() {
 #[test]
 fn a_press_drag_release_gesture_forwards_each_event() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     // Button-event tracking reports drags; SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(at.x, at.y));
-    mouse(&mut runtime, client, drag(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, press(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, drag(at.x, at.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
             at,
@@ -1015,13 +990,14 @@ fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_rou
     // This one moves three columns across and one row down, where a swap reads
     // `4;2` as `2;4`.
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     // Button-event tracking reports drags; SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
     let (start, col, row) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(start.x, start.y));
-    mouse(&mut runtime, client, drag(start.x + 3, start.y + 1));
+    mouse(&mut runtime, &mut viewer, press(start.x, start.y));
+    mouse(&mut runtime, &mut viewer, drag(start.x + 3, start.y + 1));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -1036,6 +1012,7 @@ fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_rou
 #[test]
 fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     // Button-event tracking would report a bare drag; SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
@@ -1053,17 +1030,17 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
 
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         gesture(MouseKind::Press(MouseButton::Left)),
     );
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         gesture(MouseKind::Drag(MouseButton::Left)),
     );
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         gesture(MouseKind::Release(MouseButton::Left)),
     );
 
@@ -1077,6 +1054,7 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
 #[test]
 fn a_bare_move_forwards_only_in_any_motion_mode() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     let (at, col, row) = a_content_cell(&runtime, client, pane);
     let motion = MouseInput {
@@ -1088,7 +1066,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
     // Normal tracking does not report motion: the move forwards nothing (and the
     // frame is never rebuilt to check).
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
-    mouse(&mut runtime, client, motion);
+    mouse(&mut runtime, &mut viewer, motion);
     assert_eq!(
         fake.writes(pane).expect("writes"),
         Vec::<Vec<u8>>::new(),
@@ -1097,7 +1075,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
 
     // Any-motion tracking reports it: no-button 3 + motion bit 32 = 35.
     runtime.handle_pty_output(pane, b"\x1b[?1003h");
-    mouse(&mut runtime, client, motion);
+    mouse(&mut runtime, &mut viewer, motion);
     assert_eq!(
         fake.writes(pane).expect("writes"),
         vec![format!("\x1b[<35;{col};{row}M").into_bytes()],
@@ -1108,6 +1086,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
 #[test]
 fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
@@ -1115,7 +1094,7 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     // A right press captures the gesture (button 2).
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Press(MouseButton::Right),
             at,
@@ -1126,7 +1105,7 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     // still reach the program as a right release, matching the press.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
             at,
@@ -1147,16 +1126,17 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
 #[test]
 fn a_drag_with_no_captured_press_is_dropped() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
     // A drag arrives without a press to capture the gesture (a release with no
     // matching press is the orphan-release case) — nothing is forwarded.
-    mouse(&mut runtime, client, drag(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, drag(at.x, at.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Release(MouseButton::Left),
             at,
@@ -1174,6 +1154,7 @@ fn a_drag_with_no_captured_press_is_dropped() {
 #[test]
 fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
@@ -1181,8 +1162,8 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
     // Press inside the pane to capture the gesture, then drag far past its top-
     // left corner (0, 0 is the tabline row, outside the pane); the captured drag
     // clamps to the pane's first cell.
-    mouse(&mut runtime, client, press(at.x, at.y));
-    mouse(&mut runtime, client, drag(0, 0));
+    mouse(&mut runtime, &mut viewer, press(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, drag(0, 0));
 
     assert_eq!(
         fake.writes(pane).expect("writes").last().expect("a drag"),
@@ -1194,16 +1175,29 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
 #[test]
 fn border_resize_off_leaves_a_border_press_inert() {
     let (mut runtime, client) = runtime();
-    runtime.client_config.mouse.border_resize = false;
+    // The setting is the viewer's own, so it is the viewer that must be built
+    // on it.
+    let mut viewer = viewer_for(&mut runtime, client);
+    viewer.load_startup_config(
+        Some(PartialKoshiConfig {
+            mouse: Some(PartialMouseConfig {
+                border_resize: Some(false),
+                ..PartialMouseConfig::default()
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
     split_focused(&mut runtime, client);
 
     let (cell, pane, side) = find_vertical_border(&runtime, client);
     let before = pane_cols(&runtime, client, pane);
 
-    mouse(&mut runtime, client, press(cell.x, cell.y));
+    mouse(&mut runtime, &mut viewer, press(cell.x, cell.y));
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         drag(outward_x(side, cell.x, 3), cell.y),
     );
 
@@ -1217,6 +1211,7 @@ fn border_resize_off_leaves_a_border_press_inert() {
 #[test]
 fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
     let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
     split_focused(&mut runtime, client);
     let focused = runtime.typed_pane(client).expect("a focused pane");
 
@@ -1234,7 +1229,7 @@ fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
     runtime.handle_pty_output(other, b"\x1b[?1000h\x1b[?1006h");
     let (at, _, _) = a_content_cell(&runtime, client, other);
 
-    mouse(&mut runtime, client, press(at.x, at.y));
+    mouse(&mut runtime, &mut viewer, press(at.x, at.y));
 
     assert_eq!(
         runtime.typed_pane(client),
@@ -1284,13 +1279,10 @@ fn has_highlight(runtime: &Server, client: ClientId, pane: PaneId) -> bool {
         .is_some()
 }
 
-/// The pane the client's pointer is marked as hovering over.
-fn hovered(runtime: &Server, client: ClientId) -> Option<PaneId> {
-    runtime
-        .build_snapshot(client)
-        .expect("snapshot")
-        .client
-        .hovered_pane
+/// The pane the viewer's pointer is marked as hovering over.
+fn hovered(runtime: &Server, viewer: &ViewerClient) -> Option<PaneId> {
+    let snapshot = runtime.build_snapshot(viewer.id()).expect("snapshot");
+    viewer.chrome(snapshot.client.active_tab).hovered_pane
 }
 
 /// Fill a pane's scrollback with `lines` lines by printing that many newlines,
@@ -1319,14 +1311,14 @@ fn a_wheel_over_a_plain_pane_scrolls_its_scrollback() {
     let pane = only_pane(&runtime);
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     // scroll_lines defaults to 3, so one wheel up moves the view three lines.
     assert_eq!(scroll_offset(&runtime, client, pane), 3, "wheel up scrolls");
     assert_eq!(
-        offset(&runtime, client),
+        offset(&runtime, &viewer),
         None,
         "the pane wheel leaves the tab strip alone"
     );
@@ -1339,16 +1331,16 @@ fn a_wheel_down_returns_the_view_toward_live() {
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    let viewer = viewer_for(&mut runtime, client);
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    let mut viewer = viewer_for(&mut runtime, client);
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
     assert_eq!(
         scroll_offset(&runtime, client, pane),
         6,
         "two ups, six lines"
     );
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Down, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Down, at));
     assert_eq!(
         scroll_offset(&runtime, client, pane),
         3,
@@ -1363,9 +1355,9 @@ fn a_wheel_with_a_highlight_up_scrolls_and_keeps_the_highlight() {
     feed_scrollback(&mut runtime, pane, 40);
     set_highlight(&mut runtime, client, pane);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1386,9 +1378,9 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
     // The program turns on normal tracking with SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     // Wheel up is SGR button 64; the program gets it, and koshi does not scroll.
     assert_eq!(
@@ -1410,16 +1402,16 @@ fn a_wheel_on_the_alternate_screen_with_alt_scroll_sends_arrow_keys() {
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
     assert_eq!(
         fake.writes(pane).expect("writes"),
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Down, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Down, at));
     assert_eq!(
         fake.writes(pane).expect("writes").last().expect("a write"),
         &b"\x1b[B\x1b[B\x1b[B".to_vec(),
@@ -1434,9 +1426,9 @@ fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
     // Alternate screen, alternate-scroll on, application cursor keys on.
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h\x1b[?1h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -1453,9 +1445,9 @@ fn the_ignore_wheel_config_does_nothing_over_a_plain_pane() {
     let (at, _, _) = a_content_cell(&runtime, client, pane);
     // The setting is the viewer's own, so it is the viewer that must be built
     // on it.
-    let viewer = viewer_with_wheel(&mut runtime, client, WheelScroll::Ignore);
+    let mut viewer = viewer_with_wheel(&mut runtime, client, WheelScroll::Ignore);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1476,9 +1468,9 @@ fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Left, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Left, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1490,12 +1482,13 @@ fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
 #[test]
 fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
     let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
     let pane = only_pane(&runtime);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Motion,
             at,
@@ -1503,7 +1496,7 @@ fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
         },
     );
     assert_eq!(
-        hovered(&runtime, client),
+        hovered(&runtime, &viewer),
         Some(pane),
         "a move over pane content marks it hovered"
     );
@@ -1511,7 +1504,7 @@ fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
     // Row 0 is the tabline, not a pane.
     mouse(
         &mut runtime,
-        client,
+        &mut viewer,
         MouseInput {
             kind: MouseKind::Motion,
             at: Point { x: 0, y: 0 },
@@ -1519,7 +1512,7 @@ fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
         },
     );
     assert_eq!(
-        hovered(&runtime, client),
+        hovered(&runtime, &viewer),
         None,
         "a move onto chrome clears the hover"
     );
@@ -1542,9 +1535,9 @@ fn a_wheel_scrolls_the_pane_under_the_pointer_not_the_focused_one() {
 
     feed_scrollback(&mut runtime, other, 40);
     let (at, _, _) = a_content_cell(&runtime, client, other);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, other),
@@ -1568,8 +1561,8 @@ fn a_wheel_over_a_pane_border_scrolls_the_focused_pane() {
     // The divider between the two panes is chrome, not pane content: a wheel
     // there has no pane under the pointer, so it falls to the focused pane.
     let (cell, _, _) = find_vertical_border(&runtime, client);
-    let viewer = viewer_for(&mut runtime, client);
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, cell));
+    let mut viewer = viewer_for(&mut runtime, client);
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, cell));
 
     assert_eq!(
         scroll_offset(&runtime, client, focused),
@@ -1596,9 +1589,9 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
     // The unfocused pane's program wants the mouse: normal tracking, SGR.
     runtime.handle_pty_output(other, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, other);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     // Wheel up is SGR button 64; it reaches the pane under the pointer even
     // though that pane is unfocused, and the focused pane gets nothing.
@@ -1625,9 +1618,9 @@ fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     set_highlight(&mut runtime, client, pane);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1650,7 +1643,7 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
     let tick = wheel(ScrollDirection::Up, at);
     let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
     let decision = viewer
@@ -1664,7 +1657,7 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
 
     // The program turns mouse reporting off between that frame and the write.
     runtime.handle_pty_output(pane, b"\x1b[?1000l");
-    runtime.forward_wheel_to_pane(client, pane, tick);
+    runtime.forward_mouse_to_pane(client, pane, tick);
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -1681,7 +1674,7 @@ fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written()
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
     let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
     let decision = viewer
         .handle_mouse_wheel(wheel(ScrollDirection::Up, at), &frame)
@@ -1715,7 +1708,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     let pane = only_pane(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
     let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
     let decision = viewer
         .handle_mouse_wheel(wheel(ScrollDirection::Up, at), &frame)
@@ -1742,21 +1735,21 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
 }
 
 #[test]
-fn the_wheel_write_doors_do_nothing_for_a_pane_that_is_gone() {
+fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
     // The viewer names a pane off a frame it painted, so it can name one the
     // session has since released. Every door must answer that with nothing.
     let (mut runtime, fake, client) = runtime_with_fake();
     let live = only_pane(&runtime);
     let gone = PaneId::new();
 
-    runtime.wheel_scroll_pane(client, gone, true, 3);
-    runtime.forward_wheel_to_pane(
+    runtime.scroll_pane_view(client, gone, true, 3);
+    runtime.forward_mouse_to_pane(
         client,
         gone,
         wheel(ScrollDirection::Up, Point { x: 5, y: 5 }),
     );
     runtime.write_alt_scroll_arrows(gone, true, 3);
-    runtime.set_hovered_pane(client, Some(gone));
+    let applied = runtime.drag_resize(client, gone, Direction::Right, 1, 3);
 
     assert!(
         fake.writes(gone).is_err(),
@@ -1772,11 +1765,7 @@ fn the_wheel_write_doors_do_nothing_for_a_pane_that_is_gone() {
         0,
         "no view was stored for a gone pane"
     );
-    assert_eq!(
-        hovered(&runtime, client),
-        Some(gone),
-        "the hover is recorded as given; the renderer matches it against no slot"
-    );
+    assert_eq!(applied, 0, "no border of a gone pane moved");
 }
 
 #[test]
@@ -1804,9 +1793,9 @@ fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
     // a full-screen app that ignores the wheel.
     runtime.handle_pty_output(pane, b"\x1b[?1049h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
-    let viewer = viewer_for(&mut runtime, client);
+    let mut viewer = viewer_for(&mut runtime, client);
 
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    mouse(&mut runtime, &mut viewer, wheel(ScrollDirection::Up, at));
 
     // The alternate screen keeps no scrollback, so the wheel stores no offset —
     // otherwise the shell would be scrolled back when the app exits.
@@ -1826,7 +1815,7 @@ fn a_chrome_cell(runtime: &Server, client: ClientId) -> Point {
         for x in 0..viewport.cols {
             let at = Point { x, y };
             if matches!(
-                hit_test(snapshot.layout(), at),
+                hit_test(snapshot.layout(ViewerChrome::default()), at),
                 HitRegion::PaneBorder { .. } | HitRegion::Statusline | HitRegion::None
             ) {
                 return at;
@@ -1846,8 +1835,12 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
     // A wheel over chrome (no pane under the pointer) goes to the focused pane,
     // clamped to its edge, instead of being dropped.
     let chrome = a_chrome_cell(&runtime, client);
-    let viewer = viewer_for(&mut runtime, client);
-    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, chrome));
+    let mut viewer = viewer_for(&mut runtime, client);
+    mouse(
+        &mut runtime,
+        &mut viewer,
+        wheel(ScrollDirection::Up, chrome),
+    );
 
     let writes = fake.writes(pane).expect("writes");
     assert_eq!(
@@ -1859,5 +1852,109 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
         writes[0].starts_with(b"\x1b[<64;"),
         "an SGR wheel-up report (button 64): {:?}",
         writes[0]
+    );
+}
+
+#[test]
+fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
+    // The viewer answers from the frame it last painted, which can be one event
+    // out of date. Here the program turns mouse reporting off after that frame
+    // was painted and before the press is applied. The session reads the live
+    // level at the moment of the write, so the program that stopped asking gets
+    // nothing.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let mut viewer = viewer_for(&mut runtime, client);
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+
+    let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
+    let actions = viewer.handle_mouse(press(at.x, at.y), &frame, far_apart());
+    assert_eq!(
+        actions,
+        vec![MouseAction::Forward {
+            pane,
+            mouse: press(at.x, at.y),
+        }],
+        "the frame said the program wanted the mouse"
+    );
+
+    // The program turns reporting off; no frame is painted in between.
+    runtime.handle_pty_output(pane, b"\x1b[?1000l");
+    apply(&mut runtime, &mut viewer, &frame, actions);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "the live level, not the painted one, decides what is written"
+    );
+}
+
+/// Stack a second pane onto the focused one, so the tab holds one stack whose
+/// members share a rect: the active member shows its content and the other
+/// collapses to a one-row header strip.
+fn stack_onto_focused(runtime: &mut Server, client: ClientId) {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::NewPane(NewPaneArgs {
+            stacked: true,
+            ..NewPaneArgs::default()
+        }),
+    );
+    let _ = runtime.dispatch(envelope);
+}
+
+/// A border cell of a drawn pane that sits right against a collapsed stack
+/// member's header strip, with the pane and the side it is on. Panics if the
+/// frame has no such cell.
+fn find_border_against_a_header(runtime: &Server, client: ClientId) -> (Point, PaneId) {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let viewport = snapshot.client.viewport;
+    let region = |at: Point| hit_test(snapshot.layout(ViewerChrome::default()), at);
+    let x = viewport.cols / 2;
+    for y in 1..viewport.rows - 1 {
+        let HitRegion::PaneBorder { pane_id, side } = region(Point { x, y }) else {
+            continue;
+        };
+        let touching = match side {
+            Direction::Up if y > 0 => region(Point { x, y: y - 1 }),
+            Direction::Down => region(Point { x, y: y + 1 }),
+            _ => continue,
+        };
+        if matches!(touching, HitRegion::StackHeader { .. }) {
+            return (Point { x, y }, pane_id);
+        }
+    }
+    panic!("no pane border against a stack header");
+}
+
+#[test]
+fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
+    // A collapsed stack member is drawn as a one-row header strip with no
+    // content area, so there is no pane box on the far side of that boundary to
+    // resize against. Grabbing it must begin no drag — and a stack shares one
+    // rect anyway, so there is nothing a border move could redistribute.
+    let (mut runtime, client) = runtime();
+    let mut viewer = viewer_for(&mut runtime, client);
+    stack_onto_focused(&mut runtime, client);
+
+    let (cell, _) = find_border_against_a_header(&runtime, client);
+    let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
+
+    let pressed = viewer.handle_mouse(press(cell.x, cell.y), &frame, far_apart());
+    assert_eq!(
+        pressed,
+        Vec::new(),
+        "the header strip is no neighbor to resize against, so the press \
+         begins no drag"
+    );
+
+    let dragged = viewer.handle_mouse(drag(cell.x, cell.y + 3), &frame, far_apart());
+    assert_eq!(
+        dragged,
+        Vec::new(),
+        "with no drag under way the pointer asks for no border move"
     );
 }

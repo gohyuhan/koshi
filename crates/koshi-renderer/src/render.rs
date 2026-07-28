@@ -38,7 +38,7 @@ use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineSty
 
 use crate::snapshot::{
     ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, RenderSnapshot,
-    SelectionSpans,
+    SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
@@ -54,14 +54,16 @@ use crate::theme::Theme;
 /// returns, skipping the panes and both chrome rows. Does nothing for a
 /// zero-size area.
 ///
-/// `theme`, `hints`, and `pending` come from the viewer: the colors it paints
-/// koshi's chrome in, the hint-bar data for the mode it is in, and the
-/// multi-chord sequence it has open.
+/// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
+/// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
+/// multi-chord sequence it has open, and the pane its pointer is over together
+/// with where its tab strip is scrolled.
 pub fn render_frame(
     snapshot: &RenderSnapshot,
     theme: &Theme,
     hints: &KeymapHints,
     pending: Option<&KeySequence>,
+    viewer: ViewerChrome,
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
@@ -97,7 +99,7 @@ pub fn render_frame(
         y: content.y,
     };
 
-    draw_panes(snapshot, theme, offset, buf);
+    draw_panes(snapshot, theme, viewer.hovered_pane, offset, buf);
     draw_pane_contents(snapshot, offset, buf);
     draw_stack_headers(snapshot, theme, offset, buf);
 
@@ -111,7 +113,7 @@ pub fn render_frame(
         width: area.width,
         height: 1,
     };
-    draw_tabline(snapshot.layout(), theme, tabline, buf);
+    draw_tabline(snapshot.layout(viewer), theme, tabline, buf);
 
     if area.height >= 2 {
         let hint_bar = RatatuiRect {
@@ -226,11 +228,17 @@ fn find_pane(snapshot: &RenderSnapshot, id: PaneId) -> Option<&PaneSnapshot> {
 /// Draw a bordered box for every visible pane in the active tab, coloring the
 /// focused pane's border (and an unfocused hovered pane's), writing the pane's
 /// resolved title into its top border line, and — when the pane is scrolled
-/// back — its scroll position into its bottom border. `offset` shifts each pane
-/// into the centered content rect.
-fn draw_panes(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, buf: &mut Buffer) {
+/// back — its scroll position into its bottom border. `hovered` is the pane the
+/// viewer's pointer is over; `offset` shifts each pane into the centered
+/// content rect.
+fn draw_panes(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    hovered: Option<PaneId>,
+    offset: Point,
+    buf: &mut Buffer,
+) {
     let focused = snapshot.client.focused_pane;
-    let hovered = snapshot.client.hovered_pane;
     for slot in &snapshot.session.active_tab.layout_solved {
         if !slot.visible {
             continue;

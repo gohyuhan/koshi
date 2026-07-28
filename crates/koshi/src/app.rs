@@ -8,6 +8,7 @@
 //! to the server, and repaints when the render scheduler says a frame is due.
 //! Ctrl-Q, or the shell exiting, ends the loop.
 
+use std::collections::VecDeque;
 use std::io;
 use std::ops::ControlFlow;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -33,16 +34,18 @@ use ratatui::Terminal;
 use koshi_client::input::KeyOutcome;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client;
+use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::ids::{ClientId, CommandId, SessionId};
 use koshi_core::key::KeySequence;
-use koshi_core::mouse::MouseKind;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::{CursorStyle, KeymapHints, MouseFrame, RenderSnapshot};
+use koshi_renderer::snapshot::{
+    CursorStyle, KeymapHints, MouseFrame, RenderSnapshot, ViewerChrome,
+};
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::ipc_server::IpcServer;
@@ -67,6 +70,8 @@ struct SnapshotWidget<'a> {
     hints: &'a KeymapHints,
     /// The multi-chord sequence this viewer has open.
     pending: Option<&'a KeySequence>,
+    /// The pane this viewer's pointer is over, and where its tab strip sits.
+    viewer: ViewerChrome,
 }
 
 impl Widget for SnapshotWidget<'_> {
@@ -76,6 +81,7 @@ impl Widget for SnapshotWidget<'_> {
             self.theme,
             self.hints,
             self.pending,
+            self.viewer,
             area,
             buf,
         );
@@ -403,7 +409,7 @@ fn run_loop<B: Backend>(
         let now = Instant::now();
         let next = earliest(
             earliest(server.next_render_wakeup(now), client.next_key_wakeup(now)),
-            server.next_selection_scroll_wakeup(now),
+            client.next_mouse_wakeup(now),
         );
         let event = match next {
             Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
@@ -447,7 +453,12 @@ fn run_loop<B: Backend>(
             server.handle_bound_action(client.id(), bound);
             server.invalidate_status();
         }
-        server.expire_selection_scrolls(Instant::now());
+        // A selection drag held past a pane's edge keeps scrolling while the
+        // pointer sits still, so the clock drives it.
+        if let Some(frame) = last_frame.as_ref() {
+            let actions = client.expire_mouse_scroll(Instant::now(), frame);
+            apply_mouse_actions(server, client, frame, actions);
+        }
         if server.poll_render(Instant::now()) {
             render(
                 terminal,
@@ -466,8 +477,9 @@ fn run_loop<B: Backend>(
 }
 
 /// Hand one inbox event to the server, after the client has taken the parts
-/// that are its own: a key it must resolve, a wheel tick it must route, and its
-/// terminal's new size. `last_frame` is the frame the viewer is looking at, or
+/// that are its own: a key it must resolve, a wheel tick it must route, its
+/// terminal's new size, and the end of a selection gesture its own paste key
+/// finished. `last_frame` is the frame the viewer is looking at, or
 /// `None` before the first paint. Returns [`ControlFlow::Break`] when the event
 /// is a quit request, so the loop stops.
 fn apply_event(
@@ -484,7 +496,12 @@ fn apply_event(
         if client_id == client.id() {
             match client.resolve_key(chord, Instant::now()) {
                 KeyOutcome::Fire(bound) => server.handle_bound_action(client_id, bound),
-                KeyOutcome::PassThrough(chord) => server.handle_key_press(client_id, chord),
+                KeyOutcome::PassThrough(chord) => {
+                    // The key belongs to the program in the pane, so a selection
+                    // gesture over it is over.
+                    client.end_mouse_selection();
+                    server.handle_key_press(client_id, chord);
+                }
                 // Held or dropped: nothing reaches the session, but the hint
                 // bar and mode tag are drawn from viewer state, so the frame
                 // is stale either way.
@@ -494,16 +511,22 @@ fn apply_event(
             return ControlFlow::Continue(());
         }
     }
-    // A wheel tick belongs to the viewer too: the frame it painted says which
-    // pane the pointer is over and what that pane's program asked for, and its
-    // own `mouse` settings say what a notch does. Every other mouse event still
-    // goes to the session.
+    // A mouse event belongs to the viewer too: the frame it painted says which
+    // pane the pointer is over, what that pane's program asked for, and which
+    // gesture is under way, and its own `mouse` and `copy` settings say what
+    // each of those means. The session only runs what comes back.
     if let RuntimeEvent::MouseInput { client_id, mouse } = event {
-        if client_id == client.id() && matches!(mouse.kind, MouseKind::Scroll(_)) {
-            let decided = last_frame.and_then(|frame| client.handle_mouse_wheel(mouse, frame));
-            if let Some(decision) = decided {
-                server.set_hovered_pane(client_id, decision.hovered);
-                apply_mouse_action(server, client_id, decision.action);
+        if client_id == client.id() {
+            if let Some(frame) = last_frame {
+                let tab = frame.client.active_tab;
+                let before = client.chrome(tab);
+                let actions = client.handle_mouse(mouse, frame, Instant::now());
+                apply_mouse_actions(server, client, frame, actions);
+                // The hovered pane and the tab strip's position are painted from
+                // viewer state, which no session mutation marks stale.
+                if client.chrome(tab) != before {
+                    server.invalidate_status();
+                }
             }
             return ControlFlow::Continue(());
         }
@@ -513,26 +536,60 @@ fn apply_event(
             client.set_viewport(*size);
         }
     }
+    // The user pressed their terminal's paste key, so the text is theirs and it
+    // goes to the program in the pane: a selection gesture over it is over. Only
+    // this viewer's own paste ends it — a write arriving from anywhere else does
+    // not touch the gesture.
+    if let RuntimeEvent::HostPaste { client_id, .. } = &event {
+        if *client_id == client.id() {
+            client.end_mouse_selection();
+        }
+    }
     server.handle_runtime_event(event)
 }
 
-/// Ask the session to run what the viewer decided a wheel tick means. `None` is
-/// a tick that does nothing.
-fn apply_mouse_action(server: &mut Server, client_id: ClientId, action: Option<MouseAction>) {
-    match action {
-        Some(MouseAction::Scroll { pane, up, lines }) => {
-            server.wheel_scroll_pane(client_id, pane, up, lines);
+/// Ask the session to run everything the viewer decided one mouse event means,
+/// in the order it decided them. `frame` is the frame the viewer decided
+/// against, which a scroll's answer is re-measured over.
+fn apply_mouse_actions(
+    server: &mut Server,
+    client: &mut Client,
+    frame: &MouseFrame,
+    actions: Vec<MouseAction>,
+) {
+    let client_id = client.id();
+    let mut queue: VecDeque<MouseAction> = actions.into();
+    while let Some(action) = queue.pop_front() {
+        match action {
+            MouseAction::Scroll { pane, up, lines } => {
+                let top = server.scroll_pane_view(client_id, pane, up, lines);
+                queue.extend(client.note_scroll_applied(pane, top, frame));
+            }
+            MouseAction::Forward { pane, mouse } => {
+                server.forward_mouse_to_pane(client_id, pane, mouse);
+            }
+            MouseAction::AltScrollArrows { pane, up, count } => {
+                server.write_alt_scroll_arrows(pane, up, count);
+            }
+            MouseAction::Resize {
+                pane,
+                side,
+                step,
+                count,
+            } => {
+                let applied = server.drag_resize(client_id, pane, side, step, count);
+                client.note_resize_applied(applied);
+            }
+            MouseAction::Command(command) => {
+                let envelope = CommandEnvelope::new(
+                    CommandId::new(),
+                    CommandSource::mouse(client_id),
+                    SystemTime::now(),
+                    command,
+                );
+                let _ = server.submit_command(envelope);
+            }
         }
-        Some(MouseAction::Forward { pane, mouse }) => {
-            server.forward_wheel_to_pane(client_id, pane, mouse);
-        }
-        Some(MouseAction::AltScrollArrows { pane, up, count }) => {
-            server.write_alt_scroll_arrows(pane, up, count);
-        }
-        Some(MouseAction::ScrollTabline { to }) => {
-            server.set_tabline_offset(client_id, Some(to));
-        }
-        None => {}
     }
 }
 
@@ -555,11 +612,13 @@ fn earliest(
 /// so frames that move nothing emit nothing.
 ///
 /// A [`MouseFrame`] of what it painted is left in `last_frame`, which is what
-/// the viewer answers a wheel tick from.
+/// the viewer answers a wheel tick from. Painting is also how the viewer learns
+/// which tab it is on, so a tab-strip peek made on another tab is thrown away
+/// here.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     server: &Server,
-    client: &Client,
+    client: &mut Client,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
     last_frame: &mut Option<MouseFrame>,
@@ -588,6 +647,14 @@ fn render<B: Backend>(
     // one thing it takes from the frame is whether mouse-select is on, which
     // decides the label that entry wears.
     let hints = client.frame_hints(snapshot.client.mouse_select);
+    // The viewer now sees which tab it is on, whatever moved it there — a click,
+    // a keybinding, an IPC command, a closed tab. A tab-strip peek made on
+    // another tab is thrown away here, so switching back to that tab starts from
+    // it rather than from the peek.
+    client.note_active_tab(snapshot.client.active_tab);
+    // The hovered pane and the tab strip's position are the viewer's own, so the
+    // frame the session handed out says nothing about either.
+    let viewer = client.chrome(snapshot.client.active_tab);
     terminal.draw(|frame| {
         let area = frame.area();
         frame.render_widget(
@@ -596,6 +663,7 @@ fn render<B: Backend>(
                 theme: client.theme(),
                 hints: &hints,
                 pending: client.pending_sequence(),
+                viewer,
             },
             area,
         );

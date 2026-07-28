@@ -329,14 +329,6 @@ impl Server {
         for client in session.clients.list_attached_mut() {
             client.set_scroll_offset(pane_id, 0);
             client.clear_selection(pane_id);
-            // A drag selecting in this pane has nothing left to select: the
-            // gesture ends with the pane rather than outliving it.
-            if client
-                .selection_drag()
-                .is_some_and(|drag| drag.pane == pane_id)
-            {
-                client.set_selection_drag(None);
-            }
         }
     }
 

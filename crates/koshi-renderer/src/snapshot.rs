@@ -17,9 +17,13 @@
 //! live state and renderer modules draw from it. This DTO is their contract.
 //!
 //! A frame also carries a few fields nothing draws: the terminal modes on
-//! [`PaneSnapshot`] that say where a wheel tick over a pane goes. A viewer
-//! copies them into a [`MouseFrame`] as it paints and answers the next wheel
-//! tick from that.
+//! [`PaneSnapshot`] that say where a mouse event over a pane goes, and the line
+//! number its top visible row is. A viewer copies them into a [`MouseFrame`] as
+//! it paints and answers the next mouse event from that.
+//!
+//! Two things about a frame come from the viewer instead, as a
+//! [`ViewerChrome`]: the pane its pointer is over, and where its tab strip is
+//! scrolled to. The session stores neither.
 
 use std::sync::Arc;
 
@@ -61,18 +65,41 @@ pub struct RenderSnapshot {
 }
 
 impl RenderSnapshot {
-    /// Borrow the parts of this frame that say where things sit.
+    /// Borrow the parts of this frame that say where things sit, with `viewer`
+    /// supplying the two the session does not hold.
     #[must_use]
-    pub fn layout(&self) -> FrameLayout<'_> {
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
+            viewer,
         }
     }
 }
 
+/// The two things about a frame the viewer decides, not the session: which pane
+/// its pointer is over, and where its tab strip is scrolled to.
+///
+/// Both belong to one viewer and change on a pointer move. Neither is stored on
+/// the session or carried in a snapshot; the viewer hands them in when it
+/// hit-tests a frame and again when it paints one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ViewerChrome {
+    /// The pane the viewer's pointer is over, or `None` over koshi's own chrome.
+    /// The renderer draws an *unfocused* pane under the pointer in the hover
+    /// color so the wheel target is visible; the focused pane keeps its focus
+    /// color.
+    pub hovered_pane: Option<PaneId>,
+    /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
+    /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
+    /// without changing focus. The renderer windows the tab list from this and
+    /// clamps an index past the last tab.
+    pub tabline_offset: Option<usize>,
+}
+
 /// Where a frame's surfaces sit, borrowed: the session with its solved active
-/// tab, and the viewing client. Carries no pane content and no colors.
+/// tab, the viewing client, and the viewer's own chrome state. Carries no pane
+/// content and no colors.
 ///
 /// This is what hit-testing a mouse cell and solving the tabline read. Both
 /// answer in cells, and a cell's position does not depend on what color it is
@@ -81,13 +108,15 @@ impl RenderSnapshot {
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
 /// [`RenderSnapshot::layout`]; a caller answering a mouse event builds these
-/// two on their own and skips every pane's grid, title, and highlight.
+/// on their own and skips every pane's grid, title, and highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
     pub session: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: &'a ClientSnapshot,
+    /// The viewer's pointer and tab-strip state.
+    pub viewer: ViewerChrome,
 }
 
 /// The owned form of [`FrameLayout`], for a caller that builds these two
@@ -105,19 +134,20 @@ pub struct OwnedFrameLayout {
 }
 
 impl OwnedFrameLayout {
-    /// Borrow these two as a [`FrameLayout`].
+    /// Borrow these two as a [`FrameLayout`], with `viewer` supplying the rest.
     #[must_use]
-    pub fn layout(&self) -> FrameLayout<'_> {
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
+            viewer,
         }
     }
 }
 
 /// A painted frame cut down to what answering a mouse event reads: where the
-/// surfaces sit, plus the few per-pane fields that say where a wheel tick over
-/// a pane goes.
+/// surfaces sit, plus the few per-pane fields that say which line each pane's
+/// top row shows and where an event over it goes.
 ///
 /// It carries no cells, no cursor and no titles, so a viewer holding one
 /// between paints holds no pane's [`Grid`].
@@ -133,12 +163,14 @@ pub struct MouseFrame {
 }
 
 impl MouseFrame {
-    /// Borrow the parts of this frame that say where things sit.
+    /// Borrow the parts of this frame that say where things sit, with `viewer`
+    /// supplying the two the session does not hold.
     #[must_use]
-    pub fn layout(&self) -> FrameLayout<'_> {
+    pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
             session: &self.session,
             client: &self.client,
+            viewer,
         }
     }
 }
@@ -155,12 +187,15 @@ impl From<RenderSnapshot> for MouseFrame {
     }
 }
 
-/// One pane as a mouse event reads it: which pane, and what decides where a
-/// wheel tick over it goes.
+/// One pane as a mouse event reads it: which pane, which line its top visible
+/// row is, and what decides where a wheel tick over it goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MousePane {
     /// The pane this entry describes, matched to a [`PaneSlot`] by id.
     pub id: PaneId,
+    /// The absolute line number of the pane's top visible row, copied from
+    /// [`PaneSnapshot::view_top_row`].
+    pub view_top_row: u64,
     /// Which mouse events the pane's program asked to be told about, copied
     /// from [`PaneSnapshot::mouse_tracking`].
     pub mouse_tracking: MouseTracking,
@@ -179,6 +214,7 @@ impl From<&PaneSnapshot> for MousePane {
     fn from(pane: &PaneSnapshot) -> Self {
         Self {
             id: pane.id,
+            view_top_row: pane.view_top_row,
             mouse_tracking: pane.mouse_tracking,
             alt_scroll: pane.alt_scroll,
             on_alt_screen: pane.on_alt_screen,
@@ -279,13 +315,14 @@ pub struct PaneSlot {
 }
 
 /// One pane's content: what the renderer paints inside the matching
-/// [`PaneSlot`]'s content rect, plus the three terminal modes that decide where
-/// a wheel tick over this pane goes.
+/// [`PaneSlot`]'s content rect, plus what a mouse event over this pane is
+/// answered from.
 ///
-/// The mode fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
-/// [`alt_scroll`](Self::alt_scroll), [`on_alt_screen`](Self::on_alt_screen) and
-/// [`has_selection`](Self::has_selection) are copied into a [`MousePane`] as
-/// the frame is painted, and that is what the viewer's wheel decision reads.
+/// Those last fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
+/// [`alt_scroll`](Self::alt_scroll), [`on_alt_screen`](Self::on_alt_screen),
+/// [`has_selection`](Self::has_selection) and
+/// [`view_top_row`](Self::view_top_row) are copied into a [`MousePane`] as the
+/// frame is painted, and that is what the viewer's decision reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
@@ -304,8 +341,8 @@ pub struct PaneSnapshot {
     /// swaps the default foreground and background for every cell.
     pub reverse_video: bool,
     /// Which mouse events the pane's program asked to be told about
-    /// (`?9`/`?1000`/`?1002`/`?1003`). A wheel tick over a pane at
-    /// [`Normal`](MouseTracking::Normal) or above is the program's.
+    /// (`?9`/`?1000`/`?1002`/`?1003`). An event a pane asked for is the
+    /// program's; anything it did not ask for is koshi's.
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
     /// wheel tick becomes cursor arrow keys.
@@ -313,6 +350,14 @@ pub struct PaneSnapshot {
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback, so there is no view to scroll there.
     pub on_alt_screen: bool,
+    /// The absolute line number of the top row this frame shows for the pane —
+    /// the same numbering [`koshi_core::command::GridPos::row`] uses, counting
+    /// every line the pane has ever pushed into scrollback.
+    ///
+    /// A press on the pane's `n`-th visible row names line `view_top_row + n`.
+    /// Absolute line numbers never move, so that answer keeps naming the same
+    /// text after more output arrives.
+    pub view_top_row: u64,
     /// The viewing client's highlighted text in this pane, already cut down to
     /// the rows this frame shows. `None` when the client has nothing highlighted
     /// here, or when the highlight is entirely outside the visible rows.
@@ -433,22 +478,13 @@ pub struct ClientSnapshot {
     /// no focusable pane. The renderer highlights the pane whose
     /// [`PaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane: Option<PaneId>,
-    /// The pane the client's pointer is hovering over, or `None` when it is over
-    /// chrome. The renderer draws an *unfocused* pane under the pointer in the
-    /// hover color so the wheel target is visible; the focused pane keeps its
-    /// focus color.
-    pub hovered_pane: Option<PaneId>,
     /// The client's input mode (drives the mode tag and keybind resolution).
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
-    /// so both can be on at once.
+    /// so both can be on at once. The viewer also reads it off a painted frame
+    /// to decide whether a press in a mouse-aware pane begins a highlight.
     pub mouse_select: bool,
-    /// This client's tabline scroll position: `None` follows the active tab —
-    /// the tab strip always scrolls to reveal it — while `Some(i)` peeks from
-    /// tab index `i` without changing focus. The renderer windows the tab list
-    /// from this; mouse scroll, arrow clicks, and drag set it.
-    pub tabline_offset: Option<usize>,
 }
 
 /// Plugin-contributed UI for one frame. All slots are empty for a stock,

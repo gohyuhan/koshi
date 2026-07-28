@@ -27,6 +27,7 @@ use koshi_terminal::state::CursorShape;
 use crate::snapshot::{
     ClientSnapshot, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot, PaneSnapshot,
     PluginUiSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
+    ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -68,6 +69,7 @@ fn build(
     let pane_snapshots = panes
         .iter()
         .map(|(id, _, _)| PaneSnapshot {
+            view_top_row: 0,
             id: *id,
             title: None,
             cursor: CursorSnapshot {
@@ -123,10 +125,8 @@ fn build(
             viewport,
             active_tab: tab_id,
             focused_pane: focused,
-            hovered_pane: None,
             lock_mode,
             mouse_select: false,
-            tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
     }
@@ -152,6 +152,54 @@ fn render_with(snapshot: &RenderSnapshot, theme: &Theme, w: u16, h: u16) -> Buff
         theme,
         &KeymapHints::default(),
         None,
+        ViewerChrome::default(),
+        area,
+        &mut buf,
+    );
+    buf
+}
+
+/// Paint `snapshot` with the viewer's tab strip peeking, for the tests that
+/// check which tabs the strip shows.
+fn render_peeking(snapshot: &RenderSnapshot, viewer: ViewerChrome, w: u16, h: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    let mut buf = Buffer::empty(area);
+    render_frame(
+        snapshot,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        viewer,
+        area,
+        &mut buf,
+    );
+    buf
+}
+
+/// Paint `snapshot` with the viewer's pointer over `hovered`, for the tests
+/// that check which pane's border wears the hover color.
+fn render_hovering(snapshot: &RenderSnapshot, hovered: Option<PaneId>, w: u16, h: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    let mut buf = Buffer::empty(area);
+    render_frame(
+        snapshot,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome {
+            hovered_pane: hovered,
+            tabline_offset: None,
+        },
         area,
         &mut buf,
     );
@@ -168,7 +216,15 @@ fn render_with_hints(snapshot: &RenderSnapshot, hints: &KeymapHints, w: u16, h: 
         height: h,
     };
     let mut buf = Buffer::empty(area);
-    render_frame(snapshot, &Theme::default(), hints, None, area, &mut buf);
+    render_frame(
+        snapshot,
+        &Theme::default(),
+        hints,
+        None,
+        ViewerChrome::default(),
+        area,
+        &mut buf,
+    );
     buf
 }
 
@@ -278,7 +334,7 @@ fn tabline_lists_tabs_with_active_marker() {
     // Where each tab landed, read from the same solve the paint used, so the
     // badge's width never has to be spelled out here.
     let tabs = tabline_layout(
-        snap.layout(),
+        snap.layout(ViewerChrome::default()),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -377,7 +433,7 @@ fn tabline_follows_focus_into_the_overflow() {
 #[test]
 fn tabline_peek_offset_ignores_the_active_tab() {
     let pane = PaneId::new();
-    let mut snap = build(
+    let snap = build(
         "s",
         &[
             ("t0", false),
@@ -394,8 +450,11 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         LockMode::Normal,
         Size { cols: 30, rows: 8 },
     );
-    snap.client.tabline_offset = Some(0);
-    let tabline = row_text(&render(&snap, 30, 8), 0);
+    let peeking = ViewerChrome {
+        hovered_pane: None,
+        tabline_offset: Some(0),
+    };
+    let tabline = row_text(&render_peeking(&snap, peeking, 30, 8), 0);
 
     assert!(
         tabline.contains("t0"),
@@ -573,6 +632,7 @@ fn reused_buffer_is_blanked_before_painting() {
         &Theme::default(),
         &KeymapHints::default(),
         None,
+        ViewerChrome::default(),
         area,
         &mut buf,
     );
@@ -649,7 +709,7 @@ fn stack_headers_render_collapsed_strips() {
 fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
     let focused = PaneId::new();
     let other = PaneId::new();
-    let mut snap = build(
+    let snap = build(
         "sess",
         &[("shell", true)],
         &[
@@ -662,8 +722,7 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
     );
 
     // Hovering the focused pane changes nothing: it keeps the focus color.
-    snap.client.hovered_pane = Some(focused);
-    let buf = render(&snap, 40, 8);
+    let buf = render_hovering(&snap, Some(focused), 40, 8);
     assert_eq!(
         buf[(0, 1)].fg,
         Theme::default().border_focused,
@@ -672,8 +731,7 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
 
     // Hovering the unfocused pane paints its border the hover color, and the
     // focused pane is untouched.
-    snap.client.hovered_pane = Some(other);
-    let buf = render(&snap, 40, 8);
+    let buf = render_hovering(&snap, Some(other), 40, 8);
     assert_eq!(
         buf[(20, 1)].fg,
         Theme::default().border_hover,
@@ -1313,6 +1371,7 @@ fn small_and_zero_size_areas_are_safe() {
         &Theme::default(),
         &KeymapHints::default(),
         None,
+        ViewerChrome::default(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1421,6 +1480,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         &Theme::default(),
         &KeymapHints::default(),
         None,
+        ViewerChrome::default(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1474,6 +1534,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
         &Theme::default(),
         &KeymapHints::default(),
         None,
+        ViewerChrome::default(),
         RatatuiRect {
             x: 0,
             y: 0,

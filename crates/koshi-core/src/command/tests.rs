@@ -120,6 +120,8 @@ fn visual_commands_roundtrip() {
         },
     )));
     roundtrip(&Command::Visual(VisualCommand::Copy(CopyArgs {
+        pane: PaneId::new(),
+        trim_trailing_whitespace: true,
         target: CopyTarget::Osc52,
     })));
 }
@@ -263,6 +265,8 @@ fn visual_variant_names_are_canonical() {
         ),
         (
             VisualCommand::Copy(CopyArgs {
+                pane: PaneId::new(),
+                trim_trailing_whitespace: true,
                 target: CopyTarget::Osc52,
             }),
             "Copy",

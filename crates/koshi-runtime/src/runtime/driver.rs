@@ -41,8 +41,11 @@ impl Server {
             RuntimeEvent::KeyInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a key no attached viewer resolved");
             }
-            RuntimeEvent::MouseInput { client_id, mouse } => {
-                self.handle_mouse_input(client_id, mouse, Instant::now());
+            // A mouse event is the viewer's for the same reason: only the frame
+            // it painted says which pane the pointer is over and which gesture
+            // is under way. One arriving here belongs to no attached viewer.
+            RuntimeEvent::MouseInput { client_id, .. } => {
+                tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
             RuntimeEvent::HostPaste { client_id, text } => {
                 self.handle_host_paste(client_id, &text);

@@ -685,6 +685,55 @@ fn selection_text_spans_history_and_screen() {
 }
 
 #[test]
+fn selection_text_reads_only_the_rows_the_view_still_holds() {
+    // Ten lines pushed under a cap of three: rows 0..=6 have been dropped, so
+    // the view holds history rows 7, 8, 9 and screen row 10. A selection naming
+    // every row number there could ever be copies exactly those four rows — and
+    // returns at once, where a walk over the named range would run `u64::MAX`
+    // times and never finish.
+    let scrollback = scrollback_of(
+        &["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"],
+        3,
+    );
+    let grid = grid_of(&["live"], 4);
+    let view = TextView::new(&scrollback, &grid);
+    assert_eq!(view.first_row(), 7);
+    assert_eq!(view.last_row(), 10);
+
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 0, col: 0 },
+        cursor: GridPos {
+            row: u64::MAX,
+            col: u16::MAX,
+        },
+    };
+
+    assert_eq!(selection_text(&view, &selection, true), "l7\nl8\nl9\nlive");
+}
+
+#[test]
+fn selection_text_of_rows_entirely_outside_the_view_is_empty() {
+    // Both ends are past the newest row, so the selection covers no row the
+    // view holds and the copy is empty rather than a walk to `u64::MAX`.
+    let scrollback = scrollback_of(&["old"], 100);
+    let grid = grid_of(&["live"], 4);
+    let view = TextView::new(&scrollback, &grid);
+    assert_eq!(view.last_row(), 1);
+
+    let selection = Selection {
+        kind: SelectionKind::Character,
+        anchor: GridPos { row: 900, col: 0 },
+        cursor: GridPos {
+            row: u64::MAX,
+            col: 0,
+        },
+    };
+
+    assert_eq!(selection_text(&view, &selection, true), "");
+}
+
+#[test]
 fn different_separators_do_not_join_into_one_run() {
     // `(` and `)` are both separators, but a run is one repeated character:
     // double-clicking `(` in `a() b` selects `(` alone.

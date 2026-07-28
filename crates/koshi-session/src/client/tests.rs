@@ -1,21 +1,18 @@
 //! Client and ClientRegistry unit tests.
 //!
-//! Tests verify client state tracking (focus, viewport, lock mode, drag state) and
-//! registry operations (attach, detach, lookup, mutation).
+//! Tests verify client state tracking (focus, viewport, lock mode, zoom,
+//! scrollback view, highlights) and registry operations (attach, detach,
+//! lookup, mutation).
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::MouseButton;
 use koshi_layout::mode::LayoutMode;
 
-use super::{
-    pane_viewport, ClickCount, Client, ClientRegistry, MouseState, ResizeDragState,
-    SelectionDragState, TablineDragState,
-};
+use super::{pane_viewport, Client, ClientRegistry};
 
 /// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
@@ -34,64 +31,13 @@ fn a_client(active_tab: TabId) -> Client {
 }
 
 #[test]
-fn a_new_client_starts_unlocked_with_no_focus_and_no_drag() {
+fn a_new_client_starts_unlocked_with_no_focus() {
     let tab = TabId::new();
     let client = a_client(tab);
 
     assert_eq!(client.lock_mode(), LockMode::Normal);
     assert_eq!(client.active_tab(), tab);
     assert_eq!(client.focused_pane(tab), None);
-    assert_eq!(client.mouse_state(), &MouseState::default());
-    // A freshly attached client is never mid-drag.
-    assert!(client.pending_resize_drag().is_none());
-    // And it follows its active tab (no peek offset, no tabline drag).
-    assert_eq!(client.tabline_offset(), None);
-    assert_eq!(client.tabline_drag(), None);
-}
-
-#[test]
-fn tabline_offset_and_drag_round_trip_and_reset_on_tab_switch() {
-    let tab = TabId::new();
-    let other = TabId::new();
-    let mut client = a_client(tab);
-
-    client.set_tabline_offset(Some(3));
-    assert_eq!(client.tabline_offset(), Some(3));
-    client.set_tabline_drag(Some(TablineDragState {
-        anchor_x: 12,
-        anchor_first_visible: 3,
-    }));
-    assert_eq!(
-        client.tabline_drag(),
-        Some(TablineDragState {
-            anchor_x: 12,
-            anchor_first_visible: 3,
-        })
-    );
-
-    // Switching tabs reveals the new tab: the peek offset and the drag both clear.
-    client.update_active_tab(other);
-    assert_eq!(client.active_tab(), other);
-    assert_eq!(client.tabline_offset(), None);
-    assert_eq!(client.tabline_drag(), None);
-}
-
-#[test]
-fn switching_tabs_ends_a_pending_resize_drag() {
-    let tab = TabId::new();
-    let other = TabId::new();
-    let mut client = a_client(tab);
-
-    client.update_pending_resize_drag(Some(ResizeDragState {
-        pane: PaneId::new(),
-        side: Direction::Right,
-        last: Point { x: 5, y: 5 },
-    }));
-    assert!(client.pending_resize_drag().is_some());
-
-    // The grabbed border is no longer on the client's frame, so the drag ends.
-    client.update_active_tab(other);
-    assert!(client.pending_resize_drag().is_none());
 }
 
 #[test]
@@ -248,47 +194,6 @@ fn zoom_is_tracked_independently_per_client() {
     assert_eq!(alice.zoomed_pane(tab), Some(pane));
     assert_eq!(bob.zoomed_pane(tab), None);
     assert_eq!(bob.layout_mode(tab), LayoutMode::Tiled);
-}
-
-#[test]
-fn switching_tabs_ends_a_selection_drag_and_mouse_capture() {
-    // A tab switch moves the client off the pane those gestures belonged to, so
-    // an in-flight selection drag and a captured mouse both end — while any
-    // highlight the drag already made lives on in its pane.
-    let tab = TabId::new();
-    let other = TabId::new();
-    let pane = PaneId::new();
-    let mut client = a_client(tab);
-
-    client.set_selection_drag(Some(SelectionDragState {
-        pane,
-        kind: SelectionKind::Character,
-        anchor: GridPos { row: 1, col: 2 },
-        at: Point { x: 3, y: 4 },
-        scroll_at: None,
-    }));
-    client.set_mouse_capture(Some((pane, MouseButton::Left)));
-
-    client.update_active_tab(other);
-
-    assert_eq!(client.selection_drag(), None);
-    assert_eq!(client.mouse_capture(), None);
-}
-
-#[test]
-fn a_pending_resize_drag_can_be_set_and_cleared() {
-    let mut client = a_client(TabId::new());
-
-    let drag = ResizeDragState {
-        pane: PaneId::new(),
-        side: Direction::Right,
-        last: Point { x: 4, y: 2 },
-    };
-    client.update_pending_resize_drag(Some(drag));
-    assert_eq!(client.pending_resize_drag(), Some(&drag));
-
-    client.update_pending_resize_drag(None);
-    assert!(client.pending_resize_drag().is_none());
 }
 
 #[test]
@@ -641,155 +546,4 @@ fn pane_viewport_never_touches_the_column_count() {
         pane_viewport(Size { cols: 0, rows: 24 }),
         Size { cols: 0, rows: 22 }
     );
-}
-
-// ============================================================================
-// The run of clicks
-// ============================================================================
-
-/// The 400ms the runtime uses, so these read the way the real thing behaves.
-const THRESHOLD: Duration = Duration::from_millis(400);
-
-#[test]
-fn a_first_press_is_a_single_click() {
-    let mut state = MouseState::default();
-    assert_eq!(
-        state.press(MouseButton::Left, Instant::now(), THRESHOLD),
-        ClickCount::Single
-    );
-}
-
-#[test]
-fn presses_inside_the_threshold_climb_to_double_then_triple() {
-    let mut state = MouseState::default();
-    let start = Instant::now();
-
-    assert_eq!(
-        state.press(MouseButton::Left, start, THRESHOLD),
-        ClickCount::Single
-    );
-    assert_eq!(
-        state.press(
-            MouseButton::Left,
-            start + Duration::from_millis(120),
-            THRESHOLD
-        ),
-        ClickCount::Double
-    );
-    assert_eq!(
-        state.press(
-            MouseButton::Left,
-            start + Duration::from_millis(260),
-            THRESHOLD
-        ),
-        ClickCount::Triple
-    );
-}
-
-#[test]
-fn a_fourth_quick_press_starts_the_run_over() {
-    let mut state = MouseState::default();
-    let start = Instant::now();
-    state.press(MouseButton::Left, start, THRESHOLD);
-    state.press(
-        MouseButton::Left,
-        start + Duration::from_millis(100),
-        THRESHOLD,
-    );
-    state.press(
-        MouseButton::Left,
-        start + Duration::from_millis(200),
-        THRESHOLD,
-    );
-
-    assert_eq!(
-        state.press(
-            MouseButton::Left,
-            start + Duration::from_millis(300),
-            THRESHOLD
-        ),
-        ClickCount::Single,
-        "a run tops out at three and begins again"
-    );
-}
-
-#[test]
-fn a_press_at_the_threshold_starts_a_new_run() {
-    let mut state = MouseState::default();
-    let start = Instant::now();
-    state.press(MouseButton::Left, start, THRESHOLD);
-
-    // Exactly 400ms: the gap is no longer inside the threshold.
-    assert_eq!(
-        state.press(MouseButton::Left, start + THRESHOLD, THRESHOLD),
-        ClickCount::Single
-    );
-}
-
-#[test]
-fn a_slow_second_press_is_another_single_click() {
-    let mut state = MouseState::default();
-    let start = Instant::now();
-    state.press(MouseButton::Left, start, THRESHOLD);
-
-    assert_eq!(
-        state.press(MouseButton::Left, start + Duration::from_secs(1), THRESHOLD),
-        ClickCount::Single
-    );
-}
-
-#[test]
-fn a_different_button_starts_a_new_run() {
-    let mut state = MouseState::default();
-    let start = Instant::now();
-    state.press(MouseButton::Left, start, THRESHOLD);
-
-    // A quick right click after a left one is not a double click.
-    assert_eq!(
-        state.press(
-            MouseButton::Right,
-            start + Duration::from_millis(50),
-            THRESHOLD
-        ),
-        ClickCount::Single
-    );
-    // And the run now belongs to the right button.
-    assert_eq!(
-        state.press(
-            MouseButton::Right,
-            start + Duration::from_millis(100),
-            THRESHOLD
-        ),
-        ClickCount::Double
-    );
-}
-
-#[test]
-fn each_run_length_picks_its_selection_shape() {
-    assert_eq!(
-        ClickCount::Single.selection_kind(),
-        SelectionKind::Character
-    );
-    assert_eq!(ClickCount::Double.selection_kind(), SelectionKind::Word);
-    assert_eq!(ClickCount::Triple.selection_kind(), SelectionKind::Line);
-}
-
-#[test]
-fn a_selection_drag_is_held_and_released() {
-    let mut client = a_client(TabId::new());
-    let pane = PaneId::new();
-    assert_eq!(client.selection_drag(), None);
-
-    let drag = SelectionDragState {
-        pane,
-        kind: SelectionKind::Character,
-        anchor: GridPos { row: 3, col: 4 },
-        at: Point { x: 10, y: 5 },
-        scroll_at: None,
-    };
-    client.set_selection_drag(Some(drag));
-    assert_eq!(client.selection_drag(), Some(drag));
-
-    client.set_selection_drag(None);
-    assert_eq!(client.selection_drag(), None);
 }

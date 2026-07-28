@@ -52,6 +52,7 @@ fn viewer_with(mouse: PartialMouseConfig) -> Client {
 fn plain_pane(id: PaneId) -> MousePane {
     MousePane {
         id,
+        view_top_row: 0,
         mouse_tracking: MouseTracking::Off,
         alt_scroll: false,
         on_alt_screen: false,
@@ -123,10 +124,8 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
             viewport: VIEWPORT,
             active_tab: tab_id,
             focused_pane: focused,
-            hovered_pane: None,
             lock_mode: LockMode::Normal,
             mouse_select: false,
-            tabline_offset: None,
         },
     }
 }
@@ -161,7 +160,7 @@ fn wheel(direction: ScrollDirection, at: Point) -> MouseInput {
 fn a_wheel_over_a_plain_pane_scrolls_by_the_viewers_own_line_count() {
     let pane = PaneId::new();
     let frame = one_pane_frame(plain_pane(pane));
-    let viewer = viewer_with(PartialMouseConfig {
+    let mut viewer = viewer_with(PartialMouseConfig {
         scroll_lines: Some(7),
         ..PartialMouseConfig::default()
     });
@@ -225,7 +224,7 @@ fn a_horizontal_wheel_over_a_plain_pane_decides_nothing() {
 fn the_ignore_setting_leaves_a_plain_pane_alone() {
     let pane = PaneId::new();
     let frame = one_pane_frame(plain_pane(pane));
-    let viewer = viewer_with(PartialMouseConfig {
+    let mut viewer = viewer_with(PartialMouseConfig {
         wheel: Some(WheelScroll::Ignore),
         ..PartialMouseConfig::default()
     });
@@ -460,23 +459,101 @@ fn a_tick_over_chrome_with_a_plugin_pane_focused_decides_nothing() {
 }
 
 #[test]
-fn a_tick_over_the_tabline_steps_the_strip() {
+fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
     let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let tab = frame.client.active_tab;
 
-    let down = viewer()
+    let mut viewer = viewer();
+    let down = viewer
         .handle_mouse_wheel(wheel(ScrollDirection::Down, Point { x: 40, y: 0 }), &frame)
         .expect("a wheel tick decides");
     assert_eq!(down.hovered, None);
-    assert_eq!(down.action, Some(MouseAction::ScrollTabline { to: 1 }));
+    assert_eq!(down.action, None, "the strip is the viewer's own to move");
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(1));
 
-    let up = viewer()
+    let up = viewer
         .handle_mouse_wheel(wheel(ScrollDirection::Up, Point { x: 40, y: 0 }), &frame)
         .expect("a wheel tick decides");
+    assert_eq!(up.action, None);
     assert_eq!(
-        up.action,
-        Some(MouseAction::ScrollTabline { to: 0 }),
+        viewer.chrome(tab).tabline_offset,
+        Some(0),
         "the first visible index saturates at zero"
     );
+}
+
+#[test]
+fn a_tab_switch_cancels_the_strip_peek() {
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let tab = frame.client.active_tab;
+    let mut viewer = viewer();
+
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Down, Point { x: 40, y: 0 }), &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(1));
+
+    assert_eq!(
+        viewer.chrome(TabId::new()).tabline_offset,
+        None,
+        "a peek belongs to the tab it was made on"
+    );
+}
+
+#[test]
+fn switching_away_and_back_does_not_bring_the_peek_out_again() {
+    // The peek scrolled the strip away from the active tab. Seeing a frame on
+    // another tab throws it away for good, so coming back to the tab it was
+    // made on starts from that tab rather than putting the strip back where it
+    // was — which could leave the active tab off the end of the strip.
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let first_tab = frame.client.active_tab;
+    let other_tab = TabId::new();
+    let mut viewer = viewer();
+
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Down, Point { x: 40, y: 0 }), &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(viewer.chrome(first_tab).tabline_offset, Some(1));
+
+    viewer.note_active_tab(other_tab);
+    assert_eq!(viewer.chrome(other_tab).tabline_offset, None);
+
+    viewer.note_active_tab(first_tab);
+    assert_eq!(
+        viewer.chrome(first_tab).tabline_offset,
+        None,
+        "the peek was thrown away on the switch, not just ignored"
+    );
+}
+
+#[test]
+fn a_mouse_event_on_another_tabs_frame_throws_the_peek_away() {
+    // The viewer also learns the tab from the frame a mouse event is answered
+    // against, so a peek made on one tab does not come back after an event on
+    // another.
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let first_tab = frame.client.active_tab;
+    let mut other = one_pane_frame(plain_pane(PaneId::new()));
+    other.client.active_tab = TabId::new();
+    let mut viewer = viewer();
+
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Down, Point { x: 40, y: 0 }), &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(viewer.chrome(first_tab).tabline_offset, Some(1));
+
+    viewer.handle_mouse(
+        MouseInput {
+            kind: MouseKind::Motion,
+            at: content_cell(&other, 0),
+            mods: ModFlags::NONE,
+        },
+        &other,
+        Instant::now(),
+    );
+
+    assert_eq!(viewer.chrome(first_tab).tabline_offset, None);
 }
 
 #[test]
@@ -558,7 +635,7 @@ fn a_zero_line_scroll_setting_is_carried_through_as_zero() {
     // carried as a zero-line movement rather than falling back to a default.
     let pane = PaneId::new();
     let frame = one_pane_frame(plain_pane(pane));
-    let viewer = viewer_with(PartialMouseConfig {
+    let mut viewer = viewer_with(PartialMouseConfig {
         scroll_lines: Some(0),
         ..PartialMouseConfig::default()
     });
@@ -625,4 +702,702 @@ fn a_tick_aimed_at_a_pane_the_frame_carries_no_content_for_decides_nothing() {
 
     assert_eq!(decision.hovered, Some(pane), "the layout still places it");
     assert_eq!(decision.action, None);
+}
+
+// ============================================================================
+// Gestures other than the wheel
+// ============================================================================
+
+/// A press, drag, or release of the left button at `at`, with `mods` held.
+fn event(kind: MouseKind, at: Point, mods: ModFlags) -> MouseInput {
+    MouseInput { kind, at, mods }
+}
+
+/// A left press at `at`.
+fn press(at: Point) -> MouseInput {
+    event(MouseKind::Press(MouseButton::Left), at, ModFlags::NONE)
+}
+
+/// A left drag to `at`.
+fn drag(at: Point) -> MouseInput {
+    event(MouseKind::Drag(MouseButton::Left), at, ModFlags::NONE)
+}
+
+/// A left release at `at`.
+fn release(at: Point) -> MouseInput {
+    event(MouseKind::Release(MouseButton::Left), at, ModFlags::NONE)
+}
+
+/// A buttonless move to `at`.
+fn motion(at: Point) -> MouseInput {
+    event(MouseKind::Motion, at, ModFlags::NONE)
+}
+
+/// An instant a second after `base`, so two presses never read as a double
+/// click.
+fn later(base: Instant, secs: u64) -> Instant {
+    base + Duration::from_secs(secs)
+}
+
+/// The single `SetSelection` in `actions`, or `None` when it holds none.
+fn set_selection(actions: &[MouseAction]) -> Option<SetSelectionArgs> {
+    actions.iter().find_map(|action| match action {
+        MouseAction::Command(Command::Visual(VisualCommand::SetSelection(args))) => Some(*args),
+        _ => None,
+    })
+}
+
+/// The single `Copy` in `actions`, or `None` when it holds none.
+fn copy(actions: &[MouseAction]) -> Option<CopyArgs> {
+    actions.iter().find_map(|action| match action {
+        MouseAction::Command(Command::Visual(VisualCommand::Copy(args))) => Some(*args),
+        _ => None,
+    })
+}
+
+#[test]
+fn resize_delta_grows_toward_each_border_and_ignores_the_other_axis() {
+    let from = Point { x: 10, y: 10 };
+    // Right border: pointer rightward grows, leftward shrinks.
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 13, y: 10 }),
+        3
+    );
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 8, y: 10 }),
+        -2
+    );
+    // Left border: pointer leftward grows.
+    assert_eq!(
+        resize_delta(Direction::Left, from, Point { x: 7, y: 10 }),
+        3
+    );
+    assert_eq!(
+        resize_delta(Direction::Left, from, Point { x: 12, y: 10 }),
+        -2
+    );
+    // Down border: pointer downward grows.
+    assert_eq!(
+        resize_delta(Direction::Down, from, Point { x: 10, y: 14 }),
+        4
+    );
+    // Up border: pointer upward grows.
+    assert_eq!(resize_delta(Direction::Up, from, Point { x: 10, y: 6 }), 4);
+    // A left/right border ignores vertical motion.
+    assert_eq!(
+        resize_delta(Direction::Right, from, Point { x: 10, y: 20 }),
+        0
+    );
+}
+
+#[test]
+fn advance_toward_moves_the_anchor_toward_the_pointer_and_saturates() {
+    let from = Point { x: 3, y: 3 };
+    assert_eq!(
+        advance_toward(Direction::Right, from, Point { x: 9, y: 3 }, 2),
+        Point { x: 5, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 2),
+        Point { x: 1, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Down, from, Point { x: 3, y: 9 }, 2),
+        Point { x: 3, y: 5 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 2),
+        Point { x: 3, y: 1 }
+    );
+    // A left/right border reads only x; the pointer's y is ignored.
+    assert_eq!(
+        advance_toward(Direction::Right, from, Point { x: 9, y: 99 }, 2),
+        Point { x: 5, y: 3 }
+    );
+    // Saturating: an anchor near an edge cannot wrap below zero.
+    assert_eq!(
+        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 10),
+        Point { x: 0, y: 3 }
+    );
+    assert_eq!(
+        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 10),
+        Point { x: 3, y: 0 }
+    );
+}
+
+#[test]
+fn a_press_names_the_line_the_frame_showed_on_that_row() {
+    // The load-bearing claim of absolute anchoring: the frame says which line
+    // the pane's top visible row is, so the press names that line plus the row
+    // it landed on — whatever the pane's live view has done since.
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.view_top_row = 940;
+    let frame = one_pane_frame(content);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    // The second visible row of the pane's content.
+    let inner = frame.session.active_tab.layout_solved[0]
+        .inner_rect
+        .expect("a visible pane");
+    let at = Point {
+        x: inner.origin.x + 4,
+        y: inner.origin.y + 2,
+    };
+    viewer.handle_mouse(press(at), &frame, now);
+    let actions = viewer.handle_mouse(
+        drag(Point {
+            x: inner.origin.x + 9,
+            y: inner.origin.y + 2,
+        }),
+        &frame,
+        later(now, 1),
+    );
+
+    let args = set_selection(&actions).expect("the drag asked for a highlight");
+    assert_eq!(args.pane, pane);
+    assert_eq!(args.selection.anchor, GridPos { row: 942, col: 4 });
+    assert_eq!(args.selection.cursor, GridPos { row: 942, col: 9 });
+}
+
+#[test]
+fn output_between_the_paint_and_the_press_does_not_move_what_it_names() {
+    // The same press against the same painted frame names the same line even
+    // once the pane has pushed more output: the frame's line numbers are
+    // absolute, so nothing about them shifts.
+    let pane = PaneId::new();
+    let mut scrolled = plain_pane(pane);
+    scrolled.view_top_row = 500;
+    let painted = one_pane_frame(scrolled);
+    let inner = painted.session.active_tab.layout_solved[0]
+        .inner_rect
+        .expect("a visible pane");
+    let at = Point {
+        x: inner.origin.x,
+        y: inner.origin.y + 3,
+    };
+    let now = Instant::now();
+
+    let mut viewer = viewer();
+    viewer.handle_mouse(press(at), &painted, now);
+    let actions = viewer.handle_mouse(
+        drag(Point {
+            x: inner.origin.x + 2,
+            y: inner.origin.y + 3,
+        }),
+        &painted,
+        later(now, 1),
+    );
+
+    assert_eq!(
+        set_selection(&actions)
+            .expect("a highlight")
+            .selection
+            .anchor,
+        GridPos { row: 503, col: 0 },
+        "the press names the line the user saw on that row"
+    );
+}
+
+#[test]
+fn a_second_press_inside_the_threshold_selects_whole_words() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    let actions = viewer.handle_mouse(press(at), &frame, now + Duration::from_millis(120));
+
+    assert_eq!(
+        set_selection(&actions)
+            .expect("a word highlight")
+            .selection
+            .kind,
+        SelectionKind::Word,
+        "the second press in the run names a word"
+    );
+}
+
+#[test]
+fn a_third_press_selects_whole_lines_and_a_fourth_starts_over() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(press(at), &frame, now + Duration::from_millis(100));
+    let third = viewer.handle_mouse(press(at), &frame, now + Duration::from_millis(200));
+    assert_eq!(
+        set_selection(&third)
+            .expect("a line highlight")
+            .selection
+            .kind,
+        SelectionKind::Line
+    );
+
+    // A fourth press starts the run over, and a single click names a point, so
+    // it highlights nothing until the pointer moves.
+    let fourth = viewer.handle_mouse(press(at), &frame, now + Duration::from_millis(300));
+    assert_eq!(set_selection(&fourth), None, "the run began again");
+    let dragged = viewer.handle_mouse(
+        drag(Point { x: at.x + 3, ..at }),
+        &frame,
+        now + Duration::from_millis(320),
+    );
+    assert_eq!(
+        set_selection(&dragged).expect("a highlight").selection.kind,
+        SelectionKind::Character
+    );
+}
+
+#[test]
+fn a_press_past_the_threshold_is_another_single_click() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(press(at), &frame, now + Duration::from_millis(400));
+    let actions = viewer.handle_mouse(
+        drag(Point { x: at.x + 3, ..at }),
+        &frame,
+        now + Duration::from_millis(420),
+    );
+
+    assert_eq!(
+        set_selection(&actions).expect("a highlight").selection.kind,
+        SelectionKind::Character,
+        "exactly 400ms is no longer inside the threshold"
+    );
+}
+
+#[test]
+fn alt_held_at_the_press_makes_a_block_whatever_the_run_of_clicks_was() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    let actions = viewer.handle_mouse(
+        event(MouseKind::Press(MouseButton::Left), at, ModFlags::ALT),
+        &frame,
+        now + Duration::from_millis(120),
+    );
+    // A block names a point, so the press alone highlights nothing.
+    assert_eq!(set_selection(&actions), None);
+
+    let dragged = viewer.handle_mouse(
+        drag(Point { x: at.x + 2, ..at }),
+        &frame,
+        now + Duration::from_millis(140),
+    );
+    assert_eq!(
+        set_selection(&dragged).expect("a highlight").selection.kind,
+        SelectionKind::Block
+    );
+}
+
+#[test]
+fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    // Button-event tracking reports presses, drags, and releases.
+    content.mouse_tracking = MouseTracking::ButtonMotion;
+    let frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    let pressed = viewer.handle_mouse(press(at), &frame, now);
+    assert_eq!(
+        pressed,
+        vec![MouseAction::Forward {
+            pane,
+            mouse: press(at),
+        }]
+    );
+
+    // Row 0 is the tabline — off the pane entirely. The capture still routes it.
+    let outside = Point { x: 0, y: 0 };
+    let dragged = viewer.handle_mouse(drag(outside), &frame, later(now, 1));
+    assert_eq!(
+        dragged,
+        vec![MouseAction::Forward {
+            pane,
+            mouse: drag(outside),
+        }],
+        "the held button keeps the gesture on the pane it pressed"
+    );
+
+    let released = viewer.handle_mouse(release(outside), &frame, later(now, 2));
+    assert_eq!(
+        released,
+        vec![MouseAction::Forward {
+            pane,
+            mouse: release(outside),
+        }]
+    );
+
+    // The capture is over: a further drag reaches no program.
+    assert_eq!(
+        viewer.handle_mouse(drag(outside), &frame, later(now, 3)),
+        Vec::new(),
+        "a drag with no press behind it forwards nothing"
+    );
+}
+
+#[test]
+fn a_bare_move_off_the_focused_panes_content_reaches_no_program() {
+    // No button is held, so there is no capture to route by: a move only
+    // reaches a program when it lands inside that program's own content. Both
+    // panes are drawn, the upper one is focused, and the pointer is in the
+    // lower one.
+    let focused = PaneId::new();
+    let mut content = plain_pane(focused);
+    // Any-event tracking asks for every move, so the position is the only thing
+    // keeping this one out.
+    content.mouse_tracking = MouseTracking::AnyMotion;
+    let frame = frame(
+        &[content, plain_pane(PaneId::new())],
+        Some(focused),
+        PaneKind::Terminal,
+    );
+    let inside = content_cell(&frame, 0);
+    let outside = content_cell(&frame, 1);
+    let now = Instant::now();
+    let mut viewer = viewer();
+
+    assert_eq!(
+        viewer.handle_mouse(motion(inside), &frame, now),
+        vec![MouseAction::Forward {
+            pane: focused,
+            mouse: motion(inside),
+        }],
+        "a move inside the focused pane's content is the program's"
+    );
+
+    assert_eq!(
+        viewer.handle_mouse(motion(outside), &frame, later(now, 1)),
+        Vec::new(),
+        "the same move one band down names no cell in the focused pane"
+    );
+}
+
+#[test]
+fn a_gesture_is_dropped_when_its_pane_leaves_the_frame() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+
+    // The pane closes: the next frame does not draw it.
+    let other = PaneId::new();
+    let gone = one_pane_frame(plain_pane(other));
+    let actions = viewer.handle_mouse(drag(content_cell(&gone, 0)), &gone, later(now, 1));
+
+    assert_eq!(
+        actions,
+        Vec::new(),
+        "the drag's pane is not on the frame, so the gesture ended with it"
+    );
+}
+
+#[test]
+fn a_border_press_starts_no_resize_when_the_viewer_turned_it_off() {
+    let left = PaneId::new();
+    let right = PaneId::new();
+    let frame = frame(
+        &[plain_pane(left), plain_pane(right)],
+        Some(left),
+        PaneKind::Terminal,
+    );
+    // The shared divider between the two bands: the second pane's top edge.
+    let divider = Point {
+        x: 10,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+    };
+    let now = Instant::now();
+
+    let mut off = viewer_with(PartialMouseConfig {
+        border_resize: Some(false),
+        ..PartialMouseConfig::default()
+    });
+    off.handle_mouse(press(divider), &frame, now);
+    assert_eq!(
+        off.handle_mouse(
+            drag(Point {
+                y: divider.y + 3,
+                ..divider
+            }),
+            &frame,
+            later(now, 1)
+        ),
+        Vec::new(),
+        "border resize is off, so the drag moves nothing"
+    );
+
+    // The same gesture with the setting on does move the border.
+    let mut on = viewer();
+    on.handle_mouse(press(divider), &frame, now);
+    let actions = on.handle_mouse(
+        drag(Point {
+            y: divider.y + 3,
+            ..divider
+        }),
+        &frame,
+        later(now, 1),
+    );
+    assert_eq!(
+        actions,
+        vec![MouseAction::Resize {
+            pane: right,
+            side: Direction::Up,
+            step: -1,
+            count: 3,
+        }],
+        "three cells of travel away from the grabbed top border"
+    );
+}
+
+#[test]
+fn grabbing_a_border_with_no_pane_beside_it_starts_no_resize() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    // The pane's own left edge: the tab's outer frame, with nothing beyond it.
+    let outer = Point {
+        x: frame.session.active_tab.layout_solved[0].rect.origin.x,
+        y: 5,
+    };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(outer), &frame, now);
+
+    assert_eq!(
+        viewer.handle_mouse(
+            drag(Point {
+                x: outer.x + 3,
+                ..outer
+            }),
+            &frame,
+            later(now, 1)
+        ),
+        Vec::new(),
+        "the tab's outer frame has no neighbour to resize against"
+    );
+}
+
+#[test]
+fn releasing_a_highlight_copies_it_with_the_viewers_own_trim_setting() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+
+    for trim in [true, false] {
+        let mut viewer = viewer();
+        viewer.config.copy.trim_trailing_whitespace = trim;
+        let now = Instant::now();
+
+        viewer.handle_mouse(press(at), &frame, now);
+        viewer.handle_mouse(drag(Point { x: at.x + 4, ..at }), &frame, later(now, 1));
+        let actions =
+            viewer.handle_mouse(release(Point { x: at.x + 4, ..at }), &frame, later(now, 2));
+
+        assert_eq!(
+            copy(&actions).expect("the release is the copy"),
+            CopyArgs {
+                pane,
+                target: CopyTarget::Osc52,
+                trim_trailing_whitespace: trim,
+            },
+            "trim {trim}"
+        );
+    }
+}
+
+#[test]
+fn copy_on_select_off_releases_without_copying() {
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&frame, 0);
+    let mut viewer = viewer();
+    viewer.config.copy.copy_on_select = false;
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(drag(Point { x: at.x + 4, ..at }), &frame, later(now, 1));
+    let actions = viewer.handle_mouse(release(Point { x: at.x + 4, ..at }), &frame, later(now, 2));
+
+    assert_eq!(copy(&actions), None, "the highlight stands, uncopied");
+}
+
+#[test]
+fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.view_top_row = 100;
+    let frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let inner = frame.session.active_tab.layout_solved[0]
+        .inner_rect
+        .expect("a visible pane");
+    let below = Point {
+        x: at.x,
+        y: inner.origin.y + inner.size.rows + 5,
+    };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(drag(below), &frame, later(now, 1));
+    let due = later(now, 1) + Duration::from_millis(15);
+    assert_eq!(
+        viewer.next_mouse_wakeup(later(now, 1)),
+        Some(Duration::from_millis(15)),
+        "the pointer past the edge asks the loop to wake"
+    );
+
+    // The firing asks for one line of scroll and nothing else yet.
+    let fired = viewer.expire_mouse_scroll(due, &frame);
+    assert_eq!(
+        fired,
+        vec![MouseAction::Scroll {
+            pane,
+            up: false,
+            lines: 1,
+        }]
+    );
+
+    // The session says the view moved on by one line; the highlight follows it
+    // to the pane's last row.
+    let actions = viewer.note_scroll_applied(pane, Some(101), &frame);
+    let args = set_selection(&actions).expect("the scroll re-extends the highlight");
+    assert_eq!(
+        args.selection.cursor,
+        GridPos {
+            row: 101 + u64::from(inner.size.rows - 1),
+            col: at.x - inner.origin.x,
+        },
+        "the moving end sits on the last row of the view the scroll revealed"
+    );
+}
+
+#[test]
+fn a_scroll_that_moved_nothing_disarms_the_timer() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.view_top_row = 100;
+    let frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let inner = frame.session.active_tab.layout_solved[0]
+        .inner_rect
+        .expect("a visible pane");
+    let below = Point {
+        x: at.x,
+        y: inner.origin.y + inner.size.rows + 5,
+    };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(drag(below), &frame, later(now, 1));
+    let due = later(now, 1) + Duration::from_millis(15);
+    viewer.expire_mouse_scroll(due, &frame);
+
+    // The view was already at its limit: the top line did not move.
+    let actions = viewer.note_scroll_applied(pane, Some(100), &frame);
+
+    assert_eq!(actions, Vec::new(), "nothing revealed, nothing to extend");
+    assert_eq!(
+        viewer.next_mouse_wakeup(due),
+        None,
+        "a firing that moved nothing disarms the timer"
+    );
+}
+
+#[test]
+fn a_wheel_scroll_never_re_extends_a_highlight() {
+    // `note_scroll_applied` answers only the scroll the edge timer asked for; a
+    // wheel tick's scroll leaves it with nothing to do.
+    let pane = PaneId::new();
+    let frame = one_pane_frame(plain_pane(pane));
+    let mut viewer = viewer();
+
+    viewer.handle_mouse(
+        wheel(ScrollDirection::Up, content_cell(&frame, 0)),
+        &frame,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        viewer.note_scroll_applied(pane, Some(7), &frame),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_press_on_an_unfocused_pane_only_focuses_it() {
+    let focused = PaneId::new();
+    let other = PaneId::new();
+    let frame = frame(
+        &[plain_pane(focused), plain_pane(other)],
+        Some(focused),
+        PaneKind::Terminal,
+    );
+    let mut viewer = viewer();
+
+    let actions = viewer.handle_mouse(press(content_cell(&frame, 1)), &frame, Instant::now());
+
+    assert_eq!(
+        actions,
+        vec![MouseAction::Command(Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(other),
+            client: Some(viewer.id()),
+        }))],
+        "the first click focuses and nothing else"
+    );
+}
+
+#[test]
+fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.mouse_tracking = MouseTracking::ButtonMotion;
+    let mut frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let now = Instant::now();
+
+    // With mouse-select off the press is the program's.
+    let mut plain = viewer();
+    assert_eq!(
+        plain.handle_mouse(press(at), &frame, now),
+        vec![MouseAction::Forward {
+            pane,
+            mouse: press(at),
+        }]
+    );
+
+    // With it on, the same press begins a koshi highlight instead.
+    frame.client.mouse_select = true;
+    let mut grabbing = viewer();
+    let actions = grabbing.handle_mouse(press(at), &frame, now);
+    assert_eq!(
+        actions,
+        vec![MouseAction::Command(Command::Visual(
+            VisualCommand::ClearSelection(ClearSelectionArgs { pane })
+        ))],
+        "the press drops the old highlight and arms a drag"
+    );
 }
