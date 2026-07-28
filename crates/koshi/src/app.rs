@@ -38,6 +38,7 @@ use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, SessionId};
 use koshi_core::key::KeySequence;
+use koshi_core::mouse::MouseKind;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
@@ -536,6 +537,12 @@ fn apply_event(
     if let RuntimeEvent::MouseInput { client_id, mouse } = event {
         if client_id == client.id() {
             if let Some(frame) = last_frame {
+                // The mode this event is routed in must be the mode the
+                // session last reported. A `core:mouse-select` earlier in this
+                // same batch published its change into the subscription as it
+                // ran, so taking it now is what makes this event route the new
+                // way.
+                client.apply_events();
                 let tab = frame.client.active_tab;
                 let before = client.chrome(tab);
                 let actions = client.handle_mouse(mouse, frame, Instant::now());
@@ -584,7 +591,12 @@ fn apply_mouse_actions(
                 queue.extend(client.note_scroll_applied(pane, top, frame));
             }
             MouseAction::Forward { pane, mouse } => {
-                server.forward_mouse_to_pane(client_id, pane, mouse);
+                let written = server.forward_mouse_to_pane(client_id, pane, mouse);
+                // A gesture is captured once the pane's program has seen the
+                // press that began it.
+                if let (true, MouseKind::Press(button)) = (written, mouse.kind) {
+                    client.note_press_forwarded(pane, button);
+                }
             }
             MouseAction::AltScrollArrows { pane, up, count } => {
                 server.write_alt_scroll_arrows(pane, up, count);

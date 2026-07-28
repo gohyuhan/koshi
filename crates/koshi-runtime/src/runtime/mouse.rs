@@ -163,25 +163,31 @@ impl Server {
     ///
     /// An event that is written also drops this client's highlight in that pane:
     /// input reaching the pane's child leaves visual mode.
+    ///
+    /// Returns whether a report was handed to the pane's writer. It is `false`
+    /// when the pane is gone, when its live tracking no longer asks for this
+    /// event, when the layout no longer places the pane, and when the pane
+    /// refuses the bytes — so the caller records a gesture only for a press the
+    /// pane accepted.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
         mouse: MouseInput,
-    ) {
+    ) -> bool {
         let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
             (
                 engine.state().mouse_tracking(),
                 engine.state().mouse_encoding(),
             )
         }) else {
-            return;
+            return false;
         };
         if !reports(tracking, mouse.kind) {
-            return;
+            return false;
         }
         let Some(frame) = self.build_layout(client_id) else {
-            return;
+            return false;
         };
         // A mouse report addresses the program's own grid, whose top-left
         // content cell is `(1, 1)`.
@@ -189,16 +195,18 @@ impl Server {
             pane_cell_clamped(frame.layout(ViewerChrome::default()), pane_id, mouse.at)
                 .map(|(col, row)| (col + 1, row + 1))
         else {
-            return;
+            return false;
         };
-        if let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) {
-            let _ = self.pty_backend().write(pane_id, &bytes);
-            // A wheel tick is not input the program's child typed, so it leaves
-            // a highlight standing; a click, drag, or release is.
-            if !matches!(mouse.kind, MouseKind::Scroll(_)) {
-                self.clear_selection_on_pane_input(client_id, pane_id);
-            }
+        let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) else {
+            return false;
+        };
+        let written = self.pty_backend().write(pane_id, &bytes).is_ok();
+        // A wheel tick is not input the program's child typed, so it leaves
+        // a highlight standing; a click, drag, or release is.
+        if !matches!(mouse.kind, MouseKind::Scroll(_)) {
+            self.clear_selection_on_pane_input(client_id, pane_id);
         }
+        written
     }
 
     /// Send `count` cursor arrow keys to `pane_id` for a wheel tick — the

@@ -59,6 +59,10 @@ fn lifecycle_events_roundtrip() {
         client_id: ClientId::new(),
         mode: InputMode::Locked,
     }));
+    roundtrip(&Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    }));
 }
 
 #[test]
@@ -464,6 +468,13 @@ fn event_variant_names_are_canonical() {
             "InputModeChanged",
         ),
         (
+            Event::MouseSelectChanged(MouseSelectChanged {
+                client_id: ClientId::new(),
+                on: true,
+            }),
+            "MouseSelectChanged",
+        ),
+        (
             Event::KeybindingMatched(KeybindingMatched {
                 client_id: ClientId::new(),
                 command_id: CommandId::new(),
@@ -588,7 +599,7 @@ fn event_variant_names_are_canonical() {
         ),
         (Event::Quit, "Quit"),
     ];
-    assert_eq!(cases.len(), 36);
+    assert_eq!(cases.len(), 37);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
         assert_eq!(&value.name(), name);

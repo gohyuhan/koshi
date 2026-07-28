@@ -49,6 +49,9 @@ struct State {
     /// error instead of recording — drives the best-effort partial-failure reflow
     /// path (one sibling's resize failing must not drop the others').
     resize_error: Option<(PaneId, PtyError)>,
+    /// When set, [`write`](FakePtyBackend::write) fails for this pane with this
+    /// error instead of recording — drives the pane-refused-the-bytes path.
+    write_error: Option<(PaneId, PtyError)>,
     /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd); a pane
     /// with no entry answers `None`, like a platform with no lookup.
     live_cwds: HashMap<PaneId, PathBuf>,
@@ -79,6 +82,12 @@ impl FakePtyBackend {
     /// (one sibling failing to resize must not drop the others').
     pub fn fail_resizes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().resize_error = Some((pane, error));
+    }
+
+    /// Make [`write`](Self::write) fail for `pane` with `error` instead of
+    /// recording, so a test can drive the pane-refused-the-bytes path.
+    pub fn fail_writes_on(&self, pane: PaneId, error: PtyError) {
+        self.state.lock().unwrap().write_error = Some((pane, error));
     }
 
     /// Make [`live_cwd`](Self::live_cwd) answer `cwd` for `pane`, modelling
@@ -242,6 +251,11 @@ impl PtyBackend for FakePtyBackend {
     /// captured in order; a test asserts on them via [`writes`](Self::writes).
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if let Some((failing, error)) = &state.write_error {
+            if *failing == pane {
+                return Err(error.clone());
+            }
+        }
         let record = state
             .panes
             .get_mut(&pane)

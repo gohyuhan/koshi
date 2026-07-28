@@ -36,8 +36,8 @@ use koshi_core::{
         WriteToPaneArgs,
     },
     event::{
-        Event, InputMode, InputModeChanged, LayoutChanged, PaneFocused, PtyResized, RejectReason,
-        SelectionChanged,
+        Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
+        PtyResized, RejectReason, SelectionChanged,
     },
     geometry::{Direction, Point, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},

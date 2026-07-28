@@ -1553,30 +1553,41 @@ fn toggle_mouse_select_flips_the_client_flag() {
     };
     assert!(!grabs(&rt), "a fresh client does not grab the mouse");
 
-    // First toggle turns mouse-select on; the command carries no bus event.
+    // First toggle turns mouse-select on and reports the new value, which is
+    // what the viewer routes its own mouse events against.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::ToggleMouseSelect,
     );
     let command_id = env.id;
-    match rt.dispatch(env) {
+    assert_eq!(
+        rt.dispatch(env),
         CommandResult::Ok {
-            command_id: ok_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_id, command_id);
-            assert!(emitted_events.is_empty());
+            command_id,
+            emitted_events: vec![Event::MouseSelectChanged(MouseSelectChanged {
+                client_id,
+                on: true,
+            })],
         }
-        other => panic!("expected Ok, got {other:?}"),
-    }
+    );
     assert!(grabs(&rt), "the toggle turned mouse-select on");
 
-    // A second toggle turns it back off.
+    // A second toggle turns it back off, and reports that too.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
         Command::ToggleMouseSelect,
     );
-    let _ = rt.dispatch(env);
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::MouseSelectChanged(MouseSelectChanged {
+                client_id,
+                on: false,
+            })],
+        }
+    );
     assert!(!grabs(&rt), "the second toggle turned mouse-select off");
 }
 

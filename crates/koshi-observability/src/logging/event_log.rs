@@ -122,6 +122,16 @@ pub fn log_event(event: &Event) {
             );
         }
 
+        // --- mouse select: it decides whether a click reaches the program in
+        // the pane, so a session whose clicks stop working is explained here.
+        Event::MouseSelectChanged(payload) => {
+            tracing::info!(
+                client_id = %payload.client_id,
+                on = payload.on,
+                "mouse select changed"
+            );
+        }
+
         // --- copy: the byte count only; the copied text never reaches the file.
         Event::Copied(payload) => {
             tracing::info!(

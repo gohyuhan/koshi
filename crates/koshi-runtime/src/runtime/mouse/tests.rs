@@ -26,6 +26,7 @@ use koshi_core::key::ModFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
 use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -100,6 +101,7 @@ fn mouse(runtime: &mut Server, viewer: &mut ViewerClient, input: MouseInput) {
 /// [`mouse`] with the instant the event happened at, for the tests that drive
 /// the click threshold themselves.
 fn mouse_at(runtime: &mut Server, viewer: &mut ViewerClient, input: MouseInput, now: Instant) {
+    viewer.apply_events();
     let frame = MouseFrame::from(runtime.build_snapshot(viewer.id()).expect("snapshot"));
     let actions = viewer.handle_mouse(input, &frame, now);
     apply(runtime, viewer, &frame, actions);
@@ -121,7 +123,10 @@ fn apply(
                 queue.extend(viewer.note_scroll_applied(pane, top, frame));
             }
             MouseAction::Forward { pane, mouse } => {
-                runtime.forward_mouse_to_pane(client_id, pane, mouse);
+                let written = runtime.forward_mouse_to_pane(client_id, pane, mouse);
+                if let (true, MouseKind::Press(button)) = (written, mouse.kind) {
+                    viewer.note_press_forwarded(pane, button);
+                }
             }
             MouseAction::AltScrollArrows { pane, up, count } => {
                 runtime.write_alt_scroll_arrows(pane, up, count);
@@ -1028,11 +1033,14 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let pane = only_pane(&runtime);
     // Button-event tracking would report a bare drag; SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1002h\x1b[?1006h");
-    // Grab the mouse for koshi selection.
-    runtime
-        .client_mut(client)
-        .expect("client")
-        .toggle_mouse_select();
+    // Grab the mouse for koshi selection, the way the binding does; the viewer
+    // takes the change off its subscription before the next event.
+    let _ = runtime.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::ToggleMouseSelect,
+    ));
     let (at, _, _) = a_content_cell(&runtime, client, pane);
     let gesture = |kind| MouseInput {
         kind,
@@ -1060,6 +1068,42 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
         fake.writes(pane).expect("writes"),
         Vec::<Vec<u8>>::new(),
         "in mouse-select mode the gesture is koshi's selection; the program is sent nothing"
+    );
+}
+
+#[test]
+fn the_forward_door_reports_whether_the_pane_was_written_to() {
+    // The report the door gives back is what the viewer captures a gesture on,
+    // so it must be false for exactly the events the pane never saw.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+
+    // The program asked for no mouse: nothing is written, and the door says so.
+    assert!(!runtime.forward_mouse_to_pane(client, pane, press(at.x, at.y)));
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "a pane in no mouse mode receives nothing"
+    );
+
+    // Normal tracking with SGR encoding: the press is written, and reported.
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    assert!(runtime.forward_mouse_to_pane(client, pane, press(at.x, at.y)));
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
+        "the press reached the program"
+    );
+
+    // The pane refuses the bytes: the door says so, and no gesture is captured
+    // on the strength of a press that never landed.
+    fake.fail_writes_on(pane, PtyError::UnknownPane { pane });
+    assert!(!runtime.forward_mouse_to_pane(client, pane, press(at.x, at.y)));
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
+        "the refused press left no record"
     );
 }
 
@@ -1755,7 +1799,7 @@ fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
     let gone = PaneId::new();
 
     runtime.scroll_pane_view(client, gone, true, 3);
-    runtime.forward_mouse_to_pane(
+    let forwarded = runtime.forward_mouse_to_pane(
         client,
         gone,
         wheel(ScrollDirection::Up, Point { x: 5, y: 5 }),
@@ -1778,6 +1822,7 @@ fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
         "no view was stored for a gone pane"
     );
     assert_eq!(applied, 0, "no border of a gone pane moved");
+    assert!(!forwarded, "no report was written to a gone pane");
 }
 
 #[test]

@@ -9,6 +9,11 @@
 //! pane's program had. That is everything a mouse event needs, so the viewer
 //! decides and the session only executes.
 //!
+//! Mouse-select mode is the one piece of session state read live rather than
+//! from the frame: [`Client::mouse_select`] follows the session's report of the
+//! toggle, so a press right after the key that flipped it routes the new way
+//! without waiting for a paint.
+//!
 //! Every answer comes back from [`Client::handle_mouse`] as a list of
 //! [`MouseAction`]: move a pane's view, hand the event to a pane's program,
 //! send alternate-scroll arrows, move a pane border, or run a [`Command`]. The
@@ -554,7 +559,9 @@ impl Client {
     /// `mouse-select` mode on, a drag begins a koshi highlight even over a
     /// mouse-aware program — the way to copy text out of a full-screen `vim` or
     /// `htop`. A key toggles it: the outer terminal keeps `Shift`+drag for its
-    /// own selection and never forwards it to koshi.
+    /// own selection and never forwards it to koshi. The mode is read from
+    /// [`Client::mouse_select`], the viewer's own copy, so a press right after
+    /// the key that toggled it already routes the new way.
     fn press_pane_content(
         &mut self,
         pane_id: PaneId,
@@ -567,7 +574,7 @@ impl Client {
         }
         let tracking =
             pane_modes(frame, pane_id).map_or(MouseTracking::Off, |pane| pane.mouse_tracking);
-        if reports(tracking, mouse.kind) && !frame.client.mouse_select {
+        if reports(tracking, mouse.kind) && !self.mouse_select {
             return self.forward(mouse, frame);
         }
         let clicks = self.record_click(MouseButton::Left, now);
@@ -763,6 +770,17 @@ impl Client {
         }
     }
 
+    /// Capture the gesture `button` began in `pane`, after the session reported
+    /// the press accepted for that pane.
+    ///
+    /// The capture is what carries the rest of the gesture: the drags and the
+    /// release that follow go to this same pane even as the pointer leaves it,
+    /// re-stamped with this button. Recording it on the session's report is what
+    /// keeps a press the pane refused from capturing anything.
+    pub fn note_press_forwarded(&mut self, pane: PaneId, button: MouseButton) {
+        self.mouse_capture = Some((pane, button));
+    }
+
     /// Scroll the tab strip to follow an in-flight drag whose pointer is now at
     /// column `x`. Dragging right moves the strip right (revealing earlier
     /// tabs); one tab per [`TABLINE_DRAG_STEP`] cells.
@@ -841,8 +859,11 @@ impl Client {
     ///
     /// A button gesture is captured: the press picks the focused pane under the
     /// pointer, and the drags and release that follow go to that same pane even
-    /// as the pointer leaves it. A bare move goes to the focused pane. A drag or
-    /// release with no capture — the press was koshi's, or it focused nothing —
+    /// as the pointer leaves it. The capture itself is recorded by
+    /// [`Client::note_press_forwarded`] once the session reports the press
+    /// accepted, so a press the pane refused captures nothing. A bare
+    /// move goes to the focused pane. A drag or release with no capture — the
+    /// press was koshi's, it focused nothing, or the pane refused it —
     /// is dropped, so no program ever sees a release without its press.
     ///
     /// A press or a bare move outside the pane's content reaches no program: it
@@ -884,10 +905,6 @@ impl Client {
         };
         if !reports(modes.mouse_tracking, kind) {
             return Vec::new();
-        }
-        // Capture the button the press itself named.
-        if let MouseKind::Press(button) = mouse.kind {
-            self.mouse_capture = Some((pane, button));
         }
         vec![MouseAction::Forward {
             pane,

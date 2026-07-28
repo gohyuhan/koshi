@@ -12,6 +12,7 @@ use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
 use koshi_core::action::{ActionRef, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
+use koshi_core::event::MouseSelectChanged;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::resolve::ActionArgs;
@@ -722,4 +723,44 @@ fn frame_hints_follow_the_viewers_own_mode() {
         .entries
         .iter()
         .any(|entry| entry.label == "Quit" && !entry.pinned));
+}
+
+#[test]
+fn a_mouse_select_report_for_this_viewer_flips_its_own_copy() {
+    // The viewer routes a mouse press against its own copy of the mode, so the
+    // session's report is what has to move it — both ways.
+    let (mut client, tx) = new_client();
+    assert!(!client.mouse_select(), "a fresh viewer selects nothing");
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: client.id(),
+        on: true,
+    }))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert!(client.mouse_select(), "the report turned it on");
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: client.id(),
+        on: false,
+    }))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert!(!client.mouse_select(), "the second report turned it off");
+}
+
+#[test]
+fn a_mouse_select_report_for_another_viewer_is_ignored() {
+    // Mouse select is client-scoped: two viewers of one session hold their own,
+    // and a subscription carries every client's events.
+    let (mut client, tx) = new_client();
+
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    }))
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the event was seen");
+    assert!(!client.mouse_select(), "and it was not applied here");
 }

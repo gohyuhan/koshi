@@ -11,6 +11,7 @@ use std::sync::mpsc;
 
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
+use koshi_core::event::{Event, MouseSelectChanged};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::ModFlags;
@@ -31,6 +32,20 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 fn viewer() -> Client {
     let (_tx, rx) = mpsc::sync_channel(8);
     Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new())
+}
+
+/// A viewer whose mouse-select mode the session turned on, reported the way
+/// the running binary reports it — through the viewer's own subscription.
+fn viewer_grabbing_the_mouse() -> Client {
+    let (tx, rx) = mpsc::sync_channel(8);
+    let mut viewer = Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new());
+    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: viewer.id(),
+        on: true,
+    }))
+    .expect("the viewer's queue has room");
+    viewer.apply_events();
+    viewer
 }
 
 /// The same viewer with its `mouse` settings overridden.
@@ -1025,6 +1040,9 @@ fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it
             mouse: press(at),
         }]
     );
+    // The session wrote that press to the pane, which is what captures the
+    // gesture; the loop reports it back.
+    viewer.note_press_forwarded(pane, MouseButton::Left);
 
     // Row 0 is the tabline — off the pane entirely. The capture still routes it.
     let outside = Point { x: 0, y: 0 };
@@ -1375,7 +1393,7 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
     let pane = PaneId::new();
     let mut content = plain_pane(pane);
     content.mouse_tracking = MouseTracking::ButtonMotion;
-    let mut frame = one_pane_frame(content);
+    let frame = one_pane_frame(content);
     let at = content_cell(&frame, 0);
     let now = Instant::now();
 
@@ -1390,8 +1408,7 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
     );
 
     // With it on, the same press begins a koshi highlight instead.
-    frame.client.mouse_select = true;
-    let mut grabbing = viewer();
+    let mut grabbing = viewer_grabbing_the_mouse();
     let actions = grabbing.handle_mouse(press(at), &frame, now);
     assert_eq!(
         actions,

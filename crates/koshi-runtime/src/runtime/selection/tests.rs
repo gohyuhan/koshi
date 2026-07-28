@@ -79,6 +79,7 @@ fn viewer_copying(rt: &mut Server, client_id: ClientId, copy: PartialCopyConfig)
 /// what it means against the frame it is looking at, and only what it decided
 /// reaches the session.
 fn mouse_at(rt: &mut Server, viewer: &mut ViewerClient, input: MouseInput, now: Instant) {
+    viewer.apply_events();
     let frame = MouseFrame::from(rt.build_snapshot(viewer.id()).expect("snapshot"));
     let actions = viewer.handle_mouse(input, &frame, now);
     apply(rt, viewer, &frame, actions);
@@ -107,7 +108,10 @@ fn apply(
                 queue.extend(viewer.note_scroll_applied(pane, top, frame));
             }
             MouseAction::Forward { pane, mouse } => {
-                rt.forward_mouse_to_pane(client_id, pane, mouse);
+                let written = rt.forward_mouse_to_pane(client_id, pane, mouse);
+                if let (true, MouseKind::Press(button)) = (written, mouse.kind) {
+                    viewer.note_press_forwarded(pane, button);
+                }
             }
             MouseAction::AltScrollArrows { pane, up, count } => {
                 rt.write_alt_scroll_arrows(pane, up, count);
@@ -201,10 +205,17 @@ fn release_at(at: Point) -> MouseInput {
     }
 }
 
-/// Turn on this client's mouse-select mode, so a drag grabs the mouse for a
-/// koshi selection even over a program that asked for the mouse.
+/// Turn on this client's mouse-select mode the way its keybinding does, so a
+/// drag grabs the mouse for a koshi selection even over a program that asked
+/// for the mouse. The viewer picks the change up from its subscription on the
+/// next event.
 fn grab_mouse(rt: &mut Server, client: ClientId) {
-    rt.client_mut(client).expect("client").toggle_mouse_select();
+    let _ = rt.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::key_binding(client),
+        SystemTime::now(),
+        Command::ToggleMouseSelect,
+    ));
 }
 
 /// A clock whose every reading is a second after the last, so no two presses

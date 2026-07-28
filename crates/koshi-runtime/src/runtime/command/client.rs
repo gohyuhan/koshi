@@ -267,27 +267,27 @@ impl Server {
     }
 
     /// Handle [`Command::ToggleMouseSelect`]: flip whether the acting client
-    /// grabs the mouse for text selection, and repaint so the mode indicator
-    /// tracks it.
+    /// grabs the mouse for text selection and emit [`Event::MouseSelectChanged`]
+    /// carrying the new value.
     ///
     /// Client-scoped like the lock commands: the target is the acting client
     /// alone, no pane is resolved. It changes only how the client's mouse
     /// gestures route — koshi selection versus the program — never the layout,
-    /// focus, or any PTY, so it emits no bus event; the mode indicator is the
-    /// only thing that moves.
+    /// focus, or any PTY. The event is what carries the new value to the
+    /// viewer, which routes its own mouse events against its own copy.
     pub(super) fn handle_toggle_mouse_select(
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let (_, client) = self.acting_client_mut(source, None)?;
-        client.toggle_mouse_select();
-        self.render_scheduler
-            .invalidate(InvalidationReason::StatusChanged);
-        Ok(CommandResult::Ok {
-            command_id,
-            emitted_events: Vec::new(),
-        })
+        let (client_id, client) = self.acting_client_mut(source, None)?;
+        let on = client.toggle_mouse_select();
+        let mut scope = TransactionScope::new();
+        scope.emit(Event::MouseSelectChanged(MouseSelectChanged {
+            client_id,
+            on,
+        }));
+        Ok(scope.commit(command_id, &mut self.event_bus))
     }
 
     /// Map a [`LockMode`] to the wire-facing [`InputMode`] carried on

@@ -645,6 +645,181 @@ fn a_lock_and_the_key_after_it_in_one_batch_leave_that_key_to_the_shell() {
     assert_eq!(client.lock_mode(), LockMode::Locked);
 }
 
+/// One mouse event through the loop's own routing, against the frame the viewer
+/// is looking at, as a real pointer event arrives.
+fn mouse(
+    server: &mut Server,
+    client: &mut Client,
+    client_id: ClientId,
+    frame: &MouseFrame,
+    kind: MouseKind,
+    at: Point,
+) {
+    assert!(apply_event(
+        server,
+        client,
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse: MouseInput {
+                kind,
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        Some(frame),
+    )
+    .is_continue());
+}
+
+#[test]
+fn a_mouse_select_binding_and_a_press_in_one_batch_start_a_selection() {
+    // `<C-g>` grabs the mouse for koshi selection. The loop drains every queued
+    // event before it paints, so the press can land in the same batch as the
+    // binding with nothing in between; it must be routed in the mode the
+    // `<C-g>` just produced, not the one the painted frame carries.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    // The program in the pane asks for the mouse: button-event tracking, SGR.
+    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(pane_id, b"hello world");
+
+    // The frame the press is answered against is painted before the toggle, so
+    // it still says mouse-select is off.
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    assert!(!frame.client.mouse_select, "the painted frame predates it");
+
+    press(
+        &mut server,
+        &mut client,
+        client_id,
+        KeyChord::new(ModFlags::CTRL, Key::Char('g')),
+    );
+
+    let at = content_point(&server, client_id, pane_id);
+    let to = Point {
+        x: at.x + 4,
+        y: at.y,
+    };
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Press(MouseButton::Left),
+        at,
+    );
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Drag(MouseButton::Left),
+        to,
+    );
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "the gesture is koshi's; the program was sent no mouse report"
+    );
+    assert!(
+        has_highlight(&server, client_id, pane_id),
+        "the drag highlighted text in koshi"
+    );
+    assert!(client.mouse_select(), "the viewer holds the new mode");
+}
+
+#[test]
+fn a_press_the_pane_never_saw_leaves_the_drag_after_it_unforwarded() {
+    // The viewer answers from the frame it painted, which said the program
+    // wanted the mouse. The program turned tracking off before the press
+    // reached it and back on before the drag, so the press was never written.
+    // With no press behind it the drag reaches no program either.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    // Button-event tracking reports drags; SGR encoding.
+    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    let at = content_point(&server, client_id, pane_id);
+
+    // Tracking off at the press: the session drops it.
+    server.handle_pty_output(pane_id, b"\x1b[?1002l");
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Press(MouseButton::Left),
+        at,
+    );
+    // Tracking on again at the drag.
+    server.handle_pty_output(pane_id, b"\x1b[?1002h");
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Drag(MouseButton::Left),
+        Point {
+            x: at.x + 2,
+            y: at.y,
+        },
+    );
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "no press was written, so the drag after it is not written either"
+    );
+}
+
+#[test]
+fn a_press_the_pane_did_see_captures_the_gesture_for_the_drag_after_it() {
+    // The twin of the case above: the press was written, so the gesture is
+    // captured and the drag that follows reaches the same pane, re-stamped with
+    // the button the press named.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    // Button-event tracking reports drags; SGR encoding.
+    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+    let at = content_point(&server, client_id, pane_id);
+    let (col, row) = pane_local_cell(frame.layout(ViewerChrome::default()), pane_id, at)
+        .expect("a pane-local cell");
+
+    // A right press (SGR button 2) captures the gesture.
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Press(MouseButton::Right),
+        at,
+    );
+    // The terminal reports the drag as the left button; it must still reach the
+    // program as a right drag (button 2 plus the motion bit 32).
+    mouse(
+        &mut server,
+        &mut client,
+        client_id,
+        &frame,
+        MouseKind::Drag(MouseButton::Left),
+        at,
+    );
+
+    assert_eq!(
+        fake.writes(pane_id).expect("writes"),
+        vec![
+            format!("\x1b[<2;{col};{row}M").into_bytes(),
+            format!("\x1b[<34;{col};{row}M").into_bytes(),
+        ],
+        "the press was written, and the drag follows it re-stamped to button 2"
+    );
+}
+
 #[test]
 fn child_exit_event_removes_the_pane() {
     let fake = Arc::new(FakePtyBackend::new());

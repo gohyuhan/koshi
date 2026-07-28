@@ -82,6 +82,11 @@ pub struct Client {
     /// `koshi lock --client` can reach a viewer and `koshi list-clients` can
     /// report one.
     lock_mode: LockMode,
+    /// Whether this viewer grabs the mouse for text selection. It owns this
+    /// because it decides what a press means before anything is sent; the
+    /// session keeps its own copy, which the frame carries for the mode
+    /// indicator and the hint bar's label.
+    mouse_select: bool,
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending: Option<PendingKeySequence>,
@@ -91,7 +96,8 @@ pub struct Client {
     /// The pane a forwarded press captured, and the button that pressed it.
     /// While a button is held, its drags and its release go to this pane even as
     /// the pointer leaves it, and a drag or release with no capture is not
-    /// forwarded. Set on a forwarded press; cleared on the next release.
+    /// forwarded. Set once the session reports the press accepted for that
+    /// pane; cleared on the next release.
     ///
     /// The stored button is the reliable one — a press always names its button,
     /// while some terminals report every drag and release as the left button.
@@ -158,6 +164,7 @@ impl Client {
             keymap,
             registry,
             lock_mode: LockMode::Normal,
+            mouse_select: false,
             pending: None,
             last_press: None,
             mouse_capture: None,
@@ -259,6 +266,13 @@ impl Client {
         &self.theme
     }
 
+    /// Whether this viewer grabs the mouse for text selection, as the session
+    /// last reported it.
+    #[must_use]
+    pub fn mouse_select(&self) -> bool {
+        self.mouse_select
+    }
+
     /// The hint-bar data for the viewer's current mode.
     #[must_use]
     pub fn keymap_hints(&self) -> KeymapHints {
@@ -277,21 +291,28 @@ impl Client {
     /// Take everything the subscription has delivered and apply what the
     /// viewer must react to, returning how many events were seen.
     ///
-    /// Today that is the session's report that this viewer's input mode
-    /// changed — which happens when `koshi lock --client` names it, or when
-    /// its own lock binding fires and the session records the change. Applying
-    /// it here is what keeps the two copies of the mode agreeing.
+    /// Today those are the session's reports that this viewer's input mode
+    /// changed — which happens when `koshi lock --client` names it, or when its
+    /// own lock binding fires — and that its mouse-select mode changed, which
+    /// happens when its own `core:mouse-select` binding fires. Both decide what
+    /// an input means before anything is sent, so applying them here is what
+    /// keeps the viewer's copies agreeing with the session's. An event naming
+    /// another client is skipped.
     pub fn apply_events(&mut self) -> usize {
         let mut seen = 0;
         while let Ok(event) = self.events.try_recv() {
             seen += 1;
-            if let Event::InputModeChanged(changed) = &event {
-                if changed.client_id == self.id {
+            match &event {
+                Event::InputModeChanged(changed) if changed.client_id == self.id => {
                     self.set_lock_mode(match changed.mode {
                         InputMode::Locked => LockMode::Locked,
                         InputMode::Normal => LockMode::Normal,
                     });
                 }
+                Event::MouseSelectChanged(changed) if changed.client_id == self.id => {
+                    self.mouse_select = changed.on;
+                }
+                _ => {}
             }
         }
         seen

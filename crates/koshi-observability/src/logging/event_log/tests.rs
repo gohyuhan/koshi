@@ -10,9 +10,9 @@ use super::*;
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
     CommandRejected, ConfigReloaded, Copied, EventClass, InputMode, InputModeChanged,
-    KeybindingMatched, MouseScrolled, PaneClosing, PaneCreated, PaneOutputUpdated,
-    PaneProcessExited, PaneRemoved, PaneTyped, PluginInstalled, PluginLoadFailed, PtyResized,
-    RejectReason, SubscriberLagged, TypedPayload,
+    KeybindingMatched, MouseScrolled, MouseSelectChanged, PaneClosing, PaneCreated,
+    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneTyped, PluginInstalled,
+    PluginLoadFailed, PtyResized, RejectReason, SubscriberLagged, TypedPayload,
 };
 use koshi_core::geometry::Point;
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
@@ -163,6 +163,20 @@ fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
     assert!(out.contains(r#""level":"INFO""#), "{out}");
     assert!(out.contains(r#""message":"input mode changed""#), "{out}");
     assert!(out.contains(r#""mode":"Locked""#), "{out}");
+}
+
+// Mouse select decides whether a click reaches the program in the pane, so the
+// switch is worth a line and the line says which way it went.
+#[test]
+fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
+    let out = captured(&[Event::MouseSelectChanged(MouseSelectChanged {
+        client_id: ClientId::new(),
+        on: true,
+    })]);
+
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(out.contains(r#""message":"mouse select changed""#), "{out}");
+    assert!(out.contains(r#""on":true"#), "{out}");
 }
 
 // The model rule, held as a test: an event is a fact koshi anticipated, so it
