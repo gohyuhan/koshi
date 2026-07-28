@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 
+use koshi_client::input::KeyOutcome;
 use koshi_config::types::ClientConfig;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
@@ -165,21 +166,49 @@ fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
 fn key_input_events_write_to_the_focused_pane() {
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
 
-    // Typing `ls` + Enter: three unbound presses, each written as it is made.
+    // Typing `ls` + Enter through the loop's own routing: the viewer resolves
+    // each press, binds none of them, and the session writes each as it is
+    // made.
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
-        assert!(server
-            .handle_runtime_event(RuntimeEvent::KeyInput {
+        assert!(apply_event(
+            &mut server,
+            &mut client,
+            RuntimeEvent::KeyInput {
                 client_id,
                 chord: KeyChord::new(ModFlags::NONE, key),
-            },)
-            .is_continue());
+            },
+        )
+        .is_continue());
     }
 
     assert_eq!(
         fake.writes(pane_id).expect("writes"),
         vec![b"l".to_vec(), b"s".to_vec(), b"\r".to_vec()]
     );
+}
+
+#[test]
+fn a_key_for_another_client_is_not_resolved_by_this_viewer() {
+    // The loop routes only its own viewer's keys. One addressed to a client
+    // this process does not drive falls through to the session, which has no
+    // keymap and drops it rather than typing it at someone else's pane.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::KeyInput {
+            client_id: ClientId::new(),
+            chord: KeyChord::new(ModFlags::NONE, Key::Char('x')),
+        },
+    )
+    .is_continue());
+
+    assert_eq!(fake.writes(pane_id).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
@@ -406,15 +435,15 @@ fn explicit_quit_teardown_group_kills_without_grace_delay() {
     let (mut server, _tx, client_id, pane_id) = boot(&fake);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
 
-    // The explicit quit chord travels the binding path: `core:quit` flags
-    // zero-grace shutdown, the loop stops on the quit request, and teardown
-    // group-kills at once.
-    server.handle_key_input(
-        client_id,
-        KeyChord::new(ModFlags::CTRL, Key::Char('q')),
-        Instant::now(),
-    );
+    // The explicit quit chord travels the binding path: the viewer resolves
+    // `<C-q>` to `core:quit`, which flags zero-grace shutdown, the loop stops
+    // on the quit request, and teardown group-kills at once.
     let mut client = test_client(&mut server, client_id);
+    let quit = KeyChord::new(ModFlags::CTRL, Key::Char('q'));
+    match client.resolve_key(quit, Instant::now()) {
+        KeyOutcome::Fire(bound) => server.handle_bound_action(client_id, bound),
+        other => panic!("`<C-q>` fires core:quit; got {other:?}"),
+    }
     run_loop(&mut server, &mut client, &mut terminal).expect("loop");
     let outcome: thread::Result<Result<(), <TestBackend as Backend>::Error>> = Ok(Ok(()));
     teardown(&mut server, outcome).expect("teardown");

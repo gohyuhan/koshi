@@ -5,7 +5,7 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use koshi_config::conflict::{ConflictDiagnostic, LayerOrigin};
 use koshi_config::key::Leader;
@@ -455,32 +455,6 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
 }
 
 #[test]
-fn keybinding_reload_clears_pending_sequences() {
-    let (mut runtime, client) = runtime();
-    // `<C-p>` opens the default pane prefix, leaving a pending sequence.
-    runtime.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
-        Instant::now(),
-    );
-    let has_pending = |runtime: &Server, client: ClientId| {
-        runtime
-            .session_for_client(client)
-            .expect("session")
-            .clients
-            .get(client)
-            .expect("client")
-            .pending_key_sequence()
-            .is_some()
-    };
-    assert!(has_pending(&runtime, client));
-
-    runtime.reload_keybindings(candidate_binding("normal", new_tab_ref()));
-
-    assert!(!has_pending(&runtime, client));
-}
-
-#[test]
 fn registry_refresh_never_swaps_in_a_refused_keymap() {
     let (mut runtime, _client) = runtime();
     let plugin = PluginId::new();
@@ -731,32 +705,6 @@ fn a_second_keybinding_reload_fully_replaces_the_firsts_bindings() {
             args: ActionArgs::None,
         })
     );
-}
-
-#[test]
-fn registry_refresh_clears_pending_sequences_when_the_keymap_reapplies() {
-    let (mut runtime, client) = runtime();
-    runtime.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
-        Instant::now(),
-    );
-    let has_pending = |runtime: &Server| {
-        runtime
-            .session_for_client(client)
-            .expect("session")
-            .clients
-            .get(client)
-            .expect("client")
-            .pending_key_sequence()
-            .is_some()
-    };
-    assert!(has_pending(&runtime));
-
-    let report = runtime.refresh_keymap_for_registry();
-
-    assert_eq!(report.verdict(), KeymapVerdict::Apply);
-    assert!(!has_pending(&runtime));
 }
 
 #[test]

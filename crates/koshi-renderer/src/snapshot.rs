@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -347,10 +346,6 @@ pub struct ClientSnapshot {
     /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
     /// so both can be on at once.
     pub mouse_select: bool,
-    /// The chords of a multi-chord binding pressed so far, or `None` when no
-    /// sequence is pending. The hint bar switches from the mode's top-level
-    /// hints to the continuations of this prefix while it is `Some`.
-    pub pending_sequence: Option<KeySequence>,
     /// This client's tabline scroll position: `None` follows the active tab —
     /// the tab strip always scrolls to reveal it — while `Some(i)` peeks from
     /// tab index `i` without changing focus. The renderer windows the tab list

@@ -121,7 +121,6 @@ fn build(
             hovered_pane: None,
             lock_mode,
             mouse_select: false,
-            pending_sequence: None,
             tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
@@ -144,7 +143,7 @@ fn render_with(snapshot: &RenderSnapshot, theme: &Theme, w: u16, h: u16) -> Buff
         height: h,
     };
     let mut buf = Buffer::empty(area);
-    render_frame(snapshot, theme, area, &mut buf);
+    render_frame(snapshot, theme, None, area, &mut buf);
     buf
 }
 
@@ -544,7 +543,7 @@ fn reused_buffer_is_blanked_before_painting() {
         }
     }
 
-    render_frame(&snap, &Theme::default(), area, &mut buf);
+    render_frame(&snap, &Theme::default(), None, area, &mut buf);
 
     // Tabline gap between the left tab list and the right status: blanked.
     assert_eq!(buf[(12, 0)].symbol(), " ");
@@ -1280,6 +1279,7 @@ fn small_and_zero_size_areas_are_safe() {
     render_frame(
         &snap,
         &Theme::default(),
+        None,
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1386,6 +1386,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     render_frame(
         &snap,
         &Theme::default(),
+        None,
         RatatuiRect {
             x: 0,
             y: 0,
@@ -1437,6 +1438,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     render_frame(
         &snap,
         &Theme::default(),
+        None,
         RatatuiRect {
             x: 0,
             y: 0,

@@ -66,7 +66,7 @@ fn hints(
 
 /// A skeletal snapshot carrying only what the hint bar reads: the hints and
 /// the client's pending sequence.
-fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapshot {
+fn snap(keymap_hints: KeymapHints, _pending: Option<KeySequence>) -> RenderSnapshot {
     let tab_id = TabId::new();
     RenderSnapshot {
         session: SessionSnapshot {
@@ -92,7 +92,6 @@ fn snap(keymap_hints: KeymapHints, pending: Option<KeySequence>) -> RenderSnapsh
             hovered_pane: None,
             lock_mode: LockMode::Normal,
             mouse_select: false,
-            pending_sequence: pending,
             tabline_offset: None,
         },
         plugin_ui: PluginUiSnapshot::default(),
@@ -105,6 +104,37 @@ fn draw(snapshot: &RenderSnapshot, width: u16) -> Buffer {
     draw_themed(snapshot, &Theme::default(), width)
 }
 
+/// Draw in `theme`'s colors with an open sequence.
+fn draw_themed_pending(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    pending: &KeySequence,
+    width: u16,
+) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width,
+        height: 1,
+    };
+    let mut buf = Buffer::empty(area);
+    draw_hint_bar(snapshot, theme, Some(pending), area, &mut buf);
+    buf
+}
+
+/// Draw with an open sequence, which the viewer owns and hands to the bar.
+fn draw_pending(snapshot: &RenderSnapshot, pending: &KeySequence, width: u16) -> Buffer {
+    let area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width,
+        height: 1,
+    };
+    let mut buf = Buffer::empty(area);
+    draw_hint_bar(snapshot, &Theme::default(), Some(pending), area, &mut buf);
+    buf
+}
+
 /// Paint the hint bar in `theme`'s colors, for the tests that check which
 /// color a piece of the bar takes.
 fn draw_themed(snapshot: &RenderSnapshot, theme: &Theme, width: u16) -> Buffer {
@@ -115,7 +145,7 @@ fn draw_themed(snapshot: &RenderSnapshot, theme: &Theme, width: u16) -> Buffer {
         height: 1,
     };
     let mut buf = Buffer::empty(area);
-    draw_hint_bar(snapshot, theme, area, &mut buf);
+    draw_hint_bar(snapshot, theme, None, area, &mut buf);
     buf
 }
 
@@ -284,9 +314,10 @@ fn unlabeled_group_shows_count() {
 
 #[test]
 fn pending_prefix_shows_breadcrumb_and_continuations() {
-    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
+    let pending = seq(&[ctrl('p')]);
+    let snapshot = snap(pane_fixture(false), None);
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&snapshot, &pending, 80)),
         " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane"
     );
 }
@@ -296,15 +327,20 @@ fn pending_prefix_with_no_continuations_shows_bare_breadcrumb_and_no_groups() {
     // The user pressed a chord that isn't a prefix of anything bound: no
     // matching entries means no label and no continuation groups — just the
     // breadcrumb and arrow, with no panic on the now-empty group list.
-    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('z')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  z  ▶");
+    let pending = seq(&[ctrl('z')]);
+    let snapshot = snap(pane_fixture(false), None);
+    assert_eq!(
+        row_text(&draw_pending(&snapshot, &pending, 80)),
+        " Ctrl +  z  ▶"
+    );
 }
 
 #[test]
 fn customized_pending_prefix_uses_count_not_shipped_label() {
-    let snapshot = snap(pane_fixture(true), Some(seq(&[ctrl('p')])));
+    let pending = seq(&[ctrl('p')]);
+    let snapshot = snap(pane_fixture(true), None);
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&snapshot, &pending, 80)),
         " Ctrl +  p  +2  ▶  n  New Pane  x  Close Pane"
     );
 }
@@ -322,9 +358,10 @@ fn pending_prefix_without_label_shows_derived_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, Some(seq(&[ctrl('t')])));
+    let pending = seq(&[ctrl('t')]);
+    let snapshot = snap(keymap, None);
     assert_eq!(
-        row_text(&draw(&snapshot, 80)),
+        row_text(&draw_pending(&snapshot, &pending, 80)),
         " Ctrl +  t  +1  ▶  n  New Tab"
     );
 }
@@ -350,8 +387,12 @@ fn nested_group_inside_pending_shows_count() {
         Vec::new(),
         false,
     );
-    let snapshot = snap(keymap, Some(seq(&[ctrl('p')])));
-    assert_eq!(row_text(&draw(&snapshot, 80)), " Ctrl +  p  PANE  ▶  n  +2");
+    let pending = seq(&[ctrl('p')]);
+    let snapshot = snap(keymap, None);
+    assert_eq!(
+        row_text(&draw_pending(&snapshot, &pending, 80)),
+        " Ctrl +  p  PANE  ▶  n  +2"
+    );
 }
 
 #[test]
@@ -425,7 +466,7 @@ fn empty_mode_blanks_the_row() {
     let mut buf = Buffer::empty(area);
     // Pre-fill the row: the bar owns it, so stale cells must be cleared.
     buf.set_string(0, 0, "X".repeat(20), Style::default());
-    draw_hint_bar(&snapshot, &Theme::default(), area, &mut buf);
+    draw_hint_bar(&snapshot, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
     // Blank of text, but not of color: the row still carries the bar
     // background, so an empty mode reads as a bar rather than a hole.
@@ -449,7 +490,7 @@ fn zero_size_area_draws_nothing() {
         width: 10,
         height: 1,
     });
-    draw_hint_bar(&snapshot, &Theme::default(), area, &mut buf);
+    draw_hint_bar(&snapshot, &Theme::default(), None, area, &mut buf);
     assert_eq!(row_text(&buf), "");
 }
 
@@ -457,7 +498,8 @@ fn zero_size_area_draws_nothing() {
 /// theme's accent pair and a group's key block sits on the custom ramp.
 #[test]
 fn a_custom_theme_recolors_the_bar() {
-    let snapshot = snap(pane_fixture(false), Some(seq(&[ctrl('p')])));
+    let pending = seq(&[ctrl('p')]);
+    let snapshot = snap(pane_fixture(false), None);
     let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
@@ -465,7 +507,7 @@ fn a_custom_theme_recolors_the_bar() {
         on_accent: Color::Rgb(0x01, 0x02, 0x03),
         ..Theme::default()
     };
-    let buf = draw_themed(&snapshot, &theme, 80);
+    let buf = draw_themed_pending(&snapshot, &theme, &pending, 80);
     // Row: " Ctrl +  p  PANE  ▶  n  New Pane …". The breadcrumb's `Ctrl +`
     // is accent text; its key block is on-accent text on the accent.
     assert_eq!(buf[(1, 0)].fg, Color::Rgb(0x00, 0xff, 0x00));

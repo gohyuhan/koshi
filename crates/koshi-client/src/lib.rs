@@ -18,6 +18,7 @@ use std::sync::mpsc::Receiver;
 
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::ClientConfig;
+use koshi_core::event::InputMode;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
@@ -155,6 +156,29 @@ impl Client {
     #[must_use]
     pub fn keymap_hints(&self) -> koshi_config::hints::KeymapHints {
         self.keymap.hints_for(self.lock_mode)
+    }
+
+    /// Take everything the subscription has delivered and apply what the
+    /// viewer must react to, returning how many events were seen.
+    ///
+    /// Today that is the session's report that this viewer's input mode
+    /// changed — which happens when `koshi lock --client` names it, or when
+    /// its own lock binding fires and the session records the change. Applying
+    /// it here is what keeps the two copies of the mode agreeing.
+    pub fn apply_events(&mut self) -> usize {
+        let mut seen = 0;
+        while let Ok(event) = self.events.try_recv() {
+            seen += 1;
+            if let Event::InputModeChanged(changed) = &event {
+                if changed.client_id == self.id {
+                    self.set_lock_mode(match changed.mode {
+                        InputMode::Locked => LockMode::Locked,
+                        InputMode::Normal => LockMode::Normal,
+                    });
+                }
+            }
+        }
+        seen
     }
 
     /// Drop every event the subscription has delivered since the last call,

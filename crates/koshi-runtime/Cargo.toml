@@ -22,5 +22,9 @@ ratatui = { version = "0.30.2", default-features = false }
 tracing = "0.1.44"
 
 [dev-dependencies]
+# Tests only: the end-to-end key tests drive a real viewer, which resolves the
+# press before the session sees it. koshi-client does not depend on this crate,
+# so this adds no cycle.
+koshi-client = { version = "0.1.0", path = "../koshi-client" }
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }
 uuid = "1.24.0"

@@ -1557,11 +1557,9 @@ fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
     );
     assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
 
-    rt.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::CTRL, Key::Char('c')),
-        clock.tick(),
-    );
+    // `<C-c>` binds nothing, so the viewer passes it through and the session
+    // writes it to the pane.
+    rt.handle_key_press(client, KeyChord::new(ModFlags::CTRL, Key::Char('c')));
     assert_eq!(
         selection(&mut rt, client, pane),
         None,
@@ -1592,11 +1590,7 @@ fn typing_into_the_pane_clears_the_typists_highlight_there() {
     );
     assert!(selection(&mut rt, client, pane).is_some(), "highlighted");
 
-    rt.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::NONE, Key::Char('x')),
-        clock.tick(),
-    );
+    rt.handle_key_press(client, KeyChord::new(ModFlags::NONE, Key::Char('x')));
     assert_eq!(
         selection(&mut rt, client, pane),
         None,
@@ -1624,11 +1618,7 @@ fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
         .selection_drag()
         .is_some());
 
-    rt.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::NONE, Key::Char('x')),
-        clock.tick(),
-    );
+    rt.handle_key_press(client, KeyChord::new(ModFlags::NONE, Key::Char('x')));
     assert_eq!(selection(&mut rt, client, pane), None);
     assert_eq!(
         rt.client_mut(client).expect("client").selection_drag(),
@@ -1658,11 +1648,7 @@ fn typing_after_a_press_cancels_the_empty_gesture() {
         .selection_drag()
         .is_some());
 
-    rt.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::NONE, Key::Char('x')),
-        clock.tick(),
-    );
+    rt.handle_key_press(client, KeyChord::new(ModFlags::NONE, Key::Char('x')));
     assert_eq!(
         rt.client_mut(client).expect("client").selection_drag(),
         None
@@ -1694,11 +1680,7 @@ fn typing_leaves_another_panes_highlight_and_drag_alone() {
     // The split focuses the new pane, so the key types into it.
     let other = split(&mut rt, client);
     assert_ne!(other, pane);
-    rt.handle_key_input(
-        client,
-        KeyChord::new(ModFlags::NONE, Key::Char('x')),
-        clock.tick(),
-    );
+    rt.handle_key_press(client, KeyChord::new(ModFlags::NONE, Key::Char('x')));
     assert_eq!(
         selection(&mut rt, client, pane),
         Some(highlighted),

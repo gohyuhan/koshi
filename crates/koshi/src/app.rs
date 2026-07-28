@@ -30,9 +30,11 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
+use koshi_client::input::KeyOutcome;
 use koshi_client::Client;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::key::KeySequence;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
@@ -54,11 +56,11 @@ use crate::keys::decode_key;
 /// Paints a render snapshot into ratatui's frame buffer via the widget trait —
 /// the only way to reach the frame's buffer, and exactly the shape
 /// [`render_frame`] expects.
-struct SnapshotWidget<'a>(&'a RenderSnapshot, &'a Theme);
+struct SnapshotWidget<'a>(&'a RenderSnapshot, &'a Theme, Option<&'a KeySequence>);
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_frame(self.0, self.1, area, buf);
+        render_frame(self.0, self.1, self.2, area, buf);
     }
 }
 
@@ -351,7 +353,7 @@ fn run_loop<B: Backend>(
     loop {
         let now = Instant::now();
         let next = earliest(
-            earliest(server.next_render_wakeup(now), server.next_key_wakeup(now)),
+            earliest(server.next_render_wakeup(now), client.next_key_wakeup(now)),
             server.next_selection_scroll_wakeup(now),
         );
         let event = match next {
@@ -376,7 +378,7 @@ fn run_loop<B: Backend>(
         // The embedded client renders from server snapshots, so the events its
         // subscription delivers are discarded here; the discard keeps its
         // bounded queue from filling.
-        client.discard_events();
+        client.apply_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
         // They draw nothing and do not change renderer state.
@@ -389,7 +391,13 @@ fn run_loop<B: Backend>(
         if quit || server.quit_requested() {
             break;
         }
-        server.expire_key_sequences(Instant::now());
+        // A sequence that is both a complete binding and a longer one's prefix
+        // fires when its ambiguity deadline passes. The viewer holds it, so it
+        // decides; the session only runs what comes back.
+        if let Some(bound) = client.expire_key_sequence(Instant::now()) {
+            server.handle_bound_action(client.id(), bound);
+            server.invalidate_status();
+        }
         server.expire_selection_scrolls(Instant::now());
         if server.poll_render(Instant::now()) {
             render(terminal, server, client, &mut last_title, &mut last_cursor)?;
@@ -401,10 +409,29 @@ fn run_loop<B: Backend>(
     Ok(())
 }
 
-/// Hand one inbox event to the server, first letting the client record its
-/// own terminal's new size when the event is that client's resize. Returns
-/// [`ControlFlow::Break`] when the event is a quit request, so the loop stops.
+/// Hand one inbox event to the server, after the client has taken the parts
+/// that are its own: a key it must resolve, and its terminal's new size.
+/// Returns [`ControlFlow::Break`] when the event is a quit request, so the
+/// loop stops.
 fn apply_event(server: &mut Server, client: &mut Client, event: RuntimeEvent) -> ControlFlow<()> {
+    // A key belongs to the viewer that received it: the keymap, the input mode
+    // and any open sequence all live there, so it decides what the press means
+    // and the session only ever sees the answer — a resolved action, or a
+    // press to write.
+    if let RuntimeEvent::KeyInput { client_id, chord } = event {
+        if client_id == client.id() {
+            match client.resolve_key(chord, Instant::now()) {
+                KeyOutcome::Fire(bound) => server.handle_bound_action(client_id, bound),
+                KeyOutcome::PassThrough(chord) => server.handle_key_press(client_id, chord),
+                // Held or dropped: nothing reaches the session, but the hint
+                // bar and mode tag are drawn from viewer state, so the frame
+                // is stale either way.
+                KeyOutcome::Pending | KeyOutcome::Discard => {}
+            }
+            server.invalidate_status();
+            return ControlFlow::Continue(());
+        }
+    }
     if let RuntimeEvent::Resize { client_id, size } = &event {
         if *client_id == client.id() {
             client.set_viewport(*size);
@@ -459,7 +486,10 @@ fn render<B: Backend>(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        frame.render_widget(SnapshotWidget(&snapshot, client.theme()), area);
+        frame.render_widget(
+            SnapshotWidget(&snapshot, client.theme(), client.pending_sequence()),
+            area,
+        );
         if let Some(position) = cursor_position(&snapshot, area) {
             frame.set_cursor_position(position);
         }

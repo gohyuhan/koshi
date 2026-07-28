@@ -60,7 +60,6 @@ fn snap(
             hovered_pane: None,
             lock_mode,
             mouse_select,
-            pending_sequence: None,
             tabline_offset,
         },
         plugin_ui: PluginUiSnapshot::default(),

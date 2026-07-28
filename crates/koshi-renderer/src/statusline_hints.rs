@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::{Color, Modifier, Style};
@@ -31,6 +31,7 @@ const REVERT_MARKER: &str = " keys! ";
 pub fn draw_hint_bar(
     snapshot: &RenderSnapshot,
     theme: &Theme,
+    pending: Option<&KeySequence>,
     area: RatatuiRect,
     buf: &mut Buffer,
 ) {
@@ -44,11 +45,7 @@ pub fn draw_hint_bar(
     buf.set_style(area, bar_style(theme));
 
     let hints = &snapshot.keymap_hints;
-    let pending = snapshot
-        .client
-        .pending_sequence
-        .as_ref()
-        .map_or(&[][..], |sequence| sequence.chords());
+    let pending = pending.map_or(&[][..], KeySequence::chords);
     let mut right_edge = area.right();
     if hints.reverted {
         let marker = Line::from(Span::styled(REVERT_MARKER, revert_style()));

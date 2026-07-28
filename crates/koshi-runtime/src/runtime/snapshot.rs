@@ -182,9 +182,6 @@ impl Server {
                 hovered_pane: client.hovered_pane(),
                 lock_mode: client.lock_mode(),
                 mouse_select: client.mouse_select(),
-                pending_sequence: client
-                    .pending_key_sequence()
-                    .map(|pending| pending.sequence.clone()),
                 tabline_offset: client.tabline_offset(),
             },
         })

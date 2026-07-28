@@ -135,7 +135,6 @@ fn build_snapshot_maps_session_tab_and_client() {
     assert_eq!(snap.plugin_ui, PluginUiSnapshot::default());
 
     // No sequence pends before a prefix key is pressed.
-    assert_eq!(snap.client.pending_sequence, None);
 }
 
 #[test]

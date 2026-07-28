@@ -31,6 +31,7 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::PaneId;
+use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
@@ -51,7 +52,13 @@ use crate::theme::Theme;
 /// pane (`all_suppressed`), draws only a centered too-small overlay and
 /// returns, skipping the panes and both chrome rows. Does nothing for a
 /// zero-size area.
-pub fn render_frame(snapshot: &RenderSnapshot, theme: &Theme, area: RatatuiRect, buf: &mut Buffer) {
+pub fn render_frame(
+    snapshot: &RenderSnapshot,
+    theme: &Theme,
+    pending: Option<&KeySequence>,
+    area: RatatuiRect,
+    buf: &mut Buffer,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -107,7 +114,7 @@ pub fn render_frame(snapshot: &RenderSnapshot, theme: &Theme, area: RatatuiRect,
             width: area.width,
             height: 1,
         };
-        draw_hint_bar(snapshot, theme, hint_bar, buf);
+        draw_hint_bar(snapshot, theme, pending, hint_bar, buf);
     }
 }
 
