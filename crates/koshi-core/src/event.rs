@@ -44,9 +44,8 @@ pub enum Event {
     PaneFocused(PaneFocused),
     /// A pane's PTY was resized (emitted per affected pane after a layout solve).
     PtyResized(PtyResized),
-    /// A pane's terminal content changed: a coalesced, metadata-only damage
-    /// tick carrying no content. Lossy class — bursts collapse to at most one
-    /// pending tick per pane per subscriber.
+    /// A pane's terminal content changed: a metadata-only damage tick carrying
+    /// no content. Lossy class.
     PaneOutputUpdated(PaneOutputUpdated),
     /// A tab's layout tree changed.
     LayoutChanged(LayoutChanged),
@@ -637,6 +636,52 @@ pub enum EventClass {
     Lossy,
     /// State-transition facts that must not be silently lost.
     Critical,
+}
+
+/// Returns an event's delivery class.
+///
+/// `Lossy` events may coalesce or drop during delivery. `Critical` events must
+/// not silently disappear.
+pub fn classify(event: &Event) -> EventClass {
+    match event {
+        Event::PaneCreated(_) => EventClass::Critical,
+        Event::PaneProcessExited(_) => EventClass::Critical,
+        Event::PaneClosing(_) => EventClass::Critical,
+        Event::PaneRemoved(_) => EventClass::Critical,
+        Event::PaneFocused(_) => EventClass::Critical,
+        Event::PtyResized(_) => EventClass::Critical,
+        Event::PaneOutputUpdated(_) => EventClass::Lossy,
+        Event::LayoutChanged(_) => EventClass::Critical,
+        Event::TabCreated(_) => EventClass::Critical,
+        Event::TabClosed(_) => EventClass::Critical,
+        Event::TabFocused(_) => EventClass::Critical,
+        Event::TabMoved(_) => EventClass::Critical,
+        Event::PaneSuppressed(_) => EventClass::Critical,
+        Event::PaneResumed(_) => EventClass::Critical,
+        Event::TerminalTooSmallEntered(_) => EventClass::Critical,
+        Event::TerminalTooSmallExited(_) => EventClass::Critical,
+        Event::ConfigReloaded(_) => EventClass::Critical,
+        Event::InputModeChanged(_) => EventClass::Critical,
+        Event::MouseSelectChanged(_) => EventClass::Critical,
+        Event::KeybindingMatched(_) => EventClass::Critical,
+        Event::PaneTyped(_) => EventClass::Lossy,
+        Event::PaneEnterPressed(_) => EventClass::Critical,
+        Event::MousePressed(_) => EventClass::Critical,
+        Event::MouseReleased(_) => EventClass::Critical,
+        Event::MouseDragged(_) => EventClass::Lossy,
+        Event::MouseScrolled(_) => EventClass::Lossy,
+        Event::PaneMouseForwarded(_) => EventClass::Lossy,
+        Event::PluginMouseInput(_) => EventClass::Lossy,
+        Event::PaneCommandStarted(_) => EventClass::Critical,
+        Event::PaneCommandFinished(_) => EventClass::Critical,
+        Event::PaneScrollbackTruncated(_) => EventClass::Lossy,
+        Event::SubscriberLagged(_) => EventClass::Critical,
+        Event::CommandRejected(_) => EventClass::Critical,
+        Event::SelectionChanged(_) => EventClass::Critical,
+        Event::Copied(_) => EventClass::Critical,
+        Event::Plugin(_) => EventClass::Critical,
+        Event::Quit => EventClass::Critical,
+    }
 }
 
 /// Payload for [`Event::SubscriberLagged`].

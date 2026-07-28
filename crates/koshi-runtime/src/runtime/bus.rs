@@ -10,6 +10,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
 use koshi_core::event::Event;
+use koshi_core::ids::SubscriberId;
 
 /// How many undelivered events one subscriber's queue holds. An event
 /// published while the queue is full is dropped for that subscriber.
@@ -39,7 +40,7 @@ impl EventFilter {
 struct Subscriber {
     /// Stable id assigned at subscription, named in log lines about this
     /// subscriber.
-    id: u64,
+    id: SubscriberId,
     /// Which events this subscriber receives.
     filter: EventFilter,
     /// Sending end of the subscriber's bounded queue; the receiver lives with
@@ -53,9 +54,6 @@ struct Subscriber {
 pub struct EventBus {
     /// Live subscribers, in subscription order.
     subscribers: Vec<Subscriber>,
-    /// Id handed to the next subscriber; each subscription takes the current
-    /// value and increments it.
-    next_subscriber_id: u64,
 }
 
 impl EventBus {
@@ -64,7 +62,6 @@ impl EventBus {
     pub fn new() -> Self {
         EventBus {
             subscribers: Vec::new(),
-            next_subscriber_id: 0,
         }
     }
 
@@ -73,8 +70,7 @@ impl EventBus {
     /// subscription; the bus notices on the next publish.
     pub fn subscribe(&mut self, filter: EventFilter) -> Receiver<Event> {
         let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
-        let id = self.next_subscriber_id;
-        self.next_subscriber_id += 1;
+        let id = SubscriberId::new();
         self.subscribers.push(Subscriber { id, filter, tx });
         rx
     }
@@ -91,7 +87,7 @@ impl EventBus {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
                     tracing::warn!(
-                        subscriber = subscriber.id,
+                        subscriber = %subscriber.id,
                         event = event.name(),
                         "event dropped; subscriber queue full"
                     );

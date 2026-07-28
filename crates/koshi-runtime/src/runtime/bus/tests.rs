@@ -1,6 +1,7 @@
-//! Tests for [`EventBus`]: subscribers receive published events in order over
-//! their own queues, a dropped receiver ends its subscription, and a full
-//! queue drops the overflowing event for that subscriber only.
+//! Tests for [`EventBus`]: subscribers receive distinct ids and published
+//! events in order over their own queues, a dropped receiver ends its
+//! subscription, and a full queue drops the overflowing event for that
+//! subscriber only.
 
 use koshi_core::event::{Event, LayoutChanged, TabCreated};
 use koshi_core::ids::TabId;
@@ -11,6 +12,15 @@ use super::*;
 fn a_new_bus_has_no_subscribers() {
     let bus = EventBus::new();
     assert_eq!(bus.subscriber_count(), 0);
+}
+
+#[test]
+fn subscribers_receive_distinct_ids() {
+    let mut bus = EventBus::new();
+    let _first = bus.subscribe(EventFilter::All);
+    let _second = bus.subscribe(EventFilter::All);
+
+    assert_ne!(bus.subscribers[0].id, bus.subscribers[1].id);
 }
 
 #[test]
