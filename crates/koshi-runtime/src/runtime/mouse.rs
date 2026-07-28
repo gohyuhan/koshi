@@ -19,22 +19,24 @@
 //! already in the focused one, and otherwise goes through to the program; a
 //! **pane border** begins a resize drag; the bare **tabline** begins a
 //! peek-drag. A **drag** then moves the grabbed border, scrolls the strip, or
-//! goes to the program — whichever gesture the press began; a **wheel** steps
-//! the tab strip over the tabline and scrolls a pane elsewhere (below); a
-//! **release** ends a drag or reaches the program. The hint bar is ignored.
+//! goes to the program — whichever gesture the press began; a **release** ends a
+//! drag or reaches the program. The hint bar is ignored.
 //!
 //! Anything koshi does not consume is forwarded to the program in the focused
 //! pane, encoded as the mouse report its current mode asked for (see
 //! [`encode_mouse`](fn@koshi_terminal::mouse_report::encode_mouse)) — this is
 //! what lets a mouse-aware TUI in a pane receive clicks, drags, and motion.
 //!
-//! A **wheel over a pane** targets the pane under the pointer (not the focused
-//! one), by precedence: a highlight in that pane holds the view and scrolls
-//! koshi's own scrollback; a program asking for the mouse gets the wheel as a
-//! report; an alternate-screen program with alternate-scroll mode (`?1007`) on
-//! gets cursor arrow keys; otherwise the pane's scrollback scrolls, or the wheel
-//! is ignored, per [`mouse.wheel`](koshi_config::types::MouseConfig::wheel). A
-//! buttonless **move** tracks which pane the pointer is over on the client's
+//! **A wheel tick is decided by the viewer**, off the frame it last painted, and
+//! reaches this module only as one of these calls:
+//! [`wheel_scroll_pane`](Server::wheel_scroll_pane),
+//! [`forward_wheel_to_pane`](Server::forward_wheel_to_pane),
+//! [`write_alt_scroll_arrows`](Server::write_alt_scroll_arrows),
+//! [`set_tabline_offset`](Server::set_tabline_offset), and
+//! [`set_hovered_pane`](Server::set_hovered_pane). Each re-reads the live state
+//! it needs at the moment it writes, so a program that changed a mode since that
+//! frame is still answered correctly. A buttonless **move** still tracks which
+//! pane the pointer is over on the client's
 //! [`hovered_pane`](koshi_session::client::Client::hovered_pane), so the
 //! renderer can mark the wheel's target.
 //!
@@ -50,14 +52,13 @@
 
 use std::time::{Instant, SystemTime};
 
-use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTabArgs,
     FocusTarget, ResizePaneArgs, TabTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
-use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
+use koshi_core::mouse::{reports, MouseButton, MouseInput, MouseKind};
 use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{FrameLayout, OwnedFrameLayout};
@@ -65,7 +66,7 @@ use koshi_renderer::{
     hit_test, pane_content_rect, pane_local_cell, tabline_first_visible, HitRegion,
 };
 use koshi_session::client::{ClickCount, ResizeDragState, TablineDragState};
-use koshi_terminal::mouse_report::{encode_mouse, reports};
+use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
 use crate::runtime::render_schedule::InvalidationReason;
@@ -80,11 +81,12 @@ impl Server {
     ///
     /// Koshi acts on what it owns — a click on a tab, a border, the tab strip —
     /// and hands everything else to the program in the pane under the pointer,
-    /// encoded as a mouse report when that program asked for one. A press or
-    /// wheel solves the layout to hit-test it; a drag or release consults the
+    /// encoded as a mouse report when that program asked for one. A press
+    /// solves the layout to hit-test it; a drag or release consults the
     /// stored drag first; a buttonless move solves it to find the pane under
     /// the pointer, and solves it again only when the program in that pane
-    /// asked to be told about moves.
+    /// asked to be told about moves. A wheel tick never arrives here: the viewer
+    /// answers it and calls what it decided on directly.
     pub fn handle_mouse_input(&mut self, client_id: ClientId, mouse: MouseInput, now: Instant) {
         match mouse.kind {
             MouseKind::Press(MouseButton::Left) => {
@@ -92,12 +94,9 @@ impl Server {
                     self.mouse_left_press(client_id, frame.layout(), region, mouse, now);
                 }
             }
-            MouseKind::Scroll(direction) => {
-                if let Some((frame, region)) = self.frame_hit(client_id, mouse.at) {
-                    self.set_hover(client_id, pane_under(&region));
-                    self.route_wheel(client_id, frame.layout(), region, direction, mouse);
-                }
-            }
+            // A wheel tick is answered by the viewer, off the frame it painted,
+            // and reaches the session only as one of the calls below.
+            MouseKind::Scroll(_) => {}
             MouseKind::Drag(MouseButton::Left) => {
                 // A press begins exactly one gesture: a border drag resizes, a
                 // tabline drag scrolls, a content drag selects, and any other
@@ -540,135 +539,30 @@ impl Server {
         }
     }
 
-    /// Step the tab strip one tab on a wheel `direction`, but only when the
-    /// wheel is over the tabline row.
-    fn scroll_over_tabline(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        region: HitRegion,
-        direction: ScrollDirection,
-    ) {
-        let over_tabline = matches!(
-            region,
-            HitRegion::Tabline
-                | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
-        );
-        if !over_tabline {
-            return;
-        }
-        let first = tabline_first_visible(frame);
-        let target = match direction {
-            ScrollDirection::Up | ScrollDirection::Left => first.saturating_sub(1),
-            ScrollDirection::Down | ScrollDirection::Right => first + 1,
-        };
-        self.set_tabline_offset(client_id, Some(target));
-    }
-
-    /// Route a wheel tick over `region`. Over the tab strip it steps the strip;
-    /// over a pane's content that pane is the target; over any other chrome the
-    /// client's focused pane is. The target is then scrolled by
-    /// [`wheel_on_pane`](Self::wheel_on_pane)'s precedence.
-    fn route_wheel(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        region: HitRegion,
-        direction: ScrollDirection,
-        mouse: MouseInput,
-    ) {
-        if matches!(
-            region,
-            HitRegion::Tabline
-                | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
-        ) {
-            self.scroll_over_tabline(client_id, frame, region, direction);
-            return;
-        }
-        let target = match region {
-            HitRegion::PaneContent { pane_id } => Some(pane_id),
-            _ => self.focused_terminal_pane(client_id),
-        };
-        if let Some(pane_id) = target {
-            self.wheel_on_pane(client_id, frame, pane_id, direction, mouse);
-        }
-    }
-
-    /// Act on a wheel tick aimed at `pane_id`, by precedence: a highlight in the
-    /// pane holds the view and scrolls koshi's own scrollback; else a program
-    /// asking for the mouse gets the wheel as a report; else an alternate-screen
-    /// program with `?1007` on gets cursor arrow keys; else the
-    /// [`wheel`](koshi_config::types::MouseConfig::wheel) config decides — scroll
-    /// koshi's scrollback (the default) or do nothing.
-    fn wheel_on_pane(
-        &mut self,
-        client_id: ClientId,
-        frame: FrameLayout<'_>,
-        pane_id: PaneId,
-        direction: ScrollDirection,
-        mouse: MouseInput,
-    ) {
-        let lines = usize::from(self.client_config.mouse.scroll_lines);
-        if self.pane_has_selection(client_id, pane_id) {
-            self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
-        } else if self.pane_reports_mouse(pane_id, MouseKind::Scroll(direction)) {
-            self.forward_wheel_to_pane(frame, pane_id, direction, mouse);
-        } else if self.pane_alt_scroll(pane_id) {
-            self.send_alt_scroll_keys(pane_id, direction, lines);
-        } else {
-            match self.client_config.mouse.wheel {
-                WheelScroll::ScrollScrollback => {
-                    self.wheel_scroll_scrollback(client_id, pane_id, direction, lines);
-                }
-                WheelScroll::Ignore => {}
-            }
-        }
-    }
-
-    /// Scroll `client_id`'s koshi scrollback view of `pane_id` by the wheel
-    /// `direction`. A vertical wheel moves the view; a horizontal wheel leaves
-    /// the scrollback alone.
+    /// Move `client_id`'s koshi scrollback view of `pane_id` by `lines`, up into
+    /// history or back down toward live output.
     ///
     /// Koshi scrollback exists only on the primary screen, so a pane on the
     /// alternate screen scrolls nothing: the alternate screen keeps no history,
     /// and storing an offset there would surface as an unexpectedly scrolled-back
-    /// shell once the full-screen program exits back to the primary.
-    fn wheel_scroll_scrollback(
+    /// shell once the full-screen program exits back to the primary. The screen
+    /// is read here, at the moment of the move, so a pane that switched screens
+    /// since the frame the viewer decided from is still answered correctly.
+    pub fn wheel_scroll_pane(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
-        direction: ScrollDirection,
+        up: bool,
         lines: usize,
     ) {
         if !self.pane_on_primary(pane_id) {
             return;
         }
-        match direction {
-            ScrollDirection::Up => self.scroll_up(client_id, pane_id, lines),
-            ScrollDirection::Down => self.scroll_down(client_id, pane_id, lines),
-            ScrollDirection::Left | ScrollDirection::Right => {}
+        if up {
+            self.scroll_up(client_id, pane_id, lines);
+        } else {
+            self.scroll_down(client_id, pane_id, lines);
         }
-    }
-
-    /// Whether this client has a highlight up in `pane_id`.
-    fn pane_has_selection(&self, client_id: ClientId, pane_id: PaneId) -> bool {
-        self.session_for_client(client_id)
-            .and_then(|session| session.clients.get(client_id))
-            .is_some_and(|client| client.selection(pane_id).is_some())
-    }
-
-    /// Whether `pane_id`'s program is on the alternate screen with alternate-
-    /// scroll mode (`?1007`) on — the state in which a wheel tick becomes cursor
-    /// arrow keys.
-    fn pane_alt_scroll(&self, pane_id: PaneId) -> bool {
-        self.terminal_engines.get(&pane_id).is_some_and(|engine| {
-            let state = engine.state();
-            state.alt_scroll() && state.active_screen() == Screen::Alternate
-        })
     }
 
     /// Whether `pane_id`'s program is on the primary screen — the only screen
@@ -679,20 +573,20 @@ impl Server {
             .is_some_and(|engine| engine.state().active_screen() == Screen::Primary)
     }
 
-    /// Hand a wheel tick to the program in `pane_id`, encoded as the mouse report
-    /// its mode asked for. The pane's tracking level was already checked by
-    /// [`wheel_on_pane`](Self::wheel_on_pane), so a program in no mouse mode is
-    /// never reached here.
+    /// Hand wheel tick `mouse` to the program in `pane_id`, encoded as the mouse
+    /// report that pane's mode asks for.
+    ///
+    /// The tracking level and encoding are read here, at the moment of the
+    /// write, so a program that turned mouse reporting off since the frame the
+    /// viewer decided from receives nothing.
     ///
     /// The pointer's cell is clamped into the pane, so a wheel that landed on
-    /// chrome (a border, the status line) and was routed to the focused pane
-    /// still reaches it at the nearest edge, the same way a captured drag does —
-    /// a wheel over no pane goes to the focused one.
-    fn forward_wheel_to_pane(
+    /// chrome (a border, the status line) and was aimed at the focused pane
+    /// still reaches it at the nearest edge, the same way a captured drag does.
+    pub fn forward_wheel_to_pane(
         &mut self,
-        frame: FrameLayout<'_>,
+        client_id: ClientId,
         pane_id: PaneId,
-        direction: ScrollDirection,
         mouse: MouseInput,
     ) {
         let Some((tracking, encoding)) = self.terminal_engines.get(&pane_id).map(|engine| {
@@ -703,36 +597,44 @@ impl Server {
         }) else {
             return;
         };
-        let kind = MouseKind::Scroll(direction);
-        let Some((col, row)) = pane_cell(frame, pane_id, mouse.at, true) else {
+        if !reports(tracking, mouse.kind) {
+            return;
+        }
+        let Some(frame) = self.build_layout(client_id) else {
             return;
         };
-        if let Some(bytes) = encode_mouse(kind, mouse.mods, col, row, tracking, encoding) {
+        let Some((col, row)) = pane_cell(frame.layout(), pane_id, mouse.at, true) else {
+            return;
+        };
+        if let Some(bytes) = encode_mouse(mouse.kind, mouse.mods, col, row, tracking, encoding) {
             let _ = self.pty_backend().write(pane_id, &bytes);
         }
     }
 
-    /// Send `lines` cursor arrow keys to `pane_id` for a wheel tick — the
-    /// alternate-scroll (`?1007`) translation. Up sends up-arrows, down sends
-    /// down-arrows; a horizontal wheel sends nothing. The byte form follows the
-    /// program's cursor-key mode: `ESC O A` under application keys, `ESC [ A`
-    /// otherwise.
-    fn send_alt_scroll_keys(&mut self, pane_id: PaneId, direction: ScrollDirection, lines: usize) {
-        let letter = match direction {
-            ScrollDirection::Up => b'A',
-            ScrollDirection::Down => b'B',
-            ScrollDirection::Left | ScrollDirection::Right => return,
-        };
-        let Some(app_keys) = self
-            .terminal_engines
-            .get(&pane_id)
-            .map(|engine| engine.state().app_cursor_keys())
-        else {
+    /// Send `count` cursor arrow keys to `pane_id` for a wheel tick — the
+    /// alternate-scroll (`?1007`) translation. `up` sends up-arrows, otherwise
+    /// down-arrows.
+    ///
+    /// The pane must still be on the alternate screen with alternate scroll on,
+    /// read here at the moment of the write: a pane whose program left the
+    /// alternate screen since the frame the viewer decided from receives
+    /// nothing, so the arrows cannot reach the shell underneath and recall its
+    /// history.
+    ///
+    /// The byte form follows the program's cursor-key mode (DECCKM), read at the
+    /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
+    pub fn write_alt_scroll_arrows(&mut self, pane_id: PaneId, up: bool, count: usize) {
+        let letter = if up { b'A' } else { b'B' };
+        let Some(app_keys) = self.terminal_engines.get(&pane_id).and_then(|engine| {
+            let state = engine.state();
+            (state.alt_scroll() && state.active_screen() == Screen::Alternate)
+                .then(|| state.app_cursor_keys())
+        }) else {
             return;
         };
         let intro: &[u8] = if app_keys { b"\x1bO" } else { b"\x1b[" };
-        let mut bytes = Vec::with_capacity(lines * 3);
-        for _ in 0..lines {
+        let mut bytes = Vec::with_capacity(count * 3);
+        for _ in 0..count {
             bytes.extend_from_slice(intro);
             bytes.push(letter);
         }
@@ -748,12 +650,16 @@ impl Server {
         let hovered = self
             .frame_hit(client_id, at)
             .and_then(|(_, region)| pane_under(&region));
-        self.set_hover(client_id, hovered);
+        self.set_hovered_pane(client_id, hovered);
     }
 
     /// Set this client's hovered pane, repainting only when it changed so a move
     /// within one pane costs nothing.
-    fn set_hover(&mut self, client_id: ClientId, hovered: Option<PaneId>) {
+    ///
+    /// The renderer draws an unfocused hovered pane in the hover color, so the
+    /// wheel's target is visible. The viewer names it for a wheel tick; a
+    /// buttonless move sets it from the session's own hit-test.
+    pub fn set_hovered_pane(&mut self, client_id: ClientId, hovered: Option<PaneId>) {
         let changed = self.client_mut(client_id).is_some_and(|client| {
             let changed = client.hovered_pane() != hovered;
             if changed {
@@ -767,9 +673,11 @@ impl Server {
         }
     }
 
-    /// Set this client's tab-strip peek offset and repaint. The renderer clamps
-    /// the index to a valid window, so an over-far target is harmless.
-    fn set_tabline_offset(&mut self, client_id: ClientId, offset: Option<usize>) {
+    /// Set this client's tab-strip peek offset and repaint. `None` follows the
+    /// active tab; `Some(i)` peeks from tab index `i` without changing focus.
+    /// The renderer clamps the index to a valid window, so an over-far target is
+    /// harmless.
+    pub fn set_tabline_offset(&mut self, client_id: ClientId, offset: Option<usize>) {
         let Some(client) = self.client_mut(client_id) else {
             return;
         };

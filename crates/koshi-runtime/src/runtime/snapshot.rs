@@ -28,6 +28,7 @@ use std::sync::OnceLock;
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_with_mode_min, SolveResult};
@@ -196,8 +197,9 @@ impl Server {
     /// from absolute line numbers to the rows this frame actually shows.
     ///
     /// A pane with no terminal engine — a plugin pane, or one not yet spawned —
-    /// gets `grid_view = None` and a hidden cursor; the renderer draws no cells
-    /// for it.
+    /// gets `grid_view = None`, a hidden cursor, and no mouse mode at all: the
+    /// renderer draws no cells for it, and a wheel over it asks nothing of a
+    /// program.
     #[allow(clippy::needless_pass_by_value)]
     fn pane_snapshot(
         &self,
@@ -218,7 +220,11 @@ impl Server {
                 },
                 grid_view: None,
                 reverse_video: false,
+                mouse_tracking: MouseTracking::Off,
+                alt_scroll: false,
+                on_alt_screen: false,
                 selection: None,
+                has_selection: false,
                 scrollback: ScrollbackMeta {
                     truncated: false,
                     retained_lines: 0,
@@ -255,10 +261,14 @@ impl Server {
                 blink: state.cursor_blink(),
                 shape: state.cursor_shape(),
             },
+            has_selection: selection.is_some(),
             selection: selection
                 .and_then(|selection| selection_spans(&selection, &grid, scrollback, view_offset)),
             grid_view: Some(GridView { grid, view_offset }),
             reverse_video: state.reverse_video(),
+            mouse_tracking: state.mouse_tracking(),
+            alt_scroll: state.alt_scroll(),
+            on_alt_screen: state.active_screen() == Screen::Alternate,
             scrollback: ScrollbackMeta {
                 truncated: scrollback.dropped_lines() > 0,
                 retained_lines: scrollback.len(),

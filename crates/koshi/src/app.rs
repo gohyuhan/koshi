@@ -31,16 +31,18 @@ use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
 use koshi_client::input::KeyOutcome;
+use koshi_client::mouse::MouseAction;
 use koshi_client::Client;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::key::KeySequence;
+use koshi_core::mouse::MouseKind;
 use koshi_input::mouse::decode_mouse;
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_observability::logging::{init_tracing, LoggingParams};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
-use koshi_renderer::snapshot::{CursorStyle, KeymapHints, RenderSnapshot};
+use koshi_renderer::snapshot::{CursorStyle, KeymapHints, MouseFrame, RenderSnapshot};
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{cursor_position, cursor_style, render_frame};
 use koshi_runtime::ipc_server::IpcServer;
@@ -392,6 +394,11 @@ fn run_loop<B: Backend>(
 ) -> Result<(), B::Error> {
     let mut last_title = String::new();
     let mut last_cursor = None;
+    // The frame the viewer is looking at, cut down to what a wheel tick reads:
+    // no cells, so nothing here keeps a pane's grid alive between paints. It is
+    // replaced at each paint. Before the first paint there is none, and a wheel
+    // tick arriving in that window is dropped.
+    let mut last_frame: Option<MouseFrame> = None;
     loop {
         let now = Instant::now();
         let next = earliest(
@@ -411,11 +418,11 @@ fn run_loop<B: Backend>(
         };
         let mut quit = false;
         if let Some(event) = event {
-            quit |= apply_event(server, client, event).is_break();
+            quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
         // Apply anything else already queued before painting one frame.
         while let Ok(event) = server.inbox_rx().try_recv() {
-            quit |= apply_event(server, client, event).is_break();
+            quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
         // The embedded client renders from server snapshots, so the events its
         // subscription delivers are discarded here; the discard keeps its
@@ -442,7 +449,14 @@ fn run_loop<B: Backend>(
         }
         server.expire_selection_scrolls(Instant::now());
         if server.poll_render(Instant::now()) {
-            render(terminal, server, client, &mut last_title, &mut last_cursor)?;
+            render(
+                terminal,
+                server,
+                client,
+                &mut last_title,
+                &mut last_cursor,
+                &mut last_frame,
+            )?;
         }
         if !server.has_active_panes() {
             break;
@@ -452,10 +466,16 @@ fn run_loop<B: Backend>(
 }
 
 /// Hand one inbox event to the server, after the client has taken the parts
-/// that are its own: a key it must resolve, and its terminal's new size.
-/// Returns [`ControlFlow::Break`] when the event is a quit request, so the
-/// loop stops.
-fn apply_event(server: &mut Server, client: &mut Client, event: RuntimeEvent) -> ControlFlow<()> {
+/// that are its own: a key it must resolve, a wheel tick it must route, and its
+/// terminal's new size. `last_frame` is the frame the viewer is looking at, or
+/// `None` before the first paint. Returns [`ControlFlow::Break`] when the event
+/// is a quit request, so the loop stops.
+fn apply_event(
+    server: &mut Server,
+    client: &mut Client,
+    event: RuntimeEvent,
+    last_frame: Option<&MouseFrame>,
+) -> ControlFlow<()> {
     // A key belongs to the viewer that received it: the keymap, the input mode
     // and any open sequence all live there, so it decides what the press means
     // and the session only ever sees the answer — a resolved action, or a
@@ -474,12 +494,46 @@ fn apply_event(server: &mut Server, client: &mut Client, event: RuntimeEvent) ->
             return ControlFlow::Continue(());
         }
     }
+    // A wheel tick belongs to the viewer too: the frame it painted says which
+    // pane the pointer is over and what that pane's program asked for, and its
+    // own `mouse` settings say what a notch does. Every other mouse event still
+    // goes to the session.
+    if let RuntimeEvent::MouseInput { client_id, mouse } = event {
+        if client_id == client.id() && matches!(mouse.kind, MouseKind::Scroll(_)) {
+            let decided = last_frame.and_then(|frame| client.handle_mouse_wheel(mouse, frame));
+            if let Some(decision) = decided {
+                server.set_hovered_pane(client_id, decision.hovered);
+                apply_mouse_action(server, client_id, decision.action);
+            }
+            return ControlFlow::Continue(());
+        }
+    }
     if let RuntimeEvent::Resize { client_id, size } = &event {
         if *client_id == client.id() {
             client.set_viewport(*size);
         }
     }
     server.handle_runtime_event(event)
+}
+
+/// Ask the session to run what the viewer decided a wheel tick means. `None` is
+/// a tick that does nothing.
+fn apply_mouse_action(server: &mut Server, client_id: ClientId, action: Option<MouseAction>) {
+    match action {
+        Some(MouseAction::Scroll { pane, up, lines }) => {
+            server.wheel_scroll_pane(client_id, pane, up, lines);
+        }
+        Some(MouseAction::Forward { pane, mouse }) => {
+            server.forward_wheel_to_pane(client_id, pane, mouse);
+        }
+        Some(MouseAction::AltScrollArrows { pane, up, count }) => {
+            server.write_alt_scroll_arrows(pane, up, count);
+        }
+        Some(MouseAction::ScrollTabline { to }) => {
+            server.set_tabline_offset(client_id, Some(to));
+        }
+        None => {}
+    }
 }
 
 fn earliest(
@@ -499,12 +553,16 @@ fn earliest(
 /// the backend so a test can render into an in-memory buffer; the title and
 /// cursor-style escapes go to the real stdout and are skipped when unchanged,
 /// so frames that move nothing emit nothing.
+///
+/// A [`MouseFrame`] of what it painted is left in `last_frame`, which is what
+/// the viewer answers a wheel tick from.
 fn render<B: Backend>(
     terminal: &mut Terminal<B>,
     server: &Server,
     client: &Client,
     last_title: &mut String,
     last_cursor: &mut Option<CursorStyle>,
+    last_frame: &mut Option<MouseFrame>,
 ) -> Result<(), B::Error> {
     let Some(snapshot) = server.build_snapshot(client.id()) else {
         return Ok(());
@@ -545,6 +603,9 @@ fn render<B: Backend>(
             frame.set_cursor_position(position);
         }
     })?;
+    // The mouse-sized part of what was just painted. Everything the mouse does
+    // not read — every pane's grid handle, cursor, and title — is dropped here.
+    *last_frame = Some(MouseFrame::from(snapshot));
     Ok(())
 }
 

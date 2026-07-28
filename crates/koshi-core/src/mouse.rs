@@ -1,10 +1,16 @@
-//! Mouse vocabulary: the button, scroll direction, and decoded-event types the
-//! rest of koshi reasons about — koshi's own terms, not the host library's.
+//! Mouse vocabulary: the button, scroll direction, decoded-event, and
+//! reporting-level types the rest of koshi reasons about — koshi's own terms,
+//! not the host library's.
 //!
 //! [`MouseButton`] and [`ScrollDirection`] are the primitive types; the bus
 //! events in [`crate::event`] (`MousePressed`, `MouseScrolled`, …) compose their
 //! payloads from them, and so does [`MouseInput`]. One button type and one
 //! scroll type serve the whole crate.
+//!
+//! [`MouseTracking`] says which events the program in a pane asked to receive,
+//! and [`reports`] answers that question for one event. The viewer reads them
+//! off a painted frame to decide where a wheel tick goes; the session reads
+//! them off live state to decide what to write.
 //!
 //! A [`MouseInput`] is the mouse peer of a [`KeyChord`](crate::key::KeyChord):
 //! the boundary that decodes a host event produces one of these and nothing
@@ -77,6 +83,51 @@ pub struct MouseInput {
     pub at: Point,
     /// The modifier keys held during the event.
     pub mods: ModFlags,
+}
+
+/// Which mouse events the running app has asked to be reported, set via the DEC
+/// private modes `?9`/`?1000`/`?1002`/`?1003`. The levels form a ladder (each
+/// reports strictly more than the one above); an app enables exactly one, and
+/// the last enabling sequence wins. Independent of how a report is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    /// No mouse reporting (default).
+    #[default]
+    Off,
+    /// `?9` X10 compatibility — button presses only, no releases.
+    X10,
+    /// `?1000` normal tracking — button presses and releases.
+    Normal,
+    /// `?1002` button-event tracking — presses, releases, and motion while a
+    /// button is held (drag).
+    ButtonMotion,
+    /// `?1003` any-event tracking — all motion, whether or not a button is held.
+    AnyMotion,
+}
+
+/// Whether a program at `tracking` is told about a `kind` of event. The ladder:
+/// every level but `Off` reports a press, `Normal` and up add releases,
+/// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
+/// wheel tick reports from `Normal` up — `X10` predates the wheel and reports
+/// only presses.
+///
+/// `reports(MouseTracking::Normal, MouseKind::Scroll(ScrollDirection::Up))` is
+/// `true`; `reports(MouseTracking::X10, MouseKind::Scroll(ScrollDirection::Up))`
+/// is `false`.
+#[must_use]
+pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
+    match kind {
+        MouseKind::Press(_) => tracking != MouseTracking::Off,
+        MouseKind::Release(_) | MouseKind::Scroll(_) => matches!(
+            tracking,
+            MouseTracking::Normal | MouseTracking::ButtonMotion | MouseTracking::AnyMotion
+        ),
+        MouseKind::Drag(_) => matches!(
+            tracking,
+            MouseTracking::ButtonMotion | MouseTracking::AnyMotion
+        ),
+        MouseKind::Motion => tracking == MouseTracking::AnyMotion,
+    }
 }
 
 #[cfg(test)]

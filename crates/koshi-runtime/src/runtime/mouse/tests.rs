@@ -4,24 +4,95 @@
 //! Client state is read back through [`Server::build_snapshot`] — the same
 //! projection the renderer draws — so a test never reaches into private client
 //! fields.
+//!
+//! A wheel tick takes both halves: the viewer answers it from the frame it
+//! painted and the session executes what came back, so the wheel tests drive
+//! [`wheel_tick`] rather than [`Server::handle_mouse_input`].
 
 use super::*;
 
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use koshi_client::mouse::MouseAction;
+use koshi_client::Client as ViewerClient;
+use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
+use koshi_config::types::WheelScroll;
 use koshi_core::command::{GridPos, NewPaneArgs, NewTabArgs, Selection, SelectionKind};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::ModFlags;
+use koshi_core::mouse::ScrollDirection;
+use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::hit_test;
+use koshi_renderer::snapshot::MouseFrame;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
+use crate::runtime::bus::EventFilter;
 
 fn runtime() -> (Server, ClientId) {
     let (runtime, _fake, client) = runtime_with_fake();
     (runtime, client)
+}
+
+/// The viewer half for `client_id`, on the stock settings: it holds the `mouse`
+/// config and answers every wheel tick below before the session hears about it.
+fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
+    ViewerClient::new(
+        client_id,
+        Size { cols: 80, rows: 24 },
+        runtime.subscribe(EventFilter::All),
+        TerminalCleanupGuard::new(),
+    )
+}
+
+/// The same viewer, with its `mouse.wheel` setting on `wheel`.
+fn viewer_with_wheel(
+    runtime: &mut Server,
+    client_id: ClientId,
+    wheel: WheelScroll,
+) -> ViewerClient {
+    let mut viewer = viewer_for(runtime, client_id);
+    viewer.load_startup_config(
+        Some(PartialKoshiConfig {
+            mouse: Some(PartialMouseConfig {
+                wheel: Some(wheel),
+                ..PartialMouseConfig::default()
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+    viewer
+}
+
+/// One wheel tick, the way the running binary delivers it: the viewer decides
+/// what the tick means against the frame it is looking at, and only what it
+/// decided reaches the session.
+fn wheel_tick(runtime: &mut Server, viewer: &ViewerClient, input: MouseInput) {
+    let client_id = viewer.id();
+    let frame = MouseFrame::from(runtime.build_snapshot(client_id).expect("snapshot"));
+    let Some(decision) = viewer.handle_mouse_wheel(input, &frame) else {
+        return;
+    };
+    runtime.set_hovered_pane(client_id, decision.hovered);
+    match decision.action {
+        Some(MouseAction::Scroll { pane, up, lines }) => {
+            runtime.wheel_scroll_pane(client_id, pane, up, lines);
+        }
+        Some(MouseAction::Forward { pane, mouse }) => {
+            runtime.forward_wheel_to_pane(client_id, pane, mouse);
+        }
+        Some(MouseAction::AltScrollArrows { pane, up, count }) => {
+            runtime.write_alt_scroll_arrows(pane, up, count);
+        }
+        Some(MouseAction::ScrollTabline { to }) => {
+            runtime.set_tabline_offset(client_id, Some(to));
+        }
+        None => {}
+    }
 }
 
 /// Feed one mouse event, timed far enough from any other that no two presses
@@ -210,13 +281,13 @@ fn wheel_over_the_tabline_steps_the_offset() {
             HitRegion::Tab { .. } | HitRegion::TablineScrollRight { .. }
         )
     });
-    let wheel = MouseInput {
-        kind: MouseKind::Scroll(ScrollDirection::Down),
-        at: Point { x, y: 0 },
-        mods: ModFlags::NONE,
-    };
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel);
+    wheel_tick(
+        &mut runtime,
+        &viewer,
+        wheel(ScrollDirection::Down, Point { x, y: 0 }),
+    );
 
     assert_eq!(
         offset(&runtime, client),
@@ -237,12 +308,12 @@ fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
         .set_tabline_offset(Some(2));
 
     // Row 10 is pane content, not the tabline.
-    let wheel = MouseInput {
-        kind: MouseKind::Scroll(ScrollDirection::Down),
-        at: Point { x: 40, y: 10 },
-        mods: ModFlags::NONE,
-    };
-    mouse(&mut runtime, client, wheel);
+    let viewer = viewer_for(&mut runtime, client);
+    wheel_tick(
+        &mut runtime,
+        &viewer,
+        wheel(ScrollDirection::Down, Point { x: 40, y: 10 }),
+    );
 
     assert_eq!(
         offset(&runtime, client),
@@ -1248,8 +1319,9 @@ fn a_wheel_over_a_plain_pane_scrolls_its_scrollback() {
     let pane = only_pane(&runtime);
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     // scroll_lines defaults to 3, so one wheel up moves the view three lines.
     assert_eq!(scroll_offset(&runtime, client, pane), 3, "wheel up scrolls");
@@ -1267,15 +1339,16 @@ fn a_wheel_down_returns_the_view_toward_live() {
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    let viewer = viewer_for(&mut runtime, client);
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
     assert_eq!(
         scroll_offset(&runtime, client, pane),
         6,
         "two ups, six lines"
     );
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Down, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Down, at));
     assert_eq!(
         scroll_offset(&runtime, client, pane),
         3,
@@ -1290,8 +1363,9 @@ fn a_wheel_with_a_highlight_up_scrolls_and_keeps_the_highlight() {
     feed_scrollback(&mut runtime, pane, 40);
     set_highlight(&mut runtime, client, pane);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1312,8 +1386,9 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
     // The program turns on normal tracking with SGR encoding.
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     // Wheel up is SGR button 64; the program gets it, and koshi does not scroll.
     assert_eq!(
@@ -1335,15 +1410,16 @@ fn a_wheel_on_the_alternate_screen_with_alt_scroll_sends_arrow_keys() {
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
     assert_eq!(
         fake.writes(pane).expect("writes"),
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Down, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Down, at));
     assert_eq!(
         fake.writes(pane).expect("writes").last().expect("a write"),
         &b"\x1b[B\x1b[B\x1b[B".to_vec(),
@@ -1358,8 +1434,9 @@ fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
     // Alternate screen, alternate-scroll on, application cursor keys on.
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h\x1b[?1h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         fake.writes(pane).expect("writes"),
@@ -1371,12 +1448,14 @@ fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
 #[test]
 fn the_ignore_wheel_config_does_nothing_over_a_plain_pane() {
     let (mut runtime, fake, client) = runtime_with_fake();
-    runtime.client_config.mouse.wheel = WheelScroll::Ignore;
     let pane = only_pane(&runtime);
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    // The setting is the viewer's own, so it is the viewer that must be built
+    // on it.
+    let viewer = viewer_with_wheel(&mut runtime, client, WheelScroll::Ignore);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1397,7 +1476,9 @@ fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
     feed_scrollback(&mut runtime, pane, 40);
     let (at, _, _) = a_content_cell(&runtime, client, pane);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Left, at));
+    let viewer = viewer_for(&mut runtime, client);
+
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Left, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, pane),
@@ -1461,8 +1542,9 @@ fn a_wheel_scrolls_the_pane_under_the_pointer_not_the_focused_one() {
 
     feed_scrollback(&mut runtime, other, 40);
     let (at, _, _) = a_content_cell(&runtime, client, other);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     assert_eq!(
         scroll_offset(&runtime, client, other),
@@ -1486,7 +1568,8 @@ fn a_wheel_over_a_pane_border_scrolls_the_focused_pane() {
     // The divider between the two panes is chrome, not pane content: a wheel
     // there has no pane under the pointer, so it falls to the focused pane.
     let (cell, _, _) = find_vertical_border(&runtime, client);
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, cell));
+    let viewer = viewer_for(&mut runtime, client);
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, cell));
 
     assert_eq!(
         scroll_offset(&runtime, client, focused),
@@ -1513,8 +1596,9 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
     // The unfocused pane's program wants the mouse: normal tracking, SGR.
     runtime.handle_pty_output(other, b"\x1b[?1000h\x1b[?1006h");
     let (at, col, row) = a_content_cell(&runtime, client, other);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     // Wheel up is SGR button 64; it reaches the pane under the pointer even
     // though that pane is unfocused, and the focused pane gets nothing.
@@ -1531,6 +1615,187 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
 }
 
 #[test]
+fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
+    // The frame carries whether this client has a highlight in the pane, and a
+    // highlight outranks the program's mouse mode: koshi scrolls its own view
+    // and the program is told nothing.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    set_highlight(&mut runtime, client, pane);
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
+
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        3,
+        "the highlighted view scrolls"
+    );
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "the program receives no report"
+    );
+}
+
+#[test]
+fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
+    // The viewer decides from the frame it painted, so it can name a pane whose
+    // program has since stopped asking for the mouse. The session re-reads the
+    // live mode when it writes and drops the tick.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
+    let tick = wheel(ScrollDirection::Up, at);
+    let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
+    let decision = viewer
+        .handle_mouse_wheel(tick, &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(
+        decision.action,
+        Some(MouseAction::Forward { pane, mouse: tick }),
+        "the painted frame still said the program wanted the mouse"
+    );
+
+    // The program turns mouse reporting off between that frame and the write.
+    runtime.handle_pty_output(pane, b"\x1b[?1000l");
+    runtime.forward_wheel_to_pane(client, pane, tick);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "nothing is written to a program that no longer wants the mouse"
+    );
+}
+
+#[test]
+fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written() {
+    // DECCKM (`?1`) is read when the arrows are written, not when the frame the
+    // viewer decided from was painted.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
+    let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
+    let decision = viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Up, at), &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(
+        decision.action,
+        Some(MouseAction::AltScrollArrows {
+            pane,
+            up: true,
+            count: 3,
+        })
+    );
+
+    // The program switches to application cursor keys before the write.
+    runtime.handle_pty_output(pane, b"\x1b[?1h");
+    runtime.write_alt_scroll_arrows(pane, true, 3);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1bOA\x1bOA\x1bOA".to_vec()],
+        "the SS3 form the live mode asks for, not the frame's"
+    );
+}
+
+#[test]
+fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_write() {
+    // The viewer decides from the frame it painted, so it can name a pane whose
+    // program has since left the alternate screen. Writing the arrows then would
+    // put them in the shell prompt underneath and recall its history.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+    let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
+    let frame = MouseFrame::from(runtime.build_snapshot(client).expect("snapshot"));
+    let decision = viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Up, at), &frame)
+        .expect("a wheel tick decides");
+    assert_eq!(
+        decision.action,
+        Some(MouseAction::AltScrollArrows {
+            pane,
+            up: true,
+            count: 3,
+        }),
+        "the painted frame still said the pane was on the alternate screen"
+    );
+
+    // The program leaves the alternate screen before the write.
+    runtime.handle_pty_output(pane, b"\x1b[?1049l");
+    runtime.write_alt_scroll_arrows(pane, true, 3);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "nothing is written to a pane that is back on the primary screen"
+    );
+}
+
+#[test]
+fn the_wheel_write_doors_do_nothing_for_a_pane_that_is_gone() {
+    // The viewer names a pane off a frame it painted, so it can name one the
+    // session has since released. Every door must answer that with nothing.
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let live = only_pane(&runtime);
+    let gone = PaneId::new();
+
+    runtime.wheel_scroll_pane(client, gone, true, 3);
+    runtime.forward_wheel_to_pane(
+        client,
+        gone,
+        wheel(ScrollDirection::Up, Point { x: 5, y: 5 }),
+    );
+    runtime.write_alt_scroll_arrows(gone, true, 3);
+    runtime.set_hovered_pane(client, Some(gone));
+
+    assert!(
+        fake.writes(gone).is_err(),
+        "a gone pane was never opened, so it has no write log at all"
+    );
+    assert_eq!(
+        fake.writes(live).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "and nothing landed on the live pane instead"
+    );
+    assert_eq!(
+        scroll_offset(&runtime, client, gone),
+        0,
+        "no view was stored for a gone pane"
+    );
+    assert_eq!(
+        hovered(&runtime, client),
+        Some(gone),
+        "the hover is recorded as given; the renderer matches it against no slot"
+    );
+}
+
+#[test]
+fn a_zero_line_notch_sends_no_arrow_keys() {
+    // `mouse.scroll_lines 0` reaches the door as a count of zero.
+    let (mut runtime, fake, _client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+
+    runtime.write_alt_scroll_arrows(pane, true, 0);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "a zero-line notch sends no arrows at all"
+    );
+}
+
+#[test]
 fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
     let (mut runtime, client) = runtime();
     let pane = only_pane(&runtime);
@@ -1539,8 +1804,9 @@ fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
     // a full-screen app that ignores the wheel.
     runtime.handle_pty_output(pane, b"\x1b[?1049h");
     let (at, _, _) = a_content_cell(&runtime, client, pane);
+    let viewer = viewer_for(&mut runtime, client);
 
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, at));
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, at));
 
     // The alternate screen keeps no scrollback, so the wheel stores no offset —
     // otherwise the shell would be scrolled back when the app exits.
@@ -1580,7 +1846,8 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
     // A wheel over chrome (no pane under the pointer) goes to the focused pane,
     // clamped to its edge, instead of being dropped.
     let chrome = a_chrome_cell(&runtime, client);
-    mouse(&mut runtime, client, wheel(ScrollDirection::Up, chrome));
+    let viewer = viewer_for(&mut runtime, client);
+    wheel_tick(&mut runtime, &viewer, wheel(ScrollDirection::Up, chrome));
 
     let writes = fake.writes(pane).expect("writes");
     assert_eq!(

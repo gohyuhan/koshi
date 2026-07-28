@@ -24,7 +24,7 @@
 //! keeps the button and marks the release with a trailing `m` instead of `M`.
 
 use koshi_core::key::ModFlags;
-use koshi_core::mouse::{MouseButton, MouseKind, ScrollDirection};
+use koshi_core::mouse::{reports, MouseButton, MouseKind, ScrollDirection};
 
 use crate::state::{MouseEncoding, MouseTracking};
 
@@ -62,30 +62,6 @@ pub fn encode_mouse(
         MouseEncoding::Utf8 => encode_utf8(button_code(kind, true) + modifiers, col, row),
         MouseEncoding::Urxvt => encode_urxvt(button_code(kind, true) + modifiers, col, row),
     })
-}
-
-/// Whether a program at `tracking` is told about a `kind` of event. The ladder:
-/// every level but `Off` reports a press, `Normal` and up add releases,
-/// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
-/// wheel tick reports from `Normal` up — `X10` predates the wheel and reports
-/// only presses.
-///
-/// The forward path calls this to skip the frame rebuild for an event the
-/// pane's program does not want.
-#[must_use]
-pub fn reports(tracking: MouseTracking, kind: MouseKind) -> bool {
-    match kind {
-        MouseKind::Press(_) => tracking != MouseTracking::Off,
-        MouseKind::Release(_) | MouseKind::Scroll(_) => matches!(
-            tracking,
-            MouseTracking::Normal | MouseTracking::ButtonMotion | MouseTracking::AnyMotion
-        ),
-        MouseKind::Drag(_) => matches!(
-            tracking,
-            MouseTracking::ButtonMotion | MouseTracking::AnyMotion
-        ),
-        MouseKind::Motion => tracking == MouseTracking::AnyMotion,
-    }
 }
 
 /// The button code before modifiers: the button number, plus `32` for a drag or

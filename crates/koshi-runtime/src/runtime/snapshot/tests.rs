@@ -562,6 +562,11 @@ fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
     );
 
     assert_eq!(spans(&rt, client), None, "nothing of it is on screen");
+    assert!(
+        rt.build_snapshot(client).expect("snapshot").panes[0].has_selection,
+        "the client still holds a highlight in the pane, so the wheel still \
+         scrolls koshi's own view"
+    );
 }
 
 #[test]

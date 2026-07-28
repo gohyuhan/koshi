@@ -745,6 +745,7 @@ version = "0.1.0"
 dependencies = [
  "koshi-config",
  "koshi-core",
+ "koshi-layout",
  "koshi-observability",
  "koshi-renderer",
  "ratatui",

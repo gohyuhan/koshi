@@ -14,17 +14,21 @@
 //! detached client is served by the separate session-persistence path.
 //!
 //! This module defines the *shape*. The runtime-side builder fills it from
-//! live state; renderer modules draw only these fields. This DTO is their
-//! contract.
+//! live state and renderer modules draw from it. This DTO is their contract.
+//!
+//! A frame also carries a few fields nothing draws: the terminal modes on
+//! [`PaneSnapshot`] that say where a wheel tick over a pane goes. A viewer
+//! copies them into a [`MouseFrame`] as it paints and answers the next wheel
+//! tick from that.
 
 use std::sync::Arc;
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
-use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::CursorShape;
 
@@ -32,6 +36,10 @@ use koshi_terminal::state::CursorShape;
 /// renderer only draws them, and re-exports them here so a caller painting a
 /// frame resolves them from one place.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
+
+/// What a pane runs, as [`PaneSlot::kind`] reports it. Re-exported so a caller
+/// reading a frame resolves it from here.
+pub use koshi_pane::pane::state::PaneKind;
 
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
@@ -103,6 +111,78 @@ impl OwnedFrameLayout {
         FrameLayout {
             session: &self.session,
             client: &self.client,
+        }
+    }
+}
+
+/// A painted frame cut down to what answering a mouse event reads: where the
+/// surfaces sit, plus the few per-pane fields that say where a wheel tick over
+/// a pane goes.
+///
+/// It carries no cells, no cursor and no titles, so a viewer holding one
+/// between paints holds no pane's [`Grid`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseFrame {
+    /// The session being viewed, including its solved active tab.
+    pub session: SessionSnapshot,
+    /// The viewing client's own state (viewport, focus, lock mode).
+    pub client: ClientSnapshot,
+    /// One entry per pane the frame carried content for, matched to a
+    /// [`PaneSlot`] by id.
+    pub panes: Vec<MousePane>,
+}
+
+impl MouseFrame {
+    /// Borrow the parts of this frame that say where things sit.
+    #[must_use]
+    pub fn layout(&self) -> FrameLayout<'_> {
+        FrameLayout {
+            session: &self.session,
+            client: &self.client,
+        }
+    }
+}
+
+impl From<RenderSnapshot> for MouseFrame {
+    /// Takes the frame by value, so the session and client parts move across and
+    /// only the per-pane entries are built: one [`Vec`] of [`Copy`] structs.
+    fn from(snapshot: RenderSnapshot) -> Self {
+        Self {
+            panes: snapshot.panes.iter().map(MousePane::from).collect(),
+            session: snapshot.session,
+            client: snapshot.client,
+        }
+    }
+}
+
+/// One pane as a mouse event reads it: which pane, and what decides where a
+/// wheel tick over it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MousePane {
+    /// The pane this entry describes, matched to a [`PaneSlot`] by id.
+    pub id: PaneId,
+    /// Which mouse events the pane's program asked to be told about, copied
+    /// from [`PaneSnapshot::mouse_tracking`].
+    pub mouse_tracking: MouseTracking,
+    /// Whether alternate-scroll mode (`?1007`) is on, copied from
+    /// [`PaneSnapshot::alt_scroll`].
+    pub alt_scroll: bool,
+    /// Whether the pane is showing the alternate screen, copied from
+    /// [`PaneSnapshot::on_alt_screen`].
+    pub on_alt_screen: bool,
+    /// Whether the viewing client has a highlight in the pane, copied from
+    /// [`PaneSnapshot::has_selection`].
+    pub has_selection: bool,
+}
+
+impl From<&PaneSnapshot> for MousePane {
+    fn from(pane: &PaneSnapshot) -> Self {
+        Self {
+            id: pane.id,
+            mouse_tracking: pane.mouse_tracking,
+            alt_scroll: pane.alt_scroll,
+            on_alt_screen: pane.on_alt_screen,
+            has_selection: pane.has_selection,
         }
     }
 }
@@ -199,7 +279,13 @@ pub struct PaneSlot {
 }
 
 /// One pane's content: what the renderer paints inside the matching
-/// [`PaneSlot`]'s content rect.
+/// [`PaneSlot`]'s content rect, plus the three terminal modes that decide where
+/// a wheel tick over this pane goes.
+///
+/// The mode fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
+/// [`alt_scroll`](Self::alt_scroll), [`on_alt_screen`](Self::on_alt_screen) and
+/// [`has_selection`](Self::has_selection) are copied into a [`MousePane`] as
+/// the frame is painted, and that is what the viewer's wheel decision reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
@@ -217,10 +303,24 @@ pub struct PaneSnapshot {
     /// Whether the whole screen is in reverse video (DECSCNM): the renderer
     /// swaps the default foreground and background for every cell.
     pub reverse_video: bool,
+    /// Which mouse events the pane's program asked to be told about
+    /// (`?9`/`?1000`/`?1002`/`?1003`). A wheel tick over a pane at
+    /// [`Normal`](MouseTracking::Normal) or above is the program's.
+    pub mouse_tracking: MouseTracking,
+    /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
+    /// wheel tick becomes cursor arrow keys.
+    pub alt_scroll: bool,
+    /// Whether the pane is showing the alternate screen. The alternate screen
+    /// keeps no scrollback, so there is no view to scroll there.
+    pub on_alt_screen: bool,
     /// The viewing client's highlighted text in this pane, already cut down to
     /// the rows this frame shows. `None` when the client has nothing highlighted
     /// here, or when the highlight is entirely outside the visible rows.
     pub selection: Option<SelectionSpans>,
+    /// Whether the viewing client has a highlight in this pane at all, including
+    /// one scrolled entirely out of the visible rows, where
+    /// [`selection`](Self::selection) is `None`.
+    pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback: ScrollbackMeta,
 }

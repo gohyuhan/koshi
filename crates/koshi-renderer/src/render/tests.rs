@@ -18,6 +18,7 @@ use std::sync::Arc;
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::mouse::MouseTracking;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 
@@ -78,7 +79,11 @@ fn build(
             },
             grid_view: None,
             reverse_video: false,
+            mouse_tracking: MouseTracking::Off,
+            alt_scroll: false,
+            on_alt_screen: false,
             selection: None,
+            has_selection: false,
             scrollback: ScrollbackMeta {
                 truncated: false,
                 retained_lines: 0,

@@ -1,25 +1,11 @@
 //! Terminal mode flags and the mouse tracking/encoding levels the renderer and
 //! input layers consult.
 
-/// Which mouse events the running app has asked to be reported, set via the DEC
-/// private modes `?9`/`?1000`/`?1002`/`?1003`. The levels form a ladder (each
-/// reports strictly more than the one above); an app enables exactly one, and
-/// the last enabling sequence wins. Independent of [`MouseEncoding`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MouseTracking {
-    /// No mouse reporting (default).
-    #[default]
-    Off,
-    /// `?9` X10 compatibility — button presses only, no releases.
-    X10,
-    /// `?1000` normal tracking — button presses and releases.
-    Normal,
-    /// `?1002` button-event tracking — presses, releases, and motion while a
-    /// button is held (drag).
-    ButtonMotion,
-    /// `?1003` any-event tracking — all motion, whether or not a button is held.
-    AnyMotion,
-}
+/// Which mouse events a pane's program asked to be reported. The terminal
+/// engine sets it from the DEC private modes `?9`/`?1000`/`?1002`/`?1003`.
+/// Independent of [`MouseEncoding`]. Full documentation on
+/// [`koshi_core::mouse::MouseTracking`].
+pub use koshi_core::mouse::MouseTracking;
 
 /// How a mouse report's coordinate bytes are encoded, set via the DEC private
 /// modes `?1005`/`?1006`/`?1015`. Orthogonal to [`MouseTracking`]: an app sets a

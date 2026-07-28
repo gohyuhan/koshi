@@ -24,7 +24,7 @@ use koshi_core::geometry::Point;
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
+use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_renderer::{hit_test, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -182,6 +182,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         &client,
         &mut String::new(),
         &mut None,
+        &mut None,
     )
     .expect("render");
     assert!(screen_text(&terminal).contains("Mouse Select"));
@@ -197,6 +198,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         &server,
         &client,
         &mut String::new(),
+        &mut None,
         &mut None,
     )
     .expect("render");
@@ -224,6 +226,7 @@ fn pty_output_event_renders_to_the_screen() {
         &server,
         &client,
         &mut String::new(),
+        &mut None,
         &mut None,
     )
     .expect("render");
@@ -288,6 +291,7 @@ fn key_input_events_write_to_the_focused_pane() {
                 client_id,
                 chord: KeyChord::new(ModFlags::NONE, key),
             },
+            None,
         )
         .is_continue());
     }
@@ -314,6 +318,7 @@ fn a_key_for_another_client_is_not_resolved_by_this_viewer() {
             client_id: ClientId::new(),
             chord: KeyChord::new(ModFlags::NONE, Key::Char('x')),
         },
+        None,
     )
     .is_continue());
 
@@ -467,6 +472,160 @@ fn run_loop_exits_on_a_quit_event() {
         server.has_active_panes(),
         "the shell is still alive; the quit event ended the loop"
     );
+}
+
+/// How far the client's view of the pane is scrolled back from live output,
+/// read off the frame the renderer draws.
+fn view_offset(server: &Server, client_id: ClientId, pane_id: PaneId) -> usize {
+    server
+        .build_snapshot(client_id)
+        .expect("snapshot")
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("the pane")
+        .grid_view
+        .as_ref()
+        .expect("a terminal pane")
+        .view_offset
+}
+
+/// Fill the pane's scrollback so a wheel up has room to move.
+fn feed_scrollback(server: &mut Server, pane_id: PaneId, lines: usize) {
+    for _ in 0..lines {
+        assert!(server
+            .handle_runtime_event(RuntimeEvent::PtyOutput {
+                pane_id,
+                bytes: b"x\r\n".to_vec(),
+            })
+            .is_continue());
+    }
+}
+
+#[test]
+fn a_wheel_event_is_answered_by_the_viewer_and_run_by_the_session() {
+    // The wheel never reaches the session as a raw mouse event. The loop hands
+    // it to the viewer with the frame it painted, and runs what comes back — so
+    // a loop that stopped asking the viewer would scroll nothing.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    feed_scrollback(&mut server, pane_id, 40);
+    let at = content_point(&server, client_id, pane_id);
+    let frame = MouseFrame::from(server.build_snapshot(client_id).expect("snapshot"));
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse: MouseInput {
+                kind: MouseKind::Scroll(ScrollDirection::Up),
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        Some(&frame),
+    )
+    .is_continue());
+
+    // scroll_lines defaults to 3, so one notch moves the view three lines.
+    assert_eq!(view_offset(&server, client_id, pane_id), 3);
+}
+
+#[test]
+fn a_wheel_event_before_the_first_paint_is_dropped() {
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    feed_scrollback(&mut server, pane_id, 40);
+    let at = content_point(&server, client_id, pane_id);
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse: MouseInput {
+                kind: MouseKind::Scroll(ScrollDirection::Up),
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        None,
+    )
+    .is_continue());
+
+    assert_eq!(
+        view_offset(&server, client_id, pane_id),
+        0,
+        "with no painted frame there is nothing to hit-test the tick against"
+    );
+}
+
+#[test]
+fn a_non_wheel_mouse_event_still_reaches_the_session() {
+    // Only the wheel was taken off the session. A press still routes there, and
+    // over an unfocused pane it moves focus.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, pane_id) = boot(&fake);
+    let mut client = test_client(&mut server, client_id);
+    let at = content_point(&server, client_id, pane_id);
+    assert!(server
+        .build_snapshot(client_id)
+        .expect("snapshot")
+        .panes
+        .iter()
+        .all(|pane| pane.selection.is_none()));
+
+    assert!(apply_event(
+        &mut server,
+        &mut client,
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse: MouseInput {
+                kind: MouseKind::Press(MouseButton::Left),
+                at,
+                mods: ModFlags::NONE,
+            },
+        },
+        None,
+    )
+    .is_continue());
+
+    assert_eq!(
+        server
+            .build_snapshot(client_id)
+            .expect("snapshot")
+            .client
+            .focused_pane,
+        Some(pane_id),
+        "the press reached the session's own routing"
+    );
+}
+
+#[test]
+fn render_leaves_the_frame_it_painted_for_the_viewer() {
+    // The viewer answers a wheel tick from the last painted frame, so the paint
+    // must hand it back to the loop — as a `MouseFrame`, which carries no grid.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, _pane_id) = boot(&fake);
+    let client = test_client(&mut server, client_id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut last_frame = None;
+
+    render(
+        &mut terminal,
+        &server,
+        &client,
+        &mut String::new(),
+        &mut None,
+        &mut last_frame,
+    )
+    .expect("render");
+
+    let painted = server.build_snapshot(client_id).expect("snapshot");
+    assert_eq!(last_frame, Some(MouseFrame::from(painted)));
 }
 
 #[test]
@@ -716,6 +875,7 @@ fn render_for_a_client_without_a_snapshot_draws_nothing() {
         &unknown,
         &mut String::new(),
         &mut None,
+        &mut None,
     )
     .expect("render");
 
@@ -744,6 +904,7 @@ fn render_emits_a_changed_cursor_style_and_records_it() {
         &client,
         &mut String::new(),
         &mut last_cursor,
+        &mut None,
     )
     .expect("render");
 

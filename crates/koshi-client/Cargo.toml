@@ -10,3 +10,6 @@ koshi-core = { version = "0.1.0", path = "../koshi-core" }
 koshi-observability = { version = "0.1.0", path = "../koshi-observability" }
 koshi-renderer = { version = "0.1.0", path = "../koshi-renderer" }
 ratatui = { version = "0.30.2", default-features = false }
+
+[dev-dependencies]
+koshi-layout = { path = "../koshi-layout" }

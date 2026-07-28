@@ -3,14 +3,16 @@
 //! A session is authoritative over tabs, panes, and the processes inside them.
 //! A viewer owns what belongs to the terminal in front of the user — its size,
 //! the settings it reads from its own config, the colors it paints koshi's own
-//! chrome with, and the keymap it resolves its own keys against. The two talk
-//! only through the session's command door and its event feed.
+//! chrome with, the keymap it resolves its own keys against, and what a wheel
+//! tick over its frame means. The two talk only through the session's command
+//! door and its event feed.
 //!
 //! Colors live with the viewer: the frame a session hands out says *which pane
 //! is focused*, and each viewer looks up what "focused" looks like in its own
 //! theme. Two viewers of one session can paint it two different ways at once.
 
 pub mod input;
+pub mod mouse;
 pub mod theme;
 
 use std::sync::mpsc::Receiver;
