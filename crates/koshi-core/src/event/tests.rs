@@ -324,18 +324,16 @@ fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
     repr.split('(').next().unwrap_or(&repr).to_string()
 }
 
-/// One instance per top-level `Event` variant, paired with its canonical name.
-/// Renaming any variant breaks the matching `variant_name` assert, and
-/// adding/removing one breaks the count — neither passes on a detached list.
-#[test]
-fn event_variant_names_are_canonical() {
-    let cases: Vec<(Event, &str)> = vec![
+/// One instance per top-level `Event` variant, its canonical name, and class.
+fn event_cases() -> [(Event, &'static str, EventClass); 37] {
+    [
         (
             Event::PaneCreated(PaneCreated {
                 pane_id: PaneId::new(),
                 tab_id: TabId::new(),
             }),
             "PaneCreated",
+            EventClass::Critical,
         ),
         (
             Event::PaneProcessExited(PaneProcessExited {
@@ -343,12 +341,14 @@ fn event_variant_names_are_canonical() {
                 exit_code: None,
             }),
             "PaneProcessExited",
+            EventClass::Critical,
         ),
         (
             Event::PaneClosing(PaneClosing {
                 pane_id: PaneId::new(),
             }),
             "PaneClosing",
+            EventClass::Critical,
         ),
         (
             Event::PaneRemoved(PaneRemoved {
@@ -356,6 +356,7 @@ fn event_variant_names_are_canonical() {
                 tab_id: TabId::new(),
             }),
             "PaneRemoved",
+            EventClass::Critical,
         ),
         (
             Event::PaneFocused(PaneFocused {
@@ -365,6 +366,7 @@ fn event_variant_names_are_canonical() {
                 prior_pane: None,
             }),
             "PaneFocused",
+            EventClass::Critical,
         ),
         (
             Event::PtyResized(PtyResized {
@@ -372,18 +374,21 @@ fn event_variant_names_are_canonical() {
                 size: PtySize { cols: 80, rows: 24 },
             }),
             "PtyResized",
+            EventClass::Critical,
         ),
         (
             Event::PaneOutputUpdated(PaneOutputUpdated {
                 pane_id: PaneId::new(),
             }),
             "PaneOutputUpdated",
+            EventClass::Lossy,
         ),
         (
             Event::PaneCommandStarted(PaneCommandStarted {
                 pane_id: PaneId::new(),
             }),
             "PaneCommandStarted",
+            EventClass::Critical,
         ),
         (
             Event::PaneCommandFinished(PaneCommandFinished {
@@ -391,24 +396,28 @@ fn event_variant_names_are_canonical() {
                 exit_code: None,
             }),
             "PaneCommandFinished",
+            EventClass::Critical,
         ),
         (
             Event::LayoutChanged(LayoutChanged {
                 tab_id: TabId::new(),
             }),
             "LayoutChanged",
+            EventClass::Critical,
         ),
         (
             Event::TabCreated(TabCreated {
                 tab_id: TabId::new(),
             }),
             "TabCreated",
+            EventClass::Critical,
         ),
         (
             Event::TabClosed(TabClosed {
                 tab_id: TabId::new(),
             }),
             "TabClosed",
+            EventClass::Critical,
         ),
         (
             Event::TabFocused(TabFocused {
@@ -417,6 +426,7 @@ fn event_variant_names_are_canonical() {
                 prior_tab: TabId::new(),
             }),
             "TabFocused",
+            EventClass::Critical,
         ),
         (
             Event::TabMoved(TabMoved {
@@ -425,6 +435,7 @@ fn event_variant_names_are_canonical() {
                 new_index: 1,
             }),
             "TabMoved",
+            EventClass::Critical,
         ),
         (
             Event::PaneSuppressed(PaneSuppressed {
@@ -432,6 +443,7 @@ fn event_variant_names_are_canonical() {
                 tab_id: TabId::new(),
             }),
             "PaneSuppressed",
+            EventClass::Critical,
         ),
         (
             Event::PaneResumed(PaneResumed {
@@ -439,6 +451,7 @@ fn event_variant_names_are_canonical() {
                 tab_id: TabId::new(),
             }),
             "PaneResumed",
+            EventClass::Critical,
         ),
         (
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
@@ -446,6 +459,7 @@ fn event_variant_names_are_canonical() {
                 size: Size { cols: 1, rows: 1 },
             }),
             "TerminalTooSmallEntered",
+            EventClass::Critical,
         ),
         (
             Event::TerminalTooSmallExited(TerminalTooSmallExited {
@@ -453,12 +467,14 @@ fn event_variant_names_are_canonical() {
                 size: Size { cols: 80, rows: 24 },
             }),
             "TerminalTooSmallExited",
+            EventClass::Critical,
         ),
         (
             Event::ConfigReloaded(ConfigReloaded {
                 session_id: SessionId::new(),
             }),
             "ConfigReloaded",
+            EventClass::Critical,
         ),
         (
             Event::InputModeChanged(InputModeChanged {
@@ -466,6 +482,7 @@ fn event_variant_names_are_canonical() {
                 mode: InputMode::Normal,
             }),
             "InputModeChanged",
+            EventClass::Critical,
         ),
         (
             Event::MouseSelectChanged(MouseSelectChanged {
@@ -473,6 +490,7 @@ fn event_variant_names_are_canonical() {
                 on: true,
             }),
             "MouseSelectChanged",
+            EventClass::Critical,
         ),
         (
             Event::KeybindingMatched(KeybindingMatched {
@@ -480,6 +498,7 @@ fn event_variant_names_are_canonical() {
                 command_id: CommandId::new(),
             }),
             "KeybindingMatched",
+            EventClass::Critical,
         ),
         (
             Event::PaneTyped(PaneTyped {
@@ -491,6 +510,7 @@ fn event_variant_names_are_canonical() {
                 timestamp: fixed_time(),
             }),
             "PaneTyped",
+            EventClass::Lossy,
         ),
         (
             Event::PaneEnterPressed(PaneEnterPressed {
@@ -502,6 +522,7 @@ fn event_variant_names_are_canonical() {
                 timestamp: fixed_time(),
             }),
             "PaneEnterPressed",
+            EventClass::Critical,
         ),
         (
             Event::MousePressed(MousePressed {
@@ -511,6 +532,7 @@ fn event_variant_names_are_canonical() {
                 button: MouseButton::Left,
             }),
             "MousePressed",
+            EventClass::Lossy,
         ),
         (
             Event::MouseReleased(MouseReleased {
@@ -520,6 +542,7 @@ fn event_variant_names_are_canonical() {
                 button: MouseButton::Right,
             }),
             "MouseReleased",
+            EventClass::Lossy,
         ),
         (
             Event::MouseDragged(MouseDragged {
@@ -529,6 +552,7 @@ fn event_variant_names_are_canonical() {
                 button: MouseButton::Middle,
             }),
             "MouseDragged",
+            EventClass::Lossy,
         ),
         (
             Event::MouseScrolled(MouseScrolled {
@@ -538,18 +562,21 @@ fn event_variant_names_are_canonical() {
                 direction: ScrollDirection::Down,
             }),
             "MouseScrolled",
+            EventClass::Lossy,
         ),
         (
             Event::PaneMouseForwarded(PaneMouseForwarded {
                 pane_id: PaneId::new(),
             }),
             "PaneMouseForwarded",
+            EventClass::Lossy,
         ),
         (
             Event::PluginMouseInput(PluginMouseInput {
                 plugin_id: PluginId::new(),
             }),
             "PluginMouseInput",
+            EventClass::Lossy,
         ),
         (
             Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
@@ -558,6 +585,7 @@ fn event_variant_names_are_canonical() {
                 dropped_bytes: 0,
             }),
             "PaneScrollbackTruncated",
+            EventClass::Lossy,
         ),
         (
             Event::SubscriberLagged(SubscriberLagged {
@@ -566,6 +594,7 @@ fn event_variant_names_are_canonical() {
                 event_class: EventClass::Critical,
             }),
             "SubscriberLagged",
+            EventClass::Critical,
         ),
         (
             Event::CommandRejected(CommandRejected {
@@ -573,6 +602,7 @@ fn event_variant_names_are_canonical() {
                 reason: RejectReason::Unauthorized,
             }),
             "CommandRejected",
+            EventClass::Critical,
         ),
         (
             Event::SelectionChanged(SelectionChanged {
@@ -581,6 +611,7 @@ fn event_variant_names_are_canonical() {
                 selection: None,
             }),
             "SelectionChanged",
+            EventClass::Critical,
         ),
         (
             Event::Copied(Copied {
@@ -590,20 +621,49 @@ fn event_variant_names_are_canonical() {
                 byte_len: 0,
             }),
             "Copied",
+            EventClass::Critical,
         ),
         (
             Event::Plugin(PluginEvent::Installed(PluginInstalled {
                 plugin_id: PluginId::new(),
             })),
             "Plugin",
+            EventClass::Critical,
         ),
-        (Event::Quit, "Quit"),
-    ];
+        (Event::Quit, "Quit", EventClass::Critical),
+    ]
+}
+
+/// Checks 37 distinct top-level event names against `Debug` and [`Event::name`].
+#[test]
+fn event_variant_names_are_canonical() {
+    let cases = event_cases();
+    let mut names = std::collections::BTreeSet::new();
     assert_eq!(cases.len(), 37);
-    for (value, name) in &cases {
-        assert_eq!(&variant_name(value), name);
-        assert_eq!(&value.name(), name);
+    for (event, name, _) in cases {
+        assert_eq!(variant_name(&event), name);
+        assert_eq!(event.name(), name);
+        assert!(names.insert(name), "duplicate event name: {name}");
     }
+    assert_eq!(names.len(), 37);
+}
+
+#[test]
+fn classify_maps_every_event_variant() {
+    let mut lossy = 0;
+    let mut critical = 0;
+
+    for (event, name, expected_class) in event_cases() {
+        let actual_class = classify(&event);
+        assert_eq!(actual_class, expected_class, "{name}");
+        match actual_class {
+            EventClass::Lossy => lossy += 1,
+            EventClass::Critical => critical += 1,
+        }
+    }
+
+    assert_eq!(lossy, 9);
+    assert_eq!(critical, 28);
 }
 
 #[test]
