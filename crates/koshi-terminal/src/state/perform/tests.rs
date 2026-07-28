@@ -5,7 +5,7 @@
 use super::glyph::MAX_GRAPHEME_CONTINUATIONS;
 use super::*;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
-use crate::state::Charset;
+use crate::state::{Charset, RenderState, TerminalModes};
 use crate::style::{Color, Style, UnderlineStyle};
 use koshi_core::process::PtySize;
 use std::path::Path;
@@ -4459,15 +4459,332 @@ fn an_unknown_csi_final_byte_leaves_the_cursor_unmoved() {
 }
 
 #[test]
-fn a_csi_with_an_unhandled_intermediate_is_ignored() {
-    // `CSI ! p` (DECSTR) carries a `!` intermediate koshi does not act on; it
-    // must not disturb the cursor or the pen.
+fn a_parameterized_decstr_is_ignored() {
     let mut state = state(10, 5);
-    advance(&mut state, b"\x1b[3;3H"); // (2, 2)
-    advance(&mut state, b"\x1b[1m"); // bold on
-    advance(&mut state, b"\x1b[!p"); // DECSTR — unhandled intermediate
+    advance(&mut state, b"\x1b[3;3H\x1b[1m");
+    advance(&mut state, b"\x1b[1!p\x1b[0;0!p");
     assert_eq!(state.active_cursor_position(), (2, 2));
     assert_eq!(state.active_render().style, styled(|s| s.set_bold(true)));
+}
+
+#[test]
+fn an_explicit_zero_decstr_soft_resets() {
+    let mut state = state(10, 5);
+    advance(&mut state, b"\x1b[3;3H\x1b[1m\x1b[0!p");
+    assert_eq!(state.active_cursor_position(), (2, 2));
+    assert_eq!(state.active_render().style, Style::default());
+}
+
+#[test]
+fn stored_tab_stops_drive_ht_cht_and_cbt() {
+    let mut state = state(20, 2);
+    assert!(state.tab_stops[0]);
+    assert!(state.tab_stops[8]);
+    assert!(state.tab_stops[16]);
+
+    advance(&mut state, b"\x1b[6G\x1bH\r\t");
+    assert_eq!(state.active_cursor().col, 5);
+    advance(&mut state, b"\x1b[I");
+    assert_eq!(state.active_cursor().col, 8);
+    advance(&mut state, b"\x1b[Z");
+    assert_eq!(state.active_cursor().col, 5);
+}
+
+#[test]
+fn tbc_clears_current_or_all_and_reads_only_its_first_parameter() {
+    let mut state = state(20, 2);
+
+    advance(&mut state, b"\x1b[6G\x1bH\x1b[g\r\t");
+    assert_eq!(state.active_cursor().col, 8);
+
+    advance(&mut state, b"\x1b[0;3g\r\t");
+    assert_eq!(state.active_cursor().col, 16);
+
+    advance(&mut state, b"\x1b[6G\x1bH\x1b[2g\r\t");
+    assert_eq!(state.active_cursor().col, 5);
+
+    advance(&mut state, b"\x1b[3g\r\t");
+    assert_eq!(state.active_cursor().col, 19);
+    advance(&mut state, b"\r\x1b[I");
+    assert_eq!(state.active_cursor().col, 19);
+    advance(&mut state, b"\x1b[Z");
+    assert_eq!(state.active_cursor().col, 0);
+}
+
+#[test]
+fn tab_setup_and_clear_preserve_wrap_but_tab_motion_clears_it() {
+    let mut state = state(5, 2);
+    print_str(&mut state, "abcde");
+    assert!(state.active_cursor().pending_wrap);
+
+    advance(&mut state, b"\x1bH");
+    assert_eq!(state.active_cursor_position(), (0, 4));
+    assert!(state.active_cursor().pending_wrap);
+
+    advance(&mut state, b"\x1b[g");
+    assert_eq!(state.active_cursor_position(), (0, 4));
+    assert!(state.active_cursor().pending_wrap);
+
+    advance(&mut state, b"\x1b[I");
+    assert!(!state.active_cursor().pending_wrap);
+}
+
+#[test]
+fn resizing_tab_stops_preserves_survivors_and_defaults_new_columns() {
+    let mut state = state(26, 2);
+    advance(&mut state, b"\x1b[9G\x1b[g");
+    assert!(!state.tab_stops[8]);
+
+    state.resize(PtySize { cols: 10, rows: 2 });
+    state.resize(PtySize { cols: 18, rows: 2 });
+    assert!(!state.tab_stops[8]);
+    assert!(state.tab_stops[16]);
+
+    advance(&mut state, b"\x1b[6G\x1bH");
+    state.resize(PtySize { cols: 4, rows: 2 });
+    state.resize(PtySize { cols: 10, rows: 2 });
+    assert!(!state.tab_stops[5]);
+    assert!(state.tab_stops[8]);
+}
+
+#[test]
+fn seven_and_eight_bit_index_controls_match() {
+    let mut ind_esc = state(5, 4);
+    advance(&mut ind_esc, b"\x1b[2;3H");
+    let mut ind_c1 = ind_esc.clone();
+    advance(&mut ind_esc, b"\x1bD");
+    advance(&mut ind_c1, &[0x84]);
+    assert_eq!(ind_c1, ind_esc);
+
+    let mut nel_esc = state(5, 4);
+    advance(&mut nel_esc, b"\x1b[2;3H");
+    let mut nel_c1 = nel_esc.clone();
+    advance(&mut nel_esc, b"\x1bE");
+    advance(&mut nel_c1, &[0x85]);
+    assert_eq!(nel_c1, nel_esc);
+    assert_eq!(nel_esc.active_cursor_position(), (2, 0));
+
+    let mut hts_esc = state(12, 2);
+    advance(&mut hts_esc, b"\x1b[6G");
+    let mut hts_c1 = hts_esc.clone();
+    advance(&mut hts_esc, b"\x1bH");
+    advance(&mut hts_c1, &[0x88]);
+    assert_eq!(hts_c1, hts_esc);
+
+    let mut ri_esc = state(5, 4);
+    advance(&mut ri_esc, b"\x1b[3;2H");
+    let mut ri_c1 = ri_esc.clone();
+    advance(&mut ri_esc, b"\x1bM");
+    advance(&mut ri_c1, &[0x8D]);
+    assert_eq!(ri_c1, ri_esc);
+}
+
+#[test]
+fn ind_and_nel_scroll_the_active_region_at_its_bottom() {
+    let mut ind = state(3, 3);
+    fill_3x3(&mut ind);
+    advance(&mut ind, b"\x1b[2;3r\x1b[3;2H\x1bD");
+    assert_eq!(row_text(&ind, 0), "abc");
+    assert_eq!(row_text(&ind, 1), "ghi");
+    assert_eq!(row_text(&ind, 2), "   ");
+    assert_eq!(ind.active_cursor_position(), (2, 1));
+
+    let mut nel = state(3, 3);
+    fill_3x3(&mut nel);
+    advance(&mut nel, b"\x1b[2;3r\x1b[3;2H\x1bE");
+    assert_eq!(row_text(&nel, 0), "abc");
+    assert_eq!(row_text(&nel, 1), "ghi");
+    assert_eq!(row_text(&nel, 2), "   ");
+    assert_eq!(nel.active_cursor_position(), (2, 0));
+}
+
+#[test]
+fn decstr_resets_only_its_active_dec_state() {
+    let mut state = state(10, 4);
+    print_str(&mut state, "hello");
+    advance(
+        &mut state,
+        b"\x1b]2;kept title\x07\x1b]7;file://localhost/tmp\x07\x1b[c",
+    );
+    advance(
+        &mut state,
+        b"\x1b[6G\x1bH\x1b[1m\x1b[2;4r\x1b[3;4H\x1b7\x1b[?25l",
+    );
+    advance(&mut state, b"\x1b[?1;5;7;12;1000;1006;1007;2004h\x1b[5 q");
+    state.active_cursor_mut().pending_wrap = true;
+    let history_row = state.active_grid().rows()[0].clone();
+    state.scrollback.push_row(&history_row, RowEnd::Hard);
+
+    let grid = state.active_grid().clone();
+    let tabs = state.tab_stops.clone();
+    let title = state.title.clone();
+    let cwd = state.reported_cwd.clone();
+    let history = state.scrollback.clone();
+    let replies = state.replies.clone();
+    let mouse_tracking = state.modes.mouse_tracking;
+    let mouse_encoding = state.modes.mouse_encoding;
+    let alt_scroll = state.modes.alt_scroll;
+    let reverse_video = state.modes.reverse_video;
+    let cursor_blink = state.modes.cursor_blink;
+    let cursor_shape = state.modes.cursor_shape;
+
+    advance(&mut state, b"\x1b[!p");
+
+    assert_eq!(state.active_grid(), &grid);
+    assert_eq!(state.active_cursor_position(), (2, 3));
+    assert!(state.active_cursor().is_visible);
+    assert!(!state.active_cursor().pending_wrap);
+    assert_eq!(state.active_cursor().saved, None);
+    assert_eq!(*state.active_render(), RenderState::fresh());
+    assert_eq!(state.scroll_region(), None);
+    assert!(!state.modes.app_cursor_keys);
+    assert!(!state.modes.autowrap);
+    assert_eq!(state.modes.mouse_tracking, mouse_tracking);
+    assert_eq!(state.modes.mouse_encoding, mouse_encoding);
+    assert_eq!(state.modes.alt_scroll, alt_scroll);
+    assert_eq!(state.modes.reverse_video, reverse_video);
+    assert_eq!(state.modes.cursor_blink, cursor_blink);
+    assert_eq!(state.modes.cursor_shape, cursor_shape);
+    assert!(state.modes.bracketed_paste);
+    assert_eq!(state.tab_stops, tabs);
+    assert_eq!(state.title, title);
+    assert_eq!(state.reported_cwd, cwd);
+    assert_eq!(state.scrollback, history);
+    assert_eq!(state.replies, replies);
+    assert!(state.cluster.is_empty());
+    assert_eq!(state.cluster_base, None);
+}
+
+#[test]
+fn decstr_resets_only_the_active_screen() {
+    let mut state = state(8, 4);
+    print_str(&mut state, "primary");
+    advance(&mut state, b"\x1b[1m\x1b[2;4r\x1b[3;4H");
+    let primary_grid = state.primary.clone();
+    let primary_cursor = state.primary_cursor;
+    let primary_render = state.primary_render;
+    let primary_region = state.primary_scroll_region;
+
+    advance(
+        &mut state,
+        b"\x1b[?47h\x1b[31m\x1b[2;3r\x1b[2;8H\x1b[?25l\x1b7",
+    );
+    state.print('a');
+    advance(&mut state, b"\x1b[!p");
+    assert_eq!(state.active, Screen::Alternate);
+    assert_eq!(state.alternate.cell(1, 7).map(Cell::ch), Some('a'));
+    assert_eq!(state.active_cursor_position(), (1, 7));
+    assert!(state.alternate_cursor.is_visible);
+    assert!(!state.alternate_cursor.pending_wrap);
+    assert_eq!(state.alternate_cursor.saved, None);
+    assert_eq!(state.alternate_render, RenderState::fresh());
+    assert_eq!(state.alternate_scroll_region, None);
+    assert_eq!(state.primary, primary_grid);
+    assert_eq!(state.primary_cursor, primary_cursor);
+    assert_eq!(state.primary_render, primary_render);
+    assert_eq!(state.primary_scroll_region, primary_region);
+
+    state.alternate_render.style = styled(|style| style.set_bold(true));
+    state.alternate_cursor.row = 2;
+    state.alternate_scroll_region = Some((1, 2));
+    let alternate_grid = state.alternate.clone();
+    let alternate_cursor = state.alternate_cursor;
+    let alternate_render = state.alternate_render;
+    let alternate_region = state.alternate_scroll_region;
+    advance(&mut state, b"\x1b[?47l\x1b[!p");
+    assert_eq!(state.alternate, alternate_grid);
+    assert_eq!(state.alternate_cursor, alternate_cursor);
+    assert_eq!(state.alternate_render, alternate_render);
+    assert_eq!(state.alternate_scroll_region, alternate_region);
+}
+
+#[test]
+fn decstr_breaks_the_current_grapheme_cluster() {
+    let mut state = state(5, 2);
+    state.print('e');
+    assert!(!state.cluster.is_empty());
+    advance(&mut state, b"\x1b[!p");
+    state.print('\u{0301}');
+    assert_eq!(
+        state
+            .active_grid()
+            .cell(0, 0)
+            .expect("the base cell")
+            .combining(),
+        []
+    );
+}
+
+#[test]
+fn ris_restores_display_state_but_keeps_session_metadata() {
+    let size = PtySize { cols: 20, rows: 3 };
+    let mut state = TerminalState::with_scrollback(size, ScrollbackLimit::new(1, 1024));
+    print_str(&mut state, "primary");
+    let history_row = state.active_grid().rows()[0].clone();
+    state.scrollback.push_row(&history_row, RowEnd::Hard);
+    state.scrollback.push_row(&history_row, RowEnd::Hard);
+    state.scrollback.push_row(&history_row, RowEnd::Hard);
+    advance(
+        &mut state,
+        b"\x1b]2;reset me\x07\x1b]7;file://localhost/work\x07\x1b[c",
+    );
+    advance(
+        &mut state,
+        b"\x1b[6G\x1bH\x1b[1m\x1b[2;3r\x1b[3;5H\x1b[?1;5;12;2004h",
+    );
+    advance(&mut state, b"\x1b[?47h");
+    print_str(&mut state, "alternate");
+    advance(&mut state, b"\x1b[31m\x1b[2;3r\x1b[3;4H\x1b[?25l");
+
+    let cwd = state.reported_cwd.clone();
+    let replies = state.replies.clone();
+    let total_pushed = state.scrollback.total_pushed();
+    let dropped_lines = state.scrollback.dropped_lines();
+    let dropped_bytes = state.scrollback.dropped_bytes();
+
+    advance(&mut state, b"\x1bc");
+
+    assert_eq!(state.active, Screen::Primary);
+    assert_eq!(state.primary.dimensions(), (3, 20));
+    assert_eq!(state.alternate.dimensions(), (3, 20));
+    for grid in [state.primary.as_ref(), state.alternate.as_ref()] {
+        for row in grid.rows() {
+            for cell in row {
+                assert_eq!(cell.ch(), ' ');
+                assert_eq!(cell.width(), 1);
+                assert_eq!(cell.style(), Style::default());
+            }
+        }
+    }
+    for cursor in [state.primary_cursor, state.alternate_cursor] {
+        assert_eq!((cursor.row, cursor.col), (0, 0));
+        assert!(cursor.is_visible);
+        assert!(!cursor.pending_wrap);
+        assert_eq!(cursor.saved, None);
+    }
+    assert_eq!(state.primary_render, RenderState::fresh());
+    assert_eq!(state.alternate_render, RenderState::fresh());
+    assert_eq!(state.modes, TerminalModes::default());
+    assert_eq!(state.primary_scroll_region, None);
+    assert_eq!(state.alternate_scroll_region, None);
+    assert_eq!(
+        state.tab_stops,
+        (0..20).map(|column| column % 8 == 0).collect::<Vec<_>>()
+    );
+    assert_eq!(state.title, None);
+    assert!(state.cluster.is_empty());
+    assert_eq!(state.cluster_base, None);
+    assert!(state.scrollback.is_empty());
+    assert_eq!(state.scrollback.total_pushed(), total_pushed);
+    assert_eq!(state.scrollback.dropped_lines(), dropped_lines);
+    assert_eq!(state.scrollback.dropped_bytes(), dropped_bytes);
+    assert_eq!(state.reported_cwd, cwd);
+    assert_eq!(state.replies, replies);
+
+    let blank_row = state.primary.rows()[0].clone();
+    state.scrollback.push_row(&blank_row, RowEnd::Hard);
+    state.scrollback.push_row(&blank_row, RowEnd::Hard);
+    assert_eq!(state.scrollback.len(), 1);
 }
 
 #[test]
@@ -4486,9 +4803,8 @@ fn an_ignored_private_marker_csi_does_not_break_a_cluster() {
 }
 
 #[test]
-fn a_lone_c1_control_byte_is_inert() {
-    // Raw C1 bytes (0x80..=0x9F) decode as C1 controls koshi does not act on:
-    // they must not print, move the cursor, or panic.
+fn unhandled_c1_control_bytes_are_inert() {
+    // Unhandled C1 controls do not print, move the cursor, or panic.
     let mut state = state(5, 3);
     state.print('a'); // (0, 1)
     advance(&mut state, b"\x9b\x9c\x80"); // C1 CSI, ST, PAD — all ignored
