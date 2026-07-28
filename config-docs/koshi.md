@@ -41,7 +41,7 @@ Settings use blocks. `theme` is top-level.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `new-pane-direction` | `"left"` \| `"right"` \| `"up"` \| `"down"` — where a new pane opens when the command does not say | `"right"` | ≥ 0.1.0 |
+| `new-pane-direction` | `"left"` \| `"right"` \| `"up"` \| `"down"` — which side `new-pane` opens on, both the keybinding and `koshi new-pane`. Read by each client for itself, so two terminals viewing one session can differ. The `new-pane-<side>` keybindings and an explicit `--direction` name their own side and ignore this | `"right"` | ≥ 0.1.0 |
 
 ## `mouse`
 

@@ -226,6 +226,11 @@ fn mode_name_roundtrips() {
     assert_eq!(mode.as_str(), "resize");
 }
 
+/// The `layout.new-pane-direction` the resolving client holds while the default
+/// binding table below is checked. It is not `Right`, so the `new-pane` row
+/// cannot pass on a hardcoded stock default.
+const CLIENT_SPLIT: Direction = Direction::Up;
+
 /// One expected default binding: where it lives, what it binds, and the exact
 /// outcome of resolving it against the built-in action registry.
 struct ExpectedBinding {
@@ -266,7 +271,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         Command::NewPane(NewPaneArgs {
             source: None,
             tab: None,
-            direction: Some(direction),
+            direction,
             stacked: false,
             cwd: None,
             command: None,
@@ -297,7 +302,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-p> n",
             "new-pane",
             ActionArgs::None,
-            Ok(Command::NewPane(NewPaneArgs::default())),
+            Ok(new_pane_cmd(CLIENT_SPLIT)),
         ),
         row(
             "normal",
@@ -511,7 +516,7 @@ fn default_binding_table_is_exact_and_resolves() {
         );
         assert_eq!(bound.args, row.args, "args bound to {}", row.chord);
         assert_eq!(
-            resolve_action(&bound.action, &bound.args, &registry),
+            resolve_action(&bound.action, &bound.args, &registry, CLIENT_SPLIT),
             row.resolved.map(DispatchPlan::Command),
             "resolution of {}",
             row.chord

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_client::input::KeyOutcome;
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
@@ -30,14 +30,7 @@ fn server_with(fake: Arc<FakePtyBackend>) -> Server {
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, rx) = mpsc::channel();
-    Server::new(
-        backend,
-        snapshot_provider,
-        storage,
-        rx,
-        tx,
-        Direction::Right,
-    )
+    Server::new(backend, snapshot_provider, storage, rx, tx)
 }
 
 /// Receive the next event of the wanted shape, ignoring any earlier ones, or

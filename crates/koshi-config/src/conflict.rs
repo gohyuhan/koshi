@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use koshi_core::action::ActionRef;
+use koshi_core::geometry::Direction;
 use koshi_core::key::{KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
@@ -633,7 +634,9 @@ pub(crate) fn removed_above(
 /// Classifies one binding by asking the real resolver, so detection and the
 /// keypress path can never disagree about what fires.
 fn classify(bound: &BoundAction, registry: &ActionRegistry) -> BindingState {
-    match resolve_action(&bound.action, &bound.args, registry) {
+    // Only whether the action resolves is read; the command itself is dropped,
+    // so the split direction handed in never reaches anything.
+    match resolve_action(&bound.action, &bound.args, registry, Direction::Right) {
         Ok(_) => BindingState::Live,
         Err(ResolveError::Unregistered { .. }) => BindingState::Orphan,
         Err(ResolveError::ComingSoon { .. }) => BindingState::ComingSoon,

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
 use koshi_config::conflict::KeymapVerdict;
-use koshi_config::layer::PartialKeybindingsConfig;
+use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionRef;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
@@ -16,6 +16,7 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{PluginId, SessionId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::resolve::ActionArgs;
+use koshi_layout::edit::split_leaf;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::Client;
@@ -39,7 +40,6 @@ fn runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
         Arc::new(NullStorage),
         rx,
         tx,
-        Direction::Right,
     );
     let client = runtime
         .bootstrap_local(
@@ -68,7 +68,10 @@ fn viewer_for(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
 fn press(runtime: &mut Server, viewer: &mut ViewerClient, chord: KeyChord, now: Instant) {
     let client_id = viewer.id();
     match viewer.resolve_key(chord, now) {
-        KeyOutcome::Fire(bound) => runtime.handle_bound_action(client_id, bound),
+        KeyOutcome::Fire(bound) => {
+            let direction = viewer.config().layout.new_pane_direction;
+            runtime.handle_bound_action(client_id, bound, direction);
+        }
         KeyOutcome::PassThrough(chord) => runtime.handle_key_press(client_id, chord),
         KeyOutcome::Pending | KeyOutcome::Discard => {}
     }
@@ -78,7 +81,8 @@ fn press(runtime: &mut Server, viewer: &mut ViewerClient, chord: KeyChord, now: 
 /// Fire an open sequence's binding if its ambiguity deadline has passed.
 fn expire(runtime: &mut Server, viewer: &mut ViewerClient, now: Instant) {
     if let Some(bound) = viewer.expire_key_sequence(now) {
-        runtime.handle_bound_action(viewer.id(), bound);
+        let direction = viewer.config().layout.new_pane_direction;
+        runtime.handle_bound_action(viewer.id(), bound, direction);
     }
     viewer.apply_events();
 }
@@ -513,6 +517,47 @@ fn directional_new_pane_binding_splits_on_that_side() {
 }
 
 #[test]
+fn the_viewers_configured_split_direction_reaches_the_new_pane() {
+    let (mut runtime, _fake, client, mut viewer) = runtime();
+    let original = only_pane(&runtime);
+    let now = Instant::now();
+
+    // The viewer folds `layout.new-pane-direction "down"` out of its own
+    // `koshi.kdl`. Nothing else in the process holds a split direction, so if
+    // this value does not travel with the fired binding the split comes out
+    // rightward — the stock setting — and the assert below fails.
+    viewer.load_startup_config(
+        Some(PartialKoshiConfig {
+            layout: Some(PartialLayoutDefaults {
+                new_pane_direction: Some(Direction::Down),
+            }),
+            ..PartialKoshiConfig::default()
+        }),
+        None,
+        None,
+    );
+    assert_eq!(viewer.config().layout.new_pane_direction, Direction::Down);
+
+    let tab = tab_of(&runtime, client);
+    let before = runtime.session_for_client(client).expect("session").tabs[&tab]
+        .layout()
+        .clone();
+
+    // `<C-p> n` is the direction-less new-pane binding.
+    press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'p'), now);
+    press(&mut runtime, &mut viewer, chord(ModFlags::NONE, 'n'), now);
+
+    let new_pane = focused_pane(&runtime, client);
+    assert_ne!(new_pane, original);
+    let expected =
+        split_leaf(&before, original, new_pane, Direction::Down).expect("split on the source leaf");
+    assert_eq!(
+        runtime.session_for_client(client).expect("session").tabs[&tab].layout(),
+        &expected
+    );
+}
+
+#[test]
 fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
     let (mut runtime, _fake, client, mut viewer) = runtime();
     let original = only_pane(&runtime);
@@ -570,6 +615,17 @@ fn focused_pane(runtime: &Server, client: ClientId) -> koshi_core::ids::PaneId {
     state
         .focused_pane(state.active_tab())
         .expect("a focused pane")
+}
+
+/// The tab the client is looking at.
+fn tab_of(runtime: &Server, client: ClientId) -> koshi_core::ids::TabId {
+    runtime
+        .session_for_client(client)
+        .expect("session")
+        .clients
+        .get(client)
+        .expect("client")
+        .active_tab()
 }
 
 #[test]
@@ -999,7 +1055,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         Command::NewPane(NewPaneArgs {
             source: Some(first),
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: true,
             cwd: None,
             command: None,

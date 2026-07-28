@@ -332,7 +332,7 @@ impl PartialKeybindingsConfig {
 /// Layout default overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialLayoutDefaults {
-    /// Direction a new pane spawns when the command omits one.
+    /// Direction a new pane spawns relative to the focused pane.
     pub new_pane_direction: Option<Direction>,
 }
 

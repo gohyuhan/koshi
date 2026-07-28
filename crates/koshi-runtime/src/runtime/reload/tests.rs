@@ -8,11 +8,11 @@ use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use koshi_config::layer::{
-    PartialColorPalette, PartialKeybindingsConfig, PartialLayoutDefaults, PartialPaneConfig,
-    PartialScrollbackConfig, PartialTerminalConfig, PartialThemeConfig,
+    PartialColorPalette, PartialKeybindingsConfig, PartialPaneConfig, PartialScrollbackConfig,
+    PartialTerminalConfig, PartialThemeConfig,
 };
 use koshi_config::types::RgbColor;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -39,7 +39,6 @@ fn runtime_with_no_sessions() -> Server {
         Arc::new(NullStorage),
         rx,
         tx,
-        Direction::Right,
     )
 }
 
@@ -56,65 +55,51 @@ fn load_startup_config_applies_the_app_layer_before_genesis() {
             min_cols: Some(11),
             min_rows: None,
         }),
-        layout: Some(PartialLayoutDefaults {
-            new_pane_direction: Some(Direction::Down),
+        scrollback: Some(PartialScrollbackConfig {
+            max_lines: None,
+            max_bytes: None,
+            scroll_on_input: Some(false),
         }),
         ..PartialKoshiConfig::default()
     }));
 
     assert_eq!(runtime.config.pane.min_cols, 11);
-    assert_eq!(
-        runtime.client_config.layout.new_pane_direction,
-        Direction::Down
-    );
+    assert!(!runtime.client_config.scrollback.scroll_on_input);
 }
 
 #[test]
-fn load_startup_config_without_a_file_leaves_the_constructors_seed() {
+fn load_startup_config_without_a_file_leaves_the_built_in_defaults() {
     let mut runtime = runtime_with_no_sessions();
 
     runtime.load_startup_config(None);
 
-    assert_eq!(
-        runtime.client_config.layout.new_pane_direction,
-        Direction::Right,
-        "the direction the constructor seeded"
-    );
     assert_eq!(runtime.config, ServerConfig::default());
+    assert_eq!(runtime.client_config, ClientConfig::default());
 }
 
 #[test]
-fn app_config_reload_replaces_the_startup_split_direction() {
+fn app_config_reload_replaces_the_startup_settings_and_notifies_each_session() {
     let (mut runtime, _client) = runtime();
     let session_id = only_session_id(&runtime);
-    // The constructor seeded `Right` as the app layer.
-    assert_eq!(
-        runtime.client_config.layout.new_pane_direction,
-        Direction::Right
-    );
+    assert_eq!(runtime.config.pane.min_cols, 2, "the built-in floor");
 
     let events = runtime.reload_app_config(PartialKoshiConfig {
-        layout: Some(PartialLayoutDefaults {
-            new_pane_direction: Some(Direction::Down),
+        pane: Some(PartialPaneConfig {
+            min_cols: Some(7),
+            min_rows: None,
         }),
         ..PartialKoshiConfig::default()
     });
-    assert_eq!(
-        runtime.client_config.layout.new_pane_direction,
-        Direction::Down
-    );
+    assert_eq!(runtime.config.pane.min_cols, 7);
     assert_eq!(
         events,
         vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
     );
 
-    // An empty `koshi.kdl` replaces the whole app layer, so the direction
-    // falls back to the built-in default rather than the startup seed.
+    // An empty `koshi.kdl` replaces the whole app layer, so the floor falls
+    // back to the built-in default rather than the previous file's value.
     runtime.reload_app_config(PartialKoshiConfig::default());
-    assert_eq!(
-        runtime.client_config.layout.new_pane_direction,
-        Direction::Right
-    );
+    assert_eq!(runtime.config.pane.min_cols, 2);
 }
 
 #[test]

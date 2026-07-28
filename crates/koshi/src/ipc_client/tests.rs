@@ -4,6 +4,7 @@
 use std::thread::JoinHandle;
 
 use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode};
 use koshi_ipc::transport::Listener;
@@ -20,6 +21,19 @@ fn test_runtime_dir(tag: &str) -> PathBuf {
     let dir = base.join(format!("koshi-cli-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create runtime dir");
     dir
+}
+
+/// A `new-pane` request with nothing chosen: the focused pane splits rightward.
+fn new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        source: None,
+        tab: None,
+        direction: Direction::Right,
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    }
 }
 
 /// The in-session identity a test CLI presents.
@@ -258,7 +272,7 @@ fn a_refused_hello_reports_ipc_unavailable() {
 
 #[test]
 fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
-    let captured = capture_cwd(Command::NewPane(NewPaneArgs::default()));
+    let captured = capture_cwd(Command::NewPane(new_pane_args()));
     let Command::NewPane(args) = captured else {
         panic!("the variant must not change");
     };
@@ -275,7 +289,7 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
 fn an_explicit_directory_survives_the_capture() {
     let command = Command::NewPane(NewPaneArgs {
         cwd: Some(PathBuf::from("/explicit")),
-        ..NewPaneArgs::default()
+        ..new_pane_args()
     });
     let Command::NewPane(args) = capture_cwd(command) else {
         panic!("the variant must not change");

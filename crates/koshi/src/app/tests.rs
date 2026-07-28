@@ -13,14 +13,15 @@ use ratatui::backend::TestBackend;
 
 use koshi_client::input::KeyOutcome;
 use koshi_config::layer::{
-    PartialColorPalette, PartialKoshiConfig, PartialTerminalConfig, PartialThemeConfig,
+    PartialColorPalette, PartialKoshiConfig, PartialLayoutDefaults, PartialTerminalConfig,
+    PartialThemeConfig,
 };
 use koshi_config::types::RgbColor;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::Point;
+use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
 use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
@@ -303,6 +304,107 @@ fn key_input_events_write_to_the_focused_pane() {
         fake.writes(pane_id).expect("writes"),
         vec![b"l".to_vec(), b"s".to_vec(), b"\r".to_vec()]
     );
+}
+
+/// Press one chord through the loop's own routing, as a real keystroke arrives.
+fn press(server: &mut Server, client: &mut Client, client_id: ClientId, chord: KeyChord) {
+    assert!(apply_event(
+        server,
+        client,
+        RuntimeEvent::KeyInput { client_id, chord },
+        None,
+    )
+    .is_continue());
+}
+
+/// A viewer whose `koshi.kdl` sets `layout.new-pane-direction` to `direction`.
+fn client_splitting_toward(
+    server: &mut Server,
+    client_id: ClientId,
+    direction: Direction,
+) -> Client {
+    test_client_with(
+        server,
+        client_id,
+        LoadedConfig {
+            app: Some(PartialKoshiConfig {
+                layout: Some(PartialLayoutDefaults {
+                    new_pane_direction: Some(direction),
+                }),
+                ..PartialKoshiConfig::default()
+            }),
+            theme: None,
+            keybindings: None,
+        },
+    )
+}
+
+/// Press `<C-p> n` — the new-pane binding that names no side — and give back
+/// the top-left content cell of the original pane and of the pane it opened.
+fn split_with_the_bare_new_pane_binding(
+    fake: &Arc<FakePtyBackend>,
+    server: &mut Server,
+    client: &mut Client,
+    client_id: ClientId,
+    first: PaneId,
+) -> (Point, Point) {
+    press(
+        server,
+        client,
+        client_id,
+        KeyChord::new(ModFlags::CTRL, Key::Char('p')),
+    );
+    press(
+        server,
+        client,
+        client_id,
+        KeyChord::new(ModFlags::NONE, Key::Char('n')),
+    );
+
+    let panes = fake.spawned_panes();
+    assert_eq!(panes.len(), 2, "the binding opened exactly one pane");
+    let second = panes[1];
+    (
+        content_point(server, client_id, first),
+        content_point(server, client_id, second),
+    )
+}
+
+#[test]
+fn a_new_pane_binding_opens_the_side_the_viewers_own_config_names() {
+    // `<C-p> n` names no side, so the side is whatever THIS viewer's
+    // `layout.new-pane-direction` says. The loop is the only thing that reads
+    // it off the client and hands it to the session, and nothing else in the
+    // process holds a split direction to fall back on.
+    //
+    // Down puts the new pane under the old one — same column, a lower row.
+    // Right puts it beside — same row, a further column. The two cases are
+    // asserted together so a loop passing a literal instead of the client's
+    // setting makes one of them fail whichever literal it picked.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, first) = boot(&fake);
+    let mut client = client_splitting_toward(&mut server, client_id, Direction::Down);
+    assert_eq!(client.config().layout.new_pane_direction, Direction::Down);
+
+    let (old, new) =
+        split_with_the_bare_new_pane_binding(&fake, &mut server, &mut client, client_id, first);
+    assert_eq!(old, Point { x: 1, y: 2 }, "the original pane keeps the top");
+    assert_eq!(new, Point { x: 1, y: 13 }, "the new pane opened below it");
+
+    // The same press on a viewer set to Right, for the control: identical
+    // everything but the setting, and the new pane lands beside instead.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, first) = boot(&fake);
+    let mut client = client_splitting_toward(&mut server, client_id, Direction::Right);
+
+    let (old, new) =
+        split_with_the_bare_new_pane_binding(&fake, &mut server, &mut client, client_id, first);
+    assert_eq!(
+        old,
+        Point { x: 1, y: 2 },
+        "the original pane keeps the left"
+    );
+    assert_eq!(new, Point { x: 41, y: 2 }, "the new pane opened beside it");
 }
 
 #[test]
@@ -780,7 +882,9 @@ fn explicit_quit_teardown_group_kills_without_grace_delay() {
     let mut client = test_client(&mut server, client_id);
     let quit = KeyChord::new(ModFlags::CTRL, Key::Char('q'));
     match client.resolve_key(quit, Instant::now()) {
-        KeyOutcome::Fire(bound) => server.handle_bound_action(client_id, bound),
+        KeyOutcome::Fire(bound) => {
+            server.handle_bound_action(client_id, bound, Direction::Right);
+        }
         other => panic!("`<C-q>` fires core:quit; got {other:?}"),
     }
     run_loop(&mut server, &mut client, &mut terminal).expect("loop");

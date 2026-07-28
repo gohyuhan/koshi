@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
@@ -37,7 +37,6 @@ fn runtime_with_pane() -> (Server, PaneId, ClientId) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
 
     let session_id = SessionId::new();

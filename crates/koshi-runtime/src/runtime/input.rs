@@ -3,9 +3,11 @@
 //!
 //! **What a key means is decided by the viewer that received it** — it holds
 //! the keymap, the input mode and any sequence being typed (`koshi-client`).
-//! It hands the session one of two things: a [`BoundAction`] to run, or a
-//! chord to write. So nothing here consults a keymap, and a raw chord arriving
-//! at the session belongs to no attached viewer and is dropped.
+//! It hands the session one of two things: a [`BoundAction`] to run — with the
+//! split direction its own settings hold, since a `new-pane` action carries no
+//! side of its own — or a chord to write. So nothing here consults a keymap,
+//! and a raw chord arriving at the session belongs to no attached viewer and
+//! is dropped.
 //!
 //! Text the outer terminal pastes routes here too
 //! ([`Server::handle_host_paste`]) — it is input for the same pane, delivered
@@ -29,6 +31,7 @@ use std::time::SystemTime;
 
 use koshi_config::types::BoundAction;
 use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::KeyChord;
 use koshi_core::lock::LockMode;
@@ -170,8 +173,18 @@ impl Server {
     /// a prefix to hold.
     ///
     /// what an action does.
-    pub fn handle_bound_action(&mut self, client_id: ClientId, bound: BoundAction) {
-        self.fire_binding(client_id, bound);
+    ///
+    /// `new_pane_direction` is the viewer's own `layout.new-pane-direction`
+    /// setting, handed in with the action: a pane-opening action that names no
+    /// direction splits toward it. The session keeps no split direction of its
+    /// own, so two viewers of one session each open panes their own way.
+    pub fn handle_bound_action(
+        &mut self,
+        client_id: ClientId,
+        bound: BoundAction,
+        new_pane_direction: Direction,
+    ) {
+        self.fire_binding(client_id, bound, new_pane_direction);
     }
 
     /// Write one key the viewer did not bind to the pane it is typing into,
@@ -180,8 +193,18 @@ impl Server {
         self.write_press(client_id, chord);
     }
 
-    fn fire_binding(&mut self, client_id: ClientId, bound: BoundAction) {
-        let Ok(plan) = resolve_action(&bound.action, &bound.args, &self.action_registry) else {
+    fn fire_binding(
+        &mut self,
+        client_id: ClientId,
+        bound: BoundAction,
+        new_pane_direction: Direction,
+    ) {
+        let Ok(plan) = resolve_action(
+            &bound.action,
+            &bound.args,
+            &self.action_registry,
+            new_pane_direction,
+        ) else {
             return;
         };
         self.dispatch_plan(client_id, plan);

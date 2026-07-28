@@ -26,7 +26,7 @@ use subtle::ConstantTimeEq;
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
 /// Any change to the shape of a wire struct bumps this, in the same commit.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
@@ -39,7 +39,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` yields
-///   `{"protocol_version":1, "token":"k7Qx…"}`, secret included.
+///   `{"protocol_version":2, "token":"k7Qx…"}`, secret included.
 /// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///

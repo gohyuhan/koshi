@@ -9,7 +9,6 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use koshi_core::geometry::Direction;
 use koshi_core::process::SpawnSpec;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -54,7 +53,6 @@ fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<Runtime
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, fake, tx)
 }

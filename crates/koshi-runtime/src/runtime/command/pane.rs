@@ -81,10 +81,12 @@ impl Server {
         let edited = if args.stacked {
             add_to_stack(tab.layout(), target.source_pane, new_pane_id)
         } else {
-            let direction = args
-                .direction
-                .unwrap_or(self.client_config.layout.new_pane_direction);
-            split_leaf(tab.layout(), target.source_pane, new_pane_id, direction)
+            split_leaf(
+                tab.layout(),
+                target.source_pane,
+                new_pane_id,
+                args.direction,
+            )
         };
         let candidate = edited.map_err(|_| Rejection::bare(RejectReason::TargetNotFound))?;
 

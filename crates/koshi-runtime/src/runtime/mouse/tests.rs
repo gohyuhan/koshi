@@ -38,6 +38,19 @@ fn runtime() -> (Server, ClientId) {
     (runtime, client)
 }
 
+/// A `new-pane` request with nothing chosen: the focused pane splits rightward.
+fn new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        source: None,
+        tab: None,
+        direction: Direction::Right,
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    }
+}
+
 /// The viewer half for `client_id`, on the stock settings: it holds the `mouse`
 /// and `copy` config and answers every mouse event below before the session
 /// hears about it.
@@ -153,7 +166,6 @@ fn runtime_with_fake() -> (Server, Arc<FakePtyBackend>, ClientId) {
         Arc::new(NullStorage),
         rx,
         tx,
-        Direction::Right,
     );
     let client = runtime
         .bootstrap_local(
@@ -517,7 +529,7 @@ fn split_focused(runtime: &mut Server, client: ClientId) {
         CommandId::new(),
         CommandSource::key_binding(client),
         SystemTime::now(),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let _ = runtime.dispatch(envelope);
 }
@@ -739,8 +751,8 @@ fn split_focused_vertical(runtime: &mut Server, client: ClientId) {
         CommandSource::key_binding(client),
         SystemTime::now(),
         Command::NewPane(NewPaneArgs {
-            direction: Some(Direction::Down),
-            ..NewPaneArgs::default()
+            direction: Direction::Down,
+            ..new_pane_args()
         }),
     );
     let _ = runtime.dispatch(envelope);
@@ -1900,7 +1912,7 @@ fn stack_onto_focused(runtime: &mut Server, client: ClientId) {
         SystemTime::now(),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let _ = runtime.dispatch(envelope);

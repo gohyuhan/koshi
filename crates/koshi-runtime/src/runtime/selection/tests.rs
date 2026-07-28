@@ -38,7 +38,6 @@ fn runtime() -> (Server, ViewerClient, PaneId) {
         Arc::new(NullStorage),
         rx,
         tx,
-        Direction::Right,
     );
     let client = rt
         .bootstrap_local(
@@ -241,14 +240,22 @@ fn selection(rt: &mut Server, client: ClientId, pane: PaneId) -> Option<Selectio
     rt.client_mut(client).expect("client").selection(pane)
 }
 
-/// Split the focused pane and return the new pane's id.
+/// Split the focused pane rightward and return the new pane's id.
 fn split(rt: &mut Server, client: ClientId) -> PaneId {
     let before: Vec<PaneId> = rt.pty_handles.keys().copied().collect();
     let envelope = CommandEnvelope::new(
         CommandId::new(),
         CommandSource::key_binding(client),
         SystemTime::now(),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            tab: None,
+            direction: Direction::Right,
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
+        }),
     );
     let _ = rt.dispatch(envelope);
     *rt.pty_handles

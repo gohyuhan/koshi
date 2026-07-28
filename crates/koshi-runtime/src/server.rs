@@ -17,11 +17,11 @@ use std::{
     },
 };
 
-use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
@@ -94,8 +94,7 @@ pub struct Server {
     pub(crate) config: ServerConfig,
     /// The viewer-owned sections the session itself reads, folded from the
     /// same app layer. Each viewer folds its own copy from its own files; this
-    /// one backs the session-side handling of `copy`, `mouse`,
-    /// `layout.new_pane_direction`, and `scrollback.scroll_on_input`.
+    /// one backs the session-side handling of `scrollback.scroll_on_input`.
     /// Recomputed by every `koshi.kdl` reload.
     pub(crate) client_config: ClientConfig,
     /// Decides when the dispatcher repaints: event handlers mark invalidation
@@ -128,23 +127,18 @@ pub struct Server {
 impl Server {
     /// Build a server with no sessions, no terminal engines, no subscribers, a
     /// fresh render scheduler, and an action registry holding the built-in
-    /// actions, holding the given PTY backend, service handles, event inbox,
-    /// and the default split direction for new panes. The direction seeds the
-    /// initial app config layer; a `koshi.kdl` reload replaces it.
+    /// actions, holding the given PTY backend, service handles, and event
+    /// inbox. Both effective configs start at the built-in defaults, over an
+    /// empty app layer that [`load_startup_config`](Self::load_startup_config)
+    /// and every `koshi.kdl` reload replace.
     pub fn new(
         pty_backend: Arc<dyn PtyBackend>,
         snapshot_provider: Arc<dyn SnapshotProvider>,
         storage: Arc<dyn Storage>,
         inbox_rx: Receiver<RuntimeEvent>,
         inbox_tx: Sender<RuntimeEvent>,
-        default_new_pane_direction: Direction,
     ) -> Self {
-        let app_layer = PartialKoshiConfig {
-            layout: Some(PartialLayoutDefaults {
-                new_pane_direction: Some(default_new_pane_direction),
-            }),
-            ..PartialKoshiConfig::default()
-        };
+        let app_layer = PartialKoshiConfig::default();
         let config = fold_server(&app_layer);
         let client_config = fold_client(&app_layer);
         Server {

@@ -7,7 +7,6 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::Direction;
 use koshi_core::ids::PaneId;
 use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
@@ -27,14 +26,7 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx,
-        Direction::Right,
-    );
+    let mut rt = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, tx);
 
     let pane = PaneId::new();
     let handle = fake

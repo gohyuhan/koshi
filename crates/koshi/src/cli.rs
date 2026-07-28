@@ -188,7 +188,8 @@ pub enum CliCommand {
     /// Open a new pane running a shell; its working directory and
     /// environment come from the issuing terminal.
     NewPane {
-        /// Split direction; omitted uses the default split.
+        /// Split direction; omitted follows your `layout.new-pane-direction`
+        /// setting.
         #[arg(long, value_enum, value_name = "DIRECTION", conflicts_with = "stacked")]
         direction: Option<DirectionArg>,
         /// Stack the new pane onto the source pane instead of splitting.
@@ -395,7 +396,8 @@ pub enum CliCommand {
     /// Open a new pane running the command given after `--`; its working
     /// directory and environment come from the issuing terminal.
     Run {
-        /// Split direction; omitted uses the default split.
+        /// Split direction; omitted follows your `layout.new-pane-direction`
+        /// setting.
         #[arg(long, value_enum, value_name = "DIRECTION", conflicts_with = "stacked")]
         direction: Option<DirectionArg>,
         /// Stack the new pane onto the source pane instead of splitting.
@@ -583,12 +585,22 @@ impl CliCommand {
     /// flag given directly as an id is used as-is, so only a flag given as a
     /// NAME needs the routing layer's lookup.
     ///
+    /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
+    /// setting, read from `koshi.kdl` by
+    /// [`config::new_pane_direction`](crate::config::new_pane_direction). A
+    /// pane-opening verb given no `--direction` splits toward it, so the
+    /// command that reaches the session already names a side.
+    ///
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
     /// discovery and local queries (`inspect`, the `list-*` verbs, `actions`,
     /// `keys`, and `config`), plus `plugin`, whose arguments are not built.
     #[must_use]
-    pub fn to_action(&self, targets: &ResolvedTargets) -> Option<(ActionRef, Command)> {
+    pub fn to_action(
+        &self,
+        targets: &ResolvedTargets,
+        new_pane_direction: Direction,
+    ) -> Option<(ActionRef, Command)> {
         let (name, command) = match self {
             CliCommand::NewPane {
                 direction,
@@ -602,7 +614,7 @@ impl CliCommand {
                 Command::NewPane(NewPaneArgs {
                     source: *pane,
                     tab: targets.tab.or(tab_ref_id(tab)),
-                    direction: direction.map(Direction::from),
+                    direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
                     stacked: *stacked,
                     cwd: None,
                     command: None,
@@ -740,7 +752,7 @@ impl CliCommand {
                     cwd: None,
                     source: *pane,
                     tab: targets.tab.or(tab_ref_id(tab)),
-                    direction: direction.map(Direction::from),
+                    direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
                     stacked: *stacked,
                     client: *client,
                 }),

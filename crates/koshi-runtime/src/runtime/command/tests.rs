@@ -43,6 +43,20 @@ use crate::runtime::event::RuntimeEvent;
 
 use super::*;
 
+/// A `new-pane` request with nothing chosen: the focused pane of the issuer's
+/// tab splits rightward, running the default shell.
+fn new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        source: None,
+        tab: None,
+        direction: Direction::Right,
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    }
+}
+
 /// A bare runtime with stub services and no sessions. The sender is returned so
 /// the inbox stays open.
 fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
@@ -56,7 +70,6 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, tx)
 }
@@ -76,7 +89,6 @@ fn new_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<Runtime
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, fake, tx)
 }
@@ -777,7 +789,7 @@ fn session_scoped_command_without_session_is_not_found() {
             cwd: None,
             source: None,
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         }),
@@ -803,7 +815,7 @@ fn new_pane_explicit_source_absent_is_not_found() {
 
     let env = envelope(Command::NewPane(NewPaneArgs {
         source: Some(PaneId::new()),
-        ..NewPaneArgs::default()
+        ..new_pane_args()
     }));
     let command_id = env.id;
 
@@ -825,14 +837,14 @@ fn new_pane_without_an_anchor_is_not_found() {
     // an internal source has no focused pane to anchor on. The stacked shape
     // resolves its anchor the same way, so it rejects identically.
     let cases = vec![
-        NewPaneArgs::default(),
+        new_pane_args(),
         NewPaneArgs {
-            direction: Some(koshi_core::geometry::Direction::Right),
-            ..NewPaneArgs::default()
+            direction: Direction::Right,
+            ..new_pane_args()
         },
         NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         },
     ];
 
@@ -869,7 +881,7 @@ fn new_pane_defaults_to_the_focused_pane() {
     // has no PTY, so it contributes no PtyResized.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
     match rt.dispatch(env) {
@@ -887,21 +899,11 @@ fn new_pane_defaults_to_the_focused_pane() {
 }
 
 #[test]
-fn new_pane_without_direction_splits_in_the_runtime_default() {
-    // A runtime seeded with a Down default; a directionless new-pane must
-    // split downward, not rightward.
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
-    let storage: Arc<dyn Storage> = Arc::new(NullStorage);
-    let (tx, inbox_rx) = mpsc::channel();
-    let mut rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx.clone(),
-        Direction::Down,
-    );
+fn new_pane_splits_the_direction_the_command_names() {
+    // The command carries the direction outright and the handler obeys it. The
+    // direction here is Down, so a handler that split rightward — its own
+    // default, or the stock setting — fails.
+    let (mut rt, _tx) = new_runtime();
 
     let client_id = ClientId::new();
     let tab = TabId::new();
@@ -916,7 +918,10 @@ fn new_pane_without_direction_splits_in_the_runtime_default() {
     let before = rt.sessions[&sid].tabs[&tab].layout().clone();
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(NewPaneArgs {
+            direction: Direction::Down,
+            ..new_pane_args()
+        }),
     );
     match rt.dispatch(env) {
         CommandResult::Ok { .. } => {}
@@ -950,7 +955,7 @@ fn new_pane_stacked_on_a_plain_leaf_creates_a_stack() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1007,7 +1012,7 @@ fn new_pane_stacked_onto_a_stack_member_appends() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1065,8 +1070,8 @@ fn new_pane_stacked_ignores_direction() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            direction: Some(koshi_core::geometry::Direction::Down),
-            ..NewPaneArgs::default()
+            direction: Direction::Down,
+            ..new_pane_args()
         }),
     );
     match rt.dispatch(env) {
@@ -1100,7 +1105,7 @@ fn new_pane_stacked_with_a_missing_source_is_not_found() {
         Command::NewPane(NewPaneArgs {
             stacked: true,
             source: Some(PaneId::new()),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1140,7 +1145,7 @@ fn new_pane_stacked_with_no_space_is_min_size() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1177,7 +1182,7 @@ fn new_pane_stacked_spawn_failure_leaves_no_trace() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1226,7 +1231,7 @@ fn new_pane_with_no_space_is_min_size() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1270,7 +1275,7 @@ fn new_pane_explicit_pane_in_session_without_clients_is_rejected() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_b),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -1307,7 +1312,7 @@ fn new_pane_with_stale_focus_outside_active_tab_is_rejected() {
     // The default source is the stale focus; it must reject, never split a tab.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
     assert_eq!(
@@ -1416,7 +1421,7 @@ fn in_session_cli_close_defaults_to_its_source_pane() {
     // Grow a second pane; the split focuses it and parks its handle.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, session_id, root);
@@ -2669,7 +2674,7 @@ fn focus_activation_reflows_the_expanded_member_pty() {
     // [b, c] with `c` active and `b` collapsed to a header.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     match rt.dispatch(env) {
         CommandResult::Ok { .. } => {}
@@ -2680,7 +2685,7 @@ fn focus_activation_reflows_the_expanded_member_pty() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     match rt.dispatch(env) {
@@ -2794,7 +2799,7 @@ fn in_session_cli_pane_command_without_a_client_succeeds() {
     // Grow a second pane; the split focuses it for the attached client.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, session_id, root);
@@ -2834,7 +2839,7 @@ fn in_session_cli_pane_command_with_a_detached_client_succeeds() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, session_id, root);
@@ -3128,7 +3133,7 @@ fn run_command_pane_requires_a_pane_anchor() {
             cwd: None,
             source: None,
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         }),
@@ -3165,7 +3170,7 @@ fn run_command_pane_spawns_and_records_the_command() {
             cwd: None,
             source: None,
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         }),
@@ -3224,7 +3229,7 @@ fn run_command_pane_carries_cwd_into_the_command() {
             cwd: Some(PathBuf::from("/work")),
             source: None,
             tab: None,
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             client: None,
         }),
@@ -3254,7 +3259,7 @@ fn run_command_pane_args_carry_placement_into_the_new_pane_mapping() {
         cwd: Some(PathBuf::from("/work")),
         source: Some(source),
         tab: Some(tab),
-        direction: Some(Direction::Down),
+        direction: Direction::Down,
         stacked: true,
         client: Some(client),
     };
@@ -3263,7 +3268,7 @@ fn run_command_pane_args_carry_placement_into_the_new_pane_mapping() {
         NewPaneArgs {
             source: Some(source),
             tab: Some(tab),
-            direction: Some(Direction::Down),
+            direction: Direction::Down,
             stacked: true,
             cwd: Some(PathBuf::from("/work")),
             command: Some(spawn_spec()),
@@ -3496,7 +3501,7 @@ fn new_pane_spawns_and_runs_the_child() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
     let result = rt.dispatch(env);
@@ -3530,7 +3535,7 @@ fn new_pane_without_command_spawns_the_default_shell() {
 
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
 
     // command: None resolves to the platform default shell carrying koshi's
@@ -3563,7 +3568,7 @@ fn new_pane_with_command_spawns_that_command() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             command: Some(spawn_spec()),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -3600,7 +3605,7 @@ fn new_pane_spawn_failure_leaves_no_trace() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
 
@@ -3658,7 +3663,7 @@ fn new_pane_adoption_spawn_failure_leaves_no_trace() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -3705,7 +3710,7 @@ fn new_pane_on_a_background_tab_adopts_a_viewer() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -3775,7 +3780,7 @@ fn new_pane_on_a_background_tab_adopts_the_issuing_client() {
         CommandSource::key_binding(issuer),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     // TabFocused, PaneCreated, LayoutChanged, PaneFocused, PtyResized.
@@ -3839,7 +3844,7 @@ fn new_pane_external_multiple_clients_is_ambiguous() {
         CommandSource::external_cli(Some(sid)),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -3884,7 +3889,7 @@ fn new_pane_external_targets_a_named_client() {
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(target),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let new_pane = rt.sessions[&sid]
@@ -3931,7 +3936,7 @@ fn new_pane_external_unattached_target_client_is_not_found() {
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(ghost),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -3968,7 +3973,7 @@ fn new_pane_explicit_client_wins_over_the_in_session_issuer() {
         CommandSource::key_binding(issuer),
         Command::NewPane(NewPaneArgs {
             client: Some(other),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let new_pane = other_pane(&rt, sid, root);
@@ -4003,7 +4008,7 @@ fn new_pane_explicit_unattached_client_is_rejected_even_with_an_issuer() {
         CommandSource::key_binding(issuer),
         Command::NewPane(NewPaneArgs {
             client: Some(ghost),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -4060,7 +4065,7 @@ fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -4118,7 +4123,7 @@ fn new_pane_adoption_reflows_the_vacated_tab() {
     // constraint.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_b),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -4135,7 +4140,7 @@ fn new_pane_adoption_reflows_the_vacated_tab() {
         CommandSource::key_binding(client_a),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let after = fake.resizes(pane_x).unwrap();
@@ -4163,7 +4168,7 @@ fn new_pane_adoption_vacated_tab_with_no_viewer_keeps_sizes() {
     // Give the front tab a live PTY pane by splitting it while viewed.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -4179,7 +4184,7 @@ fn new_pane_adoption_vacated_tab_with_no_viewer_keeps_sizes() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     assert_eq!(
@@ -4236,7 +4241,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
     // PTY is sized to 40 wide.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_a),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -4262,7 +4267,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         CommandSource::key_binding(client_b),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let large = *fake.resizes(pane_x).unwrap().last().unwrap();
@@ -4305,7 +4310,7 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
         CommandSource::external_cli(Some(sid)),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     let command_id = env.id;
@@ -4336,7 +4341,7 @@ fn new_pane_leaves_an_unchanged_sibling_pty_alone() {
     // Split 1: root -> (root | A), focus A. Split 2: A -> (root | (A | B)), focus B.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let a = rt.sessions[&sid]
         .panes
@@ -4346,7 +4351,7 @@ fn new_pane_leaves_an_unchanged_sibling_pty_alone() {
         .expect("pane A");
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let b = rt.sessions[&sid]
         .panes
@@ -4361,7 +4366,7 @@ fn new_pane_leaves_an_unchanged_sibling_pty_alone() {
     // unchanged (its subtree is untouched), so A's PTY is left alone entirely.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     assert_eq!(fake.resizes(a).unwrap().len(), a_before);
     assert!(fake.resizes(b).unwrap().len() > b_before);
@@ -4383,7 +4388,7 @@ fn new_pane_sibling_resize_failure_does_not_abort_the_command() {
     // First split spawns A with a live PTY.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let a = rt.sessions[&sid]
         .panes
@@ -4400,7 +4405,7 @@ fn new_pane_sibling_resize_failure_does_not_abort_the_command() {
     // nothing.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     let command_id = env.id;
     let result = rt.dispatch(env);
@@ -4437,7 +4442,7 @@ fn new_pane_records_the_resolved_launch_cwd_on_the_command() {
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/work")),
             command: Some(command),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4477,7 +4482,7 @@ fn new_pane_records_an_explicit_commands_own_cwd() {
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/work")),
             command: Some(command),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4515,7 +4520,7 @@ fn new_pane_default_shell_records_the_cwd_and_no_command() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/work")),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4549,7 +4554,7 @@ fn new_pane_external_into_a_viewed_tab_adopts_no_one() {
         CommandSource::external_cli(Some(sid)),
         Command::NewPane(NewPaneArgs {
             source: Some(root),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let new_pane = other_pane(&rt, sid, root);
@@ -4578,7 +4583,7 @@ fn new_pane_reflows_existing_sibling_ptys() {
     // First split creates pane A and spawns its PTY (the root has none yet).
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_a = other_pane(&rt, sid, root);
     let a_resizes_before = fake.resizes(pane_a).unwrap().len();
@@ -4587,7 +4592,7 @@ fn new_pane_reflows_existing_sibling_ptys() {
     // PTY-less root is in the layout — it must not abort the resize batch.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
 
     // The second split reflows A exactly once more (spawn size + this reflow).
@@ -4617,7 +4622,7 @@ fn new_pane_explicit_command_inherits_the_pane_cwd() {
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/work")),
             command: Some(command),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4650,7 +4655,7 @@ fn new_pane_explicit_command_cwd_wins_over_the_pane_cwd() {
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/work")),
             command: Some(command),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4702,7 +4707,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         CommandSource::key_binding(client_a),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_b),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
 
@@ -4748,7 +4753,7 @@ fn close_pane_defaults_to_the_focused_pane_and_kills_gracefully() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -4811,7 +4816,7 @@ fn close_pane_explicit_non_focused_target_keeps_focus() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -4868,7 +4873,7 @@ fn close_pane_force_overrides_the_close_policy() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -4908,7 +4913,7 @@ fn close_pane_tree_widens_the_graceful_kill_to_the_group() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -4947,7 +4952,7 @@ fn close_pane_tree_with_force_group_kills_immediately() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -4978,7 +4983,7 @@ fn close_pane_confirm_if_busy_running_rejects_and_mutates_nothing() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -5030,7 +5035,7 @@ fn close_pane_confirm_if_busy_exited_closes_gracefully() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -5315,14 +5320,14 @@ fn close_pane_reflows_surviving_pty_sizes() {
     // Two splits: pane A (half width), then pane B splitting A (quarters).
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_a = other_pane(&rt, sid, root);
     let size_at_half = rt.pty_sizes[&pane_a];
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_b = rt.sessions[&sid]
@@ -5378,7 +5383,7 @@ fn close_pane_reflow_skips_a_survivor_whose_rect_is_unchanged() {
     // rect is identical before and after B exists.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_a = other_pane(&rt, sid, root);
@@ -5387,7 +5392,7 @@ fn close_pane_reflow_skips_a_survivor_whose_rect_is_unchanged() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(root),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -5437,7 +5442,7 @@ fn close_pane_in_a_tab_with_no_viewer_keeps_pty_sizes() {
     // sole viewer onto the back tab: the front tab is left with no viewer.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -5449,7 +5454,7 @@ fn close_pane_in_a_tab_with_no_viewer_keeps_pty_sizes() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     assert_eq!(
@@ -5515,7 +5520,7 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
     // viewport — A is not a viewer yet.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_b),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_y = rt.sessions[&sid]
         .panes
@@ -5579,7 +5584,7 @@ fn close_last_pane_of_an_unviewed_tab_reflows_nothing() {
     // A live PTY on the viewed front tab.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -5633,14 +5638,14 @@ fn close_pane_reflow_skips_a_collapsed_stack_member() {
     // [root | A], then stack B onto A: [root | stack(A collapsed, B expanded)].
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_a = other_pane(&rt, sid, root);
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let pane_b = rt.sessions[&sid]
@@ -5700,7 +5705,7 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_a),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -5762,7 +5767,7 @@ fn close_pane_clears_only_the_gone_panes_view_state() {
     // Split so the tab survives closing one pane; the split takes focus.
     let env = envelope_from(
         CommandSource::key_binding(client),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let split = other_pane(&rt, sid, root);
@@ -5882,7 +5887,7 @@ fn close_pane_stacked_member_collapses_the_stack() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             stacked: true,
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -5982,7 +5987,7 @@ fn close_pane_honors_the_panes_own_force_policy() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -6119,7 +6124,7 @@ fn resize_fixture() -> (
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_a = other_pane(&rt, sid, root);
@@ -6486,7 +6491,7 @@ fn resize_pane_in_a_nested_split_moves_the_enclosing_border() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             source: Some(root),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -6913,7 +6918,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     // constraint: chrome leaves 40x8; half-columns yield 18x6 content.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = other_pane(&rt, sid, pane_a);
     assert_eq!(
@@ -6974,7 +6979,7 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
     // Give the doomed tab a live PTY by splitting it while viewed.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -7073,7 +7078,6 @@ fn close_tab_kills_every_pane_concurrently() {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
 
     let client_id = ClientId::new();
@@ -7093,11 +7097,11 @@ fn close_tab_kills_every_pane_concurrently() {
     // Two splits give the doomed tab two live PTYs.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let spawned: Vec<PaneId> = rt.sessions[&sid]
         .panes
@@ -7155,7 +7159,7 @@ fn close_tab_with_a_busy_confirm_pane_rejects_without_force() {
 
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -7216,7 +7220,7 @@ fn close_tab_force_kills_a_busy_confirm_pane() {
 
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -7264,7 +7268,7 @@ fn close_tab_confirm_if_busy_exited_pane_closes() {
 
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -7406,7 +7410,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
     // so each half's content is 38x20.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -8082,7 +8086,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
     // so the new half-column PTY content is 18x6.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(stayer),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = rt.sessions[&sid]
         .panes
@@ -8675,7 +8679,7 @@ fn new_pane_drops_the_splitting_clients_zoom() {
     // pair 20 each -> 18x20 content after chrome rows).
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -8907,7 +8911,7 @@ fn child_exit_close_on_exit_removes_the_pane_and_reaps_it() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -9026,7 +9030,7 @@ fn child_exit_by_signal_reports_no_exit_code() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -9055,7 +9059,7 @@ fn child_exit_respawn_shell_keeps_the_pane_and_its_bookkeeping() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let new_pane = other_pane(&rt, sid, root);
@@ -9428,7 +9432,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
     rt_viewed.sessions.insert(sid_viewed, session);
     rt_viewed.dispatch(envelope_from(
         CommandSource::key_binding(client_viewed),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let baseline_pane = other_pane(&rt_viewed, sid_viewed, root_viewed);
     let baseline_size = fake_viewed
@@ -9465,7 +9469,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         Command::NewPane(NewPaneArgs {
             source: Some(pane_back),
             client: Some(client_adopt),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     let adopted_pane = rt_adopt.sessions[&sid_adopt]
@@ -9503,7 +9507,7 @@ fn dispatched_command_schedules_a_render() {
         CommandSource::external_cli(Some(sid)),
         Command::NewPane(NewPaneArgs {
             source: Some(pane),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     ));
     assert!(matches!(result, CommandResult::Ok { .. }));
@@ -9622,7 +9626,7 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
     // First split: pane_x gets a live PTY + engine at the two-pane width.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let pane_x = other_pane(&rt, sid, pane_a);
     let wide = rt.pty_sizes[&pane_x];
@@ -9636,7 +9640,7 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
     // Second split of pane_x (it holds focus): pane_x narrows.
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let narrow = rt.pty_sizes[&pane_x];
     assert!(narrow.cols < wide.cols, "narrow {narrow:?} wide {wide:?}");
@@ -9690,7 +9694,7 @@ fn bootstrap_root_pane_rewraps_on_first_split() {
 
     rt.dispatch(envelope_from(
         CommandSource::key_binding(client),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     ));
     let narrow = rt.pty_sizes[&root];
     assert!(narrow.cols < wide.cols, "narrow {narrow:?} wide {wide:?}");
@@ -9802,13 +9806,13 @@ fn a_second_child_exit_for_the_same_pane_is_dropped_and_the_survivor_is_untouche
     // Two split panes, each with a live child and terminal engine.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     let pane_a = other_pane(&rt, sid, root);
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     // The pane that is neither the root nor the first split.
@@ -9862,7 +9866,7 @@ fn output_arriving_after_a_child_exit_is_dropped_and_a_live_pane_still_updates()
     for _ in 0..2 {
         let env = envelope_from(
             CommandSource::key_binding(client_id),
-            Command::NewPane(NewPaneArgs::default()),
+            Command::NewPane(new_pane_args()),
         );
         assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     }
@@ -10471,7 +10475,7 @@ fn new_pane_with_a_tab_target_splits_that_tabs_recent_pane() {
         Command::NewPane(NewPaneArgs {
             source: None,
             tab: Some(back_tab),
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             cwd: None,
             command: None,
@@ -10530,7 +10534,7 @@ fn new_pane_tab_target_with_no_focus_history_splits_the_first_pane() {
         Command::NewPane(NewPaneArgs {
             source: None,
             tab: Some(back_tab),
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             cwd: None,
             command: None,
@@ -10565,7 +10569,7 @@ fn new_pane_with_an_unknown_tab_target_is_not_found() {
         Command::NewPane(NewPaneArgs {
             source: None,
             tab: Some(TabId::new()),
-            direction: None,
+            direction: Direction::Right,
             stacked: false,
             cwd: None,
             command: None,
@@ -10714,7 +10718,7 @@ fn new_pane_with_no_cwd_opens_in_the_source_panes_reported_directory() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -10729,7 +10733,7 @@ fn the_shells_report_wins_over_the_os_answer() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -10746,7 +10750,7 @@ fn a_remote_shells_reported_directory_is_not_inherited() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -10761,7 +10765,7 @@ fn new_pane_with_no_cwd_falls_back_to_the_os_answer() {
 
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -10776,7 +10780,7 @@ fn new_pane_with_no_cwd_falls_back_to_the_source_panes_spawn_directory() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/srv/spawned")),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
@@ -10785,7 +10789,7 @@ fn new_pane_with_no_cwd_falls_back_to_the_source_panes_spawn_directory() {
     // the focused pane was spawned in.
     let env = envelope_from(
         CommandSource::key_binding(client_id),
-        Command::NewPane(NewPaneArgs::default()),
+        Command::NewPane(new_pane_args()),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
@@ -10801,7 +10805,7 @@ fn an_explicit_cwd_wins_over_the_source_panes_directory() {
         CommandSource::key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             cwd: Some(PathBuf::from("/explicit")),
-            ..NewPaneArgs::default()
+            ..new_pane_args()
         }),
     );
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));

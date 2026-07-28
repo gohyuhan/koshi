@@ -8,6 +8,19 @@ use crate::event::{Event, RejectReason};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId};
 use std::time::{Duration, UNIX_EPOCH};
 
+/// A `new-pane` request with nothing chosen: the focused pane splits rightward.
+fn new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        source: None,
+        tab: None,
+        direction: Direction::Right,
+        stacked: false,
+        cwd: None,
+        command: None,
+        client: None,
+    }
+}
+
 /// Roundtrip a value through JSON and assert it survives unchanged.
 fn roundtrip<T>(value: &T)
 where
@@ -30,9 +43,9 @@ fn unit_commands_roundtrip() {
 #[test]
 fn pane_commands_roundtrip() {
     roundtrip(&Command::NewPane(NewPaneArgs {
-        direction: Some(Direction::Right),
+        direction: Direction::Left,
         client: Some(ClientId::new()),
-        ..NewPaneArgs::default()
+        ..new_pane_args()
     }));
     roundtrip(&Command::ClosePane(ClosePaneArgs {
         pane: Some(PaneId::new()),
@@ -60,7 +73,7 @@ fn pane_commands_roundtrip() {
         cwd: None,
         source: Some(PaneId::new()),
         tab: Some(TabId::new()),
-        direction: Some(Direction::Down),
+        direction: Direction::Down,
         stacked: false,
         client: Some(ClientId::new()),
     }));
@@ -153,7 +166,7 @@ fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
 #[test]
 fn command_variant_names_are_canonical() {
     let cases: Vec<(Command, &str)> = vec![
-        (Command::NewPane(NewPaneArgs::default()), "NewPane"),
+        (Command::NewPane(new_pane_args()), "NewPane"),
         (Command::ClosePane(ClosePaneArgs::default()), "ClosePane"),
         (
             Command::ResizePane(ResizePaneArgs {
@@ -206,7 +219,7 @@ fn command_variant_names_are_canonical() {
                 cwd: None,
                 source: None,
                 tab: None,
-                direction: None,
+                direction: Direction::Right,
                 stacked: false,
                 client: None,
             }),
@@ -285,10 +298,7 @@ fn visual_variant_names_are_canonical() {
 #[test]
 fn command_kind_mirrors_command() {
     let cases: Vec<(Command, CommandKind)> = vec![
-        (
-            Command::NewPane(NewPaneArgs::default()),
-            CommandKind::NewPane,
-        ),
+        (Command::NewPane(new_pane_args()), CommandKind::NewPane),
         (
             Command::ClosePane(ClosePaneArgs::default()),
             CommandKind::ClosePane,
@@ -347,7 +357,7 @@ fn command_kind_mirrors_command() {
                 cwd: None,
                 source: None,
                 tab: None,
-                direction: None,
+                direction: Direction::Right,
                 stacked: false,
                 client: None,
             }),

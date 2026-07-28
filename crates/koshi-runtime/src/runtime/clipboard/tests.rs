@@ -4,7 +4,6 @@
 
 use std::sync::{mpsc, Arc};
 
-use koshi_core::geometry::Direction;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -25,7 +24,6 @@ fn new_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (runtime, tx)
 }

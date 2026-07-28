@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use koshi_core::command::{GridPos, Selection, SelectionKind};
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
@@ -36,7 +36,6 @@ fn new_runtime() -> Server {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     )
 }
 

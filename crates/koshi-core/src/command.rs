@@ -141,7 +141,7 @@ impl Command {
 /// The dispatcher routes on `stacked`: set, the new pane joins the source's
 /// stack, creating one if needed; unset, the source leaf splits
 /// directionally.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
     pub source: Option<PaneId>,
@@ -151,10 +151,11 @@ pub struct NewPaneArgs {
     /// a source pane's own tab wins.
     #[serde(default)]
     pub tab: Option<TabId>,
-    /// Split direction; `None` uses the runtime's default split direction,
-    /// which the layout config seeds. Unused when `stacked` is set — a stack
-    /// has no direction.
-    pub direction: Option<Direction>,
+    /// Split direction, always named by the client that issues the command:
+    /// the direction its own `layout.new-pane-direction` setting resolves to,
+    /// or the one the action or CLI flag states outright. Unused when
+    /// `stacked` is set — a stack has no direction.
+    pub direction: Direction,
     /// Stack the new pane onto the source instead of splitting space.
     pub stacked: bool,
     /// Working directory; `None` inherits.
@@ -311,9 +312,10 @@ pub struct RunCommandPaneArgs {
     /// same rules as [`NewPaneArgs::tab`].
     #[serde(default)]
     pub tab: Option<TabId>,
-    /// Split direction for the new pane; `None` defaults to a rightward
-    /// split. Unused when `stacked` is set — a stack has no direction.
-    pub direction: Option<Direction>,
+    /// Split direction for the new pane, resolved by the issuing client the
+    /// same way [`NewPaneArgs::direction`] is. Unused when `stacked` is set —
+    /// a stack has no direction.
+    pub direction: Direction,
     /// Stack the new pane onto the source pane instead of splitting space.
     pub stacked: bool,
     /// Client to show the new pane on; resolved by the same rules as

@@ -35,7 +35,7 @@ use koshi_client::input::KeyOutcome;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client;
 use koshi_core::command::{CommandEnvelope, CommandSource};
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, SessionId};
 use koshi_core::key::KeySequence;
 use koshi_input::mouse::decode_mouse;
@@ -257,10 +257,10 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// Build the session half and apply `app`, the parsed `koshi.kdl` layer, in one
 /// step.
 ///
-/// Runs before genesis, so the first session already sees the configured split
-/// direction, shell, and pane floor. `app` is `None` when the file is absent or
-/// failed to load. The colors and the keymap are each viewer's own; [`viewer`]
-/// applies those.
+/// Runs before genesis, so the first session already sees the configured shell
+/// and pane floor. `app` is `None` when the file is absent or failed to load.
+/// The colors, the keymap, and the split direction new panes open in are each
+/// viewer's own; [`viewer`] applies those.
 fn session(
     pty_backend: Arc<dyn PtyBackend>,
     snapshot_provider: Arc<dyn SnapshotProvider>,
@@ -269,15 +269,7 @@ fn session(
     inbox_tx: mpsc::Sender<RuntimeEvent>,
     app: Option<koshi_config::layer::PartialKoshiConfig>,
 ) -> Server {
-    let mut server = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        inbox_tx,
-        // The stock default; `app` supplies the real one when the file set it.
-        Direction::Right,
-    );
+    let mut server = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, inbox_tx);
     server.load_startup_config(app);
     server
 }
@@ -450,7 +442,8 @@ fn run_loop<B: Backend>(
         // fires when its ambiguity deadline passes. The viewer holds it, so it
         // decides; the session only runs what comes back.
         if let Some(bound) = client.expire_key_sequence(Instant::now()) {
-            server.handle_bound_action(client.id(), bound);
+            let direction = client.config().layout.new_pane_direction;
+            server.handle_bound_action(client.id(), bound, direction);
             server.invalidate_status();
         }
         // A selection drag held past a pane's edge keeps scrolling while the
@@ -495,7 +488,10 @@ fn apply_event(
     if let RuntimeEvent::KeyInput { client_id, chord } = event {
         if client_id == client.id() {
             match client.resolve_key(chord, Instant::now()) {
-                KeyOutcome::Fire(bound) => server.handle_bound_action(client_id, bound),
+                KeyOutcome::Fire(bound) => {
+                    let direction = client.config().layout.new_pane_direction;
+                    server.handle_bound_action(client_id, bound, direction);
+                }
                 KeyOutcome::PassThrough(chord) => {
                     // The key belongs to the program in the pane, so a selection
                     // gesture over it is over.

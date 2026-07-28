@@ -456,9 +456,10 @@ pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
 /// Defaults applied when creating panes and layouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDefaults {
-    /// Direction a new pane spawns relative to the focused pane when the command
-    /// omits one. The CLI new-pane command and the `new-pane-<direction>`
-    /// actions name their own direction and bypass it.
+    /// Direction a new pane spawns relative to the focused pane. Each client —
+    /// a viewer and the `koshi` CLI alike — reads its own copy and puts it on
+    /// every new-pane command it sends. The `new-pane-<direction>` actions and
+    /// an explicit `--direction` name their own direction and bypass it.
     pub new_pane_direction: Direction,
 }
 

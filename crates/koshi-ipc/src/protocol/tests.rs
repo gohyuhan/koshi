@@ -6,15 +6,17 @@
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
-use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
+use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
+use koshi_core::process::{ShellKind, SpawnSpec};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use super::*;
 
@@ -30,6 +32,36 @@ fn envelope() -> CommandEnvelope {
         CommandSource::ExternalCli { session_id: None },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+}
+
+/// An envelope carrying a `NewPane` with every optional field filled, at fixed
+/// ids and times, so its encoding is byte-stable.
+fn populated_envelope() -> CommandEnvelope {
+    CommandEnvelope::new(
+        CommandId::from_uuid(fixed_uuid()),
+        CommandSource::InSessionCli {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            client_id: Some(ClientId::from_uuid(fixed_uuid())),
+            pane_id: PaneId::from_uuid(fixed_uuid()),
+            socket_path: PathBuf::from("/run/koshi.sock"),
+        },
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        Command::NewPane(NewPaneArgs {
+            source: Some(PaneId::from_uuid(fixed_uuid())),
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+            direction: Direction::Down,
+            stacked: true,
+            cwd: Some(PathBuf::from("/home/user")),
+            command: Some(SpawnSpec {
+                program: PathBuf::from("/bin/zsh"),
+                args: vec!["-l".to_string()],
+                cwd: Some(PathBuf::from("/home/user")),
+                env: BTreeMap::from([("KOSHI_PANE_ID".to_string(), "pane-1".to_string())]),
+                shell_kind: ShellKind::Zsh,
+            }),
+            client: Some(ClientId::from_uuid(fixed_uuid())),
+        }),
     )
 }
 
@@ -131,7 +163,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // and then fails to decode the answer, which reads to the user as a
     // session that is not running.
     //
-    // Shape as of protocol version 1. Round-trip tests cannot catch this:
+    // Shape as of protocol version 2. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
     // itself.
     assert_eq!(
@@ -176,11 +208,77 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
+fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
+    // Every field of a command a CLI sends, pinned — the envelope, the source
+    // it names, and the whole argument struct of the command inside it.
+    //
+    // The `Discovery` pin above covers only what a session ANSWERS. This one
+    // covers what a caller SENDS, and the two travel opposite ways: a CLI at
+    // the old shape passes the handshake and its command then fails to decode,
+    // which reads to the user as a command that did nothing.
+    //
+    // So a change to `Command` or any `*Args` struct — add, remove, rename, or
+    // retype a field — turns this red, and `PROTOCOL_VERSION` goes up in the
+    // same commit. `direction` below is the worked example: it was
+    // `Option<Direction>` and encoded `null` when unset; it is now a bare
+    // `"Down"`, and a version-1 CLI's `null` no longer decodes.
+    //
+    // Shape as of protocol version 2. Round-trip tests cannot catch this: one
+    // build encoding and decoding its own structs always agrees with itself.
+    let request = IpcRequest {
+        request_id: 2,
+        kind: IpcRequestKind::SubmitCommand(Box::new(populated_envelope())),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&request).expect("request encodes"),
+        json!({
+            "request_id": 2,
+            "kind": {
+                "SubmitCommand": {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "source": {
+                        "InSessionCli": {
+                            "session_id": "00000000-0000-0000-0000-000000000001",
+                            "client_id": "00000000-0000-0000-0000-000000000001",
+                            "pane_id": "00000000-0000-0000-0000-000000000001",
+                            "socket_path": "/run/koshi.sock"
+                        }
+                    },
+                    "client_id": "00000000-0000-0000-0000-000000000001",
+                    "issued_at": {
+                        "secs_since_epoch": 1_700_000_000,
+                        "nanos_since_epoch": 0
+                    },
+                    "command": {
+                        "NewPane": {
+                            "source": "00000000-0000-0000-0000-000000000001",
+                            "tab": "00000000-0000-0000-0000-000000000001",
+                            "direction": "Down",
+                            "stacked": true,
+                            "cwd": "/home/user",
+                            "command": {
+                                "program": "/bin/zsh",
+                                "args": ["-l"],
+                                "cwd": "/home/user",
+                                "env": { "KOSHI_PANE_ID": "pane-1" },
+                                "shell_kind": "Zsh"
+                            },
+                            "client": "00000000-0000-0000-0000-000000000001"
+                        }
+                    }
+                }
+            }
+        })
+    );
+}
+
+#[test]
 fn an_overview_missing_a_field_this_version_needs_is_refused() {
-    // What a version-1 session's answer looks like here: its tab records
-    // carry no `session_id`. Decoding must fail rather than fill in a
-    // default, so the mismatch surfaces instead of producing tab rows that
-    // claim to belong to no session.
+    // What an older build's answer looks like here: its tab records carry no
+    // `session_id`. Decoding must fail rather than fill in a default, so the
+    // mismatch surfaces instead of producing tab rows that claim to belong to
+    // no session.
     let mut encoded = serde_json::to_value(populated_overview()).expect("overview encodes");
     encoded["tabs"][0]
         .as_object_mut()

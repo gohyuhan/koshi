@@ -21,10 +21,9 @@ use koshi_core::ids::SessionId;
 use crate::server::Server;
 
 impl Server {
-    /// Swap in a reloaded `koshi.kdl`: replace the app-settings layer,
-    /// recompute both effective configs, and hand the new values to their
-    /// consumers — the default split direction takes effect for the next
-    /// `new-pane`.
+    /// Swap in a reloaded `koshi.kdl`: replace the app-settings layer and
+    /// recompute both effective configs, so the next pane spawns with the new
+    /// shell, size floor, and scrollback limits.
     ///
     /// The candidate's theme and keybinding sections are dropped; the colors
     /// come from the theme file and the bindings from `keybinding.kdl`.

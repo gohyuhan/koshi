@@ -9,7 +9,6 @@ use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::event::{InputMode, InputModeChanged};
-use koshi_core::geometry::Direction;
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
@@ -43,7 +42,6 @@ fn new_server() -> (Server, mpsc::Sender<RuntimeEvent>) {
         storage,
         inbox_rx,
         tx.clone(),
-        Direction::Right,
     );
     (server, tx)
 }
@@ -230,23 +228,17 @@ fn publish_events_delivers_out_of_command_events_to_subscribers() {
 }
 
 #[test]
-fn constructor_seeds_the_app_config_with_the_given_default_new_pane_direction() {
+fn constructor_starts_on_an_empty_app_layer_and_the_built_in_defaults() {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
     let storage: Arc<dyn Storage> = Arc::new(NullStorage);
     let (tx, inbox_rx) = mpsc::channel();
 
-    // Every other test in this crate seeds `Direction::Right`; a different
-    // value here proves the constructor actually honors its parameter rather
-    // than a hardcoded default.
-    let rt = Server::new(
-        pty_backend,
-        snapshot_provider,
-        storage,
-        inbox_rx,
-        tx,
-        Direction::Down,
-    );
+    let rt = Server::new(pty_backend, snapshot_provider, storage, inbox_rx, tx);
 
-    assert_eq!(rt.client_config.layout.new_pane_direction, Direction::Down);
+    // Nothing is read from disk here, so the constructor holds no settings of
+    // its own: `load_startup_config` puts the first real `koshi.kdl` in.
+    assert_eq!(rt.app_layer, PartialKoshiConfig::default());
+    assert_eq!(rt.config, ServerConfig::default());
+    assert_eq!(rt.client_config, ClientConfig::default());
 }
