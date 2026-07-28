@@ -32,6 +32,9 @@ two terminals showing one session can wear different colors. See
 
 ## `pane`
 
+The session reads these: panes are the session's, so every terminal looking at
+it sees the same sizes.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `min-cols` | integer — smallest width a pane may shrink to | `2` | ≥ 0.1.0 |
@@ -77,6 +80,9 @@ dragged.
 
 ## `terminal`
 
+The session reads these: it starts the programs in the panes, so it is the one
+that decides what they are told.
+
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `term` | string — the `TERM` value child programs see | `"xterm-256color"` | ≥ 0.1.0 |
@@ -84,6 +90,8 @@ dragged.
 | `default-shell` | string — the shell to launch | your `$SHELL` (`%COMSPEC%` on Windows) | ≥ 0.1.0 |
 
 ## `logging`
+
+Neither side owns these: every koshi process reads them for its own log file.
 
 Koshi writes `logs/koshi-log-<session-id>.log` below the state directory.
 Disabled logging creates no log file.

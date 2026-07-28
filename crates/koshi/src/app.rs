@@ -424,9 +424,9 @@ fn run_loop<B: Backend>(
         }
         // Everything the subscription delivered that no key press already took:
         // a mode change asked for from outside — `koshi lock --client` — lands
-        // here, so the hint bar and mode tag are right before the frame is
-        // painted. It also empties the bounded queue on a batch with no keys in
-        // it.
+        // here, so it is in the mode the ambiguity deadline below is read in
+        // and in the frame painted after it. It also empties the bounded queue
+        // on a batch with no keys in it.
         client.apply_events();
         // Escapes aimed at this client's outer terminal — including an OSC 52
         // clipboard write — reach stdout before a queued quit is honored.
@@ -440,14 +440,7 @@ fn run_loop<B: Backend>(
         if quit || server.quit_requested() {
             break;
         }
-        // A sequence that is both a complete binding and a longer one's prefix
-        // fires when its ambiguity deadline passes. The viewer holds it, so it
-        // decides; the session only runs what comes back.
-        if let Some(bound) = client.expire_key_sequence(Instant::now()) {
-            let direction = client.config().layout.new_pane_direction;
-            server.handle_bound_action(client.id(), bound, direction);
-            server.invalidate_status();
-        }
+        fire_expired_key_sequence(server, client, Instant::now());
         // A selection drag held past a pane's edge keeps scrolling while the
         // pointer sits still, so the clock drives it.
         if let Some(frame) = last_frame.as_ref() {
@@ -469,6 +462,28 @@ fn run_loop<B: Backend>(
         }
     }
     Ok(())
+}
+
+/// Fire the viewer's open key sequence if its ambiguity deadline has passed at
+/// `now`.
+///
+/// A sequence that is both a complete binding and a longer one's prefix fires
+/// when its deadline passes. The viewer holds it, so it decides; the session
+/// only runs what comes back — with this viewer's own default split side, the
+/// same one its key presses are answered with.
+///
+/// The action's report of what it changed about this viewer is taken back
+/// straight away: a `core:lock` fired here publishes the new input mode as it
+/// runs, after the batch's own take, so without this the hint bar would be
+/// painted in the mode the viewer just left.
+fn fire_expired_key_sequence(server: &mut Server, client: &mut Client, now: Instant) {
+    let Some(bound) = client.expire_key_sequence(now) else {
+        return;
+    };
+    let direction = client.config().layout.new_pane_direction;
+    server.handle_bound_action(client.id(), bound, direction);
+    server.invalidate_status();
+    client.apply_events();
 }
 
 /// Hand one inbox event to the server, after the client has taken the parts

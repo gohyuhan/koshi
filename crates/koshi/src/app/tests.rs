@@ -7,26 +7,29 @@
 
 use super::*;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 
 use koshi_client::input::KeyOutcome;
 use koshi_config::layer::{
-    PartialColorPalette, PartialKoshiConfig, PartialLayoutDefaults, PartialTerminalConfig,
-    PartialThemeConfig,
+    PartialColorPalette, PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults,
+    PartialTerminalConfig, PartialThemeConfig,
 };
-use koshi_config::types::RgbColor;
+use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
+use koshi_core::action::ActionRef;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{CommandId, PaneId, SessionId};
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_core::process::{ExitStatus, KillPolicy};
+use koshi_core::resolve::ActionArgs;
 use koshi_renderer::snapshot::ViewerChrome;
 use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -317,11 +320,13 @@ fn press(server: &mut Server, client: &mut Client, client_id: ClientId, chord: K
     .is_continue());
 }
 
-/// A viewer whose `koshi.kdl` sets `layout.new-pane-direction` to `direction`.
+/// A viewer whose `koshi.kdl` sets `layout.new-pane-direction` to `direction`,
+/// reading the `keybinding.kdl` `keys` stands for.
 fn client_splitting_toward(
     server: &mut Server,
     client_id: ClientId,
     direction: Direction,
+    keys: Option<PartialKeybindingsConfig>,
 ) -> Client {
     test_client_with(
         server,
@@ -334,9 +339,152 @@ fn client_splitting_toward(
                 ..PartialKoshiConfig::default()
             }),
             theme: None,
-            keybindings: None,
+            keybindings: keys,
         },
     )
+}
+
+/// A `keybinding.kdl` that reaches `core:<action>` only through the chord
+/// timeout: `<C-y>` binds it, and `<C-y> q` binds `core:new-tab`, so pressing
+/// `<C-y>` opens a sequence that is both a complete binding and a longer one's
+/// prefix. That pairing is a warning, not a collision, so the file still
+/// applies.
+fn ambiguous_ctrl_y(action: &str) -> PartialKeybindingsConfig {
+    let bound = |name: &str| BoundAction {
+        action: ActionRef::core(name).expect("valid core action name"),
+        args: ActionArgs::None,
+    };
+    let ctrl_y = KeyChord::new(ModFlags::CTRL, Key::Char('y'));
+    let mut keys = BTreeMap::new();
+    keys.insert(KeySequence::from(ctrl_y), bound(action));
+    keys.insert(
+        KeySequence::new(ctrl_y, vec![KeyChord::new(ModFlags::NONE, Key::Char('q'))]),
+        bound("new-tab"),
+    );
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    PartialKeybindingsConfig {
+        modes: Some(modes),
+        ..PartialKeybindingsConfig::default()
+    }
+}
+
+/// How long an ambiguous sequence waits before its shorter binding fires.
+fn chord_timeout(client: &Client) -> Duration {
+    Duration::from_millis(u64::from(client.config().keybindings.chord_timeout_ms))
+}
+
+/// Press the ambiguous `<C-y>` and let its deadline pass, in the order the loop
+/// runs: take the subscription, then fire whatever the deadline released.
+fn press_ctrl_y_and_let_it_time_out(server: &mut Server, client: &mut Client, client_id: ClientId) {
+    press(
+        server,
+        client,
+        client_id,
+        KeyChord::new(ModFlags::CTRL, Key::Char('y')),
+    );
+    client.apply_events();
+    fire_expired_key_sequence(server, client, Instant::now() + chord_timeout(client));
+}
+
+#[test]
+fn a_lock_binding_fired_by_the_chord_timeout_locks_the_viewer_before_the_frame() {
+    // The mode tag is painted from the session's copy of the mode and the hint
+    // bar from the viewer's own, so the two must already agree when the frame
+    // is prepared. The deadline fires after the loop took the subscription for
+    // this batch, so the mode change it publishes has to be taken again — on an
+    // idle shell nothing else would wake the loop and the frame would sit
+    // showing LOCK beside the normal-mode hints for as long as the user waited.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, _pane_id) = boot(&fake);
+    let mut client = test_client_with(
+        &mut server,
+        client_id,
+        LoadedConfig {
+            app: None,
+            theme: None,
+            keybindings: Some(ambiguous_ctrl_y("lock")),
+        },
+    );
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+
+    press_ctrl_y_and_let_it_time_out(&mut server, &mut client, client_id);
+
+    assert_eq!(
+        client.lock_mode(),
+        LockMode::Locked,
+        "the hint bar is drawn from this, so it must be the new mode"
+    );
+    assert_eq!(
+        server
+            .build_snapshot(client_id)
+            .expect("snapshot")
+            .client
+            .lock_mode,
+        LockMode::Locked,
+        "the mode tag is drawn from this, and the two cannot disagree"
+    );
+}
+
+#[test]
+fn a_new_pane_binding_fired_by_the_chord_timeout_opens_the_side_the_viewers_own_config_names() {
+    // Same setting, same reader, but reached on the deadline instead of on a
+    // keystroke: this path has its own read of the viewer's
+    // `layout.new-pane-direction`. Both sides are asserted, so a loop passing a
+    // fixed side instead makes one of them fail whichever side it picked.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, first) = boot(&fake);
+    let mut client = client_splitting_toward(
+        &mut server,
+        client_id,
+        Direction::Down,
+        Some(ambiguous_ctrl_y("new-pane")),
+    );
+
+    press_ctrl_y_and_let_it_time_out(&mut server, &mut client, client_id);
+    let panes = fake.spawned_panes();
+    assert_eq!(panes.len(), 2, "the deadline opened exactly one pane");
+    assert_eq!(
+        content_point(&server, client_id, first),
+        Point { x: 1, y: 2 },
+        "the original pane keeps the top"
+    );
+    assert_eq!(
+        content_point(&server, client_id, panes[1]),
+        Point { x: 1, y: 13 },
+        "the new pane opened below it"
+    );
+
+    // The same wait on a viewer set to Right, for the control: identical
+    // everything but the setting, and the new pane lands beside instead.
+    let fake = Arc::new(FakePtyBackend::new());
+    let (mut server, _tx, client_id, first) = boot(&fake);
+    let mut client = client_splitting_toward(
+        &mut server,
+        client_id,
+        Direction::Right,
+        Some(ambiguous_ctrl_y("new-pane")),
+    );
+
+    press_ctrl_y_and_let_it_time_out(&mut server, &mut client, client_id);
+    let panes = fake.spawned_panes();
+    assert_eq!(panes.len(), 2, "the deadline opened exactly one pane");
+    assert_eq!(
+        content_point(&server, client_id, first),
+        Point { x: 1, y: 2 },
+        "the original pane keeps the left"
+    );
+    assert_eq!(
+        content_point(&server, client_id, panes[1]),
+        Point { x: 41, y: 2 },
+        "the new pane opened beside it"
+    );
 }
 
 /// Press `<C-p> n` — the new-pane binding that names no side — and give back
@@ -383,7 +531,7 @@ fn a_new_pane_binding_opens_the_side_the_viewers_own_config_names() {
     // setting makes one of them fail whichever literal it picked.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, client_id, first) = boot(&fake);
-    let mut client = client_splitting_toward(&mut server, client_id, Direction::Down);
+    let mut client = client_splitting_toward(&mut server, client_id, Direction::Down, None);
     assert_eq!(client.config().layout.new_pane_direction, Direction::Down);
 
     let (old, new) =
@@ -395,7 +543,7 @@ fn a_new_pane_binding_opens_the_side_the_viewers_own_config_names() {
     // everything but the setting, and the new pane lands beside instead.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, _tx, client_id, first) = boot(&fake);
-    let mut client = client_splitting_toward(&mut server, client_id, Direction::Right);
+    let mut client = client_splitting_toward(&mut server, client_id, Direction::Right, None);
 
     let (old, new) =
         split_with_the_bare_new_pane_binding(&fake, &mut server, &mut client, client_id, first);

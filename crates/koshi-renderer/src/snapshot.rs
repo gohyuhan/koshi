@@ -478,7 +478,9 @@ pub struct ClientSnapshot {
     /// no focusable pane. The renderer highlights the pane whose
     /// [`PaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane: Option<PaneId>,
-    /// The client's input mode (drives the mode tag and keybind resolution).
+    /// The client's input mode, as the session has it: it drives the mode tag,
+    /// decides whether a paste from the client's own terminal reaches the pane,
+    /// and is what `koshi list-clients` reports.
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
