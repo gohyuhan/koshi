@@ -56,7 +56,7 @@ fn viewer_for(rt: &mut Server, client_id: ClientId) -> ViewerClient {
     ViewerClient::new(
         client_id,
         Size { cols: 80, rows: 24 },
-        rt.subscribe(EventFilter::All),
+        rt.subscribe(client_id, EventFilter::All),
         TerminalCleanupGuard::new(),
     )
 }

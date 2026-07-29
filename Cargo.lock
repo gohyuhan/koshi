@@ -749,6 +749,7 @@ dependencies = [
  "koshi-observability",
  "koshi-renderer",
  "ratatui",
+ "tracing",
 ]
 
 [[package]]

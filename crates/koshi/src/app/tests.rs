@@ -94,7 +94,7 @@ fn test_client(server: &mut Server, client_id: ClientId) -> Client {
 
 /// The same, on the config files `loaded` stands for.
 fn test_client_with(server: &mut Server, client_id: ClientId, loaded: LoadedConfig) -> Client {
-    let events = server.subscribe(EventFilter::All);
+    let events = server.subscribe(client_id, EventFilter::All);
     viewer(
         client_id,
         VIEWPORT,

@@ -38,6 +38,7 @@ use koshi_core::{
     ids::{ClientId, PaneId, TabId},
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_renderer::snapshot::Delivery;
 use koshi_renderer::theme::Theme;
 
 use crate::mouse::{LastPress, ResizeDrag, SelectionDrag, TablineDrag};
@@ -59,8 +60,9 @@ pub struct Client {
     /// every viewer's report; this copy is the client's alone.
     viewport: Size,
     /// Receiving end of this client's event subscription, fed by the session's
-    /// bounded fan-out.
-    events: Receiver<Event>,
+    /// bounded fan-out. It carries live events, and the fresh frame the session
+    /// sends after this subscriber's queue overflowed.
+    events: Receiver<Delivery>,
     /// This viewer's stored config overrides, one layer per config file, as
     /// [`load_startup_config`](Self::load_startup_config) last left them. A
     /// refused `keybinding.kdl` leaves its layer empty.
@@ -146,7 +148,7 @@ impl Client {
     pub fn new(
         id: ClientId,
         viewport: Size,
-        events: Receiver<Event>,
+        events: Receiver<Delivery>,
         cleanup_guard: TerminalCleanupGuard,
     ) -> Self {
         let layers = ConfigLayers::default();
@@ -289,30 +291,45 @@ impl Client {
     }
 
     /// Take everything the subscription has delivered and apply what the
-    /// viewer must react to, returning how many events were seen.
+    /// viewer must react to, returning how many deliveries were seen.
     ///
-    /// Today those are the session's reports that this viewer's input mode
-    /// changed — which happens when `koshi lock --client` names it, or when its
-    /// own lock binding fires — and that its mouse-select mode changed, which
-    /// happens when its own `core:mouse-select` binding fires. Both decide what
-    /// an input means before anything is sent, so applying them here is what
-    /// keeps the viewer's copies agreeing with the session's. An event naming
-    /// another client is skipped.
+    /// Today the events that matter are the session's reports that this
+    /// viewer's input mode changed — which happens when `koshi lock --client`
+    /// names it, or when its own lock binding fires — and that its mouse-select
+    /// mode changed, which happens when its own `core:mouse-select` binding
+    /// fires. Both decide what an input means before anything is sent, so
+    /// applying them here is what keeps the viewer's copies agreeing with the
+    /// session's. An event naming another client is skipped.
+    ///
+    /// A fresh frame arrives when this subscriber's queue overflowed and the
+    /// session dropped events it cannot replay. It carries the session's own
+    /// copies of both, so the viewer takes them from the frame instead of from
+    /// the reports it never received, and logs how many were dropped.
     pub fn apply_events(&mut self) -> usize {
         let mut seen = 0;
-        while let Ok(event) = self.events.try_recv() {
+        while let Ok(delivery) = self.events.try_recv() {
             seen += 1;
-            match &event {
-                Event::InputModeChanged(changed) if changed.client_id == self.id => {
-                    self.set_lock_mode(match changed.mode {
-                        InputMode::Locked => LockMode::Locked,
-                        InputMode::Normal => LockMode::Normal,
-                    });
+            match delivery {
+                Delivery::Event(event) => match &event {
+                    Event::InputModeChanged(changed) if changed.client_id == self.id => {
+                        self.set_lock_mode(match changed.mode {
+                            InputMode::Locked => LockMode::Locked,
+                            InputMode::Normal => LockMode::Normal,
+                        });
+                    }
+                    Event::MouseSelectChanged(changed) if changed.client_id == self.id => {
+                        self.mouse_select = changed.on;
+                    }
+                    _ => {}
+                },
+                Delivery::Snapshot { snapshot, lagged } => {
+                    tracing::warn!(
+                        dropped = lagged.dropped_count,
+                        "events were dropped; resuming from a fresh frame"
+                    );
+                    self.set_lock_mode(snapshot.client.lock_mode);
+                    self.mouse_select = snapshot.client.mouse_select;
                 }
-                Event::MouseSelectChanged(changed) if changed.client_id == self.id => {
-                    self.mouse_select = changed.on;
-                }
-                _ => {}
             }
         }
         seen

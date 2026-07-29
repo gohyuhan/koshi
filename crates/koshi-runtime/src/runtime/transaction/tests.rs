@@ -6,6 +6,7 @@
 use koshi_core::command::CommandResult;
 use koshi_core::event::{Event, LayoutChanged, TabCreated, TabFocused};
 use koshi_core::ids::{ClientId, CommandId, TabId};
+use koshi_renderer::snapshot::Delivery;
 
 use super::*;
 use crate::runtime::bus::EventFilter;
@@ -91,7 +92,7 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let rx = bus.subscribe(EventFilter::All);
+    let (_id, rx) = bus.subscribe(EventFilter::All);
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
@@ -101,8 +102,8 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
     assert_eq!(
         rx.try_iter().collect::<Vec<_>>(),
         vec![
-            Event::TabCreated(TabCreated { tab_id: tab }),
-            Event::LayoutChanged(LayoutChanged { tab_id: tab }),
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab })),
+            Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id: tab })),
         ]
     );
 }

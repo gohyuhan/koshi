@@ -22,12 +22,13 @@ use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::Event;
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId, SubscriberId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::logging::event_log::log_event;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
+use koshi_renderer::snapshot::Delivery;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
@@ -73,7 +74,11 @@ pub struct Server {
     /// Event fan-out hub: every emitted [`Event`] is delivered to each
     /// subscriber over its own bounded queue.
     pub(crate) event_bus: EventBus,
-    /// Source of render snapshots for attach and overflow resync.
+    /// Which client each bus subscriber views as, in subscription order. A
+    /// subscriber paused by a dropped critical event is resynced from the
+    /// frame of the client named here.
+    subscriptions: Vec<(SubscriberId, ClientId)>,
+    /// Source of render snapshots for attach.
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
     storage: Arc<dyn Storage>,
@@ -148,6 +153,7 @@ impl Server {
             pty_handles: HashMap::new(),
             pty_sizes: HashMap::new(),
             event_bus: EventBus::new(),
+            subscriptions: Vec::new(),
             snapshot_provider,
             storage,
             ipc_server: None,
@@ -184,18 +190,73 @@ impl Server {
     /// The server→client door: register a subscriber for the events `filter`
     /// selects and hand back the receiving end of its own bounded queue.
     /// Dropping the receiver ends the subscription.
-    pub fn subscribe(&mut self, filter: EventFilter) -> Receiver<Event> {
-        self.event_bus.subscribe(filter)
+    ///
+    /// `client_id` is the client the subscriber views as: the one whose frame
+    /// [`resync_lagged`](Self::resync_lagged) builds when a critical event does
+    /// not fit the queue.
+    pub fn subscribe(&mut self, client_id: ClientId, filter: EventFilter) -> Receiver<Delivery> {
+        let (id, rx) = self.event_bus.subscribe(filter);
+        self.subscriptions.push((id, client_id));
+        rx
+    }
+
+    /// Put a fresh frame on the queue of every subscriber paused by a dropped
+    /// critical event, returning it to live delivery. Called once per pass of
+    /// the event loop, before the frame the loop paints.
+    ///
+    /// The frame is this subscriber's viewing client's, built by
+    /// [`build_snapshot`](Self::build_snapshot). A subscriber that views no
+    /// client, or whose client is no longer attached, can never be resynced, so
+    /// its subscription is dropped.
+    pub fn resync_lagged(&mut self) {
+        if !self.event_bus.has_desynced() {
+            return;
+        }
+        for id in self.event_bus.desynced() {
+            let viewed = self
+                .subscriptions
+                .iter()
+                .find(|&&(subscriber, _)| subscriber == id)
+                .map(|&(_, client_id)| client_id);
+            let Some(client_id) = viewed else {
+                tracing::warn!(
+                    subscriber = %id,
+                    "paused subscriber views no client; unsubscribing"
+                );
+                self.event_bus.unsubscribe(id);
+                continue;
+            };
+            let Some(snapshot) = self.build_snapshot(client_id) else {
+                tracing::warn!(
+                    subscriber = %id,
+                    client = %client_id,
+                    "paused subscriber's client is gone; unsubscribing"
+                );
+                self.event_bus.unsubscribe(id);
+                continue;
+            };
+            // A full queue leaves the subscriber paused; the next pass builds it
+            // a newer frame and tries again.
+            self.event_bus.try_resync(id, Box::new(snapshot));
+        }
+        let bus = &self.event_bus;
+        self.subscriptions.retain(|&(id, _)| bus.contains(id));
     }
 
     /// Log each of `events`, then deliver it to every subscriber. The shared
     /// tail of every handler that emits events outside a command transaction
     /// (attach, detach, resize, child exit); a command's events pass through
     /// the same pair when its transaction is sealed.
+    ///
+    /// A subscriber the delivery removes — its receiver is gone — takes its
+    /// `subscriptions` entry with it.
     pub(crate) fn publish_events(&mut self, events: &[Event]) {
         for event in events {
             log_event(event);
-            self.event_bus.publish(event);
+            let removed = self.event_bus.publish(event);
+            if !removed.is_empty() {
+                self.subscriptions.retain(|(id, _)| !removed.contains(id));
+            }
         }
     }
 
@@ -245,7 +306,8 @@ impl Server {
         &self.terminal_engines
     }
     /// Borrow the event bus.
-    pub fn event_bus(&self) -> &EventBus {
+    #[cfg(test)]
+    pub(crate) fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
     /// Borrow the snapshot provider.

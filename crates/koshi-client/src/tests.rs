@@ -1,6 +1,7 @@
 //! Tests for the viewer half: construction, viewport updates, the settings and
 //! colors it reads from its own config files, the keymap it validates before
-//! trusting, and the hints one frame is painted from.
+//! trusting, the hints one frame is painted from, and what it takes off its
+//! subscription — live events, and the frame it resumes from after a lag.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
@@ -12,15 +13,20 @@ use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
 use koshi_core::action::{ActionRef, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
-use koshi_core::event::MouseSelectChanged;
+use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, SubscriberLagged};
 use koshi_core::geometry::Direction;
+use koshi_core::ids::{SessionId, SubscriberId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::resolve::ActionArgs;
+use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_renderer::snapshot::{
+    ClientSnapshot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabSnapshot,
+};
 
 use super::*;
 
-fn new_client() -> (Client, mpsc::SyncSender<Event>) {
+fn new_client() -> (Client, mpsc::SyncSender<Delivery>) {
     let (tx, rx) = mpsc::sync_channel(8);
     let client = Client::new(
         ClientId::new(),
@@ -32,10 +38,55 @@ fn new_client() -> (Client, mpsc::SyncSender<Event>) {
 }
 
 /// A viewer that read a theme file painting the focused border `color`.
-fn with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Event>) {
+fn with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Delivery>) {
     let (mut client, tx) = new_client();
     client.load_startup_config(None, Some(focused_border(color)), None);
     (client, tx)
+}
+
+/// The frame the session sends a viewer whose queue overflowed, reporting
+/// `client_id` in `lock_mode` with mouse-select `mouse_select`, after
+/// `dropped_count` events it will never see.
+fn resync(
+    client_id: ClientId,
+    lock_mode: LockMode,
+    mouse_select: bool,
+    dropped_count: u64,
+) -> Delivery {
+    let tab = TabId::new();
+    Delivery::Snapshot {
+        snapshot: Box::new(RenderSnapshot {
+            session: SessionSnapshot {
+                id: SessionId::new(),
+                name: String::from("session"),
+                active_tab: TabSnapshot {
+                    id: tab,
+                    name: String::from("tab"),
+                    layout_solved: Vec::new(),
+                    effective_size: Size { cols: 80, rows: 24 },
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    all_suppressed: false,
+                },
+                tabs_metadata: Vec::new(),
+            },
+            panes: Vec::new(),
+            client: ClientSnapshot {
+                id: client_id,
+                viewport: Size { cols: 80, rows: 24 },
+                active_tab: tab,
+                focused_pane: None,
+                lock_mode,
+                mouse_select,
+            },
+            plugin_ui: PluginUiSnapshot::default(),
+        }),
+        lagged: SubscriberLagged {
+            subscriber_id: SubscriberId::new(),
+            dropped_count,
+            event_class: EventClass::Critical,
+        },
+    }
 }
 
 /// A theme file whose focused-border role is `color`.
@@ -732,18 +783,22 @@ fn a_mouse_select_report_for_this_viewer_flips_its_own_copy() {
     let (mut client, tx) = new_client();
     assert!(!client.mouse_select(), "a fresh viewer selects nothing");
 
-    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
-        client_id: client.id(),
-        on: true,
-    }))
+    tx.send(Delivery::Event(Event::MouseSelectChanged(
+        MouseSelectChanged {
+            client_id: client.id(),
+            on: true,
+        },
+    )))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
     assert!(client.mouse_select(), "the report turned it on");
 
-    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
-        client_id: client.id(),
-        on: false,
-    }))
+    tx.send(Delivery::Event(Event::MouseSelectChanged(
+        MouseSelectChanged {
+            client_id: client.id(),
+            on: false,
+        },
+    )))
     .expect("the viewer's queue has room");
     assert_eq!(client.apply_events(), 1);
     assert!(!client.mouse_select(), "the second report turned it off");
@@ -755,12 +810,85 @@ fn a_mouse_select_report_for_another_viewer_is_ignored() {
     // and a subscription carries every client's events.
     let (mut client, tx) = new_client();
 
-    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
-        client_id: ClientId::new(),
-        on: true,
-    }))
+    tx.send(Delivery::Event(Event::MouseSelectChanged(
+        MouseSelectChanged {
+            client_id: ClientId::new(),
+            on: true,
+        },
+    )))
     .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 1, "the event was seen");
     assert!(!client.mouse_select(), "and it was not applied here");
+}
+
+#[test]
+fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
+    // The reports that moved these two are exactly what a lagging subscriber
+    // misses, so the frame's copies are the only ones left that are current.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    tx.send(Delivery::Event(Event::MouseSelectChanged(
+        MouseSelectChanged {
+            client_id: client.id(),
+            on: true,
+        },
+    )))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(client.mouse_select());
+
+    tx.send(resync(client.id(), LockMode::Normal, false, 7))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the frame was seen");
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+    assert!(!client.mouse_select());
+}
+
+#[test]
+fn an_empty_queue_leaves_the_viewer_exactly_as_it_was() {
+    // The pump calls this every pass, so the common case is nothing waiting.
+    let (mut client, _tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+
+    assert_eq!(client.apply_events(), 0);
+
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+}
+
+#[test]
+fn the_later_of_two_queued_resync_frames_wins() {
+    // A resync blocked by a full queue is retried with a newer frame, so two
+    // frames can sit in one drain; the last one is the current state.
+    let (mut client, tx) = new_client();
+    tx.send(resync(client.id(), LockMode::Locked, true, 2))
+        .expect("the viewer's queue has room");
+    tx.send(resync(client.id(), LockMode::Normal, false, 5))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 2, "both frames were seen");
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+    assert!(!client.mouse_select());
+}
+
+#[test]
+fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
+    // Both ride one queue in order, so the frame is the state the events that
+    // follow it move from. The frame turns mouse-select on and locks the
+    // viewer; the event behind it unlocks, and only the lock moves.
+    let (mut client, tx) = new_client();
+    tx.send(resync(client.id(), LockMode::Locked, true, 3))
+        .expect("the viewer's queue has room");
+    tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
+        client_id: client.id(),
+        mode: InputMode::Normal,
+    })))
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 2, "the frame and the event");
+    assert_eq!(client.lock_mode(), LockMode::Normal, "the event won");
+    assert!(client.mouse_select(), "and the frame's own value stands");
 }
