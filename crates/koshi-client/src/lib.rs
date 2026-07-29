@@ -304,7 +304,8 @@ impl Client {
     /// A fresh frame arrives when this subscriber's queue overflowed and the
     /// session dropped events it cannot replay. It carries the session's own
     /// copies of both, so the viewer takes them from the frame instead of from
-    /// the reports it never received, and logs how many were dropped.
+    /// the reports it never received, and logs how many were dropped. The
+    /// frame names this viewer, checked by a debug assertion.
     pub fn apply_events(&mut self) -> usize {
         let mut seen = 0;
         while let Ok(delivery) = self.events.try_recv() {
@@ -323,6 +324,10 @@ impl Client {
                     _ => {}
                 },
                 Delivery::Snapshot { snapshot, lagged } => {
+                    debug_assert_eq!(
+                        snapshot.client.id, self.id,
+                        "a frame names the client its subscriber views"
+                    );
                     tracing::warn!(
                         dropped = lagged.dropped_count,
                         "events were dropped; resuming from a fresh frame"

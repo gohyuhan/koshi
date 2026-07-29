@@ -860,6 +860,19 @@ fn an_empty_queue_leaves_the_viewer_exactly_as_it_was() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a frame names the client its subscriber views")]
+fn a_frame_naming_another_viewer_trips_the_debug_assertion() {
+    // The session builds each frame for the client its subscriber views, so a
+    // frame naming anyone else means the subscription was recorded wrong.
+    let (mut client, tx) = new_client();
+    tx.send(resync(ClientId::new(), LockMode::Locked, true, 1))
+        .expect("the viewer's queue has room");
+
+    let _ = client.apply_events();
+}
+
+#[test]
 fn the_later_of_two_queued_resync_frames_wins() {
     // A resync blocked by a full queue is retried with a newer frame, so two
     // frames can sit in one drain; the last one is the current state.
