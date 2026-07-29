@@ -146,7 +146,7 @@ fn typed_keys_write_to_the_focused_pane() {
     let mut viewer = koshi_client::Client::new(
         client_id,
         VIEWPORT,
-        rt.subscribe(EventFilter::All),
+        rt.subscribe(client_id, EventFilter::All),
         TerminalCleanupGuard::new(),
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {

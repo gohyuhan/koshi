@@ -2,16 +2,18 @@
 //! handles, the wired event inbox, a session with one tab and one pane, and
 //! the two doors — commands in via `submit_command`, events out via
 //! `subscribe` — including that detaching a client leaves the server healthy
-//! with its panes alive.
+//! with its panes alive, and that a subscriber paused by a dropped critical
+//! event is handed a fresh frame or dropped.
 
 use std::sync::mpsc;
 use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
-use koshi_core::event::{InputMode, InputModeChanged};
+use koshi_core::event::{EventClass, InputMode, InputModeChanged, SubscriberLagged};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
+use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::Tab;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -29,6 +31,14 @@ fn booted_server() -> (Server, ClientId) {
         .bootstrap_local(SessionId::new(), VIEWPORT, SystemTime::now())
         .expect("bootstrap");
     (server, client_id)
+}
+
+/// Publish critical events until every subscriber's queue overflows and pauses
+/// it, so exactly one event was dropped for each.
+fn pause_subscribers(server: &mut Server) {
+    while !server.event_bus.has_desynced() {
+        server.event_bus.publish(&Event::Quit);
+    }
 }
 
 fn new_server() -> (Server, mpsc::Sender<RuntimeEvent>) {
@@ -198,7 +208,7 @@ fn submit_command_dispatches_against_live_state() {
 #[test]
 fn a_subscriber_receives_the_events_a_command_emits() {
     let (mut server, client_id) = booted_server();
-    let rx = server.subscribe(EventFilter::All);
+    let rx = server.subscribe(client_id, EventFilter::All);
 
     let _ = server.submit_command(CommandEnvelope::new(
         CommandId::new(),
@@ -209,22 +219,221 @@ fn a_subscriber_receives_the_events_a_command_emits() {
 
     assert_eq!(
         rx.try_iter().collect::<Vec<_>>(),
-        vec![Event::InputModeChanged(InputModeChanged {
+        vec![Delivery::Event(Event::InputModeChanged(InputModeChanged {
             client_id,
             mode: InputMode::Locked,
-        })]
+        }))]
     );
 }
 
 #[test]
 fn publish_events_delivers_out_of_command_events_to_subscribers() {
-    let (mut server, _client_id) = booted_server();
-    let rx = server.subscribe(EventFilter::All);
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
     let events = vec![Event::Quit];
 
     server.publish_events(&events);
 
-    assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![Event::Quit]);
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Quit)]
+    );
+}
+
+#[test]
+fn subscribing_records_which_client_the_subscriber_views() {
+    let (mut server, client_id) = booted_server();
+
+    let _rx = server.subscribe(client_id, EventFilter::All);
+
+    assert_eq!(server.subscriptions.len(), 1);
+    assert_eq!(server.subscriptions[0].1, client_id);
+}
+
+#[test]
+fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    drop(rx);
+
+    server.publish_events(&[Event::Quit]);
+
+    assert!(!server.event_bus.contains(subscriber_id));
+    assert_eq!(server.subscriptions, Vec::new());
+}
+
+#[test]
+fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+    // Make room, so the frame fits on the next pass. The pre-gap backlog's
+    // contents are the bus's own concern.
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+    let expected = server.build_snapshot(client_id).expect("frame");
+
+    server.resync_lagged();
+
+    assert_eq!(server.event_bus.desynced(), Vec::new());
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            snapshot: Box::new(expected),
+            lagged: SubscriberLagged {
+                subscriber_id,
+                dropped_count: 1,
+                event_class: EventClass::Critical,
+            },
+        }]
+    );
+    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+}
+
+#[test]
+fn resyncing_with_nobody_paused_delivers_nothing() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+
+    server.resync_lagged();
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    assert!(server.event_bus.contains(subscriber_id));
+}
+
+#[test]
+fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+
+    // The queue is still full, so the frame does not fit and the subscriber
+    // stays paused.
+    server.resync_lagged();
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+
+    // Change the state the frame reports, then make room.
+    let _ = server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    ));
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+    let expected = server.build_snapshot(client_id).expect("frame");
+    assert_eq!(
+        expected.client.lock_mode,
+        koshi_core::lock::LockMode::Locked
+    );
+
+    server.resync_lagged();
+
+    // The retry built a new frame: it carries the mode set after the first
+    // attempt failed, not the one that was current then. The count covers the
+    // event that triggered the pause plus the withheld mode change.
+    assert_eq!(server.event_bus.desynced(), Vec::new());
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            snapshot: Box::new(expected),
+            lagged: SubscriberLagged {
+                subscriber_id,
+                dropped_count: 2,
+                event_class: EventClass::Critical,
+            },
+        }]
+    );
+}
+
+#[test]
+fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
+    let (mut server, client_id) = booted_server();
+    let good = server.subscribe(client_id, EventFilter::All);
+    let (good_id, _) = server.subscriptions[0];
+    // Straight off the bus, so nothing records which client it views.
+    let (orphan_id, orphan) = server.event_bus.subscribe(EventFilter::All);
+    pause_subscribers(&mut server);
+    assert_eq!(server.event_bus.desynced(), vec![good_id, orphan_id]);
+    let _good_backlog: Vec<Delivery> = good.try_iter().collect();
+    let _orphan_backlog: Vec<Delivery> = orphan.try_iter().collect();
+    let expected = server.build_snapshot(client_id).expect("frame");
+
+    server.resync_lagged();
+
+    assert_eq!(
+        good.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            snapshot: Box::new(expected),
+            lagged: SubscriberLagged {
+                subscriber_id: good_id,
+                dropped_count: 1,
+                event_class: EventClass::Critical,
+            },
+        }]
+    );
+    assert!(!server.event_bus.contains(orphan_id));
+    assert_eq!(
+        orphan.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
+    assert_eq!(server.subscriptions, vec![(good_id, client_id)]);
+}
+
+#[test]
+fn a_gone_receiver_costs_only_its_own_recorded_client() {
+    let (mut server, client_id) = booted_server();
+    let keep = server.subscribe(client_id, EventFilter::All);
+    let gone = server.subscribe(client_id, EventFilter::All);
+    let (keep_id, _) = server.subscriptions[0];
+    let (gone_id, _) = server.subscriptions[1];
+    drop(gone);
+
+    server.publish_events(&[Event::Quit]);
+
+    assert!(!server.event_bus.contains(gone_id));
+    assert!(server.event_bus.contains(keep_id));
+    assert_eq!(server.subscriptions, vec![(keep_id, client_id)]);
+    assert_eq!(
+        keep.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Quit)]
+    );
+}
+
+#[test]
+fn a_paused_subscriber_that_views_no_client_is_unsubscribed() {
+    let (mut server, _client_id) = booted_server();
+    // Straight off the bus, so nothing records which client it views.
+    let (subscriber_id, rx) = server.event_bus.subscribe(EventFilter::All);
+    pause_subscribers(&mut server);
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+
+    server.resync_lagged();
+
+    assert_eq!(server.event_bus.subscriber_count(), 0);
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+}
+
+#[test]
+fn a_paused_subscriber_whose_client_is_gone_is_unsubscribed() {
+    let (mut server, _client_id) = booted_server();
+    // No session holds this id, so no frame can ever be built for it.
+    let rx = server.subscribe(ClientId::new(), EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    assert_eq!(server.event_bus.desynced(), vec![subscriber_id]);
+    let _backlog: Vec<Delivery> = rx.try_iter().collect();
+
+    server.resync_lagged();
+
+    assert_eq!(server.event_bus.subscriber_count(), 0);
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(server.subscriptions, Vec::new());
 }
 
 #[test]

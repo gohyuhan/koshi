@@ -238,9 +238,10 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The client half: the view side of the process. It subscribes to the
-    // server's events and holds the cleanup guard, since the outer terminal
-    // it restores is the client's.
-    let events_rx = server.subscribe(EventFilter::All);
+    // server's events under its own client id, so a subscriber that falls
+    // behind can be handed a fresh snapshot of that client's view, and holds
+    // the cleanup guard, since the outer terminal it restores is the client's.
+    let events_rx = server.subscribe(client_id, EventFilter::All);
     let mut client = viewer(client_id, viewport, events_rx, cleanup, loaded);
 
     // Input thread: crossterm reads block here, feeding the inbox.
@@ -285,7 +286,7 @@ fn session(
 fn viewer(
     client_id: ClientId,
     viewport: Size,
-    events: mpsc::Receiver<koshi_core::event::Event>,
+    events: mpsc::Receiver<koshi_renderer::snapshot::Delivery>,
     cleanup: TerminalCleanupGuard,
     loaded: crate::config::LoadedConfig,
 ) -> Client {
@@ -382,10 +383,11 @@ fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id: ClientId)
 }
 
 /// The event loop: block until an event is due (bounded by the next render
-/// deadline), apply it and any others already queued, repaint if due, and stop
-/// once a `core:quit` binding fires, a [`RuntimeEvent::Quit`] (terminal
-/// hangup) arrives, or no pane remains. Generic over the backend so a test
-/// can drive it headlessly.
+/// deadline), apply it and any others already queued, hand a fresh snapshot to
+/// any subscriber that lost a critical event, repaint if due, and stop once a
+/// `core:quit` binding fires, a [`RuntimeEvent::Quit`] (terminal hangup)
+/// arrives, or no pane remains. Generic over the backend so a test can drive
+/// it headlessly.
 fn run_loop<B: Backend>(
     server: &mut Server,
     client: &mut Client,
@@ -423,6 +425,10 @@ fn run_loop<B: Backend>(
         while let Ok(event) = server.inbox_rx().try_recv() {
             quit |= apply_event(server, client, event, last_frame.as_ref()).is_break();
         }
+        // A subscriber that lost a critical event is paused until it is handed
+        // a fresh snapshot; queue that snapshot now so it is applied in this
+        // pass and the frame painted below is drawn from it.
+        server.resync_lagged();
         // Everything the subscription delivered that no key press already took:
         // a mode change asked for from outside — `koshi lock --client` — lands
         // here, so it is in the mode the ambiguity deadline below is read in

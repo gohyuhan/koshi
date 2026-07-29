@@ -2,8 +2,8 @@
 //! exist. Each is replaced in place once its owning crate ships the concrete
 //! type; the runtime field and these names change together at that point.
 
-/// Source of render snapshots for attach and overflow resync. Stand-in until
-/// the snapshot type is built.
+/// Source of render snapshots for attach. Stand-in until the snapshot type is
+/// built.
 pub trait SnapshotProvider {}
 
 /// Session persistence backend. Stand-in until the storage layer is built.

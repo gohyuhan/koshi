@@ -27,6 +27,7 @@
 
 use std::sync::Arc;
 
+use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -75,6 +76,27 @@ impl RenderSnapshot {
             viewer,
         }
     }
+}
+
+/// One item on a subscriber's queue: a live event, or a fresh frame that
+/// resyncs a subscriber whose queue overflowed.
+///
+/// Both ride the same queue in order, so a subscriber that missed events reads
+/// the backlog it already had, then the frame, then live events again. The
+/// frame is boxed to keep this type close to the size of an [`Event`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// A live event, as published.
+    Event(Event),
+    /// A frame the subscriber resumes from, with the report of what it missed.
+    Snapshot {
+        /// The state the subscriber picks up from, replacing the events it did
+        /// not receive.
+        snapshot: Box<RenderSnapshot>,
+        /// Which subscriber lagged, how many events were dropped, and their
+        /// class.
+        lagged: SubscriberLagged,
+    },
 }
 
 /// The two things about a frame the viewer decides, not the session: which pane

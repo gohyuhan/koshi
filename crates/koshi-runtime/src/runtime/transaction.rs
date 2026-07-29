@@ -22,7 +22,7 @@ use crate::runtime::bus::EventBus;
 /// An ordered buffer of the [`Event`]s one command emits, sealed by
 /// [`commit`](TransactionScope::commit) into a [`CommandResult`].
 #[derive(Debug, Default)]
-pub struct TransactionScope {
+pub(crate) struct TransactionScope {
     /// Buffered events, in emission order.
     events: Vec<Event>,
 }
@@ -30,18 +30,19 @@ pub struct TransactionScope {
 impl TransactionScope {
     /// An empty scope, holding no events.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TransactionScope { events: Vec::new() }
     }
 
     /// The buffered events, in emission order.
+    #[cfg(test)]
     #[must_use]
-    pub fn events(&self) -> &[Event] {
+    pub(crate) fn events(&self) -> &[Event] {
         &self.events
     }
 
     /// Append `event` to the batch, after the events already emitted.
-    pub fn emit(&mut self, event: Event) {
+    pub(crate) fn emit(&mut self, event: Event) {
         self.events.push(event);
     }
 
@@ -50,7 +51,7 @@ impl TransactionScope {
     /// ordered events as an applied [`CommandResult::Ok`] keyed to
     /// `command_id`.
     #[must_use]
-    pub fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
+    pub(crate) fn commit(self, command_id: CommandId, bus: &mut EventBus) -> CommandResult {
         let emitted_events = self
             .events
             .into_iter()

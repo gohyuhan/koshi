@@ -1,16 +1,25 @@
 //! Event fan-out: the bounded per-subscriber delivery hub.
 //!
-//! [`EventBus::subscribe`] registers a subscriber and hands back the receiving
-//! end of that subscriber's own bounded queue. [`EventBus::publish`] clones
-//! each event into every queue whose filter matches. Delivery never blocks the
-//! dispatcher: an event that does not fit a subscriber's full queue is dropped
-//! for that subscriber and logged, and a subscriber whose receiver was dropped
-//! is removed on the next publish.
+//! `EventBus::subscribe` registers a subscriber and hands back its id plus
+//! the receiving end of that subscriber's own bounded queue.
+//! `EventBus::publish` clones each event into every queue whose filter
+//! matches. Delivery never blocks the dispatcher: a subscriber whose receiver
+//! was dropped is removed on the next publish, and an event that does not fit
+//! a subscriber's full queue is handled by its class.
+//!
+//! A dropped [`EventClass::Lossy`] event is logged and forgotten. A dropped
+//! [`EventClass::Critical`] event marks the subscriber desynced: it receives
+//! nothing at all — critical and lossy alike — while it counts the critical
+//! events it misses, until `EventBus::try_resync` puts a fresh
+//! [`RenderSnapshot`] on its queue and returns it to live delivery. The
+//! snapshot rides the same queue as events, so the subscriber reads the
+//! backlog it already had, then the snapshot, then live events again.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
-use koshi_core::event::Event;
+use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
 use koshi_core::ids::SubscriberId;
+use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 
 /// How many undelivered events one subscriber's queue holds. An event
 /// published while the queue is full is dropped for that subscriber.
@@ -34,8 +43,22 @@ impl EventFilter {
     }
 }
 
-/// One registered subscriber: its id, its filter, and the sending end of its
-/// queue.
+/// Whether a subscriber is receiving events, or paused awaiting a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryState {
+    /// Matching events are delivered as they are published.
+    Live,
+    /// A critical event did not fit the queue; nothing is delivered until a
+    /// snapshot lands.
+    Desynced {
+        /// How many critical events the subscriber has missed, counting the one
+        /// that caused the pause.
+        dropped: u64,
+    },
+}
+
+/// One registered subscriber: its id, its filter, its delivery state, and the
+/// sending end of its queue.
 #[derive(Debug)]
 struct Subscriber {
     /// Stable id assigned at subscription, named in log lines about this
@@ -43,15 +66,18 @@ struct Subscriber {
     id: SubscriberId,
     /// Which events this subscriber receives.
     filter: EventFilter,
+    /// Whether this subscriber is receiving events or paused awaiting a
+    /// snapshot.
+    state: DeliveryState,
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
-    tx: SyncSender<Event>,
+    tx: SyncSender<Delivery>,
 }
 
 /// Event fan-out hub: every published event is delivered to each live
 /// subscriber whose filter matches, over that subscriber's own bounded queue.
 #[derive(Debug, Default)]
-pub struct EventBus {
+pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.
     subscribers: Vec<Subscriber>,
 }
@@ -59,49 +85,159 @@ pub struct EventBus {
 impl EventBus {
     /// A bus with no subscribers.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         EventBus {
             subscribers: Vec::new(),
         }
     }
 
-    /// Register a subscriber for the events `filter` selects and hand back the
-    /// receiving end of its queue. Dropping the receiver ends the
-    /// subscription; the bus notices on the next publish.
-    pub fn subscribe(&mut self, filter: EventFilter) -> Receiver<Event> {
+    /// Register a subscriber for the events `filter` selects and hand back its
+    /// id plus the receiving end of its queue. The subscriber starts live.
+    /// Dropping the receiver ends the subscription; the bus notices on the next
+    /// publish.
+    pub(crate) fn subscribe(&mut self, filter: EventFilter) -> (SubscriberId, Receiver<Delivery>) {
         let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
         let id = SubscriberId::new();
-        self.subscribers.push(Subscriber { id, filter, tx });
-        rx
+        self.subscribers.push(Subscriber {
+            id,
+            filter,
+            state: DeliveryState::Live,
+            tx,
+        });
+        (id, rx)
     }
 
-    /// Deliver `event` to every subscriber whose filter matches it. A
-    /// subscriber whose queue is full misses this event (logged as a warning);
-    /// a subscriber whose receiver is gone is removed.
-    pub fn publish(&mut self, event: &Event) {
-        self.subscribers.retain(|subscriber| {
+    /// Deliver `event` to every live subscriber whose filter matches it.
+    ///
+    /// A desynced subscriber receives nothing, and counts the event when it is
+    /// [`EventClass::Critical`]. A live subscriber whose queue is full misses a
+    /// [`EventClass::Lossy`] event (logged as a warning) and becomes desynced on
+    /// a [`EventClass::Critical`] one.
+    ///
+    /// A subscriber whose receiver is gone is removed, and its id returned so
+    /// the caller can drop whatever it keeps alongside the subscription. The
+    /// returned list is empty on every publish that removes nobody.
+    pub(crate) fn publish(&mut self, event: &Event) -> Vec<SubscriberId> {
+        let class = classify(event);
+        let mut removed = Vec::new();
+        self.subscribers.retain_mut(|subscriber| {
             if !subscriber.filter.matches(event) {
                 return true;
             }
-            match subscriber.tx.try_send(event.clone()) {
+            if let DeliveryState::Desynced { dropped } = &mut subscriber.state {
+                if class == EventClass::Critical {
+                    *dropped += 1;
+                }
+                return true;
+            }
+            match subscriber.tx.try_send(Delivery::Event(event.clone())) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        subscriber = %subscriber.id,
-                        event = event.name(),
-                        "event dropped; subscriber queue full"
-                    );
+                    match class {
+                        EventClass::Lossy => tracing::warn!(
+                            subscriber = %subscriber.id,
+                            event = event.name(),
+                            "event dropped; subscriber queue full"
+                        ),
+                        EventClass::Critical => {
+                            subscriber.state = DeliveryState::Desynced { dropped: 1 };
+                            tracing::warn!(
+                                subscriber = %subscriber.id,
+                                event = event.name(),
+                                "critical event dropped; subscriber desynced, awaiting snapshot"
+                            );
+                        }
+                    }
                     true
                 }
-                Err(TrySendError::Disconnected(_)) => false,
+                Err(TrySendError::Disconnected(_)) => {
+                    removed.push(subscriber.id);
+                    false
+                }
             }
         });
+        removed
+    }
+
+    /// Whether any subscriber is desynced and awaiting a snapshot.
+    pub(crate) fn has_desynced(&self) -> bool {
+        self.subscribers
+            .iter()
+            .any(|subscriber| subscriber.state != DeliveryState::Live)
+    }
+
+    /// The ids of every subscriber desynced and awaiting a snapshot, in
+    /// subscription order.
+    pub(crate) fn desynced(&self) -> Vec<SubscriberId> {
+        self.subscribers
+            .iter()
+            .filter(|subscriber| subscriber.state != DeliveryState::Live)
+            .map(|subscriber| subscriber.id)
+            .collect()
+    }
+
+    /// Whether `id` is still registered.
+    pub(crate) fn contains(&self, id: SubscriberId) -> bool {
+        self.subscribers
+            .iter()
+            .any(|subscriber| subscriber.id == id)
+    }
+
+    /// Drop `id`'s subscription. Does nothing when `id` is not registered.
+    pub(crate) fn unsubscribe(&mut self, id: SubscriberId) {
+        self.subscribers.retain(|subscriber| subscriber.id != id);
+    }
+
+    /// Put `snapshot` on desynced subscriber `id`'s queue and return it to live
+    /// delivery, reporting how many critical events it missed.
+    ///
+    /// Returns `true` once the snapshot is queued. Returns `false` when `id` is
+    /// unknown, when it is already live, or when its queue is still full — the
+    /// caller retries a full queue on a later pass. A subscriber whose receiver
+    /// is gone is removed.
+    pub(crate) fn try_resync(&mut self, id: SubscriberId, snapshot: Box<RenderSnapshot>) -> bool {
+        let Some(index) = self
+            .subscribers
+            .iter()
+            .position(|subscriber| subscriber.id == id)
+        else {
+            return false;
+        };
+        let subscriber = &mut self.subscribers[index];
+        let DeliveryState::Desynced { dropped } = subscriber.state else {
+            return false;
+        };
+        let lagged = SubscriberLagged {
+            subscriber_id: id,
+            dropped_count: dropped,
+            event_class: EventClass::Critical,
+        };
+        match subscriber
+            .tx
+            .try_send(Delivery::Snapshot { snapshot, lagged })
+        {
+            Ok(()) => {
+                subscriber.state = DeliveryState::Live;
+                tracing::info!(
+                    subscriber = %id,
+                    dropped,
+                    "snapshot queued; subscriber resynced"
+                );
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(index);
+                false
+            }
+        }
     }
 
     /// How many subscribers are registered. Counts subscribers whose receiver
     /// is already gone but whose removal awaits the next publish.
+    #[cfg(test)]
     #[must_use]
-    pub fn subscriber_count(&self) -> usize {
+    pub(crate) fn subscriber_count(&self) -> usize {
         self.subscribers.len()
     }
 }

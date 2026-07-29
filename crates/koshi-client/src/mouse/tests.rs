@@ -20,7 +20,7 @@ use koshi_core::mouse::{MouseButton, MouseTracking};
 use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, MousePane, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
+    ClientSnapshot, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
 };
 
 use crate::Client;
@@ -39,10 +39,12 @@ fn viewer() -> Client {
 fn viewer_grabbing_the_mouse() -> Client {
     let (tx, rx) = mpsc::sync_channel(8);
     let mut viewer = Client::new(ClientId::new(), VIEWPORT, rx, TerminalCleanupGuard::new());
-    tx.send(Event::MouseSelectChanged(MouseSelectChanged {
-        client_id: viewer.id(),
-        on: true,
-    }))
+    tx.send(Delivery::Event(Event::MouseSelectChanged(
+        MouseSelectChanged {
+            client_id: viewer.id(),
+            on: true,
+        },
+    )))
     .expect("the viewer's queue has room");
     viewer.apply_events();
     viewer
