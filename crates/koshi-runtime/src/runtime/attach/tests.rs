@@ -180,10 +180,20 @@ fn every_tab_is_carried_not_only_the_first() {
     assert_eq!(structure.tabs[1].layout, LayoutNode::Pane(second_pane));
 }
 
+/// How many panes the ordering tests register.
+///
+/// `PaneRegistry` stores records in a `HashMap`, so a builder that dropped the
+/// sort would emit hash order. Hash order happens to be ascending for one
+/// arrangement out of every factorial of this count, so twelve panes leaves
+/// about one chance in 479 million of such a builder passing.
+const PANE_ORDER_SAMPLE: usize = 12;
+
 #[test]
 fn every_registered_pane_is_carried_ordered_by_id() {
     let mut session = session("s");
-    let mut registered: Vec<PaneId> = (0..4).map(|_| add_pane(&mut session)).collect();
+    let mut registered: Vec<PaneId> = (0..PANE_ORDER_SAMPLE)
+        .map(|_| add_pane(&mut session))
+        .collect();
     registered.sort();
 
     let structure = session_structure(&session);
@@ -198,6 +208,68 @@ fn every_registered_pane_is_carried_ordered_by_id() {
             })
             .collect::<Vec<PaneStructure>>()
     );
+}
+
+#[test]
+fn the_pane_list_is_strictly_ascending_by_id() {
+    let mut session = session("s");
+    for _ in 0..PANE_ORDER_SAMPLE {
+        add_pane(&mut session);
+    }
+
+    let structure = session_structure(&session);
+
+    let out_of_order: Vec<(PaneId, PaneId)> = structure
+        .panes
+        .windows(2)
+        .filter(|pair| pair[0].id >= pair[1].id)
+        .map(|pair| (pair[0].id, pair[1].id))
+        .collect();
+    assert_eq!(
+        out_of_order,
+        Vec::new(),
+        "pane list is not strictly ascending: {:?}",
+        structure
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<PaneId>>()
+    );
+    assert_eq!(structure.panes.len(), PANE_ORDER_SAMPLE);
+}
+
+#[test]
+fn the_tab_list_is_strictly_ascending_by_display_index() {
+    let mut session = session("s");
+    // Insert tabs in reverse display order, so map order and bar order disagree.
+    for index in (0..6).rev() {
+        let pane_id = add_pane(&mut session);
+        let tab_id = TabId::new();
+        session.tabs.insert(
+            tab_id,
+            Tab::new(tab_id, format!("t{index}"), index, pane_id),
+        );
+    }
+
+    let structure = session_structure(&session);
+
+    let out_of_order: Vec<(usize, usize)> = structure
+        .tabs
+        .windows(2)
+        .filter(|pair| pair[0].index >= pair[1].index)
+        .map(|pair| (pair[0].index, pair[1].index))
+        .collect();
+    assert_eq!(
+        out_of_order,
+        Vec::new(),
+        "tab list is not strictly ascending: {:?}",
+        structure
+            .tabs
+            .iter()
+            .map(|tab| tab.index)
+            .collect::<Vec<usize>>()
+    );
+    assert_eq!(structure.tabs.len(), 6);
 }
 
 #[test]
