@@ -3,10 +3,12 @@
 //! fan-out bus, outer-input routing, PTY (pseudo-terminal, a child process's
 //! terminal connection) forwarding and output handling, config reload
 //! transactions, render scheduling, per-client scrollback scrolling, staged
-//! shutdown, the render-snapshot builder, and event transactions. The
+//! shutdown, the render-snapshot builder, the attach-structure builder, and
+//! event transactions. The
 //! [`Server`](crate::server::Server) type these modules extend lives in
 //! [`crate::server`].
 
+pub mod attach;
 pub mod bootstrap;
 pub mod bus;
 pub mod clipboard;
