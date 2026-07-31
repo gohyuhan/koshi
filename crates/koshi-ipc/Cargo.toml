@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 thiserror = "2.0.18"
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
+koshi-layout = { version = "0.1.0", path = "../koshi-layout" }
+koshi-pane = { version = "0.1.0", path = "../koshi-pane" }
 koshi-storage = { version = "0.1.0", path = "../koshi-storage" }
 serde = { version = "1.0.229", features = ["derive"] }
 subtle = "2.6.1"

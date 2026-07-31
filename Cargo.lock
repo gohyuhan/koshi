@@ -803,6 +803,8 @@ dependencies = [
  "getrandom 0.4.3",
  "interprocess",
  "koshi-core",
+ "koshi-layout",
+ "koshi-pane",
  "koshi-storage",
  "libc",
  "serde",
