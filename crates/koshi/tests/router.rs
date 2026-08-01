@@ -10,7 +10,7 @@
 //! Every process a test starts is held in a guard that ends it when the test
 //! drops it, so a failed assertion leaves nothing running.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ const POLL: Duration = Duration::from_millis(100);
 /// drops it.
 fn test_runtime_dir() -> TempDir {
     #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
+    let base = std::path::PathBuf::from("/tmp");
     #[cfg(windows)]
     let base = std::env::temp_dir();
     TempDir::new_in(base).expect("a temporary runtime directory")

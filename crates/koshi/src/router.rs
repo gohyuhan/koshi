@@ -95,7 +95,7 @@ struct SessionEntry {
 enum RouterEvent {
     /// A request read off a connection, with the channel its answer goes back
     /// on.
-    Op {
+    Request {
         /// What is being asked.
         kind: RouterRequestKind,
         /// Where the answer goes.
@@ -288,7 +288,10 @@ fn ask_dispatcher(
     kind: RouterRequestKind,
 ) -> Option<RouterResult> {
     let (reply, answer) = mpsc::channel();
-    if events_tx.send(RouterEvent::Op { kind, reply }).is_err() {
+    if events_tx
+        .send(RouterEvent::Request { kind, reply })
+        .is_err()
+    {
         return None;
     }
     answer.recv().ok()
@@ -320,8 +323,8 @@ fn dispatch(
             return registry;
         };
         match event {
-            RouterEvent::Op { kind, reply } => {
-                let _ = reply.send(serve_op(&runtime_dir, &mut registry, &events_tx, kind));
+            RouterEvent::Request { kind, reply } => {
+                let _ = reply.send(serve_request(&runtime_dir, &mut registry, &events_tx, kind));
             }
             RouterEvent::ChildExited(id) => unregister(&runtime_dir, &mut registry, id),
         }
@@ -329,14 +332,16 @@ fn dispatch(
 }
 
 /// Answer one request against the session list.
-fn serve_op(
+fn serve_request(
     runtime_dir: &Path,
     registry: &mut Registry,
     events_tx: &Sender<RouterEvent>,
     kind: RouterRequestKind,
 ) -> RouterResult {
     match kind {
-        RouterRequestKind::Hello { .. } => RouterResult::Hello,
+        RouterRequestKind::Hello { .. } => {
+            unreachable!("Hello is answered by the connection thread before dispatch")
+        }
         RouterRequestKind::CreateSession => create_session(runtime_dir, registry, events_tx),
         RouterRequestKind::AttachLookup { selector } => {
             attach_lookup(runtime_dir, registry, &selector)

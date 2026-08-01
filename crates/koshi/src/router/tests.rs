@@ -248,7 +248,7 @@ fn a_request_inside_the_idle_window_is_served_and_the_loop_goes_on() {
     let (events_tx, events_rx) = mpsc::channel();
     let (reply, answer) = mpsc::channel();
     events_tx
-        .send(RouterEvent::Op {
+        .send(RouterEvent::Request {
             kind: RouterRequestKind::ListSessions,
             reply,
         })
