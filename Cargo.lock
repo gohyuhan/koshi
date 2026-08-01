@@ -744,10 +744,9 @@ dependencies = [
 name = "koshi-beta"
 version = "0.1.0"
 dependencies = [
- "koshi-config",
+ "koshi-macro",
  "koshi-observability",
- "quote",
- "syn 2.0.119",
+ "tracing",
 ]
 
 [[package]]
@@ -772,7 +771,6 @@ dependencies = [
  "koshi-layout",
  "miette",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -837,6 +835,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-macro"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

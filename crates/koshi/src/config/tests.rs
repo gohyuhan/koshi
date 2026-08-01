@@ -436,16 +436,16 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     };
 
     apply_beta_gate(Some(on.clone()));
-    assert!(koshi_config::beta::allowed());
+    assert!(koshi_beta::allowed());
 
     apply_beta_gate(Some(off));
-    assert!(!koshi_config::beta::allowed());
+    assert!(!koshi_beta::allowed());
 
     // No `koshi.kdl` at all closes an open gate.
     apply_beta_gate(Some(on));
-    assert!(koshi_config::beta::allowed());
+    assert!(koshi_beta::allowed());
     apply_beta_gate(None);
-    assert!(!koshi_config::beta::allowed());
+    assert!(!koshi_beta::allowed());
 
     // The whole chain from text on disk: the reader `load_app_layer` uses, onto
     // the gate, into a function carrying the attribute. `load_app_layer` takes

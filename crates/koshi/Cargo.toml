@@ -17,6 +17,7 @@ ratatui = { version = "0.30.2", default-features = false, features = [
   "crossterm",
 ] }
 thiserror = "2.0.18"
+koshi-beta = { version = "0.1.0", path = "../koshi-beta" }
 koshi-client = { version = "0.1.0", path = "../koshi-client" }
 koshi-config = { version = "0.1.0", path = "../koshi-config" }
 koshi-core = { version = "0.1.0", path = "../koshi-core" }
@@ -47,5 +48,4 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 tempfile = "3.27.0"
 
 [dev-dependencies]
-koshi-beta = { version = "0.1.0", path = "../koshi-beta" }
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

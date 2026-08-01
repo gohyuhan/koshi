@@ -6,13 +6,11 @@
 //! keybinding files parsed into keymap layers ([`keybinding`]), conflict
 //! detection across those layers ([`conflict`]), merging them into the
 //! per-mode lookup tables ([`keymap_merge`]), profile files parsed into
-//! templates ([`profile`]), the process-wide beta-feature gate ([`beta`]),
-//! and the config error types ([`error`]).
+//! templates ([`profile`]), and the config error types ([`error`]).
 //! Discovering config files on disk, full validation, and migrating older
 //! files forward belong to this system too.
 
 pub mod app_config;
-pub mod beta;
 pub mod conflict;
 pub mod error;
 pub mod hints;

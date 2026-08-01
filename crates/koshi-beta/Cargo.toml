@@ -4,13 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-proc-macro = true
-
 [dependencies]
-quote = "1.0.45"
-syn = { version = "2.0.117", features = ["full"] }
+koshi-macro = { version = "0.1.0", path = "../koshi-macro" }
+tracing = "0.1.44"
 
 [dev-dependencies]
-koshi-config = { path = "../koshi-config" }
-koshi-observability = { path = "../koshi-observability" }
+koshi-observability = { version = "0.1.0", path = "../koshi-observability" }

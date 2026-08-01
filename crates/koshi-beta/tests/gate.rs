@@ -35,20 +35,20 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     let (_guard, logs) = koshi_observability::logging::with_test_writer();
 
     // Off: the body never runs and the call returns the `otherwise` value.
-    koshi_config::beta::set_allowed(false);
+    koshi_beta::set_allowed(false);
     assert_eq!(double(21), Err("beta feature is off"));
     assert_eq!(count_runs(), 0);
     assert_eq!(RUNS.load(Ordering::Relaxed), 0);
 
     // On: the body runs and the call returns what the body returns.
-    koshi_config::beta::set_allowed(true);
+    koshi_beta::set_allowed(true);
     assert_eq!(double(21), Ok(42));
     assert_eq!(count_runs(), 1);
     assert_eq!(RUNS.load(Ordering::Relaxed), 1);
 
     // Off again: the same site stops running mid-process. `RUNS` is 1 here, so
     // the second site answers 0 only while it is blocked.
-    koshi_config::beta::set_allowed(false);
+    koshi_beta::set_allowed(false);
     assert_eq!(double(21), Err("beta feature is off"));
     assert_eq!(count_runs(), 0);
     assert_eq!(RUNS.load(Ordering::Relaxed), 1);

@@ -104,7 +104,7 @@ pub fn load_app_layer() -> Option<PartialKoshiConfig> {
 /// point does nothing.
 pub fn apply_beta_gate(app: Option<PartialKoshiConfig>) {
     let server = merge_server(ServerConfig::default(), app.into_iter().collect());
-    koshi_config::beta::set_allowed(server.allow_beta_features);
+    koshi_beta::set_allowed(server.allow_beta_features);
 }
 
 /// The split direction a pane-opening verb uses when `--direction` is absent:
