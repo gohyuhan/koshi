@@ -180,7 +180,7 @@ fn kill_session_takes_an_optional_session() {
     assert_eq!(
         parse(&["koshi", "kill-session", "work"]).command,
         Some(CliCommand::KillSession {
-            session: Some("work".to_string())
+            session: Some(SessionRef::Name("work".to_string()))
         })
     );
 }
@@ -394,7 +394,7 @@ fn list_tabs_parses_a_typed_session_and_a_format() {
         ])
         .command,
         Some(CliCommand::ListTabs {
-            session: Some(SessionId::from_uuid(fixed_uuid())),
+            session: Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid()))),
             format: FormatArg::Json,
         })
     );
@@ -406,7 +406,7 @@ fn list_panes_parses_a_session_filter() {
     assert_eq!(
         parse(&["koshi", "list-panes", "--session", &session]).command,
         Some(CliCommand::ListPanes {
-            session: Some(SessionId::from_uuid(fixed_uuid())),
+            session: Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid()))),
             format: FormatArg::Table,
         })
     );
@@ -445,7 +445,7 @@ fn inspect_forms_parse_typed_ids() {
             "session",
             format!("session-{uuid}"),
             InspectTarget::Session {
-                session: SessionId::from_uuid(uuid),
+                session: SessionRef::Id(SessionId::from_uuid(uuid)),
                 format: FormatArg::Table,
             },
         ),
@@ -453,7 +453,7 @@ fn inspect_forms_parse_typed_ids() {
             "tab",
             format!("tab-{uuid}"),
             InspectTarget::Tab {
-                tab: TabId::from_uuid(uuid),
+                tab: TabRef::Id(TabId::from_uuid(uuid)),
                 format: FormatArg::Table,
             },
         ),
@@ -1098,7 +1098,7 @@ fn focus_tab_takes_exactly_one_of_index_or_tab() {
         command(&["koshi", "focus-tab", "--tab", &tab_flag]),
         CliCommand::FocusTab {
             index: None,
-            tab: Some(TabId::from_uuid(fixed_uuid())),
+            tab: Some(TabRef::Id(TabId::from_uuid(fixed_uuid()))),
             client: None,
         }
     );
@@ -1777,4 +1777,144 @@ fn run_program_name_is_preserved_verbatim_for_non_ascii() {
     };
     assert_eq!(args.command.program, PathBuf::from("☕"));
     assert_eq!(args.command.shell_kind, ShellKind::Other("☕".to_string()));
+}
+
+// --- Session and tab arguments: id or name, verb by verb ---
+
+/// The [`SessionRef`] the session-taking verb in `argv` parsed.
+fn parsed_session_ref(argv: &[&str]) -> SessionRef {
+    match command(argv) {
+        CliCommand::KillSession { session }
+        | CliCommand::ListTabs { session, .. }
+        | CliCommand::ListPanes { session, .. }
+        | CliCommand::ListClients { session, .. } => session.expect("argv names a session"),
+        CliCommand::Inspect {
+            target: InspectTarget::Session { session, .. },
+        } => session,
+        other => panic!("argv names no session: {other:?}"),
+    }
+}
+
+/// The [`TabRef`] the tab-taking verb in `argv` parsed.
+fn parsed_tab_ref(argv: &[&str]) -> TabRef {
+    match command(argv) {
+        CliCommand::MoveTab { tab, .. } | CliCommand::FocusTab { tab, .. } => {
+            tab.expect("argv names a tab")
+        }
+        CliCommand::Inspect {
+            target: InspectTarget::Tab { tab, .. },
+        } => tab,
+        other => panic!("argv names no tab: {other:?}"),
+    }
+}
+
+/// Every verb taking a session runs the one id-else-name gate:
+/// `session-<uuid>` is an id, `work` is a name.
+#[test]
+fn every_session_argument_parses_an_id_or_a_name() {
+    let id = format!("session-{}", fixed_uuid());
+    let prefixes: &[&[&str]] = &[
+        &["koshi", "kill-session"],
+        &["koshi", "list-tabs", "--session"],
+        &["koshi", "list-panes", "--session"],
+        &["koshi", "list-clients", "--session"],
+        &["koshi", "inspect", "session"],
+    ];
+    for prefix in prefixes {
+        let mut by_id = prefix.to_vec();
+        by_id.push(&id);
+        assert_eq!(
+            parsed_session_ref(&by_id),
+            SessionRef::Id(SessionId::from_uuid(fixed_uuid())),
+            "for {by_id:?}"
+        );
+
+        let mut by_name = prefix.to_vec();
+        by_name.push("work");
+        assert_eq!(
+            parsed_session_ref(&by_name),
+            SessionRef::Name("work".to_string()),
+            "for {by_name:?}"
+        );
+    }
+}
+
+/// Every verb taking a tab runs the one id-else-name gate: `tab-<uuid>` is an
+/// id, `logs` is a name.
+#[test]
+fn every_tab_argument_parses_an_id_or_a_name() {
+    let id = format!("tab-{}", fixed_uuid());
+    let prefixes: &[&[&str]] = &[
+        &["koshi", "move-tab", "--index", "2", "--tab"],
+        &["koshi", "focus-tab", "--tab"],
+        &["koshi", "inspect", "tab"],
+    ];
+    for prefix in prefixes {
+        let mut by_id = prefix.to_vec();
+        by_id.push(&id);
+        assert_eq!(
+            parsed_tab_ref(&by_id),
+            TabRef::Id(TabId::from_uuid(fixed_uuid())),
+            "for {by_id:?}"
+        );
+
+        let mut by_name = prefix.to_vec();
+        by_name.push("logs");
+        assert_eq!(
+            parsed_tab_ref(&by_name),
+            TabRef::Name("logs".to_string()),
+            "for {by_name:?}"
+        );
+    }
+}
+
+/// A `--tab` id rides into the mapped command with no resolved targets; a
+/// `--tab` name rides in as the id the routing layer resolved it to.
+#[test]
+fn move_tab_and_focus_tab_carry_their_tab_id_into_the_command() {
+    let tab = TabId::from_uuid(fixed_uuid());
+    let tab_flag = format!("tab-{}", fixed_uuid());
+
+    let (_, mapped) = action_of(&["koshi", "move-tab", "--index", "2", "--tab", &tab_flag]);
+    assert_eq!(
+        mapped,
+        Command::MoveTab(MoveTabArgs {
+            tab: Some(tab),
+            index: 2,
+        })
+    );
+    let (_, mapped) = action_of(&["koshi", "focus-tab", "--tab", &tab_flag]);
+    assert_eq!(
+        mapped,
+        Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Id(tab),
+            client: None,
+        })
+    );
+
+    let resolved = ResolvedTargets {
+        session: None,
+        tab: Some(tab),
+    };
+    assert_eq!(
+        command(&["koshi", "move-tab", "--index", "2", "--tab", "logs"])
+            .to_action(&resolved, Direction::Right),
+        Some((
+            ActionRef::core("move-tab").expect("valid"),
+            Command::MoveTab(MoveTabArgs {
+                tab: Some(tab),
+                index: 2,
+            })
+        ))
+    );
+    assert_eq!(
+        command(&["koshi", "focus-tab", "--tab", "logs"]).to_action(&resolved, Direction::Right),
+        Some((
+            ActionRef::core("focus-tab").expect("valid"),
+            Command::FocusTab(FocusTabArgs {
+                target: TabTarget::Id(tab),
+                client: None,
+            })
+        ))
+    );
 }

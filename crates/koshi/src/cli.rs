@@ -12,7 +12,9 @@
 //! vocabulary through [`CliCommand::to_action`](crate::cli::CliCommand::to_action),
 //! which pairs each with its `core:` action reference. Entity ids are parsed
 //! at this boundary: a flag accepts the id exactly as koshi prints it
-//! (`pane-<uuid>`) or as a bare UUID.
+//! (`pane-<uuid>`) or as a bare UUID. A session or tab argument accepts the
+//! display name too: a value that reads as an id (`session-<uuid>`,
+//! `tab-<uuid>`, or a bare UUID) is that id, anything else is a name.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -180,8 +182,9 @@ pub enum CliCommand {
     },
     /// Kill a session; without a name, targets the only running session.
     KillSession {
-        /// Session to kill.
-        session: Option<String>,
+        /// Session to kill, by id or name.
+        #[arg(value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
     },
     /// Check the local koshi installation and environment.
     Doctor,
@@ -293,11 +296,11 @@ pub enum CliCommand {
         /// Destination zero-based index.
         #[arg(long, value_name = "INDEX")]
         index: usize,
-        /// Tab to move; defaults to the focused tab.
-        #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
-        tab: Option<TabId>,
+        /// Tab to move, by id or name; defaults to the focused tab.
+        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
+        tab: Option<TabRef>,
     },
-    /// Focus a tab by index or id.
+    /// Focus a tab by index, id, or name.
     FocusTab {
         /// Zero-based index of the tab to focus.
         #[arg(
@@ -307,9 +310,9 @@ pub enum CliCommand {
             required_unless_present = "tab"
         )]
         index: Option<usize>,
-        /// Id of the tab to focus.
-        #[arg(long, value_parser = parse_tab_id, value_name = "TAB_ID")]
-        tab: Option<TabId>,
+        /// Tab to focus, by id or name.
+        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
+        tab: Option<TabRef>,
         /// Client whose view switches; defaults to the issuing client.
         #[arg(long, value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client: Option<ClientId>,
@@ -368,27 +371,27 @@ pub enum CliCommand {
     },
     /// List tabs across every running session.
     ListTabs {
-        /// Narrow the listing to one session.
-        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
-        session: Option<SessionId>,
+        /// Narrow the listing to one session, by id or name.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
     /// List panes across every running session.
     ListPanes {
-        /// Narrow the listing to one session.
-        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
-        session: Option<SessionId>,
+        /// Narrow the listing to one session, by id or name.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
     /// List clients attached across every running session.
     ListClients {
-        /// Narrow the listing to one session.
-        #[arg(long, value_parser = parse_session_id, value_name = "SESSION_ID")]
-        session: Option<SessionId>,
+        /// Narrow the listing to one session, by id or name.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
@@ -510,23 +513,24 @@ pub enum KeysCommand {
 }
 
 /// The entity kinds `koshi inspect` reports on. Each takes the id exactly as
-/// koshi prints it (`<kind>-<uuid>`) or as a bare UUID.
+/// koshi prints it (`<kind>-<uuid>`) or as a bare UUID; a session or a tab
+/// takes its display name too.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum InspectTarget {
     /// Report a session: name, creation time, clients, and pane count.
     Session {
-        /// Session to inspect.
-        #[arg(value_parser = parse_session_id, value_name = "SESSION_ID")]
-        session: SessionId,
+        /// Session to inspect, by id or name.
+        #[arg(value_parser = parse_session_ref, value_name = "SESSION")]
+        session: SessionRef,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
     },
     /// Report a tab: name, position, active pane, and pane count.
     Tab {
-        /// Tab to inspect.
-        #[arg(value_parser = parse_tab_id, value_name = "TAB_ID")]
-        tab: TabId,
+        /// Tab to inspect, by id or name.
+        #[arg(value_parser = parse_tab_ref, value_name = "TAB")]
+        tab: TabRef,
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
@@ -693,16 +697,19 @@ impl CliCommand {
             CliCommand::MoveTab { index, tab } => (
                 "move-tab",
                 Command::MoveTab(MoveTabArgs {
-                    tab: *tab,
+                    tab: targets.tab.or(tab_ref_id(tab)),
                     index: *index,
                 }),
             ),
             CliCommand::FocusTab { index, tab, client } => {
-                // The parser enforces exactly one of the two flags.
-                let target = match (index, tab) {
+                // The parser enforces exactly one of the two flags, and the
+                // routing layer resolves a `--tab` name to its id.
+                let target = match (index, targets.tab.or(tab_ref_id(tab))) {
                     (Some(index), None) => TabTarget::Index(*index),
-                    (None, Some(tab)) => TabTarget::Id(*tab),
-                    _ => unreachable!("clap enforces exactly one of --index/--tab"),
+                    (None, Some(tab)) => TabTarget::Id(tab),
+                    _ => unreachable!(
+                        "clap enforces exactly one of --index/--tab, and routing resolves a tab name"
+                    ),
                 };
                 (
                     "focus-tab",
@@ -798,7 +805,9 @@ impl CliCommand {
         match self {
             CliCommand::NewPane { tab, .. }
             | CliCommand::Run { tab, .. }
-            | CliCommand::CloseTab { tab, .. } => tab.as_ref(),
+            | CliCommand::CloseTab { tab, .. }
+            | CliCommand::MoveTab { tab, .. }
+            | CliCommand::FocusTab { tab, .. } => tab.as_ref(),
             _ => None,
         }
     }
@@ -877,16 +886,6 @@ pub(crate) fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, Str
 /// Parse a `--pane` flag value into a [`PaneId`].
 fn parse_pane_id(value: &str) -> Result<PaneId, String> {
     parse_prefixed_uuid(value, "pane").map(PaneId::from_uuid)
-}
-
-/// Parse a `--tab` flag value into a [`TabId`].
-fn parse_tab_id(value: &str) -> Result<TabId, String> {
-    parse_prefixed_uuid(value, "tab").map(TabId::from_uuid)
-}
-
-/// Parse a `--session` flag value into a [`SessionId`].
-fn parse_session_id(value: &str) -> Result<SessionId, String> {
-    parse_prefixed_uuid(value, "session").map(SessionId::from_uuid)
 }
 
 /// Parse a `--client` flag value into a [`ClientId`].

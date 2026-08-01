@@ -10,11 +10,15 @@ use koshi_core::event::Event;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::transport::{Connection, Listener};
+use uuid::Uuid;
 
 use super::*;
 
 fn overview(name: &str) -> SessionOverview {
-    let session_id = SessionId::new();
+    named(SessionId::new(), name)
+}
+
+fn named(session_id: SessionId, name: &str) -> SessionOverview {
     SessionOverview {
         session: SessionInfo {
             id: session_id,
@@ -114,6 +118,47 @@ fn serve_kill(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<()> {
     })
 }
 
+/// A stand-in session that scripts the kill exchange alone. A discovery
+/// request on the first connection fails the scripted thread, so joining it
+/// proves the caller asked no session to describe itself.
+fn serve_kill_only(runtime_dir: &Path, session_id: SessionId) -> JoinHandle<()> {
+    let socket = koshi_ipc::endpoint::socket_addr(runtime_dir, session_id);
+    let token = ConnectionToken::generate();
+    let listener = Listener::bind(&socket).expect("stand-in session binds");
+    EndpointFile {
+        socket,
+        token: token.clone(),
+    }
+    .write(&EndpointFile::path(runtime_dir, session_id))
+    .expect("endpoint file written");
+
+    std::thread::spawn(move || {
+        let mut kill = listener.accept().expect("accept kill command");
+        let hello: IpcRequest = kill.recv().expect("read kill hello");
+        let request: IpcRequest = kill.recv().expect("read kill request");
+        assert!(matches!(
+            &hello.kind,
+            IpcRequestKind::Hello {
+                token: presented,
+                ..
+            } if presented == &token
+        ));
+        let IpcRequestKind::SubmitCommand(envelope) = request.kind else {
+            panic!("expected a submitted command as the first request");
+        };
+        assert_eq!(envelope.command, Command::Quit);
+        reply(&mut kill, hello.request_id, IpcResult::Hello);
+        reply(
+            &mut kill,
+            request.request_id,
+            IpcResult::CommandResult(CommandResult::Ok {
+                command_id: envelope.id,
+                emitted_events: vec![Event::Quit],
+            }),
+        );
+    })
+}
+
 #[test]
 fn a_name_selects_its_session() {
     let quiet = overview("quiet-lake");
@@ -158,20 +203,28 @@ fn no_running_session_uses_the_session_not_found_exit_code() {
 }
 
 #[test]
-fn duplicate_names_are_ambiguous() {
+fn duplicate_names_list_every_session_id() {
+    let first = SessionId::from_uuid(Uuid::from_u128(1));
+    let second = SessionId::from_uuid(Uuid::from_u128(2));
     let error = select_kill_session(
-        &census(vec![overview("quiet-lake"), overview("quiet-lake")]),
+        &census(vec![
+            named(first, "quiet-lake"),
+            named(second, "quiet-lake"),
+        ]),
         Some("quiet-lake"),
     )
     .expect_err("two sessions share the name");
 
-    assert!(matches!(
-        error,
-        CliError::CommandRejected {
-            reason: RejectReason::TargetAmbiguous,
-            ..
-        }
-    ));
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejected command");
+    };
+    assert_eq!(reason, RejectReason::TargetAmbiguous);
+    assert_eq!(
+        help,
+        Some(format!(
+            "several sessions are named `quiet-lake`: {first}, {second}; use the session id"
+        ))
+    );
 }
 
 #[test]
@@ -213,7 +266,11 @@ fn kill_by_name_submits_quit_to_that_session() {
     let quiet = overview("quiet-lake");
     let server = serve_kill(&runtime_dir, quiet);
 
-    let result = kill_session_in(&runtime_dir, Some("quiet-lake")).expect("kill exchange succeeds");
+    let result = kill_session_in(
+        &runtime_dir,
+        Some(&SessionRef::Name("quiet-lake".to_string())),
+    )
+    .expect("kill exchange succeeds");
 
     assert!(matches!(
         result,
@@ -242,5 +299,41 @@ fn kill_without_a_name_submits_quit_to_the_only_session() {
         } if emitted_events == vec![Event::Quit]
     ));
     server.join().expect("stand-in session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn kill_by_id_submits_quit_without_discovery() {
+    let runtime_dir = test_runtime_dir("by-id");
+    let session_id = SessionId::new();
+    let server = serve_kill_only(&runtime_dir, session_id);
+
+    let result = kill_session_in(&runtime_dir, Some(&SessionRef::Id(session_id)))
+        .expect("kill exchange succeeds");
+
+    assert!(matches!(
+        result,
+        CommandResult::Ok {
+            emitted_events,
+            ..
+        } if emitted_events == vec![Event::Quit]
+    ));
+    server.join().expect("stand-in session saw no discovery");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn kill_by_unknown_id_is_session_not_found() {
+    let runtime_dir = test_runtime_dir("unknown-id");
+    let session_id = SessionId::new();
+
+    let error = kill_session_in(&runtime_dir, Some(&SessionRef::Id(session_id)))
+        .expect_err("nothing advertises that id");
+
+    assert!(matches!(
+        &error,
+        CliError::SessionNotFound { session } if session == &session_id.to_string()
+    ));
+    assert_eq!(CliExitCode::from(&error), CliExitCode::SessionNotFound);
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }

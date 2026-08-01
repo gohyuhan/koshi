@@ -1,4 +1,4 @@
-# `profile/<name>.kdl` — saved session layouts
+# `profile/<name>.kdl` — saved layouts
 
 A profile defines tabs, pane layouts, and pane commands. Load one by name:
 

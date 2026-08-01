@@ -47,7 +47,9 @@ session. Two running sessions + the same command fails because koshi cannot
 choose safely.
 
 Session and tab flags that say `NAME_OR_ID` accept either their generated name
-or printed id. Pane and client flags use printed ids.
+or printed id. A value that reads as an id is always the id — it never falls
+back to a name lookup. A name several targets share is refused, and the error
+lists every matching id. Pane and client flags use printed ids.
 
 ## Created ids
 
@@ -70,21 +72,22 @@ id line.
 | Command | Result |
 |---|---|
 | `koshi list-sessions` | List session ids and names |
-| `koshi kill-session [NAME]` | End the named session, or the only running one |
-| `koshi list-tabs [--session <SESSION_ID>]` | List tab ids, names, and owning sessions |
-| `koshi list-panes [--session <SESSION_ID>]` | List pane, tab, and session ids and names |
-| `koshi list-clients [--session <SESSION_ID>]` | List client ids and owning sessions |
-| `koshi inspect session <SESSION_ID>` | Show one session's full record |
-| `koshi inspect tab <TAB_ID>` | Show one tab's full record |
+| `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
+| `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
+| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, and session ids and names |
+| `koshi list-clients [--session <NAME_OR_ID>]` | List client ids and owning sessions |
+| `koshi inspect session <NAME_OR_ID>` | Show one session's full record |
+| `koshi inspect tab <NAME_OR_ID>` | Show one tab's full record |
 | `koshi inspect pane <PANE_ID>` | Show one pane's full record |
 | `koshi inspect client <CLIENT_ID>` | Show one client's full record |
 
 Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
 
-`kill-session` matches the generated session name exactly. With no name, it
-works only when exactly one session is running. An unknown name exits 3; an
-unreachable control socket exits 4.
+`kill-session` takes the session id or its exact generated name; an id goes
+straight to that session with no lookup. With no argument, it works only when
+exactly one session is running. An unknown name or id exits 3; an unreachable
+control socket exits 4.
 
 ## Panes
 
@@ -112,8 +115,8 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi close-tab` | `--tab <NAME_OR_ID>`, `--session <NAME_OR_ID>`, `--force` | Close a tab |
 | `koshi next-tab` | `--client` | Focus the next tab |
 | `koshi previous-tab` | `--client` | Focus the previous tab |
-| `koshi focus-tab` | `--index` or `--tab`, optional `--client` | Focus one tab |
-| `koshi move-tab` | `--index`, optional `--tab` | Move one tab to a zero-based index |
+| `koshi focus-tab` | `--index` or `--tab <NAME_OR_ID>`, optional `--client` | Focus one tab |
+| `koshi move-tab` | `--index`, optional `--tab <NAME_OR_ID>` | Move one tab to a zero-based index |
 
 ## Input lock
 

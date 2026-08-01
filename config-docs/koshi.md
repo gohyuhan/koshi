@@ -135,7 +135,7 @@ the feature goes quiet with no message.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 |
+| `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 (coming soon) |
 
 ## Full example
 

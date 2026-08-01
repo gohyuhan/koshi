@@ -18,10 +18,13 @@
 //!
 //! Ambiguity is always an error, never a guess: two sessions sharing a name,
 //! or two running sessions with no flag, both refuse with a hint instead of
-//! picking one.
+//! picking one. An ambiguous name names every id that matched it, so the
+//! refusal itself carries the ids to retry with.
 //!
 //! The probing itself is [`crate::discovery`]'s, the same code the listing
 //! verbs use, so a session that is gone is swept here too.
+
+use std::path::Path;
 
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
@@ -123,10 +126,10 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
 /// Whatever picked it, every explicitly named pane and client must then
 /// belong to the picked session — a mismatch refuses rather than retargets.
 ///
-/// Every branch that would answer "nowhere" or "there is only this one"
-/// needs a complete census: with a running session unasked
-/// ([`Discovered::is_complete`]), the command is refused rather than aimed at
-/// whichever session did answer.
+/// Every branch that would answer "nowhere", "there is only this one", or
+/// "exactly one has this name" needs a complete census: with a running
+/// session unasked ([`Discovered::is_complete`]), the command is refused
+/// rather than aimed at whichever session did answer.
 fn pick_session<'a>(
     session: Option<&SessionRef>,
     pane: Option<PaneId>,
@@ -142,18 +145,31 @@ fn pick_session<'a>(
                 .find(|overview| overview.session.id == *id)
                 .ok_or_else(|| found.no_such_session(&id.to_string()))?,
             SessionRef::Name(name) => {
-                let mut matches = overviews
+                let matches: Vec<&SessionOverview> = overviews
                     .iter()
-                    .filter(|overview| overview.session.name == *name);
-                match (matches.next(), matches.next()) {
-                    (Some(only), None) => only,
-                    (Some(_), Some(_)) => {
+                    .filter(|overview| overview.session.name == *name)
+                    .collect();
+                match matches.as_slice() {
+                    [only] if found.is_complete() => *only,
+                    [_] => {
+                        return Err(
+                            found.unanswered(&format!("cannot tell whether `{name}` is unique"))
+                        );
+                    }
+                    [] => return Err(found.no_such_session(name)),
+                    several => {
+                        let ids = several
+                            .iter()
+                            .map(|overview| overview.session.id.to_string())
+                            .collect::<Vec<String>>()
+                            .join(", ");
                         return Err(rejected(
                             RejectReason::TargetAmbiguous,
-                            format!("several sessions are named `{name}`; use the session id"),
-                        ))
+                            format!(
+                                "several sessions are named `{name}`: {ids}; use the session id"
+                            ),
+                        ));
                     }
-                    (None, _) => return Err(found.no_such_session(name)),
                 }
             }
         }
@@ -226,8 +242,9 @@ fn pick_session<'a>(
 
 /// The session owning an explicitly named tab: by id, the one session whose
 /// tab list holds it; by name, the name must match exactly one tab across
-/// every running session — two sessions with a same-named tab demand the tab
-/// id or `--session`.
+/// every running session — a second tab of that name, in the same session or
+/// another, demands the tab id or `--session`, and a sole match counts only
+/// when every running session answered.
 fn pick_session_by_tab<'a>(
     tab_ref: &TabRef,
     found: &'a Discovered,
@@ -239,19 +256,38 @@ fn pick_session_by_tab<'a>(
             .find(|overview| overview.tabs.iter().any(|tab| tab.id == *tab_id))
             .ok_or_else(|| found.missing("tab", &tab_id.to_string())),
         TabRef::Name(name) => {
-            let mut owners = found
+            let matches: Vec<(&SessionOverview, TabId)> = found
                 .sessions
                 .iter()
-                .filter(|overview| overview.tabs.iter().any(|tab| tab.name == *name));
-            match (owners.next(), owners.next()) {
-                (Some(only), None) => Ok(only),
-                (Some(_), Some(_)) => Err(rejected(
-                    RejectReason::TargetAmbiguous,
-                    format!(
-                        "several sessions have a tab named `{name}`; use the tab id or --session"
-                    ),
-                )),
-                (None, _) => Err(found.missing("tab named", &format!("`{name}`"))),
+                .flat_map(|overview| {
+                    overview
+                        .tabs
+                        .iter()
+                        .filter(|tab| tab.name == *name)
+                        .map(move |tab| (overview, tab.id))
+                })
+                .collect();
+            match matches.as_slice() {
+                [(only, _)] if found.is_complete() => Ok(*only),
+                [_] => {
+                    Err(found.unanswered(&format!("cannot tell whether tab `{name}` is unique")))
+                }
+                [] => Err(found.missing("tab named", &format!("`{name}`"))),
+                several => {
+                    let places = several
+                        .iter()
+                        .map(|(overview, tab_id)| {
+                            format!("{tab_id} in session `{}`", overview.session.name)
+                        })
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    Err(rejected(
+                        RejectReason::TargetAmbiguous,
+                        format!(
+                            "several tabs are named `{name}`: {places}; use the tab id or --session"
+                        ),
+                    ))
+                }
             }
         }
     }
@@ -272,25 +308,66 @@ fn resolve_tab(overview: &SessionOverview, tab_ref: &TabRef) -> Result<TabId, Cl
             }
         }
         TabRef::Name(name) => {
-            let mut matches = overview.tabs.iter().filter(|tab| tab.name == *name);
-            match (matches.next(), matches.next()) {
-                (Some(only), None) => Ok(only.id),
-                (Some(_), Some(_)) => Err(rejected(
-                    RejectReason::TargetAmbiguous,
-                    format!(
-                        "several tabs are named `{name}` in session `{}`; use the tab id",
-                        overview.session.name
-                    ),
-                )),
-                (None, _) => Err(rejected(
+            let matches: Vec<TabId> = overview
+                .tabs
+                .iter()
+                .filter(|tab| tab.name == *name)
+                .map(|tab| tab.id)
+                .collect();
+            match matches.as_slice() {
+                [only] => Ok(*only),
+                [] => Err(rejected(
                     RejectReason::TargetNotFound,
                     format!(
                         "no tab named `{name}` in session `{}`",
                         overview.session.name
                     ),
                 )),
+                several => {
+                    let ids = several
+                        .iter()
+                        .map(|tab_id| tab_id.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    Err(rejected(
+                        RejectReason::TargetAmbiguous,
+                        format!(
+                            "several tabs are named `{name}` in session `{}`: {ids}; use the tab id",
+                            overview.session.name
+                        ),
+                    ))
+                }
             }
         }
+    }
+}
+
+/// The sessions a `--session` flag puts in scope: an id asks that one
+/// session alone, a name is looked up over a full census and scopes to the
+/// one session it matches, and an absent flag scopes to every session that
+/// answered.
+pub fn scope_sessions(
+    runtime_dir: &Path,
+    session: Option<&SessionRef>,
+) -> Result<Discovered, CliError> {
+    match session {
+        None => Ok(discovery::fetch_all(runtime_dir)),
+        Some(SessionRef::Id(id)) => Ok(Discovered::of(discovery::fetch_one(runtime_dir, *id)?)),
+        Some(session_ref) => {
+            let found = discovery::fetch_all(runtime_dir);
+            let picked = pick_session(Some(session_ref), None, None, None, &found)?;
+            Ok(Discovered::of(picked.clone()))
+        }
+    }
+}
+
+/// The tab a `--tab` flag names, over the sessions in scope: an id passes
+/// straight through with no lookup, and a name must match exactly one tab of
+/// exactly one session.
+pub fn tab_by_ref(found: &Discovered, tab_ref: &TabRef) -> Result<TabId, CliError> {
+    match tab_ref {
+        TabRef::Id(tab_id) => Ok(*tab_id),
+        TabRef::Name(_) => resolve_tab(pick_session_by_tab(tab_ref, found)?, tab_ref),
     }
 }
 

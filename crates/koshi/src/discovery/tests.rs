@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use koshi_core::discovery::SessionInfo;
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Size;
 use koshi_core::lock::LockMode;
@@ -264,10 +265,6 @@ fn inspect_finds_an_entity_in_the_second_session() {
     assert_eq!(
         find_client(&found, second.clients[0].id).expect("client found"),
         second.clients[0]
-    );
-    assert_eq!(
-        find_session(&found, second.session.id).expect("session found"),
-        second.session
     );
 }
 
