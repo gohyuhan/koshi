@@ -173,6 +173,8 @@ pub struct PartialKoshiConfig {
     pub logging: Option<PartialLoggingConfig>,
     /// Self-update overrides.
     pub update: Option<PartialUpdateConfig>,
+    /// Beta-feature gate override.
+    pub allow_beta_features: Option<bool>,
 }
 
 impl PartialKoshiConfig {
@@ -191,6 +193,7 @@ impl PartialKoshiConfig {
         if let Some(logging) = self.logging {
             logging.apply(&mut config.logging);
         }
+        merge_field(&mut config.allow_beta_features, self.allow_beta_features);
     }
 
     /// Applies the viewer-owned sections' overrides onto `config`, ignoring

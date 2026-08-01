@@ -1,0 +1,12 @@
+[package]
+name = "koshi-beta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koshi-macro = { version = "0.1.0", path = "../koshi-macro" }
+tracing = "0.1.44"
+
+[dev-dependencies]
+koshi-observability = { version = "0.1.0", path = "../koshi-observability" }

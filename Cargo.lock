@@ -712,6 +712,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "koshi-beta",
  "koshi-client",
  "koshi-config",
  "koshi-core",
@@ -737,6 +738,15 @@ dependencies = [
  "ureq",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "koshi-beta"
+version = "0.1.0"
+dependencies = [
+ "koshi-macro",
+ "koshi-observability",
+ "tracing",
 ]
 
 [[package]]
@@ -825,6 +835,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "koshi-macro"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

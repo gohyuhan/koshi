@@ -46,6 +46,13 @@ fn main() -> ExitCode {
 /// the only running session. A verb the socket does not serve yet reports
 /// IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
+    // A beta-gated entry point reads a process-wide flag and takes no gate
+    // argument, so the flag is set before any verb dispatches: one
+    // `allow-beta-features` answer covers the CLI verbs and the interactive
+    // launch alike.
+    let app = config::load_app_layer();
+    config::apply_beta_gate(app.clone());
+
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` introspects the static action table, so it renders locally
         // rather than being served over IPC like the session verbs.
@@ -95,7 +102,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // This CLI is a client, so it reads its own `layout.new-pane-direction`
     // out of `koshi.kdl` and puts it on the pane-opening verbs that were given
     // no `--direction`. The session holds no split direction to fall back on.
-    let new_pane_direction = config::new_pane_direction(config::load_app_layer());
+    let new_pane_direction = config::new_pane_direction(app);
 
     // The action verbs travel a socket as commands; the remaining verbs
     // (discovery listings, lifecycle) have their own serving layers. The

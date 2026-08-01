@@ -25,6 +25,19 @@ fn explain_reports_file_default_and_meaning() {
     );
 }
 
+/// The beta knob is top-level like `theme`, and `explain` answers for it the
+/// same way it answers for every other key the parser accepts.
+#[test]
+fn explain_answers_for_the_top_level_beta_knob() {
+    let output = explain("koshi.allow-beta-features").unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.allow-beta-features\nfile: koshi.kdl\ndefault: #false\n\
+         Run features still marked beta.\n"
+    );
+}
+
 #[test]
 fn explain_unknown_key_suggests_the_nearest_key() {
     let error = explain("koshi.pane.min-col").unwrap_err();

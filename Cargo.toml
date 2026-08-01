@@ -14,6 +14,8 @@ members = [
     "crates/koshi-renderer",
     "crates/koshi-input",
     "crates/koshi-config",
+    "crates/koshi-beta",
+    "crates/koshi-macro",
     "crates/koshi-plugin-api",
     "crates/koshi-plugin-host",
     "crates/koshi-plugin-manager",

@@ -118,6 +118,46 @@ fn a_repeated_theme_line_keeps_the_first_and_warns() {
 }
 
 #[test]
+fn allow_beta_features_records_what_it_is_set_to() {
+    assert_eq!(
+        parse("allow-beta-features #true").allow_beta_features,
+        Some(true)
+    );
+    assert_eq!(
+        parse("allow-beta-features #false").allow_beta_features,
+        Some(false)
+    );
+}
+
+#[test]
+fn an_absent_allow_beta_features_sets_no_layer() {
+    // Absent leaves the field unset, so the built-in `false` stands and the
+    // knob can still be turned on by a later layer.
+    assert_eq!(parse("").allow_beta_features, None);
+}
+
+#[test]
+fn a_non_boolean_allow_beta_features_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("allow-beta-features \"yes\"");
+    assert_eq!(layer.allow_beta_features, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `allow-beta-features`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_allow_beta_features_line_keeps_the_first_and_warns() {
+    let (layer, warnings) =
+        parse_with_warnings("allow-beta-features #true\nallow-beta-features #false");
+    assert_eq!(layer.allow_beta_features, Some(true));
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `allow-beta-features` section".to_string()]
+    );
+}
+
+#[test]
 fn a_colors_block_in_the_app_file_is_ignored() {
     // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
     // is an unknown top-level node and sets nothing, so one file's settings

@@ -1,7 +1,8 @@
 # `koshi.kdl` — app settings
 
 Main settings for theme, panes, scrollback, layout, mouse, terminal values,
-logging, and updates. `version` is required. Other settings are optional.
+logging, updates, and beta features. `version` is required. Other settings are
+optional.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
@@ -11,7 +12,7 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `koshi config check` and `migrate` reject them. A bad value in `update` rejects
 the whole app file for that launch.
 
-Settings use blocks. `theme` is top-level.
+Settings use blocks. `theme` and `allow-beta-features` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -118,6 +119,24 @@ launch.
 | `check-interval-days` | integer — days between checks | `14` | ≥ 0.1.0 |
 | `allow-prerelease` | boolean — offer pre-release builds too | `#false` | ≥ 0.1.0 |
 
+## `allow-beta-features`
+
+Some features are finished code that has not been used enough yet to be turned
+on for everyone. Those are off unless you say otherwise. Turning this on runs
+all of them; there is no per-feature switch.
+
+Every koshi process reads this from your `koshi.kdl` when it starts, so the
+interactive session and the `koshi` commands you type all get the same answer.
+
+A beta feature that declines to run does nothing — nothing crashes and nothing
+is lost. It also writes one warning naming itself, but only inside a running
+session that has `logging` turned on. A `koshi` command writes no log, so there
+the feature goes quiet with no message.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 |
+
 ## Full example
 
 This shows every app setting. Fixed values match defaults. `default-shell` is
@@ -128,6 +147,7 @@ commented because its default comes from `$SHELL` or `%COMSPEC%`.
 version 1
 
 theme "default"
+allow-beta-features #false
 
 pane {
     min-cols 2

@@ -30,11 +30,11 @@ use std::path::Path;
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
 use koshi_config::keybinding::parse_keybindings;
 use koshi_config::layer::{
-    merge_client, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
+    merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
-use koshi_config::types::{ClientConfig, DEFAULT_THEME};
+use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME};
 use koshi_core::geometry::Direction;
 use koshi_layout::template::ProfileTemplate;
 
@@ -84,17 +84,27 @@ pub fn load() -> (LoadedConfig, Vec<String>) {
 
 /// Read and parse `koshi.kdl` alone, skipping the theme and the keymap.
 ///
-/// The verb path of the `koshi` binary needs one setting out of the config
-/// directory — `layout.new-pane-direction` — and `koshi.kdl` is the only file
-/// that can carry it, so a `koshi new-pane` reads that file and nothing else.
-/// Absent, unreadable, or unparseable yields `None`, which folds to the
-/// built-in defaults. Warnings are dropped: a CLI verb prints its command's
-/// result, not a config report.
+/// The `koshi` binary reads this file before it dispatches a verb: every path
+/// needs the top-level `allow-beta-features`, and the verb path also needs
+/// `layout.new-pane-direction`. `koshi.kdl` is the only file that can carry
+/// either, so a `koshi new-pane` reads that file and nothing else. Absent,
+/// unreadable, or unparseable yields `None`, which folds to the built-in
+/// defaults. Warnings are dropped: a CLI verb prints its command's result, not
+/// a config report.
 #[must_use]
 pub fn load_app_layer() -> Option<PartialKoshiConfig> {
     let dir = koshi_paths::config_dir()?;
     let mut warnings = Vec::new();
     load_app(&dir.join("koshi.kdl"), &mut warnings).map(|file| file.layer)
+}
+
+/// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate, so
+/// entry points carrying `#[beta_feature]` know whether to run. Called once
+/// per process; without it the gate stays closed and every beta-gated entry
+/// point does nothing.
+pub fn apply_beta_gate(app: Option<PartialKoshiConfig>) {
+    let server = merge_server(ServerConfig::default(), app.into_iter().collect());
+    koshi_beta::set_allowed(server.allow_beta_features);
 }
 
 /// The split direction a pane-opening verb uses when `--direction` is absent:
