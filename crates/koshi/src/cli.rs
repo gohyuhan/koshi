@@ -431,6 +431,26 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: KeysCommand,
     },
+    /// Run the router process.
+    #[command(hide = true)]
+    ServeRouter {
+        /// Runtime directory to serve; defaults to this user's own.
+        #[arg(long, value_name = "DIR")]
+        runtime_dir: Option<PathBuf>,
+    },
+    /// Run one session's server process.
+    #[command(hide = true)]
+    ServeSession {
+        /// The session's id, which the router picked.
+        #[arg(value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session_id: SessionId,
+        /// The session's display name, which the router generated.
+        #[arg(value_name = "SESSION_NAME")]
+        session_name: String,
+        /// Runtime directory to serve; defaults to this user's own.
+        #[arg(long, value_name = "DIR")]
+        runtime_dir: Option<PathBuf>,
+    },
 }
 
 /// Local config operations.
@@ -776,7 +796,9 @@ impl CliCommand {
             | CliCommand::ListTabs { .. }
             | CliCommand::ListPanes { .. }
             | CliCommand::ListClients { .. }
-            | CliCommand::Keys { .. } => return None,
+            | CliCommand::Keys { .. }
+            | CliCommand::ServeRouter { .. }
+            | CliCommand::ServeSession { .. } => return None,
         };
         let action = ActionRef::core(name)
             .expect("CLI action names are constants satisfying the action-name grammar");
@@ -881,6 +903,11 @@ pub(crate) fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, Str
         .and_then(|rest| rest.strip_prefix('-'))
         .unwrap_or(value);
     Uuid::parse_str(bare).map_err(|_| format!("expected `{prefix}-<uuid>` or a bare UUID"))
+}
+
+/// Parse a session id argument into a [`SessionId`].
+fn parse_session_id(value: &str) -> Result<SessionId, String> {
+    parse_prefixed_uuid(value, "session").map(SessionId::from_uuid)
 }
 
 /// Parse a `--pane` flag value into a [`PaneId`].

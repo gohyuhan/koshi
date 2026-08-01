@@ -66,6 +66,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
     EndpointFile {
         socket: addr,
         token: token.clone(),
+        pid: std::process::id(),
     }
     .write(&EndpointFile::path(runtime_dir, session))
     .expect("write endpoint file");
@@ -226,6 +227,7 @@ fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
     EndpointFile {
         socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, session),
         token: ConnectionToken::generate(),
+        pid: std::process::id(),
     }
     .write(&EndpointFile::path(&runtime_dir, session))
     .expect("write endpoint file");

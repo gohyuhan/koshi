@@ -14,7 +14,9 @@ use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::router;
 use koshi::session_control;
+use koshi::session_server;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, CommandResult};
@@ -68,6 +70,36 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     if let Some(CliCommand::Config { command }) = &cli.command {
         return config_command::run(command);
+    }
+
+    if let Some(CliCommand::ServeRouter { runtime_dir }) = &cli.command {
+        // This process becomes the router: it serves the control socket in
+        // that directory until no session is left.
+        let runtime_dir = match runtime_dir {
+            Some(dir) => dir.clone(),
+            None => ipc_client::runtime_dir()?,
+        };
+        return router::run_router(&runtime_dir).map_err(|err| CliError::Runtime {
+            detail: err.to_string(),
+        });
+    }
+
+    if let Some(CliCommand::ServeSession {
+        session_id,
+        session_name,
+        runtime_dir,
+    }) = &cli.command
+    {
+        // This process becomes one session's server: the router started it
+        // and gave it the identity to seed the session under.
+        let runtime_dir = match runtime_dir {
+            Some(dir) => dir.clone(),
+            None => ipc_client::runtime_dir()?,
+        };
+        return session_server::run_session_server(&runtime_dir, *session_id, session_name.clone())
+            .map_err(|err| CliError::Runtime {
+                detail: err.to_string(),
+            });
     }
 
     if let Some(CliCommand::Update) = &cli.command {

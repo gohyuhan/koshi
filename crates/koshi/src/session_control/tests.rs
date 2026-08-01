@@ -75,6 +75,7 @@ fn serve_kill(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<()> {
     EndpointFile {
         socket,
         token: token.clone(),
+        pid: std::process::id(),
     }
     .write(&EndpointFile::path(runtime_dir, session_id))
     .expect("endpoint file written");
@@ -128,6 +129,7 @@ fn serve_kill_only(runtime_dir: &Path, session_id: SessionId) -> JoinHandle<()> 
     EndpointFile {
         socket,
         token: token.clone(),
+        pid: std::process::id(),
     }
     .write(&EndpointFile::path(runtime_dir, session_id))
     .expect("endpoint file written");

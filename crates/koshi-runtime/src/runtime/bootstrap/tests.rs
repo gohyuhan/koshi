@@ -264,6 +264,25 @@ fn bootstrap_local_injects_the_in_session_identity_env() {
 }
 
 #[test]
+fn bootstrap_local_named_uses_the_supplied_id_and_name() {
+    let (mut rt, _fake) = runtime();
+    let sid = SessionId::new();
+    let _client = rt
+        .bootstrap_local_named(
+            sid,
+            "S-example".to_string(),
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+
+    assert_eq!(rt.sessions.len(), 1);
+    let session = rt.sessions.values().next().expect("one session");
+    assert_eq!(session.id, sid);
+    assert_eq!(session.name, "S-example");
+}
+
+#[test]
 fn profile_panes_carry_the_in_session_identity_env() {
     let (mut rt, fake) = runtime();
     let tmpl = template("version 1\ntab {\n    horizontal {\n        pane\n        pane\n    }\n}");
