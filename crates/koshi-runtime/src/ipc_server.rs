@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use koshi_core::ids::SessionId;
-use koshi_ipc::endpoint::{socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::handshake::Handshake;
 use koshi_ipc::protocol::{
@@ -94,6 +94,7 @@ impl IpcServer {
         let endpoint = EndpointFile {
             socket: addr.clone(),
             token: token.clone(),
+            pid: std::process::id(),
         };
         if let Err(error) = endpoint.write(&endpoint_path) {
             // Dropping the listener releases the address (and unlinks the
@@ -165,20 +166,6 @@ impl IpcServer {
 impl Drop for IpcServer {
     fn drop(&mut self) {
         self.stop();
-    }
-}
-
-/// Unlink the socket file at `addr` on Unix, where the address is a
-/// filesystem path. On Windows the address is a pipe name that vanishes with
-/// its last handle, so there is nothing to remove.
-fn remove_socket_file(addr: &str) {
-    #[cfg(unix)]
-    {
-        let _ = std::fs::remove_file(addr);
-    }
-    #[cfg(windows)]
-    {
-        let _ = addr;
     }
 }
 

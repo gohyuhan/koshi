@@ -49,6 +49,7 @@ fn advertise(runtime_dir: &Path, session: SessionId, socket: String) -> PathBuf 
     EndpointFile {
         socket,
         token: ConnectionToken::generate(),
+        pid: std::process::id(),
     }
     .write(&path)
     .expect("endpoint file written");

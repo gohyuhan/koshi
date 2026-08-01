@@ -10,6 +10,10 @@ pub mod error;
 /// Connection handshake checks.
 pub mod handshake;
 pub mod protocol;
+/// The control-plane protocol: the messages that create, find, list and kill
+/// sessions, the handshake that opens a router connection, and the fixed
+/// names the router serves under.
+pub mod router;
 /// Transport layer.
 pub mod transport;
 /// Shared types.

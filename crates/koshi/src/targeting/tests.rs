@@ -149,6 +149,7 @@ fn serve_discovery(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<
     EndpointFile {
         socket,
         token: token.clone(),
+        pid: std::process::id(),
     }
     .write(&EndpointFile::path(runtime_dir, session_id))
     .expect("endpoint file written");

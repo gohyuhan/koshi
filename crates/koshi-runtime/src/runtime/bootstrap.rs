@@ -33,16 +33,33 @@ mod tests;
 
 impl Server {
     /// Seed the first session/tab/root-pane/client for a local single-process
-    /// start and return the client's id. The session is registered under
-    /// `session_id` (the caller mints it so the log file can be named for the
-    /// session before genesis). The root pane runs the default shell, sized to
-    /// the middle pane region of `viewport`; `now` stamps attach/create.
-    ///
-    /// The child is spawned before any state is committed, so a failed launch
-    /// leaves no session behind and surfaces as `Err`.
+    /// start and return the client's id. Same start as
+    /// [`bootstrap_local_named`](Self::bootstrap_local_named), with the
+    /// session's display name generated here.
     pub fn bootstrap_local(
         &mut self,
         session_id: SessionId,
+        viewport: Size,
+        now: SystemTime,
+    ) -> Result<ClientId, PtyError> {
+        // This is the first session, so no existing name can collide.
+        let session_name = generate_name(NameKind::Session, |_| false);
+        self.bootstrap_local_named(session_id, session_name, viewport, now)
+    }
+
+    /// Seed the first session/tab/root-pane/client under a caller-chosen id and
+    /// display name, and return the client's id. The session is registered
+    /// under `session_id` (the caller mints it so the log file can be named for
+    /// the session before genesis) and carries `session_name`. The root pane
+    /// runs the default shell, sized to the middle pane region of `viewport`;
+    /// `now` stamps attach/create.
+    ///
+    /// The child is spawned before any state is committed, so a failed launch
+    /// leaves no session behind and surfaces as `Err`.
+    pub fn bootstrap_local_named(
+        &mut self,
+        session_id: SessionId,
+        session_name: String,
         viewport: Size,
         now: SystemTime,
     ) -> Result<ClientId, PtyError> {
@@ -69,8 +86,6 @@ impl Server {
 
         // Assemble the session with one client viewing the tab we are about to
         // create, then commit the tab + root pane and focus the client on it.
-        // This is the first session, so no existing name can collide.
-        let session_name = generate_name(NameKind::Session, |_| false);
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
         let client = Client::new(client_id, session_id, now, viewport, tab_id);
         session.attach_client(client);

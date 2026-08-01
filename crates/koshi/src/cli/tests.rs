@@ -615,6 +615,8 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "previous-tab",
         "resize-pane",
         "run",
+        "serve-router",
+        "serve-session",
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",
@@ -624,6 +626,17 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
     .to_vec();
     expected.sort();
     assert_eq!(names, expected);
+}
+
+#[test]
+fn the_two_process_subcommands_are_the_only_ones_kept_out_of_the_help() {
+    let hidden: Vec<String> = Cli::command()
+        .get_subcommands()
+        .filter(|command| command.is_hide_set())
+        .map(|command| command.get_name().to_string())
+        .collect();
+
+    assert_eq!(hidden, ["serve-router", "serve-session"]);
 }
 
 #[test]

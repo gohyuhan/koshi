@@ -391,6 +391,7 @@ fn the_endpoint_file_lives_while_serving_and_both_files_go_at_shutdown() {
         endpoint_path.exists(),
         "endpoint file present while serving"
     );
+    assert_eq!(endpoint.pid, std::process::id());
     #[cfg(unix)]
     assert!(
         Path::new(&endpoint.socket).exists(),

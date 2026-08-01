@@ -2,9 +2,9 @@
 //!
 //! Each running Koshi writes one JSON file — `session-<uuid>.json` — directly
 //! inside the private (`0700`) runtime directory. The file names the
-//! session's control-socket address and carries the
-//! [`ConnectionToken`](crate::protocol::ConnectionToken) a connection must
-//! present at
+//! session's control-socket address, names the process advertising it, and
+//! carries the [`ConnectionToken`](crate::protocol::ConnectionToken) a
+//! connection must present at
 //! [`Hello`](crate::protocol::IpcRequestKind::Hello). The directory is
 //! readable only by the user who started Koshi, so being able to read the
 //! file is itself the same-user proof.
@@ -13,6 +13,12 @@
 //! it to find the socket and the token before connecting. Writes go through
 //! [`koshi_storage::atomic::write_atomic`], so a reader finds the old content
 //! or the new, never a half-written middle.
+//!
+//! The same module holds the two address helpers every writer and reader
+//! shares: [`socket_addr`](crate::endpoint::socket_addr) builds the
+//! control-socket address a session listens on, and
+//! [`remove_socket_file`](crate::endpoint::remove_socket_file) takes that
+//! address off the disk once the session is gone.
 
 use std::path::{Path, PathBuf};
 
@@ -51,6 +57,20 @@ pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
     }
 }
 
+/// Unlink the socket file at `addr` on Unix, where the address is a
+/// filesystem path. On Windows the address is a pipe name that vanishes with
+/// its last handle, so there is nothing to remove.
+pub fn remove_socket_file(addr: &str) {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(addr);
+    }
+    #[cfg(windows)]
+    {
+        let _ = addr;
+    }
+}
+
 /// What the endpoint file holds.
 ///
 /// Decoding rejects any field it does not know, so a misspelled name is an
@@ -65,6 +85,8 @@ pub struct EndpointFile {
     pub socket: String,
     /// The secret a connection presents at Hello.
     pub token: ConnectionToken,
+    /// The process id of the process advertising this socket.
+    pub pid: u32,
 }
 
 impl EndpointFile {

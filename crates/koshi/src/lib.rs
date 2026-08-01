@@ -27,8 +27,21 @@ pub mod in_session;
 /// endpoint, submit a command, and read back its result.
 pub mod ipc_client;
 
+/// The router process: it owns the list of running sessions, starts and
+/// reaps one session server per session, and tells callers where to reach
+/// them.
+pub mod router;
+
+/// The client side of the router socket: ask the router something, starting
+/// one first when none is running.
+pub mod router_client;
+
 /// Process-level session commands that work without an attached pane.
 pub mod session_control;
+
+/// The per-session server process: one session's panes and PTYs, served
+/// headlessly over that session's control socket.
+pub mod session_server;
 
 /// Keyboard event decoding: crossterm key events to child input bytes.
 pub mod keys;

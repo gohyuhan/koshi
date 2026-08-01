@@ -8,11 +8,12 @@ use uuid::Uuid;
 
 use super::*;
 
-/// An endpoint file holding a fixed address and secret.
+/// An endpoint file holding a fixed address, secret and process id.
 fn endpoint() -> EndpointFile {
     EndpointFile {
         socket: "/run/koshi/session-abc.sock".to_string(),
         token: ConnectionToken::new("k7QxSecret"),
+        pid: 4242,
     }
 }
 
@@ -51,7 +52,7 @@ fn the_file_on_disk_carries_the_real_secret() {
     let data = std::fs::read_to_string(&path).expect("read file bytes");
     assert_eq!(
         data,
-        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret"}"#
+        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","pid":4242}"#
     );
 }
 
@@ -70,6 +71,7 @@ fn rewriting_replaces_the_previous_content() {
     let second = EndpointFile {
         socket: "/run/koshi/session-def.sock".to_string(),
         token: ConnectionToken::new("secondSecret"),
+        pid: 4343,
     };
 
     second.write(&path).expect("write second endpoint file");
@@ -130,7 +132,7 @@ fn a_file_with_an_unknown_field_is_unreadable() {
     let path = dir.path().join("session-unknown.json");
     std::fs::write(
         &path,
-        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","extra":1}"#,
+        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","pid":4242,"extra":1}"#,
     )
     .expect("write file");
 
@@ -144,7 +146,11 @@ fn a_file_with_an_unknown_field_is_unreadable() {
 fn a_file_missing_a_field_is_unreadable() {
     let dir = TempDir::new().expect("create temp dir");
     let path = dir.path().join("session-partial.json");
-    std::fs::write(&path, r#"{"socket":"/run/koshi/session-abc.sock"}"#).expect("write file");
+    std::fs::write(
+        &path,
+        r#"{"socket":"/run/koshi/session-abc.sock","pid":4242}"#,
+    )
+    .expect("write file");
 
     match EndpointFile::read(&path) {
         Err(IpcError::EndpointFileUnreadable { .. }) => {}
@@ -199,4 +205,36 @@ fn the_socket_addr_passes_the_socket_location_check() {
     let session = SessionId::new();
     let addr = socket_addr(dir.path(), session);
     crate::validate::validate_socket_addr(&addr, dir.path()).expect("validate socket addr");
+}
+
+#[cfg(unix)]
+#[test]
+fn removing_the_socket_file_takes_the_path_off_the_disk() {
+    let dir = TempDir::new().expect("create temp dir");
+    let session = SessionId::new();
+    let addr = socket_addr(dir.path(), session);
+    std::fs::write(&addr, b"").expect("create the leftover socket file");
+
+    remove_socket_file(&addr);
+
+    assert!(!Path::new(&addr).exists());
+    // A path with nothing at it is left alone rather than reported.
+    remove_socket_file(&addr);
+    assert!(!Path::new(&addr).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn removing_a_pipe_name_leaves_the_filesystem_untouched() {
+    // A Windows address is a pipe name, not a path, so a file that happens to
+    // carry that name in the working directory must survive.
+    let dir = TempDir::new().expect("create temp dir");
+    let session = SessionId::new();
+    let addr = socket_addr(dir.path(), session);
+    let namesake = dir.path().join(&addr);
+    std::fs::write(&namesake, b"").expect("create the namesake file");
+
+    remove_socket_file(&addr);
+
+    assert!(namesake.exists());
 }
