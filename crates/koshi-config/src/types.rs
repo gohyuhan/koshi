@@ -58,6 +58,8 @@ pub struct ServerConfig {
     pub terminal: TerminalConfig,
     /// Log-file behavior for this process.
     pub logging: LoggingConfig,
+    /// Whether entry points marked `#[beta_feature]` may run.
+    pub allow_beta_features: bool,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +70,7 @@ impl Default for ServerConfig {
             scrollback: ScrollbackLimits::default(),
             terminal: TerminalConfig::default(),
             logging: LoggingConfig::default(),
+            allow_beta_features: false,
         }
     }
 }

@@ -712,6 +712,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "koshi-beta",
  "koshi-client",
  "koshi-config",
  "koshi-core",
@@ -740,6 +741,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "koshi-beta"
+version = "0.1.0"
+dependencies = [
+ "koshi-config",
+ "koshi-observability",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "koshi-client"
 version = "0.1.0"
 dependencies = [
@@ -761,6 +772,7 @@ dependencies = [
  "koshi-layout",
  "miette",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

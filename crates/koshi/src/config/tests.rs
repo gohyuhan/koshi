@@ -2,11 +2,21 @@
 //! files (profiles, themes) and the per-file readers that take an explicit
 //! path.
 
+use std::fs;
 use std::path::PathBuf;
 
+use koshi_beta::beta_feature;
 use koshi_config::types::RgbColor;
+use tempfile::TempDir;
 
 use super::*;
+
+/// Stands in for a real beta-gated entry point: the gate decides whether the
+/// body runs, and the two answers differ, so a closed gate is visible.
+#[beta_feature(otherwise = 0)]
+fn mock_beta_entry_point() -> u32 {
+    1
+}
 
 #[test]
 fn a_plain_name_is_accepted() {
@@ -409,4 +419,49 @@ fn push_field_warnings_adds_nothing_for_an_empty_skip_list() {
     let mut warnings = Vec::new();
     push_field_warnings(path, &[], &mut warnings);
     assert_eq!(warnings, Vec::<String>::new());
+}
+
+/// The startup wiring: the `koshi.kdl` knob reaches the process-wide gate.
+/// One test walks both answers, because the gate is one flag and separate
+/// tests would race each other over it.
+#[test]
+fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
+    let on = PartialKoshiConfig {
+        allow_beta_features: Some(true),
+        ..Default::default()
+    };
+    let off = PartialKoshiConfig {
+        allow_beta_features: Some(false),
+        ..Default::default()
+    };
+
+    apply_beta_gate(Some(on.clone()));
+    assert!(koshi_config::beta::allowed());
+
+    apply_beta_gate(Some(off));
+    assert!(!koshi_config::beta::allowed());
+
+    // No `koshi.kdl` at all closes an open gate.
+    apply_beta_gate(Some(on));
+    assert!(koshi_config::beta::allowed());
+    apply_beta_gate(None);
+    assert!(!koshi_config::beta::allowed());
+
+    // The whole chain from text on disk: the reader `load_app_layer` uses, onto
+    // the gate, into a function carrying the attribute. `load_app_layer` takes
+    // its directory from the platform, so the file goes to `load_app` here.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("koshi.kdl");
+
+    fs::write(&path, "version 1\nallow-beta-features #true\n").unwrap();
+    let mut warnings = Vec::new();
+    apply_beta_gate(load_app(&path, &mut warnings).map(|file| file.layer));
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(mock_beta_entry_point(), 1);
+
+    fs::write(&path, "version 1\nallow-beta-features #false\n").unwrap();
+    let mut warnings = Vec::new();
+    apply_beta_gate(load_app(&path, &mut warnings).map(|file| file.layer));
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(mock_beta_entry_point(), 0);
 }

@@ -47,4 +47,5 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 tempfile = "3.27.0"
 
 [dev-dependencies]
+koshi-beta = { version = "0.1.0", path = "../koshi-beta" }
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }

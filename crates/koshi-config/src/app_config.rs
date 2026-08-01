@@ -69,6 +69,7 @@ const SECTIONS: &[&str] = &[
     "copy",
     "terminal",
     "logging",
+    "allow-beta-features",
 ];
 
 /// A parsed `koshi.kdl`.
@@ -142,6 +143,14 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
             "copy" => partial.copy = Some(parse_copy(node, &mut warnings)),
             "terminal" => partial.terminal = Some(parse_terminal(node, &mut warnings)),
             "logging" => partial.logging = Some(parse_logging(node, &mut warnings)),
+            // Top-level like `theme`, so a bad value names the key alone —
+            // there is no `koshi` block to prefix it with.
+            "allow-beta-features" => match value_bool(node) {
+                Ok(allowed) => partial.allow_beta_features = Some(allowed),
+                Err(detail) => {
+                    warnings.push(format!("ignored `allow-beta-features`: {detail}"));
+                }
+            },
             other => warnings.push(format!("ignored {}", unknown_key(other, SECTIONS))),
         }
     }

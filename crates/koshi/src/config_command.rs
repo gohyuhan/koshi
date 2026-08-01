@@ -51,6 +51,12 @@ const FIELDS: &[FieldHelp] = &[
         "Color theme file name.",
     ),
     field(
+        "koshi.allow-beta-features",
+        "koshi.kdl",
+        "#false",
+        "Run features still marked beta.",
+    ),
+    field(
         "koshi.pane.min-cols",
         "koshi.kdl",
         "2",

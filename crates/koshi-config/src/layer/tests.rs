@@ -34,6 +34,50 @@ fn no_layers_returns_base() {
 }
 
 #[test]
+fn beta_features_are_off_unless_the_file_turns_them_on() {
+    // The built-in default, so a machine with no `koshi.kdl` runs nothing beta.
+    let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert!(!server.allow_beta_features);
+}
+
+#[test]
+fn allow_beta_features_folds_onto_the_session_side_only() {
+    let layer = PartialKoshiConfig {
+        allow_beta_features: Some(true),
+        ..Default::default()
+    };
+
+    // The session owns the knob, so it is the side that changes.
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    assert!(server.allow_beta_features);
+    assert_eq!(
+        server,
+        ServerConfig {
+            allow_beta_features: true,
+            ..ServerConfig::default()
+        }
+    );
+
+    // A viewer folds the same file and is untouched by it.
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+    assert_eq!(client, ClientConfig::default());
+}
+
+#[test]
+fn a_later_layer_can_turn_beta_features_back_off() {
+    let user = PartialKoshiConfig {
+        allow_beta_features: Some(true),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        allow_beta_features: Some(false),
+        ..Default::default()
+    };
+
+    assert!(!merge_server(ServerConfig::default(), vec![user, session]).allow_beta_features);
+}
+
+#[test]
 fn single_field_override_keeps_sibling() {
     let layer = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {
