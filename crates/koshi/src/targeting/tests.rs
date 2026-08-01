@@ -460,10 +460,40 @@ fn tab_name_owned_by_two_sessions_is_ambiguous() {
 
 #[test]
 fn two_tabs_of_one_session_sharing_a_name_are_ambiguous() {
-    // Both matches live in the same session, so the hint repeats that
-    // session's name — the tab ids are what tells them apart.
+    // Both matches live in one session: that session is the unambiguous
+    // owner, and resolving the tab inside it refuses with the ids —
+    // `--session` is not offered, only the tab ids tell them apart.
+    let session = SessionId::new();
     let first = TabId::from_uuid(uuid!("019bb2ba-0002-7000-8000-000000000001"));
     let second = TabId::from_uuid(uuid!("019bb2ba-0002-7000-8000-000000000002"));
+    let overviews = census([overview(
+        "amber-fox",
+        session,
+        &[(first, "logs"), (second, "logs")],
+        &[],
+        &[],
+    )]);
+    let tab_ref = TabRef::Name("logs".to_string());
+
+    let picked =
+        pick_session(None, None, Some(&tab_ref), None, &overviews).expect("one owning session");
+    assert_eq!(picked.session.id, session);
+
+    let error = resolve_tab(picked, &tab_ref).expect_err("two tabs share the name");
+    assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
+    assert_eq!(
+        rejection_help(&error),
+        "several tabs are named `logs` in session `amber-fox`: \
+         tab-019bb2ba-0002-7000-8000-000000000001, \
+         tab-019bb2ba-0002-7000-8000-000000000002; \
+         use the tab id"
+    );
+}
+
+#[test]
+fn inspecting_a_duplicated_tab_name_in_one_session_lists_its_ids() {
+    let first = TabId::from_uuid(uuid!("019bb2ba-0004-7000-8000-000000000001"));
+    let second = TabId::from_uuid(uuid!("019bb2ba-0004-7000-8000-000000000002"));
     let overviews = census([overview(
         "amber-fox",
         SessionId::new(),
@@ -471,14 +501,46 @@ fn two_tabs_of_one_session_sharing_a_name_are_ambiguous() {
         &[],
         &[],
     )]);
+
+    let error = tab_by_ref(&overviews, &TabRef::Name("logs".to_string()))
+        .expect_err("two tabs share the name");
+    assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
+    assert_eq!(
+        rejection_help(&error),
+        "several tabs are named `logs` in session `amber-fox`: \
+         tab-019bb2ba-0004-7000-8000-000000000001, \
+         tab-019bb2ba-0004-7000-8000-000000000002; \
+         use the tab id"
+    );
+}
+
+#[test]
+fn duplicate_tabs_spanning_sessions_still_offer_the_session_flag() {
+    // Two matches in one session plus one in another: the matches span
+    // sessions, so `--session` can still narrow to the session with the
+    // unique tab.
+    let first = TabId::from_uuid(uuid!("019bb2ba-0003-7000-8000-000000000001"));
+    let second = TabId::from_uuid(uuid!("019bb2ba-0003-7000-8000-000000000002"));
+    let third = TabId::from_uuid(uuid!("019bb2ba-0003-7000-8000-000000000003"));
+    let overviews = census([
+        overview(
+            "amber-fox",
+            SessionId::new(),
+            &[(first, "logs"), (second, "logs")],
+            &[],
+            &[],
+        ),
+        overview("blue-owl", SessionId::new(), &[(third, "logs")], &[], &[]),
+    ]);
     let tab_ref = TabRef::Name("logs".to_string());
-    let error = pick_session(None, None, Some(&tab_ref), None, &overviews).expect_err("two tabs");
+    let error = pick_session(None, None, Some(&tab_ref), None, &overviews).expect_err("three tabs");
     assert_eq!(rejection_reason(&error), RejectReason::TargetAmbiguous);
     assert_eq!(
         rejection_help(&error),
         "several tabs are named `logs`: \
-         tab-019bb2ba-0002-7000-8000-000000000001 in session `amber-fox`, \
-         tab-019bb2ba-0002-7000-8000-000000000002 in session `amber-fox`; \
+         tab-019bb2ba-0003-7000-8000-000000000001 in session `amber-fox`, \
+         tab-019bb2ba-0003-7000-8000-000000000002 in session `amber-fox`, \
+         tab-019bb2ba-0003-7000-8000-000000000003 in session `blue-owl`; \
          use the tab id or --session"
     );
 }

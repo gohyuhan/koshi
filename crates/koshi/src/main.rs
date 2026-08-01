@@ -216,12 +216,16 @@ fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
             output::render_clients(&discovery::client_rows(sessions), *format)
         }
         CliCommand::Inspect { target } => match target {
-            InspectTarget::Session { format, .. } => {
+            InspectTarget::Session { session, format } => {
                 // The scope already resolved the named session, so the census
-                // holds that one session.
-                let overview = sessions
-                    .first()
-                    .expect("a session-scoped census holds the session it resolved");
+                // holds that one session; an empty census reports it as not
+                // found.
+                let overview = sessions.first().ok_or_else(|| CliError::SessionNotFound {
+                    session: match session {
+                        SessionRef::Id(id) => id.to_string(),
+                        SessionRef::Name(name) => name.clone(),
+                    },
+                })?;
                 output::render_session(&overview.session, *format)
             }
             InspectTarget::Tab { tab, format } => {

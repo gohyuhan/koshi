@@ -242,9 +242,10 @@ fn pick_session<'a>(
 
 /// The session owning an explicitly named tab: by id, the one session whose
 /// tab list holds it; by name, the name must match exactly one tab across
-/// every running session — a second tab of that name, in the same session or
-/// another, demands the tab id or `--session`, and a sole match counts only
-/// when every running session answered.
+/// every running session — matches spanning several sessions demand the tab
+/// id or `--session`, matches all in one session resolve to that session
+/// (the duplicate-tab refusal is [`resolve_tab`]'s), and a sole match counts
+/// only when every running session answered.
 fn pick_session_by_tab<'a>(
     tab_ref: &TabRef,
     found: &'a Discovered,
@@ -274,6 +275,15 @@ fn pick_session_by_tab<'a>(
                 }
                 [] => Err(found.missing("tab named", &format!("`{name}`"))),
                 several => {
+                    let one_owner = several
+                        .windows(2)
+                        .all(|pair| pair[0].0.session.id == pair[1].0.session.id);
+                    if one_owner {
+                        // One session owns every match, so the session answer
+                        // is that session; the duplicate-tab refusal, with the
+                        // ids, is resolve_tab's.
+                        return Ok(several[0].0);
+                    }
                     let places = several
                         .iter()
                         .map(|(overview, tab_id)| {
