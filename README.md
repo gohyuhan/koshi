@@ -34,7 +34,7 @@ scrollback, keyboard shortcuts, mouse input, and process cleanup.
 ## Why Koshi?
 
 Koshi keeps the core focused on terminal work. Panes, tabs, layouts,
-keybindings, themes, and saved sessions are built in. App settings stay in
+keybindings, themes, and saved layouts are built in. App settings stay in
 small KDL files, and shell commands can control a running session.
 
 ## Features
@@ -254,7 +254,7 @@ Koshi uses four optional KDL file types. Each present file must declare
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, and update settings |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, and beta-feature settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, and environment values |
@@ -294,16 +294,19 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 ### Sessions and discovery
 
 List and inspect commands accept `--format table` or `--format json`.
+`NAME_OR_ID` takes the target's generated name or its printed id; an id is
+never treated as a name, and a name several targets share is refused with
+every matching id listed.
 
 | Command | Result |
 |---|---|
 | `koshi list-sessions` | List running sessions |
-| `koshi kill-session [NAME]` | End the named session, or the only running session |
-| `koshi list-tabs [--session <SESSION_ID>]` | List tabs |
-| `koshi list-panes [--session <SESSION_ID>]` | List panes |
-| `koshi list-clients [--session <SESSION_ID>]` | List attached clients |
-| `koshi inspect session <SESSION_ID>` | Show one session |
-| `koshi inspect tab <TAB_ID>` | Show one tab |
+| `koshi kill-session [NAME_OR_ID]` | End that session, or the only running session |
+| `koshi list-tabs [--session <NAME_OR_ID>]` | List tabs |
+| `koshi list-panes [--session <NAME_OR_ID>]` | List panes |
+| `koshi list-clients [--session <NAME_OR_ID>]` | List attached clients |
+| `koshi inspect session <NAME_OR_ID>` | Show one session |
+| `koshi inspect tab <NAME_OR_ID>` | Show one tab |
 | `koshi inspect pane <PANE_ID>` | Show one pane |
 | `koshi inspect client <CLIENT_ID>` | Show one client |
 
@@ -314,7 +317,7 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 
 | Command | Result |
 |---|---|
-| `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <TAB>] [--session <SESSION>] [--client <CLIENT_ID>]` | Open a shell pane |
+| `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--client <CLIENT_ID>]` | Open a shell pane |
 | `koshi run [new-pane options] -- <COMMAND>...` | Open a pane running one command |
 | `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
 | `koshi resize-pane --direction <DIRECTION> [--size <CELLS>] [--pane <PANE_ID>]` | Move one pane border |
@@ -330,8 +333,8 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 | `koshi close-tab [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--force]` | Close a tab |
 | `koshi next-tab [--client <CLIENT_ID>]` | Focus the next tab |
 | `koshi previous-tab [--client <CLIENT_ID>]` | Focus the previous tab |
-| `koshi focus-tab (--index <INDEX>\|--tab <TAB_ID>) [--client <CLIENT_ID>]` | Focus one tab |
-| `koshi move-tab --index <INDEX> [--tab <TAB_ID>]` | Move one tab |
+| `koshi focus-tab (--index <INDEX>\|--tab <NAME_OR_ID>) [--client <CLIENT_ID>]` | Focus one tab |
+| `koshi move-tab --index <INDEX> [--tab <NAME_OR_ID>]` | Move one tab |
 
 Create commands print created ids. `new-pane` and `run` print one pane id.
 `new-tab` prints its tab id and root pane id.

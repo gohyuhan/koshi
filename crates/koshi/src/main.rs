@@ -3,10 +3,12 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use koshi::cli::{ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets};
+use koshi::cli::{
+    ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets, SessionRef,
+};
 use koshi::config;
 use koshi::config_command;
-use koshi::discovery::{self, Discovered};
+use koshi::discovery;
 use koshi::error::CliError;
 use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
@@ -16,7 +18,6 @@ use koshi::session_control;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, CommandResult};
-use koshi_core::ids::SessionId;
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -83,7 +84,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::KillSession { session }) = &cli.command {
-        return finish_command(session_control::kill_session(session.as_deref())?);
+        return finish_command(session_control::kill_session(session.as_ref())?);
     }
 
     if cli.is_interactive_launch() {
@@ -168,17 +169,17 @@ fn is_discovery(command: &CliCommand) -> bool {
     )
 }
 
-/// The one session a discovery query is scoped to: a listing's `--session`
-/// flag, or the session an `inspect session` names. Every other query spans
-/// all running sessions.
-fn discovery_session(command: &CliCommand) -> Option<SessionId> {
+/// The one session a discovery query is scoped to, by id or name: a
+/// listing's `--session` flag, or the session an `inspect session` names.
+/// Every other query spans all running sessions.
+fn discovery_session(command: &CliCommand) -> Option<&SessionRef> {
     match command {
         CliCommand::ListTabs { session, .. }
         | CliCommand::ListPanes { session, .. }
-        | CliCommand::ListClients { session, .. } => *session,
+        | CliCommand::ListClients { session, .. } => session.as_ref(),
         CliCommand::Inspect {
             target: InspectTarget::Session { session, .. },
-        } => Some(*session),
+        } => Some(session),
         _ => None,
     }
 }
@@ -186,9 +187,11 @@ fn discovery_session(command: &CliCommand) -> Option<SessionId> {
 /// Serve a discovery query from live state: probe the running sessions the
 /// query is scoped to, keep the rows it asked for, and print them.
 ///
-/// A scoped query asks one session and reports it as not running when
-/// nothing answers; an unscoped one spans every session, so nothing running
-/// is an empty answer — the header row alone — not an error.
+/// A query scoped by session id asks that one session and reports it as not
+/// running when nothing answers; one scoped by session name asks every
+/// session and keeps the one that matches, refusing when two share the name.
+/// An unscoped query spans every session, so nothing running is an empty
+/// answer — the header row alone — not an error.
 ///
 /// A listing claims to be the whole picture, so it prints its rows and then
 /// reports a session that could not answer as a failure. An `inspect` claims
@@ -196,10 +199,7 @@ fn discovery_session(command: &CliCommand) -> Option<SessionId> {
 /// have said, so a successful one is a success.
 fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
-    let found = match discovery_session(command) {
-        Some(session_id) => Discovered::of(discovery::fetch_one(&runtime_dir, session_id)?),
-        None => discovery::fetch_all(&runtime_dir),
-    };
+    let found = targeting::scope_sessions(&runtime_dir, discovery_session(command))?;
     let sessions = found.sessions.as_slice();
 
     let rendered = match command {
@@ -217,10 +217,20 @@ fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
         }
         CliCommand::Inspect { target } => match target {
             InspectTarget::Session { session, format } => {
-                output::render_session(&discovery::find_session(&found, *session)?, *format)
+                // The scope already resolved the named session, so the census
+                // holds that one session; an empty census reports it as not
+                // found.
+                let overview = sessions.first().ok_or_else(|| CliError::SessionNotFound {
+                    session: match session {
+                        SessionRef::Id(id) => id.to_string(),
+                        SessionRef::Name(name) => name.clone(),
+                    },
+                })?;
+                output::render_session(&overview.session, *format)
             }
             InspectTarget::Tab { tab, format } => {
-                output::render_tab(&discovery::find_tab(&found, *tab)?, *format)
+                let tab_id = targeting::tab_by_ref(&found, tab)?;
+                output::render_tab(&discovery::find_tab(&found, tab_id)?, *format)
             }
             InspectTarget::Pane { pane, format } => {
                 output::render_pane(&discovery::find_pane(&found, *pane)?, *format)

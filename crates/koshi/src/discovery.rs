@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use koshi_core::discovery::{ClientInfo, PaneInfo, SessionInfo, SessionOverview, TabInfo};
+use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_ipc::endpoint::EndpointFile;
@@ -296,16 +296,6 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
             })
         })
         .collect()
-}
-
-/// The session `session_id` names, in full, wherever it is running.
-pub fn find_session(found: &Discovered, session_id: SessionId) -> Result<SessionInfo, CliError> {
-    found
-        .sessions
-        .iter()
-        .find(|overview| overview.session.id == session_id)
-        .map(|overview| overview.session.clone())
-        .ok_or_else(|| found.missing("session", &session_id.to_string()))
 }
 
 /// The tab `tab_id` names, in full, wherever it is running.
