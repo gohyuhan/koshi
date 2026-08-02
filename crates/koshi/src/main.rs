@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use koshi::attach;
 use koshi::cli::{
     ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets, SessionRef,
 };
@@ -19,7 +20,7 @@ use koshi::session_control;
 use koshi::session_server;
 use koshi::targeting::{self, Route};
 use koshi::updater;
-use koshi_core::command::{CliExitCode, CommandResult};
+use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -128,9 +129,48 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         });
     }
 
+    // Attach is a root flag rather than an action verb, so it dispatches here
+    // rather than through the routing layer. It joins a session this process
+    // is outside of, so it reads no in-session identity.
+    if let Some(selector) = cli.attach.as_deref() {
+        return attach::run(selector);
+    }
+
     // Session verbs read the in-session identity first, so a broken pane
     // environment reports itself rather than as a missing daemon.
     let in_session = InSessionContext::from_env()?;
+
+    // Detach is a root flag rather than an action verb, so it dispatches here
+    // rather than through the routing layer. Success prints nothing; a detach
+    // the session refuses comes back as a rejected command.
+    match cli.detach.as_ref() {
+        Some(None) => {
+            let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
+                detail: "bare --detach only works inside a koshi session; outside one use koshi --detach <id>".to_string(),
+            })?;
+            return finish_command(ipc_client::submit_in_session(
+                context,
+                Command::Detach(DetachArgs { client: None }),
+            )?);
+        }
+        Some(Some(raw)) => {
+            return finish_command(session_control::detach_client_or_session(raw)?);
+        }
+        None => {}
+    }
+
+    match cli.detach_all.as_ref() {
+        Some(None) => {
+            let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
+                detail: "bare --detach-all only works inside a koshi session; outside one use koshi --detach-all <session>".to_string(),
+            })?;
+            return finish_command(ipc_client::submit_in_session(context, Command::DetachAll)?);
+        }
+        Some(Some(session)) => {
+            return finish_command(session_control::detach_all_session(Some(session))?);
+        }
+        None => {}
+    }
 
     // This CLI is a client, so it reads its own `layout.new-pane-direction`
     // out of `koshi.kdl` and puts it on the pane-opening verbs that were given

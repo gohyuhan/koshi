@@ -30,7 +30,7 @@ use crate::attach::AttachedSessionStructureSnapshot;
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
 /// Any change to the shape of a wire struct bumps this, in the same commit.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.

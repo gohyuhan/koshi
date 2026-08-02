@@ -93,6 +93,26 @@ impl Widget for SnapshotWidget<'_> {
 /// or the shell exits, then restore the terminal. When `profile` names one, the
 /// session opens that profile's tabs and panes; otherwise it opens one shell.
 /// Errors surface to `main`.
+/// Register the hook that puts the outer terminal back the way koshi found
+/// it: raw mode off, default cursor shape, mouse capture and bracketed paste
+/// off, alternate screen left. Shared by the interactive launch and the
+/// attached client, so both restore identically on any exit — normal, error,
+/// or panic.
+pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
+    cleanup.register_cleanup(Box::new(|| {
+        let _ = disable_raw_mode();
+        // The cursor style koshi last copied out of a pane belongs to that pane,
+        // not to the shell koshi exits back to: quitting while vim was inserting
+        // would otherwise leave the user's own prompt wearing vim's blinking bar.
+        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
+        // Undo the mouse capture enabled at startup, so the terminal koshi exits
+        // back to has its native selection and scroll again.
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }));
+}
+
 pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Read the config before tracing starts, so the `logging` section can
     // decide whether a log file is opened at all, and at what level and format.
@@ -137,18 +157,7 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 
     // Restore the terminal on any exit — normal, error, or panic.
     let cleanup = TerminalCleanupGuard::new();
-    cleanup.register_cleanup(Box::new(|| {
-        let _ = disable_raw_mode();
-        // The cursor style koshi last copied out of a pane belongs to that pane,
-        // not to the shell koshi exits back to: quitting while vim was inserting
-        // would otherwise leave the user's own prompt wearing vim's blinking bar.
-        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
-        // Undo the mouse capture enabled at startup, so the terminal koshi exits
-        // back to has its native selection and scroll again.
-        let _ = execute!(io::stdout(), DisableMouseCapture);
-        let _ = execute!(io::stdout(), DisableBracketedPaste);
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    }));
+    register_terminal_restore(&cleanup);
     let _panic_guard = install_panic_hook(&cleanup);
     // Each step below is one koshi has no way to work around: without it there
     // is no surface to draw on, so the failure is logged as an error naming the
@@ -241,7 +250,10 @@ pub fn run(profile: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // server's events under its own client id, so a subscriber that falls
     // behind can be handed a fresh snapshot of that client's view, and holds
     // the cleanup guard, since the outer terminal it restores is the client's.
+    // The server is told this client is its in-process viewer, so a detach can
+    // never take the window the session runs in.
     let events_rx = server.subscribe(client_id, EventFilter::All);
+    server.set_local_viewer(client_id);
     let mut client = viewer(client_id, viewport, events_rx, cleanup, loaded);
 
     // Input thread: crossterm reads block here, feeding the inbox.

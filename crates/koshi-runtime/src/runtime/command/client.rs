@@ -210,6 +210,12 @@ impl Server {
     ///
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
+    ///
+    /// Runs for both detach triggers: a connection drop (either half of an
+    /// attached client's connection ending) and the [`Command::Detach`] /
+    /// [`Command::DetachAll`] execution arms. Target resolution and the
+    /// in-process-viewer refusal happen at command resolution before this is
+    /// reached, so every `client_id` arriving here is detachable.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.

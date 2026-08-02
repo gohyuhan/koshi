@@ -203,7 +203,10 @@ fn exchange(
 
 /// Read the endpoint file for `session_id`. A missing file means no running
 /// koshi advertises that session.
-fn read_endpoint(runtime_dir: &Path, session_id: SessionId) -> Result<EndpointFile, CliError> {
+pub(crate) fn read_endpoint(
+    runtime_dir: &Path,
+    session_id: SessionId,
+) -> Result<EndpointFile, CliError> {
     let path = EndpointFile::path(runtime_dir, session_id);
     EndpointFile::read(&path).map_err(|error| match error {
         IpcError::EndpointFileMissing { .. } => CliError::SessionNotFound {
@@ -218,7 +221,10 @@ fn read_endpoint(runtime_dir: &Path, session_id: SessionId) -> Result<EndpointFi
 /// Connect to the advertised socket. An address nothing listens on is a
 /// leftover from a session that is gone, so it reports the session as not
 /// running rather than a transport fault.
-fn connect(endpoint: &EndpointFile, session_id: SessionId) -> Result<Connection, CliError> {
+pub(crate) fn connect(
+    endpoint: &EndpointFile,
+    session_id: SessionId,
+) -> Result<Connection, CliError> {
     Connection::connect(&endpoint.socket).map_err(|error| match error {
         IpcError::NoListener { .. } => CliError::SessionNotFound {
             session: session_id.to_string(),
@@ -231,7 +237,7 @@ fn connect(endpoint: &EndpointFile, session_id: SessionId) -> Result<Connection,
 
 /// A transport failure mid-exchange: the endpoint was reachable but the
 /// conversation could not finish.
-fn talk_failed(error: IpcError) -> CliError {
+pub(crate) fn talk_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
         detail: error.to_string(),
     }
@@ -239,7 +245,7 @@ fn talk_failed(error: IpcError) -> CliError {
 
 /// The server refused a request at the protocol level (bad token, version
 /// mismatch, unreadable request).
-fn refused(refusal: &IpcErrorPayload) -> CliError {
+pub(crate) fn refused(refusal: &IpcErrorPayload) -> CliError {
     CliError::IpcUnavailable {
         detail: refusal.message.clone(),
     }
@@ -247,7 +253,7 @@ fn refused(refusal: &IpcErrorPayload) -> CliError {
 
 /// The server answered with a result kind the request cannot produce —
 /// a protocol violation, not a command outcome.
-fn unexpected_reply(result: &IpcResult) -> CliError {
+pub(crate) fn unexpected_reply(result: &IpcResult) -> CliError {
     let kind = match result {
         IpcResult::Hello => "Hello",
         IpcResult::Attached { .. } => "Attached",

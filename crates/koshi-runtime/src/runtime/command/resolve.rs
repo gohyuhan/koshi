@@ -101,6 +101,8 @@ impl Server {
     /// mouse-select commands (mouse/keybinding only), plugin commands (plugin
     /// host only) — is refused before any state is read. `Quit` is accepted
     /// from an external CLI (`kill-session`) but not from inside a pane.
+    /// `Detach` and `DetachAll` are accepted from both, since a client detaches
+    /// itself from inside the session and by id from outside it.
     /// Non-CLI sources are unrestricted here.
     pub(super) fn allowed_from_source(command: &Command, source: &CommandSource) -> bool {
         let cli_verb = matches!(
@@ -118,6 +120,8 @@ impl Server {
                 | Command::FocusPane(_)
                 | Command::SetLockMode(_)
                 | Command::ToggleLockMode(_)
+                | Command::Detach(_)
+                | Command::DetachAll
         );
         match source {
             CommandSource::InSessionCli { .. } => cli_verb,
@@ -285,8 +289,68 @@ impl Server {
             Command::RunCommandPane(args) => self
                 .resolve_new_pane_source(&Self::run_command_new_pane_args(args), source, session)
                 .map(drop),
-            Command::Plugin(_) | Command::Quit => Ok(()),
+            // Detach names one client, resolved and vetted here so the handler
+            // receives a client it may remove.
+            Command::Detach(args) => self
+                .resolve_detach_client(args.client, source, Self::require_session(session)?)
+                .map(drop),
+            Command::Plugin(_) | Command::DetachAll | Command::Quit => Ok(()),
         }
+    }
+
+    /// Resolve the client a [`Command::Detach`] removes: the explicit `client`
+    /// argument when set, else the acting client
+    /// ([`Self::resolve_acting_client`]) — the issuer while it is attached,
+    /// else the session's sole attached client. Several attached with none
+    /// named lists the ids to choose from.
+    ///
+    /// The in-process viewer is refused here, the one place every detach
+    /// spelling passes: `koshi --detach`, `koshi --detach <client-id>`, and the
+    /// bare form on a session whose only client is that viewer all stop before
+    /// the handler, so the window the session runs in keeps its client record,
+    /// its subscription, and its rendering.
+    pub(super) fn resolve_detach_client(
+        &self,
+        explicit: Option<ClientId>,
+        source: &CommandSource,
+        session: &Session,
+    ) -> Result<ClientId, Rejection> {
+        let client_id = match explicit {
+            Some(client_id) => {
+                if session.clients.get(client_id).is_none() {
+                    return Err(Rejection::new(
+                        RejectReason::TargetNotFound,
+                        "target client not attached to the session",
+                    ));
+                }
+                client_id
+            }
+            None => Self::resolve_acting_client(source, session).map_err(|rejection| {
+                if rejection.reason == RejectReason::TargetAmbiguous {
+                    let ids: Vec<String> = session
+                        .clients
+                        .list_attached()
+                        .map(|client| client.id().to_string())
+                        .collect();
+                    Rejection::new(
+                        RejectReason::TargetAmbiguous,
+                        &format!(
+                            "several clients are attached; specify the client: {}",
+                            ids.join(", ")
+                        ),
+                    )
+                } else {
+                    rejection
+                }
+            })?,
+        };
+        if Some(client_id) == self.local_viewer {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "this session runs inside the koshi window viewing it; that window cannot detach — kill-session ends the session",
+            ));
+        }
+        Ok(client_id)
     }
 
     /// Resolve a [`Command::NewPane`] to its concrete target: the session and

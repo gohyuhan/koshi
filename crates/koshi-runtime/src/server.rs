@@ -78,6 +78,12 @@ pub struct Server {
     /// subscriber paused by a dropped critical event is resynced from the
     /// frame of the client named here.
     subscriptions: Vec<(SubscriberId, ClientId)>,
+    /// The client whose view runs inside this same process — the interactive
+    /// launch's own viewer, set by [`set_local_viewer`](Self::set_local_viewer).
+    /// A detach naming it is rejected, so its record, its subscription, and its
+    /// rendering all outlive every detach. A per-session server has no
+    /// in-process viewer and leaves this `None`.
+    pub(crate) local_viewer: Option<ClientId>,
     /// Source of render snapshots for attach.
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
@@ -154,6 +160,7 @@ impl Server {
             pty_sizes: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
+            local_viewer: None,
             snapshot_provider,
             storage,
             ipc_server: None,
@@ -198,6 +205,13 @@ impl Server {
         let (id, rx) = self.event_bus.subscribe(filter);
         self.subscriptions.push((id, client_id));
         rx
+    }
+
+    /// Name `client_id` the viewer running inside this process. A detach
+    /// resolving to it is rejected, so the window the session runs in keeps
+    /// its client record, its subscription, and its rendering.
+    pub fn set_local_viewer(&mut self, client_id: ClientId) {
+        self.local_viewer = Some(client_id);
     }
 
     /// Drop every subscription registered as viewing `client_id`, closing the
