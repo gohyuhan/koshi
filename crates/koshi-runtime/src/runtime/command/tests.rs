@@ -32,6 +32,7 @@ use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::error::PtyError;
+use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{pane_viewport, Client, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::{Session, Tab};
@@ -39,6 +40,7 @@ use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
+use crate::runtime::bus::EventFilter;
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
@@ -10916,4 +10918,287 @@ fn new_tab_with_no_cwd_opens_in_the_focused_panes_directory() {
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
 
     assert_eq!(last_spawn_cwd(&fake), Some(PathBuf::from("/tmp/reported")));
+}
+
+/// The message every detach spelling that resolves to the in-process viewer
+/// comes back with.
+const VIEWER_REFUSAL: &str = "this session runs inside the koshi window viewing it; that window cannot detach — kill-session ends the session";
+
+/// The socket path an in-session CLI envelope carries in these tests; the
+/// source only has to be well-formed, nothing reads the path.
+fn cli_socket() -> PathBuf {
+    PathBuf::from("/tmp/koshi-detach-tests.sock")
+}
+
+#[test]
+fn detach_naming_the_in_process_viewer_is_refused_and_keeps_its_record() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewer = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, _pane) = only_slot(&rt);
+    rt.set_local_viewer(viewer);
+    let events = rt.subscribe(viewer, EventFilter::All);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs {
+            client: Some(viewer),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(VIEWER_REFUSAL.to_string()),
+        }
+    );
+
+    // The record, and the subscription feeding the window's rendering, both
+    // outlive the refused detach.
+    assert_eq!(rt.sessions[&sid].clients.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid].clients.get(viewer).map(Client::id),
+        Some(viewer)
+    );
+    assert_eq!(rt.event_bus.subscriber_count(), 1);
+    drop(events);
+}
+
+#[test]
+fn a_bare_detach_from_inside_the_koshi_window_is_refused() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewer = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    rt.set_local_viewer(viewer);
+
+    // `koshi --detach` typed in a pane of the window the session runs in: no
+    // client named, and the issuing pane carries the viewer's id.
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(viewer), pane, cli_socket()),
+        Command::Detach(DetachArgs { client: None }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(VIEWER_REFUSAL.to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid].clients.get(viewer).map(Client::id),
+        Some(viewer)
+    );
+}
+
+#[test]
+fn detach_all_takes_every_client_except_the_in_process_viewer() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let big = Size { cols: 80, rows: 24 };
+    let small = Size { cols: 40, rows: 24 };
+    let viewer = rt
+        .bootstrap_local(SessionId::new(), big, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab, pane) = only_slot(&rt);
+    rt.set_local_viewer(viewer);
+
+    // A second, smaller client joins over the socket and holds the tab at
+    // 40x24.
+    let socket_client = ClientId::new();
+    rt.handle_client_attach(sid, socket_client, small, tab, SystemTime::now());
+    let viewer_events = rt.subscribe(viewer, EventFilter::All);
+    let socket_events = rt.subscribe(socket_client, EventFilter::All);
+
+    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let command_id = env.id;
+
+    // Only the socket client leaves, so the tab grows back to the viewer's own
+    // size and the pane's PTY reflows up.
+    let expected = size_root_pane(pane, pane_viewport(big), MIN_PANE_SIZE);
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PtyResized(PtyResized {
+                pane_id: pane,
+                size: expected,
+            })],
+        }
+    );
+    assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+
+    assert_eq!(rt.sessions[&sid].clients.len(), 1);
+    assert_eq!(
+        rt.sessions[&sid].clients.get(viewer).map(Client::id),
+        Some(viewer)
+    );
+    assert!(rt.sessions[&sid].clients.get(socket_client).is_none());
+
+    // The viewer keeps its subscription, and the reflow reaches it; the socket
+    // client's subscription is dropped with its record.
+    assert_eq!(rt.event_bus.subscriber_count(), 1);
+    assert_eq!(
+        viewer_events.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::Event(Event::PtyResized(PtyResized {
+            pane_id: pane,
+            size: expected,
+        }))]
+    );
+    drop(socket_events);
+}
+
+#[test]
+fn detach_naming_a_client_that_is_not_attached_is_not_found() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let attached = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, _pane) = only_slot(&rt);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs {
+            client: Some(ClientId::new()),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(
+        rt.sessions[&sid].clients.get(attached).map(Client::id),
+        Some(attached)
+    );
+}
+
+#[test]
+fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    let first = rt
+        .bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab, _pane) = only_slot(&rt);
+    let second = ClientId::new();
+    rt.handle_client_attach(sid, second, size, tab, SystemTime::now());
+
+    // An external CLI names no client of its own, and two are attached.
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs { client: None }),
+    );
+    let command_id = env.id;
+
+    // The registry lists clients in id order, which for these ids is the order
+    // their text sorts in.
+    let mut ids = [first.to_string(), second.to_string()];
+    ids.sort();
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some(format!(
+                "several clients are attached; specify the client: {}, {}",
+                ids[0], ids[1]
+            )),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].clients.len(), 2);
+}
+
+#[test]
+fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let only_client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    let events = rt.subscribe(only_client, EventFilter::All);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs { client: None }),
+    );
+    let command_id = env.id;
+
+    // The tab loses its last viewer, so it has no viewport to reflow to and
+    // the detach emits nothing.
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(rt.sessions[&sid].clients.get(only_client).is_none());
+    assert_eq!(rt.event_bus.subscriber_count(), 0);
+
+    // The session model lives on: the pane is still registered and still holds
+    // its PTY.
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane).map(PaneRecord::id),
+        Some(pane)
+    );
+    assert!(rt.pty_handles.contains_key(&pane));
+    drop(events);
+}
+
+#[test]
+fn detach_all_on_a_session_with_no_clients_applies_and_emits_nothing() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let mut session = bare_session(SessionId::new());
+    let pane = PaneId::new();
+    let tab = TabId::new();
+    add_pane(&mut session, pane);
+    add_tab(&mut session, tab, pane);
+    let sid = session.id;
+    rt.sessions.insert(sid, session);
+
+    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane).map(PaneRecord::id),
+        Some(pane)
+    );
 }

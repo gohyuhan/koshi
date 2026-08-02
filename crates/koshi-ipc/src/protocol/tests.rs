@@ -189,7 +189,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // and then fails to decode the answer, which reads to the user as a
     // session that is not running.
     //
-    // Shape as of protocol version 3. Round-trip tests cannot catch this:
+    // Shape as of protocol version 4. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
     // itself.
     assert_eq!(
@@ -249,7 +249,7 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // `Option<Direction>` and encoded `null` when unset; it is now a bare
     // `"Down"`, and a version-1 CLI's `null` no longer decodes.
     //
-    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let request = IpcRequest {
         request_id: 2,
@@ -314,7 +314,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
     // including inside `AttachedSessionStructureSnapshot` — turns this red,
     // and `PROTOCOL_VERSION` goes up in the same commit.
     //
-    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let request = IpcRequest {
         request_id: 4,

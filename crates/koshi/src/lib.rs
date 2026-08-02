@@ -4,6 +4,11 @@
 /// Startup, the event loop, and terminal I/O for the interactive binary.
 pub mod app;
 
+/// The attached client: join a running session over its control socket and
+/// read its event stream until it detaches, the session ends, or the
+/// connection breaks.
+pub mod attach;
+
 /// Command-line grammar: root parser, attach/detach flags, subcommand tree.
 pub mod cli;
 

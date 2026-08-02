@@ -334,6 +334,12 @@ fn serve_connection(
 /// ends the writing thread. Both
 /// notify, so a write that fails while the reading half still blocks is
 /// cleaned up too — a detach for a client already gone changes nothing.
+///
+/// A detach the server starts closes the client's queue: the writing thread
+/// drains what is already queued, writes [`SessionEvent::Detached`] as its
+/// last frame, and ends. The reading half stays blocked until the client
+/// closes its end, and that close reads as end of stream — a second detach for
+/// a client already gone.
 fn stream_events(
     connection: Connection,
     client_id: ClientId,
@@ -343,7 +349,14 @@ fn stream_events(
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
     std::thread::spawn(move || {
-        while let Ok(delivery) = events.recv() {
+        loop {
+            let Ok(delivery) = events.recv() else {
+                // The queue closed, which the server does when it detaches this
+                // client. `recv` hands back everything queued before the close,
+                // so the goodbye follows the events that preceded it.
+                let _ = writer.send(&SessionEvent::Detached);
+                break;
+            };
             if let Some(event) = wire_event(&delivery) {
                 if writer.send(&event).is_err() {
                     break;

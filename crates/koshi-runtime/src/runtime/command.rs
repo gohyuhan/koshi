@@ -30,9 +30,9 @@ use crate::server::Server;
 use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
-        CommandSource, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos, LockModeArgs,
-        MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, Selection,
-        SelectionKind, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
+        CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos,
+        LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
+        Selection, SelectionKind, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
         WriteToPaneArgs,
     },
     event::{
@@ -243,6 +243,8 @@ impl Server {
             Command::Visual(command) => self.handle_visual(command_id, &envelope.source, &command),
             Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
             Command::Quit => Ok(self.handle_quit(command_id)),
+            Command::Detach(args) => self.handle_detach(command_id, &envelope.source, &args),
+            Command::DetachAll => Ok(self.handle_detach_all(command_id)),
             Command::TogglePaneFullscreen => {
                 self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
             }
@@ -441,6 +443,53 @@ impl Server {
             command_id,
             emitted_events: Vec::new(),
         }
+    }
+
+    /// Handle [`Command::Detach`]: remove the resolved client from the session
+    /// and reconcile the tab it was viewing
+    /// ([`Server::handle_client_detach`]). The session and its panes keep
+    /// running; the other clients keep their records.
+    ///
+    /// The client is resolved through
+    /// [`Server::resolve_detach_client`], the same call validation made, so
+    /// this never reaches the in-process viewer.
+    fn handle_detach(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &DetachArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let session = Self::require_session(self.acting_session(source)?)?;
+        let client_id = self.resolve_detach_client(args.client, source, session)?;
+
+        let mut scope = TransactionScope::new();
+        for event in self.handle_client_detach(client_id) {
+            scope.emit(event);
+        }
+        Ok(scope.commit(command_id, &mut self.event_bus))
+    }
+
+    /// Handle [`Command::DetachAll`]: remove every attached client except the
+    /// in-process viewer, one [`Server::handle_client_detach`] each, and report
+    /// the events they emitted together. A session whose only client is that
+    /// viewer — or which has no client at all — emits nothing.
+    fn handle_detach_all(&mut self, command_id: CommandId) -> CommandResult {
+        let local_viewer = self.local_viewer;
+        let clients: Vec<ClientId> = self
+            .sessions
+            .values()
+            .flat_map(|session| session.clients.list_attached())
+            .map(|client| client.id())
+            .filter(|client_id| Some(*client_id) != local_viewer)
+            .collect();
+
+        let mut scope = TransactionScope::new();
+        for client_id in clients {
+            for event in self.handle_client_detach(client_id) {
+                scope.emit(event);
+            }
+        }
+        scope.commit(command_id, &mut self.event_bus)
     }
 
     /// The session's only attached client, or a rejection saying why — none

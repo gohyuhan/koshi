@@ -52,6 +52,7 @@ fn bare_koshi_is_the_interactive_launch() {
         Cli {
             attach: None,
             detach: None,
+            detach_all: None,
             profile: None,
             command: None,
         }
@@ -81,6 +82,7 @@ fn attach_takes_a_required_session_id() {
         Cli {
             attach: Some("3f2a".to_string()),
             detach: None,
+            detach_all: None,
             profile: None,
             command: None,
         }
@@ -103,6 +105,7 @@ fn detach_without_an_id_targets_the_current_session() {
         Cli {
             attach: None,
             detach: Some(None),
+            detach_all: None,
             profile: None,
             command: None,
         }
@@ -118,6 +121,7 @@ fn detach_with_an_id_targets_that_session() {
         Cli {
             attach: None,
             detach: Some(Some("3f2a".to_string())),
+            detach_all: None,
             profile: None,
             command: None,
         }
@@ -132,6 +136,7 @@ fn detach_binds_a_subcommand_looking_token_as_its_value() {
         Cli {
             attach: None,
             detach: Some(Some("list-sessions".to_string())),
+            detach_all: None,
             profile: None,
             command: None,
         }
@@ -141,6 +146,75 @@ fn detach_binds_a_subcommand_looking_token_as_its_value() {
 #[test]
 fn attach_and_detach_conflict() {
     let err = parse_err(&["koshi", "--attach", "3f2a", "--detach"]);
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[test]
+fn detach_all_without_an_id_targets_this_panes_session() {
+    let cli = parse(&["koshi", "--detach-all"]);
+    assert_eq!(
+        cli,
+        Cli {
+            attach: None,
+            detach: None,
+            detach_all: Some(None),
+            profile: None,
+            command: None,
+        }
+    );
+    assert!(!cli.is_interactive_launch());
+}
+
+#[test]
+fn detach_all_with_an_id_targets_that_session() {
+    let cli = parse(&[
+        "koshi",
+        "--detach-all",
+        &format!("session-{}", fixed_uuid()),
+    ]);
+    assert_eq!(
+        cli,
+        Cli {
+            attach: None,
+            detach: None,
+            detach_all: Some(Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid())))),
+            profile: None,
+            command: None,
+        }
+    );
+    assert!(!cli.is_interactive_launch());
+}
+
+#[test]
+fn detach_all_with_a_name_targets_the_session_carrying_it() {
+    let cli = parse(&["koshi", "--detach-all", "workspace"]);
+    assert_eq!(
+        cli,
+        Cli {
+            attach: None,
+            detach: None,
+            detach_all: Some(Some(SessionRef::Name("workspace".to_string()))),
+            profile: None,
+            command: None,
+        }
+    );
+}
+
+#[test]
+fn detach_all_conflicts_with_attach_and_with_detach() {
+    let with_attach = parse_err(&["koshi", "--attach", "3f2a", "--detach-all"]);
+    assert_eq!(with_attach.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(with_attach.exit_code(), 2);
+
+    let with_detach = parse_err(&["koshi", "--detach", "--detach-all"]);
+    assert_eq!(with_detach.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(with_detach.exit_code(), 2);
+}
+
+#[test]
+fn detach_all_conflicts_with_profile() {
+    let err = parse_err(&["koshi", "--profile", "dev", "--detach-all"]);
     assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     assert_eq!(err.exit_code(), 2);
 }

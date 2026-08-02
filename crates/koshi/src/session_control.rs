@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use koshi_core::command::{Command, CommandResult};
+use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{ClientId, SessionId};
 
-use crate::cli::SessionRef;
+use crate::cli::{parse_prefixed_uuid, SessionRef};
 use crate::discovery::{self, Discovered};
 use crate::error::CliError;
 use crate::ipc_client;
@@ -85,6 +85,107 @@ fn select_kill_session(found: &Discovered, name: Option<&str>) -> Result<Session
             }
         }
     }
+}
+
+/// Detach the client the value after `--detach` names, leaving the session
+/// running and its panes untouched.
+///
+/// The value is a client id, a session id, or a session display name. A value
+/// that names a session rather than a client leaves the choice to that
+/// session, which detaches its only attached client and lists the attached ids
+/// when there are several.
+pub fn detach_client_or_session(raw: &str) -> Result<CommandResult, CliError> {
+    detach_client_or_session_in(&ipc_client::runtime_dir()?, raw)
+}
+
+/// [`detach_client_or_session`] against an explicit runtime directory.
+fn detach_client_or_session_in(runtime_dir: &Path, raw: &str) -> Result<CommandResult, CliError> {
+    let (session_id, client) = select_detach_target(runtime_dir, raw)?;
+    ipc_client::submit_external_via_runtime_dir(
+        runtime_dir,
+        session_id,
+        Command::Detach(DetachArgs { client }),
+    )
+}
+
+/// The session to ask and the client it detaches, for the value typed after
+/// `--detach`.
+///
+/// A `session-<uuid>` id names a session and goes straight there, asking no
+/// session to describe itself. Anything else is read against the running
+/// sessions: a `client-<uuid>` id, or a bare UUID an answering session reports
+/// as an attached client, names that client and the session holding it; a bare
+/// UUID no attached client carries is read as a session id instead; any other
+/// value is a session display name, resolved the way `kill-session` resolves
+/// one. A resolved session with no named client is returned as `None`, so the
+/// session itself picks the client.
+fn select_detach_target(
+    runtime_dir: &Path,
+    raw: &str,
+) -> Result<(SessionId, Option<ClientId>), CliError> {
+    if raw.starts_with("session-") {
+        let uuid = parse_prefixed_uuid(raw, "session")
+            .map_err(|detail| CliError::InvalidArgs { detail })?;
+        return Ok((SessionId::from_uuid(uuid), None));
+    }
+
+    let found = discovery::fetch_all(runtime_dir);
+    let Ok(uuid) = parse_prefixed_uuid(raw, "client") else {
+        return Ok((select_kill_session(&found, Some(raw))?, None));
+    };
+    let client_id = ClientId::from_uuid(uuid);
+    match session_holding(&found, client_id) {
+        Ok(session_id) => Ok((session_id, Some(client_id))),
+        // A `client-` id is a client and nothing else.
+        Err(error) if raw.starts_with("client-") => Err(error),
+        Err(error) => {
+            let session_id = SessionId::from_uuid(uuid);
+            let answered = found
+                .sessions
+                .iter()
+                .any(|overview| overview.session.id == session_id);
+            if answered || found.is_complete() {
+                Ok((session_id, None))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// The session that reports `client_id` among its attached clients.
+fn session_holding(found: &Discovered, client_id: ClientId) -> Result<SessionId, CliError> {
+    found
+        .sessions
+        .iter()
+        .find(|overview| overview.clients.iter().any(|client| client.id == client_id))
+        .map(|overview| overview.session.id)
+        .ok_or_else(|| found.missing("client", &client_id.to_string()))
+}
+
+/// Detach every client attached to the session named by `session`, or to the
+/// only running session when absent. The session keeps running and its panes
+/// are untouched.
+///
+/// An id goes straight to that session; a name is resolved against every
+/// running session first.
+pub fn detach_all_session(session: Option<&SessionRef>) -> Result<CommandResult, CliError> {
+    detach_all_session_in(&ipc_client::runtime_dir()?, session)
+}
+
+/// [`detach_all_session`] against an explicit runtime directory.
+fn detach_all_session_in(
+    runtime_dir: &Path,
+    session: Option<&SessionRef>,
+) -> Result<CommandResult, CliError> {
+    let session_id = match session {
+        Some(SessionRef::Id(id)) => *id,
+        Some(SessionRef::Name(name)) => {
+            select_kill_session(&discovery::fetch_all(runtime_dir), Some(name.as_str()))?
+        }
+        None => select_kill_session(&discovery::fetch_all(runtime_dir), None)?,
+    };
+    ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, Command::DetachAll)
 }
 
 #[cfg(test)]

@@ -47,6 +47,7 @@ fn every_event() -> Vec<SessionEvent> {
             new_index: 0,
         },
         SessionEvent::Quit,
+        SessionEvent::Detached,
         SessionEvent::Resync { dropped_count: 4 },
     ]
 }
@@ -94,7 +95,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
     // So a change here — add, remove, rename, or retype anything below — turns
     // this red, and `PROTOCOL_VERSION` goes up in the same commit.
     //
-    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let id = "00000000-0000-0000-0000-000000000001";
 
@@ -120,6 +121,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!({ "TabFocused": { "client_id": id, "tab_id": id, "prior_tab": id } }),
             json!({ "TabMoved": { "tab_id": id, "old_index": 2, "new_index": 0 } }),
             json!("Quit"),
+            json!("Detached"),
             json!({ "Resync": { "dropped_count": 4 } }),
         ]
     );

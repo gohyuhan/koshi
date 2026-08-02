@@ -63,6 +63,12 @@ pub enum Command {
     MoveTab(MoveTabArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
+    /// Detach one client from the session. The session keeps running and its
+    /// panes are untouched.
+    Detach(DetachArgs),
+    /// Detach every client attached to this session. The session keeps running
+    /// and its panes are untouched.
+    DetachAll,
 }
 
 /// The payload-free discriminant of a [`Command`] — one unit variant per
@@ -108,6 +114,10 @@ pub enum CommandKind {
     MoveTab,
     /// Discriminant of [`Command::Quit`].
     Quit,
+    /// Discriminant of [`Command::Detach`].
+    Detach,
+    /// Discriminant of [`Command::DetachAll`].
+    DetachAll,
 }
 
 impl Command {
@@ -132,6 +142,8 @@ impl Command {
             Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
             Command::MoveTab(_) => CommandKind::MoveTab,
             Command::Quit => CommandKind::Quit,
+            Command::Detach(_) => CommandKind::Detach,
+            Command::DetachAll => CommandKind::DetachAll,
         }
     }
 }
@@ -331,6 +343,15 @@ pub struct MoveTabArgs {
     pub tab: Option<TabId>,
     /// Destination zero-based index.
     pub index: usize,
+}
+
+/// Arguments for [`Command::Detach`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DetachArgs {
+    /// Client that detaches; resolved by the same rules as
+    /// [`NewPaneArgs::client`].
+    #[serde(default)]
+    pub client: Option<ClientId>,
 }
 
 /// Selection and copy commands — the commands of visual mode.

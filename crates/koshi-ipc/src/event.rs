@@ -102,6 +102,10 @@ pub enum SessionEvent {
     /// The session is shutting down: its last tab closed, so the program
     /// quits. A terminal frame — nothing follows it.
     Quit,
+    /// The server detached this client. The last frame the server writes on
+    /// this connection; the session keeps running and the client may attach
+    /// again.
+    Detached,
     /// The client's queue overflowed and dropped an event the stream cannot
     /// skip. The client connects again and attaches again for a fresh
     /// structure.

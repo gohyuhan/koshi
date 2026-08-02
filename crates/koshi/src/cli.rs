@@ -2,11 +2,12 @@
 //! attach/detach flags, and the subcommand tree.
 //!
 //! A bare `koshi` launches the interactive app: it spawns a new session and
-//! attaches this terminal to it. `--attach` and `--detach` are root flags
-//! rather than subcommands: each is a sub-action of that client spawn,
-//! redirecting it at an existing session (attach) or reversing it (detach).
-//! Every other verb is a subcommand. Parsing yields typed values only; no
-//! command here talks to a runtime.
+//! attaches this terminal to it. `--attach`, `--detach` and `--detach-all` are
+//! root flags rather than subcommands: each is a sub-action of that client
+//! spawn, redirecting it at an existing session (attach) or reversing it for
+//! one client (detach) or for every client of a session (detach-all). Every
+//! other verb is a subcommand. Parsing yields typed values only; no command
+//! here talks to a runtime.
 //!
 //! Action subcommands carry typed arguments and map to the core command
 //! vocabulary through [`CliCommand::to_action`](crate::cli::CliCommand::to_action),
@@ -45,14 +46,25 @@ pub struct Cli {
     #[arg(long, value_name = "SESSION_ID", conflicts_with = "detach")]
     pub attach: Option<String>,
 
-    /// Detach from a session: with an id, every client attached to that
-    /// session detaches; without one, the client's current session detaches.
-    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1)]
+    /// Detach one client: bare, this pane's client; with an id, that client —
+    /// or the named session's only attached client.
+    #[arg(long, value_name = "CLIENT_OR_SESSION", num_args = 0..=1)]
     pub detach: Option<Option<String>>,
+
+    /// Detach every client attached to a session: with an id or name, that
+    /// session's clients; without one, the clients of this pane's session.
+    #[arg(
+        long,
+        value_name = "SESSION",
+        num_args = 0..=1,
+        value_parser = parse_session_ref,
+        conflicts_with_all = ["attach", "detach"],
+    )]
+    pub detach_all: Option<Option<SessionRef>>,
 
     /// Launch with a named profile: read `profile/<name>.kdl` from the config
     /// directory and open its tabs and panes instead of a single shell.
-    #[arg(long, value_name = "NAME", conflicts_with_all = ["attach", "detach"])]
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["attach", "detach", "detach_all"])]
     pub profile: Option<String>,
 
     /// The verb to run; absent on the bare interactive launch.
@@ -65,7 +77,10 @@ impl Cli {
     /// attach/detach flag — which launches the interactive app.
     #[must_use]
     pub fn is_interactive_launch(&self) -> bool {
-        self.attach.is_none() && self.detach.is_none() && self.command.is_none()
+        self.attach.is_none()
+            && self.detach.is_none()
+            && self.detach_all.is_none()
+            && self.command.is_none()
     }
 }
 
