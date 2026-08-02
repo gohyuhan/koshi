@@ -14,7 +14,9 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource, NewTabArgs};
+use koshi_core::command::{
+    CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, NewTabArgs,
+};
 use koshi_core::event::Event;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
@@ -365,6 +367,91 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
     assert_eq!(first.colour(), 0);
     assert_eq!(second.colour(), 1);
     assert_ne!(first.label(), second.label());
+}
+
+/// Close `tab` in the running session over `connection`, killing its panes
+/// outright. Closing the last tab quits the session.
+fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, request_id: u64) {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::ExternalCli {
+            session_id: Some(session_id),
+        },
+        SystemTime::UNIX_EPOCH,
+        Command::CloseTab(CloseTabArgs {
+            tab: Some(tab),
+            force: true,
+            tree: false,
+        }),
+    );
+    connection
+        .send(&IpcRequest {
+            request_id,
+            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+        })
+        .expect("send close-tab");
+    let reply: IpcResponse = connection.recv().expect("close-tab reply");
+    let IpcResult::CommandResult(CommandResult::Ok {
+        command_id: _,
+        emitted_events,
+    }) = reply.result
+    else {
+        panic!("expected the close to apply, got {:?}", reply.result);
+    };
+    assert!(
+        emitted_events
+            .iter()
+            .any(|event| matches!(event, Event::Quit)),
+        "closing the last tab quits the session",
+    );
+}
+
+#[test]
+fn the_event_stream_ends_with_the_quit_frame() {
+    let (server, session_id) = served("quit-ends-stream", |dir, session_id| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach(&mut viewer, 2);
+        let only_tab = structure.tabs[0].id;
+
+        let mut caller = open(&dir, session_id);
+        assert_eq!(attached_client_count(&mut caller, 3), 1);
+        close_tab(&mut caller, session_id, only_tab, 4);
+
+        // Reading a frame blocks with no deadline of its own, so the walk to
+        // the quit frame runs on a thread this one can give up waiting on.
+        // The connection comes back so it stays open below.
+        let (quit_tx, quit_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let frame: SessionEvent = viewer.recv().expect("an event frame");
+                if matches!(frame, SessionEvent::Quit) {
+                    break;
+                }
+            }
+            let _ = quit_tx.send(viewer);
+        });
+        let viewer = quit_rx
+            .recv_timeout(PATIENCE)
+            .expect("the quit frame reaches the event stream");
+
+        // The quit frame ends the stream: its writing thread exits and
+        // detaches the client. The viewer connection is still open, so the
+        // record going away can only come from that exit.
+        let deadline = Instant::now() + PATIENCE;
+        let mut request_id = 5;
+        while attached_client_count(&mut caller, request_id) != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the stream outlived its quit frame",
+            );
+            request_id += 1;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (vec![caller, viewer], session_id)
+    });
+
+    let session = server.sessions().get(&session_id).expect("session running");
+    assert_eq!(session.clients.len(), 0);
 }
 
 #[test]

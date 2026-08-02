@@ -34,6 +34,7 @@ use std::time::{Duration, SystemTime};
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
+use koshi_ipc::event::SessionEvent;
 use koshi_ipc::handshake::Handshake;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -329,7 +330,8 @@ fn serve_connection(
 /// close as end of stream or a transport fault is.
 ///
 /// Either half ending detaches the client, which removes its record and drops
-/// its subscription; the closed queue then ends the writing thread. Both
+/// its subscription; the closed queue, or the terminal `Quit` frame, then
+/// ends the writing thread. Both
 /// notify, so a write that fails while the reading half still blocks is
 /// cleaned up too — a detach for a client already gone changes nothing.
 fn stream_events(
@@ -344,6 +346,11 @@ fn stream_events(
         while let Ok(delivery) = events.recv() {
             if let Some(event) = wire_event(&delivery) {
                 if writer.send(&event).is_err() {
+                    break;
+                }
+                // `Quit` is the stream's terminal frame; the loop ends with
+                // it rather than waiting for the queue to close.
+                if matches!(event, SessionEvent::Quit) {
                     break;
                 }
             }
