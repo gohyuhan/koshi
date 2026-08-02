@@ -23,7 +23,7 @@ use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::PaneRecord;
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::cascade::on_child_exit;
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_session::session::policy::EmptyTabPolicy;
@@ -118,7 +118,16 @@ fn two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
 /// the mismatch as `ClientSessionMismatch` — so threading the real id keeps the
 /// fixture a state the session would actually accept.
 fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client {
-    let mut client = Client::new(ClientId::new(), session_id, EPOCH, VIEWPORT, tab_id);
+    let mut client = Client::new(
+        ClientId::new(),
+        session_id,
+        EPOCH,
+        VIEWPORT,
+        tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
     client.update_focused_pane(tab_id, pane);
     client
 }

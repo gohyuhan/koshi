@@ -250,6 +250,7 @@ fn refused(refusal: &IpcErrorPayload) -> CliError {
 fn unexpected_reply(result: &IpcResult) -> CliError {
     let kind = match result {
         IpcResult::Hello => "Hello",
+        IpcResult::Attached { .. } => "Attached",
         IpcResult::CommandResult(_) => "CommandResult",
         IpcResult::Overview(_) => "Overview",
         IpcResult::Error(_) => "Error",

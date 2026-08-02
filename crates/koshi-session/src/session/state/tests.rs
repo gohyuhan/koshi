@@ -3,6 +3,8 @@
 use super::*;
 use std::time::SystemTime;
 
+use crate::client::ClientOrigin;
+
 /// Attach a client viewing `tab` with the given viewport.
 fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
     let client = Client::new(
@@ -11,6 +13,9 @@ fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
         SystemTime::UNIX_EPOCH,
         Size { cols, rows },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
 }
@@ -121,6 +126,9 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     assert_eq!(session.attach_client(first).map(|c| c.id()), None);
 
@@ -130,6 +138,9 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 40, rows: 10 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     let displaced = session.attach_client(second);
 
@@ -164,6 +175,9 @@ fn attaching_a_client_before_any_tab_leaves_the_session_starting() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
 
@@ -186,6 +200,9 @@ fn detach_client_returns_the_exact_record_it_removed() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 12, rows: 3 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
 
@@ -260,6 +277,9 @@ fn detaching_the_last_client_of_a_stopping_session_does_not_revert_it() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 0, rows: 0 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
     session.request_stop();

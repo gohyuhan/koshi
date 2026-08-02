@@ -5,6 +5,9 @@
 //! tab id. So the single-process local start assembles the first session with
 //! one tab holding one shell pane, viewed by one client, directly through the
 //! session-layer ops, then hands the pane's PTY to a forwarder like any other.
+//!
+//! The per-session server process seeds the same session and tab with no
+//! client at all; the first attach adds one.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,7 +21,7 @@ use koshi_layout::template::{LeafTemplate, ProfileTemplate, TemplateError, Termi
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::backend::state::PtyHandle;
 use koshi_pty::error::PtyError;
-use koshi_session::client::{pane_viewport, Client, ClientRegistry};
+use koshi_session::client::{pane_viewport, Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
@@ -63,11 +66,32 @@ impl Server {
         viewport: Size,
         now: SystemTime,
     ) -> Result<ClientId, PtyError> {
+        let client_id = ClientId::new();
+        self.bootstrap_session(session_id, session_name, viewport, now, Some(client_id))?;
+        Ok(client_id)
+    }
+
+    /// Seed the first session/tab/root-pane under a caller-chosen id and
+    /// display name, optionally viewed by `client_id`. `Some` attaches that
+    /// client to the new tab, focuses it on the root pane, and names it in the
+    /// pane's identity vars; `None` seeds the session with no client, the
+    /// headless start a later attach joins. Every other argument means what it
+    /// does in [`bootstrap_local_named`](Self::bootstrap_local_named).
+    ///
+    /// The child is spawned before any state is committed, so a failed launch
+    /// leaves no session behind and surfaces as `Err`.
+    pub fn bootstrap_session(
+        &mut self,
+        session_id: SessionId,
+        session_name: String,
+        viewport: Size,
+        now: SystemTime,
+        client_id: Option<ClientId>,
+    ) -> Result<(), PtyError> {
         let backend = Arc::clone(self.pty_backend());
 
         let tab_id = TabId::new();
         let pane_id = PaneId::new();
-        let client_id = ClientId::new();
 
         // Chrome owns one row above and below the pane region.
         let spawn_size =
@@ -78,17 +102,31 @@ impl Server {
         let mut spawn_spec = self.default_shell_spec(None, BTreeMap::new());
         spawn_spec.env.extend(koshi_env(
             session_id,
-            Some(client_id),
+            client_id,
             pane_id,
             koshi_paths::runtime_dir().as_deref(),
         ));
         let handle = backend.spawn(pane_id, spawn_spec, spawn_size)?;
 
-        // Assemble the session with one client viewing the tab we are about to
-        // create, then commit the tab + root pane and focus the client on it.
+        // Assemble the session with its client, if any, viewing the tab we are
+        // about to create, then commit the tab + root pane and focus the client
+        // on it.
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
-        let client = Client::new(client_id, session_id, now, viewport, tab_id);
-        session.attach_client(client);
+        if let Some(client_id) = client_id {
+            // This is the session's first client, so no existing label can collide.
+            let client_label = generate_name(NameKind::Client, |_| false);
+            let client = Client::new(
+                client_id,
+                session_id,
+                now,
+                viewport,
+                tab_id,
+                ClientOrigin::Local,
+                client_label,
+                0,
+            );
+            session.attach_client(client);
+        }
 
         let tab_name = generate_name(NameKind::Tab, |candidate| {
             session.tabs.values().any(|tab| tab.name() == candidate)
@@ -102,7 +140,7 @@ impl Server {
             tab_id,
             pane_id,
             tab_name,
-            Some(client_id),
+            client_id,
             spec,
             now,
         );
@@ -112,7 +150,7 @@ impl Server {
         self.render_scheduler
             .invalidate(InvalidationReason::LayoutChanged);
 
-        Ok(client_id)
+        Ok(())
     }
 
     /// Seed the first session from a `--profile` template: one session holding
@@ -214,7 +252,18 @@ impl Server {
         let focused_tab_id = plans[focused_tab].tab_id;
         let session_name = generate_name(NameKind::Session, |_| false);
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
-        let client = Client::new(client_id, session_id, now, viewport, focused_tab_id);
+        // This is the session's first client, so no existing label can collide.
+        let client_label = generate_name(NameKind::Client, |_| false);
+        let client = Client::new(
+            client_id,
+            session_id,
+            now,
+            viewport,
+            focused_tab_id,
+            ClientOrigin::Local,
+            client_label,
+            0,
+        );
         session.attach_client(client);
 
         // Commit each tab; only the focused one moves the client onto it.

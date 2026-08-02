@@ -112,6 +112,50 @@ impl Connection {
     pub fn recv<T: DeserializeOwned>(&mut self) -> Result<T, IpcError> {
         read_message(&mut self.stream)
     }
+
+    /// Split the connection into its reading and its writing half, so one
+    /// thread reads frames while another writes them. Both halves speak the
+    /// same frame shape the whole connection did.
+    ///
+    /// The connection is consumed: after this, [`send`](Self::send) and
+    /// [`recv`](Self::recv) are the halves' own methods.
+    #[must_use]
+    pub fn split(self) -> (FrameReader, FrameWriter) {
+        let (recv_half, send_half) = self.stream.split();
+        (
+            FrameReader { half: recv_half },
+            FrameWriter { half: send_half },
+        )
+    }
+}
+
+/// The reading half of a split [`Connection`]. Sends nothing.
+#[derive(Debug)]
+pub struct FrameReader {
+    half: socket::RecvHalf,
+}
+
+impl FrameReader {
+    /// Read one frame and decode its message as `T`. Blocks until a whole
+    /// frame arrives. The peer closing its writing end is
+    /// [`IpcError::Disconnected`].
+    pub fn recv<T: DeserializeOwned>(&mut self) -> Result<T, IpcError> {
+        read_message(&mut self.half)
+    }
+}
+
+/// The writing half of a split [`Connection`]. Reads nothing.
+#[derive(Debug)]
+pub struct FrameWriter {
+    half: socket::SendHalf,
+}
+
+impl FrameWriter {
+    /// Send one message as one frame. Blocks until the bytes are handed to
+    /// the OS.
+    pub fn send<T: Serialize>(&mut self, message: &T) -> Result<(), IpcError> {
+        write_message(&mut self.half, message)
+    }
 }
 
 /// Buffer for one outgoing frame: 4 placeholder length bytes, then the JSON

@@ -238,6 +238,48 @@ fn hello_and_request_sent_back_to_back_arrive_as_two_messages() {
 }
 
 #[test]
+fn split_halves_carry_frames_both_ways_from_two_threads() {
+    let addr = test_addr("split");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        let (mut reader, mut writer) = listener.accept().expect("accept").split();
+        // The reading half moves to its own thread and blocks there while the
+        // writing half sends on this one.
+        let reading = thread::spawn(move || {
+            let first: IpcRequest = reader.recv().expect("server recv first");
+            let second: IpcRequest = reader.recv().expect("server recv second");
+            vec![first.request_id, second.request_id]
+        });
+        for id in [11, 12] {
+            writer
+                .send(&IpcResponse {
+                    request_id: Some(id),
+                    result: IpcResult::Hello,
+                })
+                .expect("server send");
+        }
+        reading.join().expect("server reading thread")
+    });
+
+    let (mut reader, mut writer) = Connection::connect(&addr).expect("connect").split();
+    let reading = thread::spawn(move || {
+        let first: IpcResponse = reader.recv().expect("client recv first");
+        let second: IpcResponse = reader.recv().expect("client recv second");
+        vec![first.request_id, second.request_id]
+    });
+    for id in [21, 22] {
+        writer.send(&hello_request(id)).expect("client send");
+    }
+
+    assert_eq!(
+        reading.join().expect("client reading thread"),
+        vec![Some(11), Some(12)]
+    );
+    assert_eq!(server.join().expect("server thread"), vec![21, 22]);
+}
+
+#[test]
 fn one_listener_serves_two_callers_in_turn() {
     let addr = test_addr("twocallers");
     let listener = Listener::bind(&addr).expect("bind");

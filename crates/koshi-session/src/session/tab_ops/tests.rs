@@ -19,7 +19,7 @@ use koshi_pane::pane::state::PaneRecord;
 use super::{
     close_tab, commit_new_tab, commit_profile_tab, focus_tab, move_tab, ProfileTab, TabTarget,
 };
-use crate::client::{Client, ClientRegistry};
+use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::error::SessionConsistencyError;
 use crate::session::lifecycle::SessionLifecycle;
 use crate::session::pane_ops::NewPaneSpec;
@@ -54,6 +54,9 @@ fn client_on(session_id: SessionId, tab_id: TabId) -> Client {
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     )
 }
 

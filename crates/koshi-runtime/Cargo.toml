@@ -27,4 +27,5 @@ tracing = "0.1.44"
 # so this adds no cycle.
 koshi-client = { version = "0.1.0", path = "../koshi-client" }
 koshi-test-support = { version = "0.1.0", path = "../koshi-test-support" }
+serde_json = "1.0.151"
 uuid = "1.24.0"

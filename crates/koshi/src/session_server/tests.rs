@@ -31,11 +31,12 @@ fn the_session_answers_discovery_with_the_id_and_name_it_was_started_with() {
     let (mut server, tx) = test_server(fake);
     let session_id = SessionId::new();
     server
-        .bootstrap_local_named(
+        .bootstrap_session(
             session_id,
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
+            None,
         )
         .expect("the session is seeded");
 
@@ -64,11 +65,12 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
     let (mut server, tx) = test_server(fake);
     let session_id = SessionId::new();
     server
-        .bootstrap_local_named(
+        .bootstrap_session(
             session_id,
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
+            None,
         )
         .expect("the session is seeded");
 

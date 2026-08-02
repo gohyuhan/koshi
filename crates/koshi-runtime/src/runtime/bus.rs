@@ -14,11 +14,18 @@
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
 //! backlog it already had, then the snapshot, then live events again.
+//!
+//! A subscriber in another process works in the wire spellings from
+//! `koshi-ipc` instead. The two conversions between them live here: the
+//! [`From`] impl on [`EventFilter`] reads the filter an attaching client sent,
+//! and [`wire_event`] turns one queue item into the frame that client is sent.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
 use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
 use koshi_core::ids::SubscriberId;
+use koshi_ipc::event::SessionEvent;
+use koshi_ipc::protocol::EventFilterSpec;
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 
 /// How many undelivered events one subscriber's queue holds. An event
@@ -39,6 +46,15 @@ impl EventFilter {
     fn matches(self, _event: &Event) -> bool {
         match self {
             EventFilter::All => true,
+        }
+    }
+}
+
+impl From<EventFilterSpec> for EventFilter {
+    /// The filter an attaching client asked for, in the form the bus works in.
+    fn from(spec: EventFilterSpec) -> Self {
+        match spec {
+            EventFilterSpec::All => EventFilter::All,
         }
     }
 }
@@ -239,6 +255,67 @@ impl EventBus {
     #[must_use]
     pub(crate) fn subscriber_count(&self) -> usize {
         self.subscribers.len()
+    }
+}
+
+/// The frame an attached client is sent for one item off its queue, or `None`
+/// when the item says nothing about the session's structure.
+///
+/// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
+/// of missed events. The frame itself does not go on the wire: the client
+/// attaches again, and the attach reply carries a fresh structure.
+#[must_use]
+pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
+    match delivery {
+        Delivery::Event(event) => match event {
+            Event::PaneCreated(payload) => Some(SessionEvent::PaneCreated {
+                pane_id: payload.pane_id,
+                tab_id: payload.tab_id,
+            }),
+            Event::PaneProcessExited(payload) => Some(SessionEvent::PaneProcessExited {
+                pane_id: payload.pane_id,
+                exit_code: payload.exit_code,
+            }),
+            Event::PaneClosing(payload) => Some(SessionEvent::PaneClosing {
+                pane_id: payload.pane_id,
+            }),
+            Event::PaneRemoved(payload) => Some(SessionEvent::PaneRemoved {
+                pane_id: payload.pane_id,
+                tab_id: payload.tab_id,
+            }),
+            Event::PaneFocused(payload) => Some(SessionEvent::PaneFocused {
+                client_id: payload.client_id,
+                tab_id: payload.tab_id,
+                pane_id: payload.pane_id,
+                prior_pane: payload.prior_pane,
+            }),
+            Event::LayoutChanged(payload) => Some(SessionEvent::LayoutChanged {
+                tab_id: payload.tab_id,
+            }),
+            Event::TabCreated(payload) => Some(SessionEvent::TabCreated {
+                tab_id: payload.tab_id,
+            }),
+            Event::TabClosed(payload) => Some(SessionEvent::TabClosed {
+                tab_id: payload.tab_id,
+            }),
+            Event::TabFocused(payload) => Some(SessionEvent::TabFocused {
+                client_id: payload.client_id,
+                tab_id: payload.tab_id,
+                prior_tab: payload.prior_tab,
+            }),
+            Event::TabMoved(payload) => Some(SessionEvent::TabMoved {
+                tab_id: payload.tab_id,
+                old_index: payload.old_index,
+                new_index: payload.new_index,
+            }),
+            Event::Quit => Some(SessionEvent::Quit),
+            // Pane content, PTY sizing, input, mouse, selection, plugin and
+            // per-client view events carry no structure change.
+            _ => None,
+        },
+        Delivery::Snapshot { lagged, .. } => Some(SessionEvent::Resync {
+            dropped_count: lagged.dropped_count,
+        }),
     }
 }
 

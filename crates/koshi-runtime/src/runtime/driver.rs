@@ -84,6 +84,17 @@ impl Server {
                 // the command has already applied, so there is nothing to undo.
                 let _ = reply.send(result);
             }
+            RuntimeEvent::IpcAttach {
+                viewport,
+                filter,
+                attached_at,
+                reply,
+            } => {
+                // The client and its subscription are registered together here,
+                // so the structure in the answer and the queue's first event
+                // describe one continuous state.
+                let _ = reply.send(self.handle_ipc_attach(viewport, filter, attached_at));
+            }
             RuntimeEvent::IpcDiscovery { reply } => {
                 let _ = reply.send(self.build_overview());
             }

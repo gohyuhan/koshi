@@ -1,8 +1,10 @@
-//! Attached clients: the per-client view state of one session.
+//! Attached clients: the identity and per-client view state of one session.
 //!
 //! A session accepts several clients at once. Focus, viewport, and input
 //! modes are per-client so two attached terminals never fight over one
-//! global cursor; the session itself holds only this registry.
+//! global cursor; the session itself holds only this registry. Each client
+//! also carries what the server decided about it at attach — its origin, the
+//! authority that origin grants, its generated label, and its colour.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -27,10 +29,29 @@ pub const fn pane_viewport(viewport: Size) -> Size {
     }
 }
 
+/// Where a client connected from, decided by the server when it accepts the
+/// connection. The machine's own socket is the only way in, so every client
+/// is [`ClientOrigin::Local`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientOrigin {
+    /// Connected over the local socket on this machine.
+    Local,
+}
+
+/// What a client is allowed to do. Read from the client's origin inside
+/// [`Client::new`] and never taken from a caller, so nothing a client sends
+/// can raise its own authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityTier {
+    /// Every command the session accepts.
+    Admin,
+}
+
 /// One attached client: a single terminal connected to a session, holding the
-/// view state that is the client's alone. Two clients on the same session — and
-/// even viewing the same tab — keep independent focus, lock mode, and viewport,
-/// so they never fight over one cursor or mode.
+/// identity the server gave it at attach and the view state that is the
+/// client's alone. Two clients on the same session — and even viewing the same
+/// tab — keep independent focus, lock mode, and viewport, so they never fight
+/// over one cursor or mode.
 #[derive(Debug)]
 pub struct Client {
     id: ClientId,
@@ -38,6 +59,18 @@ pub struct Client {
     attached_at: SystemTime,
     viewport: Size,
     active_tab: TabId,
+    /// Where this client connected from, set by the server at accept — never
+    /// read off the wire.
+    origin: ClientOrigin,
+    /// What this client is allowed to do, read from
+    /// [`origin`](Self::origin) in [`Client::new`].
+    tier: AuthorityTier,
+    /// This client's display name, `C-<adjective>-<noun>`, generated at
+    /// attach and never changed.
+    label: String,
+    /// Which palette entry paints this client's identity in the UI, chosen by
+    /// the caller at attach.
+    colour: u8,
     focus_by_tab: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection: while on, a drag
@@ -86,6 +119,15 @@ impl Client {
     /// per-tab focus recorded yet and in [`LockMode::Normal`]. `attached_at` is
     /// supplied by the caller at the attach boundary, not read from the clock
     /// here, so it stays controllable.
+    ///
+    /// `origin` says where the connection came from and is the only input to
+    /// the client's [`AuthorityTier`]: the tier is computed here, and there is
+    /// no parameter for it. `label` is the generated `C-<adjective>-<noun>`
+    /// name and `colour` the palette entry the caller picked for this client.
+    // Carries the whole of one attach: the client's identity (`id`,
+    // `session_id`, `origin`, `label`, `colour`) and its first view
+    // (`attached_at`, `viewport`, `active_tab`).
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         id: ClientId,
@@ -93,6 +135,9 @@ impl Client {
         attached_at: SystemTime,
         viewport: Size,
         active_tab: TabId,
+        origin: ClientOrigin,
+        label: String,
+        colour: u8,
     ) -> Self {
         Client {
             id,
@@ -100,6 +145,12 @@ impl Client {
             attached_at,
             viewport,
             active_tab,
+            origin,
+            tier: match origin {
+                ClientOrigin::Local => AuthorityTier::Admin,
+            },
+            label,
+            colour,
             focus_by_tab: HashMap::new(),
             lock_mode: LockMode::Normal,
             mouse_select: false,
@@ -125,6 +176,30 @@ impl Client {
     #[must_use]
     pub fn attached_at(&self) -> SystemTime {
         self.attached_at
+    }
+
+    /// Where this client connected from.
+    #[must_use]
+    pub fn origin(&self) -> ClientOrigin {
+        self.origin
+    }
+
+    /// What this client is allowed to do.
+    #[must_use]
+    pub fn tier(&self) -> AuthorityTier {
+        self.tier
+    }
+
+    /// This client's generated display name.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Which palette entry paints this client's identity.
+    #[must_use]
+    pub fn colour(&self) -> u8 {
+        self.colour
     }
 
     /// This client's current viewport size.

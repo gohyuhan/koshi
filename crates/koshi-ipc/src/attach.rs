@@ -24,7 +24,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every tab in the session is present, so a client draws any tab it switches
 /// to from what it already holds.
+///
+/// Decoding this and every record under it rejects any field the build does
+/// not know, so a misspelled name is an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttachedSessionStructureSnapshot {
     /// The session's stable id.
     pub id: SessionId,
@@ -40,6 +44,7 @@ pub struct AttachedSessionStructureSnapshot {
 /// One tab: what to label it in the tab bar, how its panes are arranged, and
 /// which pane it focused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TabStructure {
     /// The tab's stable id.
     pub id: TabId,
@@ -59,6 +64,7 @@ pub struct TabStructure {
 
 /// One pane: its id, and what backs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaneStructure {
     /// The pane's stable id, matching its layout leaf.
     pub id: PaneId,

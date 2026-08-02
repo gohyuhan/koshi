@@ -63,11 +63,14 @@ pub fn run_session_server(
     );
     server.load_startup_config(app);
 
-    server.bootstrap_local_named(
+    // No client is minted here: this process serves whoever attaches over the
+    // control socket, and until one does the session holds none.
+    server.bootstrap_session(
         session_id,
         session_name,
         STARTING_VIEWPORT,
         SystemTime::now(),
+        None,
     )?;
 
     // Binds the socket and writes the endpoint file advertising it; the

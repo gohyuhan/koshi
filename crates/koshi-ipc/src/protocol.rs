@@ -17,16 +17,20 @@ use std::fmt;
 
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::discovery::SessionOverview;
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::redact::REDACTED;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+
+use crate::attach::AttachedSessionStructureSnapshot;
 
 /// The protocol version this build speaks. A connection whose
 /// [`IpcRequestKind::Hello`] names a different version is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
 /// Any change to the shape of a wire struct bumps this, in the same commit.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
@@ -39,7 +43,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` yields
-///   `{"protocol_version":2, "token":"k7Qx…"}`, secret included.
+///   `{"protocol_version":3, "token":"k7Qx…"}`, secret included.
 /// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
@@ -138,6 +142,19 @@ pub enum IpcRequestKind {
         /// The secret read from the endpoint file.
         token: ConnectionToken,
     },
+    /// Join the session as a viewing client: the server mints the client,
+    /// registers it for the events `filter` selects, and answers with
+    /// [`IpcResult::Attached`].
+    ///
+    /// The caller names no identity of its own. Who the client is, what it may
+    /// do, and what it is called are all decided by the server.
+    Attach {
+        /// The caller's terminal size in cells, which the server records as
+        /// the client's viewport.
+        viewport: Size,
+        /// Which of the session's events the client receives.
+        filter: EventFilterSpec,
+    },
     /// Dispatch a command against the session.
     SubmitCommand(Box<CommandEnvelope>),
     /// Ask the session to describe itself in full. The caller narrows the
@@ -153,10 +170,22 @@ impl IpcRequestKind {
     pub fn name(&self) -> &'static str {
         match self {
             IpcRequestKind::Hello { .. } => "Hello",
+            IpcRequestKind::Attach { .. } => "Attach",
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
         }
     }
+}
+
+/// Which of the session's events an attaching client asks for.
+///
+/// This is the wire spelling only. The server maps it to the filter its event
+/// hub works in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum EventFilterSpec {
+    /// Every event the session publishes.
+    All,
 }
 
 /// One message answering an [`IpcRequest`].
@@ -181,6 +210,18 @@ pub enum IpcResult {
     /// Answers [`IpcRequestKind::Hello`]: the connection is open, because the
     /// versions agree and the token matched.
     Hello,
+    /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
+    /// event subscription is live. Every field is the server's own answer, and
+    /// this frame is the last one written before the event stream starts.
+    Attached {
+        /// The id the server minted for this client. A second attach mints a
+        /// new one.
+        client_id: ClientId,
+        /// The session the client joined.
+        session_id: SessionId,
+        /// What the session contains right now, built for this reply.
+        structure: AttachedSessionStructureSnapshot,
+    },
     /// What dispatching the submitted command produced.
     CommandResult(CommandResult),
     /// The session's full description.

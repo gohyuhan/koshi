@@ -20,7 +20,7 @@ use super::lifecycle::{SessionLifecycle, TabLifecycle};
 use super::pane_ops::NewPaneSpec;
 use super::state::{Session, Tab};
 use super::tab_ops::{close_tab, commit_new_tab};
-use crate::client::{Client, ClientRegistry};
+use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::error::SessionConsistencyError;
 
 /// Create a tab through [`commit_new_tab`] with freshly minted ids, no focus
@@ -47,6 +47,9 @@ fn client_viewing(active_tab: TabId) -> Client {
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
         active_tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     )
 }
 
@@ -450,6 +453,9 @@ fn attach_viewing(session: &mut Session, active_tab: TabId) -> ClientId {
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
         active_tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     let client_id = client.id();
     session.attach_client(client);
@@ -621,6 +627,9 @@ fn a_client_belonging_to_another_session_is_reported() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
 

@@ -19,7 +19,7 @@ use koshi_core::resolve::ActionArgs;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
-use koshi_session::client::Client;
+use koshi_session::client::{Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use std::time::{Duration, Instant};
 
@@ -1012,6 +1012,9 @@ fn one_clients_zoom_does_not_stop_another_clients_keys() {
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     joining.update_focused_pane(tab_id, first);
     runtime
@@ -1080,6 +1083,9 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     joining.update_focused_pane(tab_id, second);
     runtime
@@ -1143,6 +1149,9 @@ fn pending_sequences_stay_independent_across_clients_in_the_same_session() {
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     second.update_focused_pane(tab_id, original_pane);
     runtime
@@ -1207,6 +1216,9 @@ fn one_viewers_open_sequence_is_invisible_to_another() {
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     second.update_focused_pane(tab_id, only_pane(&runtime));
     runtime

@@ -178,6 +178,9 @@ fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: O
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     if let Some(pane) = focused {
         client.update_focused_pane(tab, pane);
@@ -1136,6 +1139,9 @@ fn new_pane_stacked_with_no_space_is_min_size() {
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab, pane);
     session.attach_client(client);
@@ -1224,6 +1230,9 @@ fn new_pane_with_no_space_is_min_size() {
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab, pane);
     session.attach_client(client);
@@ -2187,6 +2196,9 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, a);
     session.attach_client(client);
@@ -4063,6 +4075,9 @@ fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
         tab_front,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_front, pane_front);
     session.attach_client(client);
@@ -4122,6 +4137,9 @@ fn new_pane_adoption_reflows_the_vacated_tab() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_front,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     a.update_focused_pane(tab_front, pane_front);
     session.attach_client(a);
@@ -4229,6 +4247,9 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_back,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     a.update_focused_pane(tab_back, pane_back);
     session.attach_client(a);
@@ -4242,6 +4263,9 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
             rows: 50,
         },
         tab_front,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     b.update_focused_pane(tab_front, pane_front);
     session.attach_client(b);
@@ -4308,6 +4332,9 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
         SystemTime::now(),
         Size { cols: 2, rows: 1 },
         tab_front,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_front, pane_front);
     session.attach_client(client);
@@ -4707,6 +4734,9 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_b,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     viewer.update_focused_pane(tab_b, pane_b);
     session_b.attach_client(viewer);
@@ -5259,6 +5289,9 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
         SystemTime::now(),
         Size { cols: 60, rows: 20 },
         tab_a,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     second.update_focused_pane(tab_a, pane_a);
     session.attach_client(second);
@@ -5519,6 +5552,9 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_solo,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     a.update_focused_pane(tab_solo, pane_solo);
     session.attach_client(a);
@@ -5728,6 +5764,9 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     second.update_focused_pane(tab, new_pane);
     rt.sessions.get_mut(&sid).unwrap().attach_client(second);
@@ -6917,6 +6956,9 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_a,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     a.update_focused_pane(tab_a, pane_a);
     session.attach_client(a);
@@ -7412,6 +7454,9 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_b,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(a);
     let sid = session.id;
@@ -8077,6 +8122,9 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         SystemTime::now(),
         Size { cols: 30, rows: 8 },
         tab_a,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(a);
     let stayer = ClientId::new();
@@ -8086,6 +8134,9 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_b,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     let mut b = b;
     b.update_focused_pane(tab_b, pane_b);
@@ -8163,6 +8214,9 @@ fn new_tab_for_a_client_below_minimum_size_is_rejected() {
         SystemTime::now(),
         Size { cols: 1, rows: 1 },
         tab_a,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     session.attach_client(client);
     let sid = session.id;
@@ -8366,6 +8420,9 @@ fn toggle_fullscreen_below_the_pane_floor_is_rejected() {
         SystemTime::now(),
         Size { cols: 3, rows: 3 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, pane);
     session.attach_client(client);
@@ -9436,6 +9493,9 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         SystemTime::now(),
         viewport,
         tab_viewed,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_viewed, root_viewed);
     session.attach_client(client);
@@ -9470,6 +9530,9 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         SystemTime::now(),
         viewport,
         tab_front,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_front, pane_front);
     session.attach_client(client);

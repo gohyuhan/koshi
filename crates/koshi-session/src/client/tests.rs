@@ -1,8 +1,8 @@
 //! Client and ClientRegistry unit tests.
 //!
-//! Tests verify client state tracking (focus, viewport, lock mode, zoom,
-//! scrollback view, highlights) and registry operations (attach, detach,
-//! lookup, mutation).
+//! Tests verify the server-set identity (origin, tier, label, colour), client
+//! state tracking (focus, viewport, lock mode, zoom, scrollback view,
+//! highlights) and registry operations (attach, detach, lookup, mutation).
 
 use std::time::SystemTime;
 
@@ -12,7 +12,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use super::{pane_viewport, Client, ClientRegistry};
+use super::{pane_viewport, AuthorityTier, Client, ClientOrigin, ClientRegistry};
 
 /// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
@@ -22,12 +22,35 @@ fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
         active_tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     )
 }
 
 /// Creates a test client with a fresh ID and the given active tab.
 fn a_client(active_tab: TabId) -> Client {
     a_client_with(ClientId::new(), active_tab)
+}
+
+#[test]
+fn a_local_client_is_admin_and_keeps_its_label_and_colour() {
+    let client = Client::new(
+        ClientId::new(),
+        SessionId::new(),
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        TabId::new(),
+        ClientOrigin::Local,
+        "C-swift-otter".to_string(),
+        3,
+    );
+
+    // The tier comes from the origin alone — no caller ever passes one in.
+    assert_eq!(client.origin(), ClientOrigin::Local);
+    assert_eq!(client.tier(), AuthorityTier::Admin);
+    assert_eq!(client.label(), "C-swift-otter");
+    assert_eq!(client.colour(), 3);
 }
 
 #[test]

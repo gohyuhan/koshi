@@ -61,7 +61,7 @@ use koshi_pane::pane::{
 };
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_session::client::{pane_viewport, Client};
+use koshi_session::client::{pane_viewport, Client, ClientOrigin};
 use koshi_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,

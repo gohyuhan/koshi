@@ -3,7 +3,52 @@
 
 use super::*;
 
+use crate::runtime::attach::session_structure;
+use crate::runtime::bus::EventFilter;
+use crate::runtime::event::AttachAccepted;
+
 impl Server {
+    /// Serve one attach arriving over the control socket, in this single
+    /// dispatcher turn: mint the client, register it on the running session's
+    /// first tab, publish what the attach emitted, subscribe it to the events
+    /// `filter` selects, and read the session's structure back.
+    ///
+    /// Registration and subscription land in the same turn, so the structure
+    /// returned here and the queue's first event describe one continuous
+    /// state: no change can slip between them. `None` when no session is
+    /// running, or when the one running holds no tab to view — neither is
+    /// something a client can attach to. `attached_at` is supplied by the
+    /// caller; the handler never reads the clock itself.
+    pub(crate) fn handle_ipc_attach(
+        &mut self,
+        viewport: Size,
+        filter: EventFilter,
+        attached_at: SystemTime,
+    ) -> Option<AttachAccepted> {
+        // One process serves one session: genesis seeds exactly one and no
+        // command creates another in-process.
+        let session = self.sessions.values().next()?;
+        let session_id = session.id;
+        let active_tab = session.tabs.values().min_by_key(|tab| tab.index())?.id();
+
+        let client_id = ClientId::new();
+        let emitted =
+            self.handle_client_attach(session_id, client_id, viewport, active_tab, attached_at);
+        self.publish_events(&emitted);
+
+        let events = self.subscribe(client_id, filter);
+        let session = self
+            .sessions
+            .get(&session_id)
+            .expect("session located above");
+        Some(AttachAccepted {
+            client_id,
+            session_id,
+            structure: session_structure(session),
+            events,
+        })
+    }
+
     /// Attach a client to `session_id` viewing `active_tab`, then reconcile the
     /// affected tabs' PTY sizes and schedule a redraw.
     ///
@@ -12,7 +57,10 @@ impl Server {
     /// is never recorded twice. Within the target session an id that is already
     /// attached is a re-attach: its view updates in place, keeping its per-tab
     /// focus, scrollback offsets, and lock mode, and the tab it moves off of
-    /// reflows too. A fresh id is registered anew.
+    /// reflows too. A fresh id is registered anew, carrying
+    /// [`ClientOrigin::Local`], a generated `C-<adjective>-<noun>` label that
+    /// no client in the session already holds, and the lowest palette index no
+    /// attached client is painted in.
     ///
     /// The viewer joins each affected tab's effective size
     /// ([`Session::tab_viewport`], the per-axis minimum across every client
@@ -81,12 +129,30 @@ impl Server {
             client.update_active_tab(active_tab);
             Some(prior)
         } else {
+            let label = generate_name(NameKind::Client, |candidate| {
+                session
+                    .clients
+                    .list_attached()
+                    .any(|client| client.label() == candidate)
+            });
+            let colour = (0..=u8::MAX)
+                .find(|candidate| {
+                    !session
+                        .clients
+                        .list_attached()
+                        .any(|client| client.colour() == *candidate)
+                })
+                // Every palette index is in use, so this client shares one.
+                .unwrap_or(0);
             session.attach_client(Client::new(
                 client_id,
                 session_id,
                 attached_at,
                 viewport,
                 active_tab,
+                ClientOrigin::Local,
+                label,
+                colour,
             ));
             None
         };
@@ -141,6 +207,9 @@ impl Server {
     /// viewport and keeps its sizes. The detach always invalidates
     /// [`InvalidationReason::LayoutChanged`] so the remaining clients repaint. A
     /// detach for a client this runtime does not hold is dropped.
+    ///
+    /// Every subscription registered as viewing this client is dropped with the
+    /// record, closing the sending end of each one's queue.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
@@ -162,6 +231,7 @@ impl Server {
         let active_tab = session
             .detach_client(client_id)
             .map(|client| client.active_tab());
+        self.unsubscribe_client(client_id);
 
         let mut events = Vec::new();
         // Reflow the tab the client left, if any other client still views it; a

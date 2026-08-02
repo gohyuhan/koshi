@@ -946,6 +946,7 @@ dependencies = [
  "koshi-terminal",
  "koshi-test-support",
  "ratatui",
+ "serde_json",
  "tracing",
  "uuid",
 ]
