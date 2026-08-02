@@ -11202,3 +11202,41 @@ fn detach_all_on_a_session_with_no_clients_applies_and_emits_nothing() {
         Some(pane)
     );
 }
+
+#[test]
+fn detach_all_only_detaches_clients_of_the_acting_session() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let sid_a = SessionId::new();
+    let sid_b = SessionId::new();
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+
+    for (sid, client_id) in [(sid_a, client_a), (sid_b, client_b)] {
+        let mut session = bare_session(sid);
+        let pane = PaneId::new();
+        let tab = TabId::new();
+        add_pane(&mut session, pane);
+        add_tab(&mut session, tab, pane);
+        add_client(&mut session, client_id, tab, None);
+        rt.sessions.insert(sid, session);
+    }
+
+    let env = envelope_from(CommandSource::external_cli(Some(sid_a)), Command::DetachAll);
+    let command_id = env.id;
+
+    let CommandResult::Ok {
+        command_id: done_id,
+        ..
+    } = rt.dispatch(env)
+    else {
+        panic!("detach-all on the named session dispatches Ok");
+    };
+    assert_eq!(done_id, command_id);
+
+    // The named session drained; the other session's client is untouched.
+    assert_eq!(rt.sessions[&sid_a].clients.len(), 0);
+    assert_eq!(
+        rt.sessions[&sid_b].clients.get(client_b).map(Client::id),
+        Some(client_b)
+    );
+}
