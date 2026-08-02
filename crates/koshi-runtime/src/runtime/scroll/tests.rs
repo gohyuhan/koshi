@@ -13,7 +13,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -63,6 +63,9 @@ fn runtime_with_pane() -> (Server, PaneId, ClientId) {
         SystemTime::now(),
         Size { cols: 8, rows: 1 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, pane_id);
     session.attach_client(client);
@@ -449,6 +452,9 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
             SystemTime::now(),
             Size { cols: 8, rows: 1 },
             tab_id,
+            ClientOrigin::Local,
+            "C-test-client".to_string(),
+            0,
         );
         rt.sessions
             .get_mut(&session_id)

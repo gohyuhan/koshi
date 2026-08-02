@@ -19,7 +19,7 @@ use koshi_pane::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 use koshi_pane::pane::state::PaneRecord;
 
 use super::{on_child_exit, remove_pane_cascade};
-use crate::client::{Client, ClientRegistry};
+use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::session::policy::EmptyTabPolicy;
 use crate::session::state::{Session, Tab};
 
@@ -122,6 +122,9 @@ fn focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client 
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, pane);
     client

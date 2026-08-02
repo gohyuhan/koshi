@@ -3,8 +3,15 @@
 //! subscription, a lossy event that does not fit a full queue is dropped for
 //! that subscriber only, and a critical one that does not fit desyncs the
 //! subscriber until a snapshot resyncs it.
+//!
+//! Then the two wire conversions: the filter an attaching client sent becomes
+//! the bus's own, and one queue item becomes the frame that client is sent.
 
-use koshi_core::event::{Event, LayoutChanged, PaneOutputUpdated, TabCreated};
+use koshi_core::event::{
+    Event, InputMode, InputModeChanged, LayoutChanged, PaneClosing, PaneCreated, PaneFocused,
+    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneSuppressed, TabClosed, TabCreated,
+    TabFocused, TabMoved,
+};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -479,5 +486,196 @@ fn unsubscribe_removes_that_subscriber_only() {
         vec![Delivery::Event(Event::TabCreated(TabCreated {
             tab_id: tab
         }))]
+    );
+}
+
+#[test]
+fn the_wire_filter_converts_to_the_bus_filter() {
+    assert_eq!(EventFilter::from(EventFilterSpec::All), EventFilter::All);
+}
+
+#[test]
+fn every_structure_event_converts_to_its_wire_frame() {
+    let client = ClientId::new();
+    let pane = PaneId::new();
+    let other_pane = PaneId::new();
+    let tab = TabId::new();
+    let other_tab = TabId::new();
+
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneCreated(PaneCreated {
+            pane_id: pane,
+            tab_id: tab,
+        }))),
+        Some(SessionEvent::PaneCreated {
+            pane_id: pane,
+            tab_id: tab,
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneProcessExited(
+            PaneProcessExited {
+                pane_id: pane,
+                exit_code: Some(130),
+            }
+        ))),
+        Some(SessionEvent::PaneProcessExited {
+            pane_id: pane,
+            exit_code: Some(130),
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneClosing(PaneClosing {
+            pane_id: pane,
+        }))),
+        Some(SessionEvent::PaneClosing { pane_id: pane })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneRemoved(PaneRemoved {
+            pane_id: pane,
+            tab_id: tab,
+        }))),
+        Some(SessionEvent::PaneRemoved {
+            pane_id: pane,
+            tab_id: tab,
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
+            client_id: client,
+            tab_id: tab,
+            pane_id: pane,
+            prior_pane: Some(other_pane),
+        }))),
+        Some(SessionEvent::PaneFocused {
+            client_id: client,
+            tab_id: tab,
+            pane_id: pane,
+            prior_pane: Some(other_pane),
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::LayoutChanged(LayoutChanged {
+            tab_id: tab,
+        }))),
+        Some(SessionEvent::LayoutChanged { tab_id: tab })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::TabCreated(TabCreated {
+            tab_id: tab
+        }))),
+        Some(SessionEvent::TabCreated { tab_id: tab })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::TabClosed(TabClosed {
+            tab_id: tab
+        }))),
+        Some(SessionEvent::TabClosed { tab_id: tab })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::TabFocused(TabFocused {
+            client_id: client,
+            tab_id: tab,
+            prior_tab: other_tab,
+        }))),
+        Some(SessionEvent::TabFocused {
+            client_id: client,
+            tab_id: tab,
+            prior_tab: other_tab,
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::TabMoved(TabMoved {
+            tab_id: tab,
+            old_index: 2,
+            new_index: 0,
+        }))),
+        Some(SessionEvent::TabMoved {
+            tab_id: tab,
+            old_index: 2,
+            new_index: 0,
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::Quit)),
+        Some(SessionEvent::Quit)
+    );
+}
+
+#[test]
+fn an_absent_optional_field_stays_absent_on_the_wire() {
+    let client = ClientId::new();
+    let pane = PaneId::new();
+    let tab = TabId::new();
+
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneProcessExited(
+            PaneProcessExited {
+                pane_id: pane,
+                exit_code: None,
+            }
+        ))),
+        Some(SessionEvent::PaneProcessExited {
+            pane_id: pane,
+            exit_code: None,
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
+            client_id: client,
+            tab_id: tab,
+            pane_id: pane,
+            prior_pane: None,
+        }))),
+        Some(SessionEvent::PaneFocused {
+            client_id: client,
+            tab_id: tab,
+            pane_id: pane,
+            prior_pane: None,
+        })
+    );
+}
+
+#[test]
+fn an_event_that_is_not_a_structure_change_converts_to_nothing() {
+    let pane = PaneId::new();
+    let tab = TabId::new();
+
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneOutputUpdated(
+            PaneOutputUpdated { pane_id: pane }
+        ))),
+        None
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PaneSuppressed(PaneSuppressed {
+            pane_id: pane,
+            tab_id: tab,
+        }))),
+        None
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::InputModeChanged(
+            InputModeChanged {
+                client_id: ClientId::new(),
+                mode: InputMode::Locked,
+            }
+        ))),
+        None
+    );
+}
+
+#[test]
+fn a_snapshot_converts_to_a_resync_carrying_the_dropped_count() {
+    assert_eq!(
+        wire_event(&Delivery::Snapshot {
+            snapshot: snapshot(),
+            lagged: SubscriberLagged {
+                subscriber_id: SubscriberId::new(),
+                dropped_count: 4,
+                event_class: EventClass::Critical,
+            },
+        }),
+        Some(SessionEvent::Resync { dropped_count: 4 })
     );
 }

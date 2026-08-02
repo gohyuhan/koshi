@@ -23,7 +23,7 @@ use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
 use super::{commit_new_pane, NewPaneSpec};
-use crate::client::{Client, ClientRegistry};
+use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::session::state::{Session, Tab};
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
@@ -54,6 +54,9 @@ fn session_one_pane() -> (Session, TabId, PaneId, ClientId) {
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, pane);
     session.attach_client(client);
@@ -176,6 +179,9 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
         SystemTime::UNIX_EPOCH,
         VIEWPORT,
         tab_a,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_a, pane_a);
     session.attach_client(client);
@@ -386,6 +392,9 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
         SystemTime::UNIX_EPOCH,
         Size { cols: 80, rows: 24 },
         tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     onlooker.update_focused_pane(tab, source);
     onlooker.zoom_pane(tab, source);

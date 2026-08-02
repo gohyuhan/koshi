@@ -200,6 +200,23 @@ impl Server {
         rx
     }
 
+    /// Drop every subscription registered as viewing `client_id`, closing the
+    /// sending end of each one's queue. Called when the client detaches: the
+    /// frames those subscribers are resynced from are built from the client's
+    /// own view state, which is gone with the record.
+    ///
+    /// A client with no subscription of its own leaves the bus untouched.
+    pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
+        let bus = &mut self.event_bus;
+        self.subscriptions.retain(|&(id, viewed)| {
+            if viewed == client_id {
+                bus.unsubscribe(id);
+                return false;
+            }
+            true
+        });
+    }
+
     /// Put a fresh frame on the queue of every subscriber paused by a dropped
     /// critical event, returning it to live delivery. Called once per pass of
     /// the event loop, before the frame the loop paints.

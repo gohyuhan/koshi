@@ -15,7 +15,7 @@ use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::PluginUiSnapshot;
-use koshi_session::client::{Client, ClientRegistry};
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::CursorShape;
@@ -61,7 +61,16 @@ fn session_with_client(viewport: Size) -> (Session, SessionId, TabId, PaneId, Cl
         .tabs
         .insert(tab_id, Tab::new(tab_id, "t".to_string(), 0, pane_id));
 
-    let mut client = Client::new(client_id, session_id, SystemTime::now(), viewport, tab_id);
+    let mut client = Client::new(
+        client_id,
+        session_id,
+        SystemTime::now(),
+        viewport,
+        tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
     client.update_focused_pane(tab_id, pane_id);
     session.attach_client(client);
 
@@ -290,6 +299,9 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         SystemTime::now(),
         Size { cols: 40, rows: 10 },
         tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
     );
     client.update_focused_pane(tab_id, pane_id);
     session.attach_client(client);

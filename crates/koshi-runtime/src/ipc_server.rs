@@ -4,10 +4,15 @@
 //! the endpoint file advertising it, and spawns the accept loop. Each
 //! accepted connection gets its own thread holding its own
 //! [`Handshake`] gate: a Hello must open the connection before any other
-//! request is served. A `SubmitCommand` or `Discovery` request crosses to
-//! the dispatcher thread through the runtime inbox with a reply channel;
-//! the dispatcher's answer comes back on it and leaves as the connection's
-//! response frame.
+//! request is served. A `SubmitCommand`, `Discovery` or `Attach` request
+//! crosses to the dispatcher thread through the runtime inbox with a reply
+//! channel; the dispatcher's answer comes back on it and leaves as the
+//! connection's response frame.
+//!
+//! An `Attach` is the one request that keeps its connection: once the reply
+//! carrying the session's structure is written, the connection is split and
+//! serves that client's event stream until the peer goes away, which detaches
+//! the client.
 //!
 //! A connection fault stays on its connection: a malformed-but-aligned
 //! frame is answered with `MalformedRequest` and the connection keeps
@@ -21,14 +26,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
+use koshi_ipc::event::SessionEvent;
 use koshi_ipc::handshake::Handshake;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -36,7 +42,9 @@ use koshi_ipc::protocol::{
 };
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
+use koshi_renderer::snapshot::Delivery;
 
+use crate::runtime::bus::wire_event;
 use crate::runtime::event::RuntimeEvent;
 
 /// How long the accept loop pauses after a failed accept before trying
@@ -195,10 +203,14 @@ fn accept_loop(
 }
 
 /// Serve one connection until its peer hangs up or a fault closes it: a
-/// [`Handshake`] gates every request, `SubmitCommand` and `Discovery` cross
-/// to the dispatcher over the inbox and answer with its reply, and a
-/// malformed-but-aligned frame is answered with
+/// [`Handshake`] gates every request, `SubmitCommand`, `Attach` and
+/// `Discovery` cross to the dispatcher over the inbox and answer with its
+/// reply, and a malformed-but-aligned frame is answered with
 /// [`IpcErrorCode::MalformedRequest`] while the connection keeps serving.
+///
+/// An answered `Attach` ends the request loop: the connection is handed to
+/// [`stream_events`], which carries that client's events for as long as the
+/// connection lives.
 fn serve_connection(
     mut connection: Connection,
     token: ConnectionToken,
@@ -255,6 +267,38 @@ fn serve_connection(
                         None => return,
                     }
                 }
+                IpcRequestKind::Attach { viewport, filter } => {
+                    let answer = ask_dispatcher(inbox_tx, |reply| RuntimeEvent::IpcAttach {
+                        viewport,
+                        filter: filter.into(),
+                        attached_at: SystemTime::now(),
+                        reply,
+                    });
+                    // No running session, or no dispatcher left to mint the
+                    // client: the process is past its last session, so the
+                    // socket is as good as gone.
+                    let Some(Some(accepted)) = answer else {
+                        return;
+                    };
+                    let attached = IpcResponse {
+                        request_id,
+                        result: IpcResult::Attached {
+                            client_id: accepted.client_id,
+                            session_id: accepted.session_id,
+                            structure: accepted.structure,
+                        },
+                    };
+                    if connection.send(&attached).is_err() {
+                        let _ = inbox_tx.send(RuntimeEvent::ClientDetached {
+                            client_id: accepted.client_id,
+                        });
+                        return;
+                    }
+                    // The reply is written; from here the connection carries
+                    // the client's event stream and nothing else.
+                    stream_events(connection, accepted.client_id, accepted.events, inbox_tx);
+                    return;
+                }
                 IpcRequestKind::Discovery => {
                     let answer =
                         ask_dispatcher(inbox_tx, |reply| RuntimeEvent::IpcDiscovery { reply });
@@ -274,6 +318,48 @@ fn serve_connection(
             return;
         }
     }
+}
+
+/// Carry `client_id`'s event stream on its own connection until the peer goes
+/// away, then detach the client.
+///
+/// The connection is split: a spawned thread drains the client's queue and
+/// writes one frame per delivery that says something about the session's
+/// structure, while this thread blocks on the reading half. No frame is
+/// expected there in this release, so a frame arriving is as much a reason to
+/// close as end of stream or a transport fault is.
+///
+/// Either half ending detaches the client, which removes its record and drops
+/// its subscription; the closed queue, or the terminal `Quit` frame, then
+/// ends the writing thread. Both
+/// notify, so a write that fails while the reading half still blocks is
+/// cleaned up too — a detach for a client already gone changes nothing.
+fn stream_events(
+    connection: Connection,
+    client_id: ClientId,
+    events: Receiver<Delivery>,
+    inbox_tx: &Sender<RuntimeEvent>,
+) {
+    let (mut reader, mut writer) = connection.split();
+    let writer_inbox = inbox_tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(delivery) = events.recv() {
+            if let Some(event) = wire_event(&delivery) {
+                if writer.send(&event).is_err() {
+                    break;
+                }
+                // `Quit` is the stream's terminal frame; the loop ends with
+                // it rather than waiting for the queue to close.
+                if matches!(event, SessionEvent::Quit) {
+                    break;
+                }
+            }
+        }
+        let _ = writer_inbox.send(RuntimeEvent::ClientDetached { client_id });
+    });
+
+    let _ = reader.recv::<IpcRequest>();
+    let _ = inbox_tx.send(RuntimeEvent::ClientDetached { client_id });
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build

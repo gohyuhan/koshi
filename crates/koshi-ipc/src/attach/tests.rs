@@ -1,6 +1,6 @@
 //! Tests for the attach structure's wire form: it survives an encode/decode
 //! round trip with every field intact, including each stacked child's collapsed
-//! flag.
+//! flag, and a record carrying a field this build does not know is refused.
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, PluginId, SessionId, TabId};
@@ -88,6 +88,22 @@ fn a_stacked_tab_arrives_with_its_collapsed_flags_and_active_index() {
             .map(|child| child.collapsed)
             .collect::<Vec<bool>>(),
         vec![true, false, true]
+    );
+}
+
+#[test]
+fn a_tab_carrying_an_unknown_field_is_refused() {
+    let mut encoded = serde_json::to_value(structure()).expect("encodes");
+    encoded["tabs"][0]
+        .as_object_mut()
+        .expect("a tab encodes as an object")
+        .insert("pinned".to_string(), serde_json::Value::Bool(true));
+
+    let decoded: Result<AttachedSessionStructureSnapshot, _> = serde_json::from_value(encoded);
+    let error = decoded.expect_err("an unknown field decoded instead of failing");
+    assert!(
+        error.to_string().contains("unknown field `pinned`"),
+        "unexpected error: {error}"
     );
 }
 

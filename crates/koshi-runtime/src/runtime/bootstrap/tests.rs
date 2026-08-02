@@ -13,6 +13,7 @@ use koshi_core::ids::SessionId;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::error::PtyError;
+use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
@@ -280,6 +281,26 @@ fn bootstrap_local_named_uses_the_supplied_id_and_name() {
     let session = rt.sessions.values().next().expect("one session");
     assert_eq!(session.id, sid);
     assert_eq!(session.name, "S-example");
+}
+
+#[test]
+fn a_session_seeded_without_a_client_holds_none_and_still_reaches_running() {
+    // The per-session server process seeds its session before anyone attaches,
+    // so the session must run on its first tab alone.
+    let (mut rt, _fake) = runtime();
+    rt.bootstrap_session(
+        SessionId::new(),
+        "S-example".to_string(),
+        viewport(),
+        SystemTime::UNIX_EPOCH,
+        None,
+    )
+    .expect("bootstrap");
+
+    let session = rt.sessions.values().next().expect("one session");
+    assert_eq!(session.clients.len(), 0, "no client is registered");
+    assert_eq!(session.tabs.len(), 1, "the first tab is still seeded");
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Running);
 }
 
 #[test]

@@ -13,10 +13,14 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_layout::tree::LayoutNode;
+use koshi_pane::pane::state::PaneKind;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
+
+use crate::attach::{PaneStructure, TabStructure};
 
 use super::*;
 
@@ -128,6 +132,28 @@ fn populated_overview() -> SessionOverview {
     }
 }
 
+/// A session structure holding one tab and the one terminal pane in it, at
+/// fixed ids, so its encoding is byte-stable.
+fn populated_structure() -> AttachedSessionStructureSnapshot {
+    let pane_id = PaneId::from_uuid(fixed_uuid());
+
+    AttachedSessionStructureSnapshot {
+        id: SessionId::from_uuid(fixed_uuid()),
+        name: "quiet-lake".to_string(),
+        tabs: vec![TabStructure {
+            id: TabId::from_uuid(fixed_uuid()),
+            name: "editor".to_string(),
+            index: 0,
+            layout: LayoutNode::Pane(pane_id),
+            focus_mru: vec![pane_id],
+        }],
+        panes: vec![PaneStructure {
+            id: pane_id,
+            kind: PaneKind::Terminal,
+        }],
+    }
+}
+
 /// The one UUID every fixed id above uses.
 fn fixed_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
@@ -163,7 +189,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // and then fails to decode the answer, which reads to the user as a
     // session that is not running.
     //
-    // Shape as of protocol version 2. Round-trip tests cannot catch this:
+    // Shape as of protocol version 3. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
     // itself.
     assert_eq!(
@@ -223,7 +249,7 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // `Option<Direction>` and encoded `null` when unset; it is now a bare
     // `"Down"`, and a version-1 CLI's `null` no longer decodes.
     //
-    // Shape as of protocol version 2. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let request = IpcRequest {
         request_id: 2,
@@ -266,6 +292,82 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
                             },
                             "client": "00000000-0000-0000-0000-000000000001"
                         }
+                    }
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn the_attach_wire_shape_belongs_to_this_protocol_version() {
+    // Both halves of the attach exchange, pinned: what a client SENDS to join
+    // the session, and what the server ANSWERS.
+    //
+    // The answer is the one frame a client cannot recover from misreading: it
+    // carries the ids the client names itself by afterwards and the structure
+    // it draws its first frame from, and it arrives once. A client at the old
+    // shape passes the handshake and then fails to decode this, which reads to
+    // the user as a session that opens to a blank screen.
+    //
+    // So a change here — add, remove, rename, or retype anything below,
+    // including inside `AttachedSessionStructureSnapshot` — turns this red,
+    // and `PROTOCOL_VERSION` goes up in the same commit.
+    //
+    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
+    // build encoding and decoding its own structs always agrees with itself.
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&request).expect("request encodes"),
+        json!({
+            "request_id": 4,
+            "kind": {
+                "Attach": {
+                    "viewport": { "cols": 80, "rows": 24 },
+                    "filter": "All"
+                }
+            }
+        })
+    );
+
+    let response = IpcResponse {
+        request_id: Some(4),
+        result: IpcResult::Attached {
+            client_id: ClientId::from_uuid(fixed_uuid()),
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            structure: populated_structure(),
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&response).expect("response encodes"),
+        json!({
+            "request_id": 4,
+            "result": {
+                "Attached": {
+                    "client_id": "00000000-0000-0000-0000-000000000001",
+                    "session_id": "00000000-0000-0000-0000-000000000001",
+                    "structure": {
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "name": "quiet-lake",
+                        "tabs": [{
+                            "id": "00000000-0000-0000-0000-000000000001",
+                            "name": "editor",
+                            "index": 0,
+                            "layout": { "Pane": "00000000-0000-0000-0000-000000000001" },
+                            "focus_mru": ["00000000-0000-0000-0000-000000000001"]
+                        }],
+                        "panes": [{
+                            "id": "00000000-0000-0000-0000-000000000001",
+                            "kind": "Terminal"
+                        }]
                     }
                 }
             }
@@ -322,6 +424,69 @@ fn hello_request_encodes_to_the_expected_shape() {
             "request_id": 1,
             "kind": { "Hello": { "protocol_version": 1, "token": "k7QxSecret" } }
         })
+    );
+}
+
+#[test]
+fn attach_request_round_trips() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+        },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn attached_response_round_trips() {
+    let response = IpcResponse {
+        request_id: Some(4),
+        result: IpcResult::Attached {
+            client_id: ClientId::new(),
+            session_id: SessionId::new(),
+            structure: populated_structure(),
+        },
+    };
+
+    assert_eq!(round_trip(&response), response);
+}
+
+#[test]
+fn an_attach_naming_its_own_authority_is_refused() {
+    // A caller cannot say what it is allowed to do: the server decides that
+    // from the connection it arrived on. An `Attach` carrying a `tier` is not
+    // this build's shape, so it fails to decode and is answered on the
+    // malformed-request path — the field never reaches code that would have to
+    // remember to ignore it.
+    let with_tier: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","tier":"admin"}}}"#,
+    );
+
+    let error = with_tier.expect_err("an authority field decoded instead of failing");
+    assert!(
+        error.to_string().contains("unknown field `tier`"),
+        "unexpected error: {error}"
+    );
+
+    // The same frame without that one field decodes, so the refusal above is
+    // the field's doing and not a typo elsewhere in the bytes.
+    let without_tier: IpcRequest = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+    )
+    .expect("the same attach without the extra field decodes");
+
+    assert_eq!(
+        without_tier,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+            },
+        }
     );
 }
 
@@ -459,6 +624,16 @@ fn a_response_to_unreadable_bytes_names_no_request() {
 #[test]
 fn each_request_kind_is_tagged_with_its_own_name() {
     assert_eq!(
+        tag_of(
+            &serde_json::to_value(IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+            })
+            .unwrap()
+        ),
+        "Attach"
+    );
+    assert_eq!(
         tag_of(&serde_json::to_value(IpcRequestKind::SubmitCommand(Box::new(envelope()))).unwrap()),
         "SubmitCommand"
     );
@@ -473,6 +648,17 @@ fn each_result_is_tagged_with_its_own_name() {
     assert_eq!(
         serde_json::to_value(IpcResult::Hello).unwrap(),
         json!("Hello")
+    );
+    assert_eq!(
+        tag_of(
+            &serde_json::to_value(IpcResult::Attached {
+                client_id: ClientId::new(),
+                session_id: SessionId::new(),
+                structure: populated_structure(),
+            })
+            .unwrap()
+        ),
+        "Attached"
     );
     assert_eq!(
         tag_of(
@@ -580,6 +766,14 @@ fn every_request_kind_names_itself_without_its_payload() {
         }
         .name(),
         "Hello"
+    );
+    assert_eq!(
+        IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+        }
+        .name(),
+        "Attach"
     );
     assert_eq!(
         IpcRequestKind::SubmitCommand(Box::new(envelope())).name(),

@@ -15,7 +15,7 @@
 //! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
 //! that crosses the IPC socket.
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::SystemTime;
 
 use koshi_core::{
@@ -27,6 +27,10 @@ use koshi_core::{
     mouse::MouseInput,
     process::ExitStatus,
 };
+use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_renderer::snapshot::Delivery;
+
+use crate::runtime::bus::EventFilter;
 
 /// A trigger the dispatcher thread reacts to, drained from the runtime inbox.
 ///
@@ -126,6 +130,23 @@ pub enum RuntimeEvent {
         /// Where the dispatcher sends the command's result.
         reply: Sender<CommandResult>,
     },
+    /// An attach request delivered over the IPC socket: the caller asks to
+    /// join the running session as a viewing client. Carries the reply sender
+    /// the connection thread waits on; the dispatcher registers the client and
+    /// its event subscription in one turn and answers with
+    /// [`AttachAccepted`], or with `None` when no session is running.
+    IpcAttach {
+        /// The caller's terminal size in cells, recorded as the client's
+        /// viewport.
+        viewport: Size,
+        /// Which of the session's events the client receives.
+        filter: EventFilter,
+        /// When the producer received the request, carried on the event so the
+        /// handler never reads the clock itself.
+        attached_at: SystemTime,
+        /// Where the dispatcher sends what it minted.
+        reply: Sender<Option<AttachAccepted>>,
+    },
     /// A discovery request delivered over the IPC socket: the caller asks
     /// this process to describe its session. Carries the reply sender the
     /// connection thread waits on; the dispatcher answers with the overview
@@ -136,6 +157,24 @@ pub enum RuntimeEvent {
     },
     /// A capability-checked command issued by a plugin.
     Plugin(CommandEnvelope),
+}
+
+/// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
+/// record, the session it joined, the structure built for the attach reply,
+/// and the receiving end of the client's own event queue.
+///
+/// The whole of it comes out of one dispatcher turn, so the structure names
+/// the same state the queue's first event follows.
+#[derive(Debug)]
+pub struct AttachAccepted {
+    /// The id the dispatcher minted for this client.
+    pub client_id: ClientId,
+    /// The session the client joined.
+    pub session_id: SessionId,
+    /// What the session contains, built for this reply.
+    pub structure: AttachedSessionStructureSnapshot,
+    /// The client's event queue. Dropping it ends the subscription.
+    pub events: Receiver<Delivery>,
 }
 
 #[cfg(test)]

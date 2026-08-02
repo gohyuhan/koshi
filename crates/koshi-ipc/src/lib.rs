@@ -7,6 +7,8 @@ pub mod attach;
 pub mod endpoint;
 /// Error types.
 pub mod error;
+/// The events an attached client receives after the attach reply.
+pub mod event;
 /// Connection handshake checks.
 pub mod handshake;
 pub mod protocol;

@@ -1,9 +1,10 @@
 //! Tests for the server half: construction defaults, the held service
 //! handles, the wired event inbox, a session with one tab and one pane, and
 //! the two doors — commands in via `submit_command`, events out via
-//! `subscribe` — including that detaching a client leaves the server healthy
-//! with its panes alive, and that a subscriber paused by a dropped critical
-//! event is handed a fresh frame or dropped.
+//! `subscribe` — including the identity every attached client carries, that
+//! detaching a client leaves the server healthy with its panes alive, and that
+//! a subscriber paused by a dropped critical event is handed a fresh frame or
+//! dropped.
 
 use std::sync::mpsc;
 use std::time::SystemTime;
@@ -14,7 +15,7 @@ use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_renderer::snapshot::Delivery;
-use koshi_session::client::ClientRegistry;
+use koshi_session::client::{AuthorityTier, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::Tab;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -133,6 +134,39 @@ fn a_fresh_server_has_no_draining_or_quit_flags_set() {
 
     assert!(!rt.is_draining());
     assert!(!rt.quit_requested());
+}
+
+#[test]
+fn every_attached_client_is_a_local_admin_with_its_own_generated_label() {
+    let (mut server, first) = booted_server();
+    let session_id = *server.sessions().keys().next().expect("session");
+    let active_tab = server.sessions()[&session_id]
+        .clients
+        .get(first)
+        .expect("client record")
+        .active_tab();
+
+    let second = ClientId::new();
+    let _ =
+        server.handle_client_attach(session_id, second, VIEWPORT, active_tab, SystemTime::now());
+
+    let clients = &server.sessions()[&session_id].clients;
+    let bootstrapped = clients.get(first).expect("bootstrapped client");
+    let attached = clients.get(second).expect("attached client");
+
+    assert_eq!(bootstrapped.origin(), ClientOrigin::Local);
+    assert_eq!(bootstrapped.tier(), AuthorityTier::Admin);
+    assert_eq!(attached.origin(), ClientOrigin::Local);
+    assert_eq!(attached.tier(), AuthorityTier::Admin);
+
+    // Both labels are generated as `C-<adjective>-<noun>`, and the attaching
+    // client never takes the label the bootstrapped one already holds.
+    for label in [bootstrapped.label(), attached.label()] {
+        let pieces: Vec<&str> = label.split('-').collect();
+        assert_eq!(pieces.len(), 3, "not C-<adjective>-<noun>: {label}");
+        assert_eq!(pieces[0], "C");
+    }
+    assert_ne!(bootstrapped.label(), attached.label());
 }
 
 #[test]

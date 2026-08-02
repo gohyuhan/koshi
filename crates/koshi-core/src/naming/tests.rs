@@ -17,9 +17,10 @@ fn parts(name: &str) -> (String, String, String) {
 }
 
 #[test]
-fn prefix_tags_are_s_and_t() {
+fn prefix_tags_are_s_and_t_and_c() {
     assert_eq!(NameKind::Session.prefix(), "S");
     assert_eq!(NameKind::Tab.prefix(), "T");
+    assert_eq!(NameKind::Client.prefix(), "C");
 }
 
 #[test]
