@@ -31,8 +31,9 @@ use crate::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 /// [`RouterRequestKind::Hello`] names a different version is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// Any change to the shape of a wire struct in this module bumps this, in the
-/// same commit.
+/// Bumps once per release cycle, in the commit that first changes a wire shape
+/// after a release — not once per change. This protocol was born in 0.2.0 and
+/// has never shipped, so it stays 1 until 0.2.0 is out.
 pub const ROUTER_PROTOCOL_VERSION: u32 = 1;
 
 /// Which session a request means: the id, or the generated display name.
@@ -77,7 +78,14 @@ pub enum RouterRequestKind {
     },
     /// Start a new session. The router picks the id and the name, spawns the
     /// session server, and answers once that server's socket is bound.
-    CreateSession,
+    CreateSession {
+        /// The `--profile` name the new session opens, or `None` for one shell.
+        profile: Option<String>,
+        /// The directory the caller ran in. The session's first shell opens
+        /// here; `None` leaves the session server in the directory it
+        /// inherited.
+        cwd: Option<PathBuf>,
+    },
     /// Look up a running session's control-socket address, so the caller can
     /// connect to that session directly.
     AttachLookup {
@@ -102,7 +110,7 @@ impl RouterRequestKind {
     pub fn name(&self) -> &'static str {
         match self {
             RouterRequestKind::Hello { .. } => "Hello",
-            RouterRequestKind::CreateSession => "CreateSession",
+            RouterRequestKind::CreateSession { .. } => "CreateSession",
             RouterRequestKind::AttachLookup { .. } => "AttachLookup",
             RouterRequestKind::ListSessions => "ListSessions",
             RouterRequestKind::KillSession { .. } => "KillSession",

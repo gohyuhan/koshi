@@ -18,6 +18,9 @@
 //! Focus and every selection change arrive as ordinary commands through
 //! [`Server::submit_command`], validated like any command typed at the CLI.
 //!
+//! An out-of-process viewer sends a whole round of these at once, which
+//! [`run_client_mouse`](Server::run_client_mouse) runs in order and answers.
+//!
 //! **Each call re-reads the live state it needs at the moment it acts**, so a
 //! program that changed a mouse mode, switched screens, or hit its minimum size
 //! since the frame the viewer decided from is still answered correctly.
@@ -27,7 +30,8 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
-use koshi_core::mouse::{reports, MouseInput, MouseKind};
+use koshi_core::mouse::{reports, MouseAnswer, MouseInput, MouseKind};
+use koshi_ipc::protocol::WireMouseAction;
 use koshi_renderer::pane_cell_clamped;
 use koshi_renderer::snapshot::ViewerChrome;
 use koshi_terminal::mouse_report::encode_mouse;
@@ -239,6 +243,81 @@ impl Server {
         if !bytes.is_empty() {
             let _ = self.pty_backend().write(pane_id, &bytes);
         }
+    }
+
+    /// Run one round of mouse actions `client_id`'s viewer decided, in the
+    /// order it decided them, then answer the round.
+    ///
+    /// The session hit-tests nothing here: every action names its own target,
+    /// so this walks the list and calls the door each one names.
+    ///
+    /// One answer is queued for the round, always, carrying `request_id`. It
+    /// holds one entry per action that had something to report — a scroll and a
+    /// border move — in the order those actions ran, and is empty when none
+    /// did. Each entry names the pane it is about, and a border move's entry
+    /// also names the side and direction it was asked in, so several moves in
+    /// one round stay told apart.
+    pub fn run_client_mouse(
+        &mut self,
+        client_id: ClientId,
+        request_id: u64,
+        actions: Vec<WireMouseAction>,
+    ) {
+        let mut answers = Vec::new();
+        for action in actions {
+            match action {
+                WireMouseAction::Scroll { pane, up, lines } => {
+                    let top = self.scroll_pane_view(client_id, pane, up, lines);
+                    answers.push(MouseAnswer::Scrolled { pane, top });
+                }
+                WireMouseAction::Forward { pane, mouse } => {
+                    let _ = self.forward_mouse_to_pane(client_id, pane, mouse);
+                }
+                WireMouseAction::AltScrollArrows { pane, up, count } => {
+                    self.write_alt_scroll_arrows(pane, up, count);
+                }
+                WireMouseAction::Resize {
+                    pane,
+                    side,
+                    step,
+                    count,
+                } => {
+                    let applied = self.drag_resize(client_id, pane, side, step, count);
+                    answers.push(MouseAnswer::Resized {
+                        pane,
+                        side,
+                        step,
+                        applied,
+                    });
+                }
+                WireMouseAction::Command(command) => {
+                    let _ = self.dispatch_mouse_command(client_id, *command);
+                }
+            }
+        }
+        self.answer_mouse_round(client_id, request_id, answers);
+    }
+
+    /// Put `answers` on the queue of the subscriber that views `client_id`, as
+    /// the answer to mouse round `request_id`.
+    ///
+    /// A client with no subscription is no attached viewer, so it is waiting on
+    /// nothing and nothing is queued.
+    fn answer_mouse_round(
+        &mut self,
+        client_id: ClientId,
+        request_id: u64,
+        answers: Vec<MouseAnswer>,
+    ) {
+        let Some(&(subscriber, _)) = self
+            .subscriptions
+            .iter()
+            .find(|&&(_, viewed)| viewed == client_id)
+        else {
+            return;
+        };
+        self.event_bus
+            .try_send_answer(subscriber, request_id, answers);
     }
 }
 

@@ -154,10 +154,14 @@ impl Server {
     }
 
     /// Seed the first session from a `--profile` template: one session holding
-    /// every tab the profile defines, each with its own tree of panes, viewed
-    /// by one client focused on the profile's starting tab and pane. The session
-    /// is registered under the caller-supplied `session_id`, as in
+    /// every tab the profile defines, each with its own tree of panes. The
+    /// session is registered under the caller-supplied `session_id`, as in
     /// [`bootstrap_local`](Self::bootstrap_local).
+    ///
+    /// `client_id` names the one client viewing it, focused on the profile's
+    /// starting tab and pane. `None` seeds the session with no client at all,
+    /// which is what a session server started with nothing attached holds; the
+    /// tabs still record which pane a client attaching later lands on.
     ///
     /// Every child is spawned before any state is committed, so a failed launch
     /// commits nothing and kills whatever it already spawned — the caller then
@@ -169,7 +173,25 @@ impl Server {
         template: ProfileTemplate,
         viewport: Size,
         now: SystemTime,
-    ) -> Result<ClientId, ProfileLaunchError> {
+        client_id: Option<ClientId>,
+    ) -> Result<(), ProfileLaunchError> {
+        // This is the first session, so no existing name can collide.
+        let session_name = generate_name(NameKind::Session, |_| false);
+        self.bootstrap_profile_named(session_id, session_name, template, viewport, now, client_id)
+    }
+
+    /// [`bootstrap_profile`](Self::bootstrap_profile) under a caller-chosen
+    /// display name, for a session server whose name was picked by the router
+    /// that started it.
+    pub fn bootstrap_profile_named(
+        &mut self,
+        session_id: SessionId,
+        session_name: String,
+        template: ProfileTemplate,
+        viewport: Size,
+        now: SystemTime,
+        client_id: Option<ClientId>,
+    ) -> Result<(), ProfileLaunchError> {
         let backend = Arc::clone(self.pty_backend());
         let region = pane_viewport(viewport);
 
@@ -208,9 +230,6 @@ impl Server {
 
         // Spawn every pane before committing anything. On any failure, kill
         // what was already spawned so no orphan child outlives the launch.
-        // The client id is minted before the spawns so every pane's identity
-        // vars can name the client that will view the profile.
-        let client_id = ClientId::new();
         let runtime_dir = koshi_paths::runtime_dir();
         let mut handles: Vec<(PaneId, PtyHandle, PtySize)> = Vec::new();
         let pane_min = self.effective_pane_min();
@@ -227,7 +246,7 @@ impl Server {
                 let mut spawn_spec = spawn.clone();
                 spawn_spec.env.extend(koshi_env(
                     session_id,
-                    Some(client_id),
+                    client_id,
                     *pane_id,
                     runtime_dir.as_deref(),
                 ));
@@ -246,25 +265,26 @@ impl Server {
             }
         }
 
-        // Assemble the session and its one client, viewing the tab the profile
-        // starts focused on.
+        // Assemble the session and its client, if any, viewing the tab the
+        // profile starts focused on.
         let focused_tab = template.focused_tab.min(plans.len().saturating_sub(1));
         let focused_tab_id = plans[focused_tab].tab_id;
-        let session_name = generate_name(NameKind::Session, |_| false);
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
-        // This is the session's first client, so no existing label can collide.
-        let client_label = generate_name(NameKind::Client, |_| false);
-        let client = Client::new(
-            client_id,
-            session_id,
-            now,
-            viewport,
-            focused_tab_id,
-            ClientOrigin::Local,
-            client_label,
-            0,
-        );
-        session.attach_client(client);
+        if let Some(client_id) = client_id {
+            // This is the session's first client, so no existing label can collide.
+            let client_label = generate_name(NameKind::Client, |_| false);
+            let client = Client::new(
+                client_id,
+                session_id,
+                now,
+                viewport,
+                focused_tab_id,
+                ClientOrigin::Local,
+                client_label,
+                0,
+            );
+            session.attach_client(client);
+        }
 
         // Commit each tab; only the focused one moves the client onto it.
         for (index, plan) in plans.into_iter().enumerate() {
@@ -281,7 +301,7 @@ impl Server {
                     focus_leaf: plan.focus_leaf,
                 },
                 tab_name,
-                Some(client_id),
+                client_id,
                 index == focused_tab,
                 now,
             );
@@ -299,7 +319,7 @@ impl Server {
         self.render_scheduler
             .invalidate(InvalidationReason::LayoutChanged);
 
-        Ok(client_id)
+        Ok(())
     }
 }
 

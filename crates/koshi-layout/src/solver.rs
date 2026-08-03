@@ -27,6 +27,7 @@
 
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
+use serde::{Deserialize, Serialize};
 
 use crate::mode::LayoutMode;
 use crate::size::SizeConstraint;
@@ -68,7 +69,7 @@ pub struct SolveResult {
 /// instead. The strip is a Koshi-owned region: the renderer draws it and
 /// mouse routing hit-tests it like a border, so a click on it activates the
 /// member and is never forwarded to a PTY.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackHeader {
     /// The collapsed pane this header represents; clicking the strip
     /// activates it.

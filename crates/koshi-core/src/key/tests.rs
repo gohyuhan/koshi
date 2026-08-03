@@ -1,6 +1,6 @@
 //! Tests for the key chord model: modifier bit operations, the canonical text
-//! form each type renders, and the typeable predicate that guards transparent
-//! modes from swallowing input.
+//! form each type renders, the typeable predicate that guards transparent
+//! modes from swallowing input, and the serde wire form a chord travels in.
 
 use super::*;
 
@@ -260,6 +260,78 @@ fn fold_uppercase_at_the_top_of_the_char_range_is_a_no_op() {
 fn named_key_f_key_number_boundaries_display_exactly() {
     assert_eq!(NamedKey::F(0).to_string(), "F0");
     assert_eq!(NamedKey::F(255).to_string(), "F255");
+}
+
+#[test]
+fn a_chord_survives_a_serde_round_trip() {
+    for chord in [
+        KeyChord::new(ModFlags::NONE, Key::Char('a')),
+        KeyChord::new(ModFlags::CTRL | ModFlags::SHIFT, Key::Char('a')),
+        KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::F(12))),
+        KeyChord::new(ModFlags::ALT | ModFlags::SUPER, Key::Named(NamedKey::Enter)),
+    ] {
+        let json = serde_json::to_string(&chord).expect("serialize");
+        let restored: KeyChord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, chord);
+    }
+}
+
+#[test]
+fn decoding_refuses_a_modifier_bit_that_names_no_modifier() {
+    // Bit 4 is the lowest one past Super, the highest modifier.
+    let refused = serde_json::from_str::<KeyChord>(r#"{"mods":16,"key":{"Char":"q"}}"#)
+        .expect_err("bit 4 names no modifier");
+    assert_eq!(
+        refused.to_string(),
+        "modifier bits 0b00010000 name no modifier; the modifiers are 0b00001111 \
+         at line 1 column 10"
+    );
+
+    // Every bit the four modifiers do occupy still decodes.
+    let all_four = serde_json::from_str::<KeyChord>(r#"{"mods":15,"key":{"Char":"q"}}"#)
+        .expect("the four modifier bits together");
+    assert_eq!(
+        all_four,
+        KeyChord::new(
+            ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER,
+            Key::Char('q')
+        )
+    );
+}
+
+#[test]
+fn decoding_refuses_a_function_key_number_no_terminal_names() {
+    // The column is where the number ends, so it grows with the number's digits.
+    for (number, column) in [(0_u8, 32), (25, 33), (255, 34)] {
+        let json = format!(r#"{{"mods":0,"key":{{"Named":{{"F":{number}}}}}}}"#);
+        let refused = serde_json::from_str::<KeyChord>(&json)
+            .expect_err("a function key outside F1 through F24");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "F{number} is not a function key; they run F1 through F24 \
+                 at line 1 column {column}"
+            )
+        );
+    }
+
+    // The two ends of the range still decode.
+    for number in [1_u8, 24] {
+        let json = format!(r#"{{"mods":0,"key":{{"Named":{{"F":{number}}}}}}}"#);
+        let decoded: KeyChord = serde_json::from_str(&json).expect("a real function key");
+        assert_eq!(
+            decoded,
+            KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::F(number)))
+        );
+    }
+}
+
+#[test]
+fn the_chord_wire_form_is_the_field_names_the_modifier_bits_and_the_variant_name() {
+    assert_eq!(
+        serde_json::to_string(&KeyChord::new(ModFlags::CTRL, Key::Char('q'))).expect("serialize"),
+        r#"{"mods":1,"key":{"Char":"q"}}"#
+    );
 }
 
 #[test]

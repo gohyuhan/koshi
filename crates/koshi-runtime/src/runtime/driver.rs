@@ -41,6 +41,22 @@ impl Server {
             RuntimeEvent::KeyInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a key no attached viewer resolved");
             }
+            // An attached client's viewer already read this chord against its
+            // keymap and bound nothing to it, so it is written to the pane that
+            // client is typing into.
+            RuntimeEvent::ClientKeyPress { client_id, chord } => {
+                self.handle_key_press(client_id, chord);
+            }
+            // An attached client's viewer already read this mouse event against
+            // the frame it painted, so the round names every pane it touches.
+            // The round is answered on that client's own queue.
+            RuntimeEvent::ClientMouse {
+                client_id,
+                request_id,
+                actions,
+            } => {
+                self.run_client_mouse(client_id, request_id, actions);
+            }
             // A mouse event is the viewer's for the same reason: only the frame
             // it painted says which pane the pointer is over and which gesture
             // is under way. One arriving here belongs to no attached viewer.

@@ -57,6 +57,12 @@ const FIELDS: &[FieldHelp] = &[
         "Run features still marked beta.",
     ),
     field(
+        "koshi.auto-close-session",
+        "koshi.kdl",
+        "#false",
+        "End the session when its last client leaves.",
+    ),
+    field(
         "koshi.pane.min-cols",
         "koshi.kdl",
         "2",

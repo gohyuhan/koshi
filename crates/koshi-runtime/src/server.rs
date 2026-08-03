@@ -1,5 +1,5 @@
-//! The server half of the in-process ownership split: the single owner of all
-//! authoritative session state, driven by the event loop.
+//! The server half of the server/client ownership split: the single owner of
+//! all authoritative session state, driven by the event loop.
 //!
 //! A [`Server`] owns the sessions and their layout trees, the per-pane
 //! terminal engines, the shared PTY backend, the action registry, and the
@@ -74,16 +74,12 @@ pub struct Server {
     /// Event fan-out hub: every emitted [`Event`] is delivered to each
     /// subscriber over its own bounded queue.
     pub(crate) event_bus: EventBus,
-    /// Which client each bus subscriber views as, in subscription order. A
-    /// subscriber paused by a dropped critical event is resynced from the
-    /// frame of the client named here.
-    subscriptions: Vec<(SubscriberId, ClientId)>,
-    /// The client whose view runs inside this same process — the interactive
-    /// launch's own viewer, set by [`set_local_viewer`](Self::set_local_viewer).
-    /// A detach naming it is rejected, so its record, its subscription, and its
-    /// rendering all outlive every detach. A per-session server has no
-    /// in-process viewer and leaves this `None`.
-    pub(crate) local_viewer: Option<ClientId>,
+    /// Which client each bus subscriber views as, in subscription order. Every
+    /// due render puts the frame of the client named here on the subscriber's
+    /// queue, a subscriber paused by a dropped critical event is resynced from
+    /// that same frame, and a mouse round's answer goes to the subscriber that
+    /// views the client whose viewer sent the round.
+    pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
     /// Source of render snapshots for attach.
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
@@ -130,8 +126,8 @@ pub struct Server {
     /// Bytes waiting to be written to each client's own outer terminal —
     /// escape sequences aimed at the terminal program the client runs in, not
     /// at any pane's child. The copy queues its OSC 52 clipboard write here;
-    /// the client's event loop drains the queue with
-    /// [`take_host_writes`](Self::take_host_writes) each turn.
+    /// [`push_frames`](Self::push_frames) drains a client's queue onto its
+    /// subscriber, ahead of that client's next frame.
     host_writes: HashMap<ClientId, Vec<u8>>,
 }
 
@@ -160,7 +156,6 @@ impl Server {
             pty_sizes: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
-            local_viewer: None,
             snapshot_provider,
             storage,
             ipc_server: None,
@@ -199,6 +194,7 @@ impl Server {
     /// Dropping the receiver ends the subscription.
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
+    /// [`push_frames`](Self::push_frames) queues each due render, and the one
     /// [`resync_lagged`](Self::resync_lagged) builds when a critical event does
     /// not fit the queue.
     pub fn subscribe(&mut self, client_id: ClientId, filter: EventFilter) -> Receiver<Delivery> {
@@ -207,20 +203,16 @@ impl Server {
         rx
     }
 
-    /// Name `client_id` the viewer running inside this process. A detach
-    /// resolving to it is rejected, so the window the session runs in keeps
-    /// its client record, its subscription, and its rendering.
-    pub fn set_local_viewer(&mut self, client_id: ClientId) {
-        self.local_viewer = Some(client_id);
-    }
-
     /// Drop every subscription registered as viewing `client_id`, closing the
     /// sending end of each one's queue. Called when the client detaches: the
     /// frames those subscribers are resynced from are built from the client's
     /// own view state, which is gone with the record.
     ///
     /// A client with no subscription of its own leaves the bus untouched.
+    /// Bytes still queued for the client's own terminal are dropped with it:
+    /// the terminal that was to be written to is gone.
     pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
+        self.host_writes.remove(&client_id);
         let bus = &mut self.event_bus;
         self.subscriptions.retain(|&(id, viewed)| {
             if viewed == client_id {
@@ -274,6 +266,38 @@ impl Server {
         self.subscriptions.retain(|&(id, _)| bus.contains(id));
     }
 
+    /// Put each client's current frame on its queue. Called once per due
+    /// render, after [`resync_lagged`](Self::resync_lagged).
+    ///
+    /// The frame is the subscriber's viewing client's, built by
+    /// [`build_snapshot`](Self::build_snapshot).
+    ///
+    /// Bytes queued for a client's own terminal go on its subscriber's queue
+    /// first, so a clipboard write lands ahead of the frame drawn after it.
+    ///
+    /// A frame that does not fit the queue is dropped and the next due render
+    /// offers a newer one. A subscriber the send removed — its receiver is gone
+    /// — takes its `subscriptions` entry with it.
+    pub fn push_frames(&mut self) {
+        // Taken and put back rather than cloned: building a frame and queueing
+        // it both need `self`, and this runs on every due frame for every
+        // client, so the clone was an allocation per render tick. Nothing in
+        // the loop touches `subscriptions` itself.
+        let subscriptions = std::mem::take(&mut self.subscriptions);
+        for &(id, client_id) in &subscriptions {
+            if let Some(bytes) = self.host_writes.remove(&client_id) {
+                self.event_bus.try_send_host_write(id, bytes);
+            }
+            let Some(snapshot) = self.build_snapshot(client_id) else {
+                continue;
+            };
+            self.event_bus.try_send_frame(id, Box::new(snapshot));
+        }
+        self.subscriptions = subscriptions;
+        let bus = &self.event_bus;
+        self.subscriptions.retain(|&(id, _)| bus.contains(id));
+    }
+
     /// Log each of `events`, then deliver it to every subscriber. The shared
     /// tail of every handler that emits events outside a command transaction
     /// (attach, detach, resize, child exit); a command's events pass through
@@ -292,8 +316,10 @@ impl Server {
     }
 
     /// Take every byte queued for `client_id`'s outer terminal, or `None` when
-    /// nothing is queued. The caller writes them to the terminal verbatim.
-    pub fn take_host_writes(&mut self, client_id: ClientId) -> Option<Vec<u8>> {
+    /// nothing is queued. Test-only: delivery runs through
+    /// [`push_frames`](Self::push_frames).
+    #[cfg(test)]
+    pub(crate) fn take_host_writes(&mut self, client_id: ClientId) -> Option<Vec<u8>> {
         self.host_writes.remove(&client_id)
     }
 

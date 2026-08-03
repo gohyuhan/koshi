@@ -34,7 +34,7 @@ use koshi_core::mouse::MouseButton;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
     event::Event,
-    geometry::{Point, Size},
+    geometry::Size,
     ids::{ClientId, PaneId, TabId},
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -107,9 +107,6 @@ pub struct Client {
     /// The pane-border drag under way, held only between the press on a border
     /// that begins it and the release that ends it.
     resize_drag: Option<ResizeDrag>,
-    /// The cell the in-flight border drag last asked to move to, awaiting the
-    /// session's count of how many of those cells it accepted.
-    resize_pointer: Option<Point>,
     /// The tab-strip peek-drag under way, held only between the press on the
     /// bare strip that begins it and the release that ends it.
     tabline_drag: Option<TablineDrag>,
@@ -171,7 +168,6 @@ impl Client {
             last_press: None,
             mouse_capture: None,
             resize_drag: None,
-            resize_pointer: None,
             tabline_drag: None,
             tabline_peek: None,
             selection_drag: None,
@@ -275,6 +271,16 @@ impl Client {
         self.mouse_select
     }
 
+    /// Set whether this viewer grabs the mouse for text selection.
+    ///
+    /// Called when the session reports the mode for this viewer, either as an
+    /// event or in the frame an attached viewer reads. The session owns the
+    /// mode; this only moves the viewer's copy of it, which mouse routing
+    /// reads.
+    pub fn set_mouse_select(&mut self, on: bool) {
+        self.mouse_select = on;
+    }
+
     /// The hint-bar data for the viewer's current mode.
     #[must_use]
     pub fn keymap_hints(&self) -> KeymapHints {
@@ -306,6 +312,11 @@ impl Client {
     /// copies of both, so the viewer takes them from the frame instead of from
     /// the reports it never received, and logs how many were dropped. The
     /// frame names this viewer, checked by a debug assertion.
+    ///
+    /// A [`Delivery::Frame`] is the picture composed for a client in another
+    /// process. It is counted, and nothing is taken from it. So is a
+    /// [`Delivery::MouseAnswer`], which answers that client's mouse round, and
+    /// a [`Delivery::HostWrite`], which that client writes to its own terminal.
     pub fn apply_events(&mut self) -> usize {
         let mut seen = 0;
         while let Ok(delivery) = self.events.try_recv() {
@@ -323,6 +334,15 @@ impl Client {
                     }
                     _ => {}
                 },
+                // The frame composed for a client in another process.
+                Delivery::Frame(_) => {}
+                // The attached viewer reads a round's answers off its own
+                // connection, not off a subscription; the viewer in this
+                // process is sent neither answers nor frames.
+                Delivery::MouseAnswer { .. } => {}
+                // Bytes for a client's own terminal, written by that client off
+                // its own connection.
+                Delivery::HostWrite(_) => {}
                 Delivery::Snapshot { snapshot, lagged } => {
                     debug_assert_eq!(
                         snapshot.client.id, self.id,

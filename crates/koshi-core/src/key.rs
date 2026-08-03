@@ -18,12 +18,38 @@
 //! carrying only ALT, while the Windows console reports `Char('h')` carrying
 //! ALT and SHIFT.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Instant;
 
 /// The modifier keys held down as part of a chord, packed one per bit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Decoding refuses a bit no modifier names, so a value that arrived over the
+/// wire holds only the four below.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "u8")]
 pub struct ModFlags(u8);
+
+/// Every bit the four modifiers occupy; the rest name nothing.
+const MOD_FLAG_BITS: u8 = 0b0000_1111;
+
+impl TryFrom<u8> for ModFlags {
+    type Error = String;
+
+    /// Accepts a bit pattern drawn only from the four modifier bits: Control,
+    /// Alt, Shift and Super.
+    fn try_from(bits: u8) -> Result<Self, Self::Error> {
+        if bits & !MOD_FLAG_BITS == 0 {
+            Ok(Self(bits))
+        } else {
+            Err(format!(
+                "modifier bits {bits:#010b} name no modifier; the modifiers are {MOD_FLAG_BITS:#010b}"
+            ))
+        }
+    }
+}
 
 impl ModFlags {
     /// No modifiers held.
@@ -97,7 +123,7 @@ impl fmt::Display for ModFlags {
 const NON_TEXT: ModFlags = ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 /// A key that is not a printable character.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum NamedKey {
     /// Return / Enter.
     Enter,
@@ -130,7 +156,26 @@ pub enum NamedKey {
     /// Down arrow.
     Down,
     /// Function key `F1` through `F24`.
-    F(u8),
+    F(#[serde(deserialize_with = "function_key_number")] u8),
+}
+
+/// The lowest and highest function key a terminal names.
+const FIRST_FUNCTION_KEY: u8 = 1;
+const LAST_FUNCTION_KEY: u8 = 24;
+
+/// Decode a [`NamedKey::F`] number, refusing one no function key carries.
+fn function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let number = u8::deserialize(deserializer)?;
+    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&number) {
+        Ok(number)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "F{number} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
+        )))
+    }
 }
 
 impl fmt::Display for NamedKey {
@@ -158,7 +203,7 @@ impl fmt::Display for NamedKey {
 }
 
 /// The key part of a chord, with the modifiers stripped off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Key {
     /// A printable character, lowercase when it has a single-character
     /// lowercase mapping; the capital is carried by [`ModFlags::SHIFT`].
@@ -217,7 +262,7 @@ pub fn fold_uppercase(c: char) -> (char, bool) {
 }
 
 /// One key press: the modifiers held, and the key itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct KeyChord {
     /// The modifier keys held down.
     pub mods: ModFlags,

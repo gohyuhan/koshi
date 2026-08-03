@@ -1,11 +1,15 @@
 //! Tests for the loop-facing driver surface: render-wakeup timing and
-//! poll delegation to the scheduler, the live-pane check, and the abrupt
-//! group-kill the panic path takes.
+//! poll delegation to the scheduler, the live-pane check, the routing of an
+//! attached client's key press and pasted text, and the abrupt group-kill the
+//! panic path takes.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc;
+use std::time::SystemTime;
 
-use koshi_core::ids::PaneId;
+use koshi_core::geometry::Size;
+use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -84,6 +88,53 @@ fn the_panic_teardown_group_kills_every_pane_as_a_tree() {
     assert_eq!(
         fake.kills(second).expect("second pane"),
         vec![KillPolicy::Tree]
+    );
+}
+
+#[test]
+fn a_client_key_press_is_written_to_that_clients_focused_pane() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+    let pane = *rt.pty_handles.keys().next().expect("one pane");
+
+    let flow = rt.handle_runtime_event(RuntimeEvent::ClientKeyPress {
+        client_id: client,
+        chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
+    });
+
+    assert_eq!(flow, ControlFlow::Continue(()));
+    assert_eq!(fake.writes(pane).expect("writes"), vec![vec![b'a']]);
+}
+
+#[test]
+fn a_host_paste_is_written_to_that_clients_focused_pane() {
+    let (mut rt, fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap");
+    let pane = *rt.pty_handles.keys().next().expect("one pane");
+
+    let flow = rt.handle_runtime_event(RuntimeEvent::HostPaste {
+        client_id: client,
+        text: String::from("hello\nworld"),
+    });
+
+    // A fresh pane has bracketed paste off, so the text reaches it unwrapped,
+    // with the line break as the byte the Enter key sends.
+    assert_eq!(flow, ControlFlow::Continue(()));
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"hello\rworld".to_vec()]
     );
 }
 

@@ -667,7 +667,6 @@ impl Client {
         let selecting = self.selection_drag.take();
         let resizing = self.resize_drag.take().is_some();
         let peeking = self.tabline_drag.take().is_some();
-        self.resize_pointer = None;
         if !(selecting.is_some() || resizing || peeking) {
             return self.forward(mouse, frame);
         }
@@ -738,15 +737,14 @@ impl Client {
     ///
     /// Asks for the move one cell at a time toward the border, so a fast drag
     /// that jumps several cells fills right up to a pane's minimum size instead
-    /// of being refused whole. The pointer's cell is remembered in
-    /// [`note_resize_applied`](Self::note_resize_applied), once the session has
-    /// said how many of those cells it took.
-    fn drag_resize_to(&mut self, drag: ResizeDrag, at: Point) -> Vec<MouseAction> {
+    /// of being refused whole. The whole distance from the anchor is named every
+    /// time; [`note_resize_applied`](Self::note_resize_applied) moves the anchor
+    /// over the cells the session says it took.
+    fn drag_resize_to(&self, drag: ResizeDrag, at: Point) -> Vec<MouseAction> {
         let total = resize_delta(drag.side, drag.last, at);
         if total == 0 {
             return Vec::new();
         }
-        self.resize_pointer = Some(at);
         vec![MouseAction::Resize {
             pane: drag.pane,
             side: drag.side,
@@ -756,15 +754,27 @@ impl Client {
     }
 
     /// Advance the border drag's anchor over the `applied` cells the session
-    /// accepted. The first refused step is the wall, so the anchor stops there
-    /// and a reverse drag moves the border the instant the pointer crosses back.
-    pub fn note_resize_applied(&mut self, applied: u16) {
-        let (Some(drag), Some(to)) = (self.resize_drag, self.resize_pointer.take()) else {
+    /// accepted of a move asked for on `pane`'s `side` in direction `step`. The
+    /// first refused step is the wall, so the anchor stops there and a reverse
+    /// drag moves the border the instant the pointer crosses back.
+    ///
+    /// Nothing moves unless the drag now held is the one `pane` and `side` name:
+    /// an answer for a border the viewer has let go of, or for another border of
+    /// the same pane, leaves the anchor where it is.
+    ///
+    /// `step` and `applied` are the whole of the distance — the pointer is never
+    /// read here, so an answer that lands while the pointer is still moves the
+    /// anchor exactly as far as one that lands mid-motion.
+    pub fn note_resize_applied(&mut self, pane: PaneId, side: Direction, step: i16, applied: u16) {
+        let Some(drag) = self
+            .resize_drag
+            .filter(|drag| drag.pane == pane && drag.side == side)
+        else {
             return;
         };
         if applied > 0 {
             self.resize_drag = Some(ResizeDrag {
-                last: advance_toward(drag.side, drag.last, to, applied),
+                last: advance_along(drag.side, drag.last, step, applied),
                 ..drag
             });
         }
@@ -1111,29 +1121,37 @@ fn resize_delta(side: Direction, from: Point, to: Point) -> i16 {
     outward.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
-/// The cell `n` cells from `from` toward `to` along `side`'s axis. Moving toward
-/// the pointer keeps the anchor correct for both a grow and a shrink.
-/// Saturating, so a border at a viewport edge cannot wrap below zero.
-fn advance_toward(side: Direction, from: Point, to: Point, n: u16) -> Point {
+/// The cell `from` reaches when `n` cells of a border move asked for in
+/// direction `step` are accepted. The inverse of [`resize_delta`]: a positive
+/// `step` grows the pane, which walks a left or up border toward zero and a
+/// right or down border away from it. Left/right borders move along x, up/down
+/// borders along y.
+fn advance_along(side: Direction, from: Point, step: i16, n: u16) -> Point {
+    let moved = i32::from(step) * i32::from(n);
     match side {
-        Direction::Left | Direction::Right => Point {
-            x: step_toward(from.x, to.x, n),
+        Direction::Right => Point {
+            x: shift(from.x, moved),
             ..from
         },
-        Direction::Up | Direction::Down => Point {
-            y: step_toward(from.y, to.y, n),
+        Direction::Left => Point {
+            x: shift(from.x, -moved),
+            ..from
+        },
+        Direction::Down => Point {
+            y: shift(from.y, moved),
+            ..from
+        },
+        Direction::Up => Point {
+            y: shift(from.y, -moved),
             ..from
         },
     }
 }
 
-/// `from` moved `n` cells toward `to`, saturating at zero.
-fn step_toward(from: u16, to: u16, n: u16) -> u16 {
-    if to >= from {
-        from.saturating_add(n)
-    } else {
-        from.saturating_sub(n)
-    }
+/// `coord` moved `by` cells, saturating at both ends of the cell range, so a
+/// border at a viewport edge cannot wrap.
+fn shift(coord: u16, by: i32) -> u16 {
+    (i32::from(coord) + by).clamp(0, i32::from(u16::MAX)) as u16
 }
 
 /// `kind` with its button replaced by `button`. Only a drag or release carries a

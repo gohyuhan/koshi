@@ -1,14 +1,16 @@
 //! Integration cover for attaching over a real control socket: what one
 //! attach registers, what the reply carries and when it is written, what a
-//! second attach sees, what strict decoding refuses, what a detach leaves
-//! behind for the clients that stay and for the panes, and what a dropped
-//! connection leaves behind.
+//! second attach sees, what strict decoding refuses, what a client's key
+//! presses and resizes reach, what a client's mouse rounds do to its panes and
+//! what the one answer each round is given carries, what a detach leaves behind
+//! for the clients that stay and for the panes, and what a dropped connection
+//! leaves behind.
 //!
 //! Each test runs the shape the per-session server process runs in: a headless
-//! session seeded with no client, its inbox drained on the thread that owns
-//! the server, and the socket answered by the real accept loop. The exchange
-//! with the socket runs on its own thread, since the caller and the dispatcher
-//! must both be live for a request to be answered.
+//! session seeded with no client, its inbox drained and its frames pushed on
+//! the thread that owns the server, and the socket answered by the real accept
+//! loop. The exchange with the socket runs on its own thread, since the caller
+//! and the dispatcher must both be live for a request to be answered.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
@@ -16,19 +18,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
-    CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs, NewTabArgs,
+    CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs,
+    FocusPaneArgs, FocusTarget, NewPaneArgs, NewTabArgs,
 };
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_core::mouse::{MouseAnswer, MouseButton, MouseInput, MouseKind, MouseTracking};
 use koshi_core::process::PtySize;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
+use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
     EventFilterSpec, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, PROTOCOL_VERSION,
+    IpcResult, WireMouseAction, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
@@ -36,7 +42,7 @@ use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
-use koshi_session::client::{AuthorityTier, ClientOrigin};
+use koshi_session::client::{pane_viewport, AuthorityTier, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 /// The terminal size every attaching client in these tests reports.
@@ -64,13 +70,15 @@ impl Drop for StopDispatcher {
 
 /// Seed a headless session under a fake PTY backend, serve its control socket
 /// from a directory named for `tag`, and run `exchange` against that socket
-/// while this thread drains the runtime inbox.
+/// while this thread drains the runtime inbox and pushes each attached
+/// client its frames.
 ///
 /// Returns the server and the fake backend once the exchange is done, so a
 /// test can read the session state and the PTY sizes the exchange left behind,
 /// plus whatever the exchange itself produced. `exchange` receives the runtime
 /// directory and the session id, the two facts it needs to find and open the
-/// socket.
+/// socket, and the fake backend, which is how it makes a pane's program write
+/// output while the session is running.
 ///
 /// It hands back the connections it wants left open alongside its own value:
 /// a connection dropped while the dispatcher is still draining detaches its
@@ -78,7 +86,9 @@ impl Drop for StopDispatcher {
 /// dispatcher has stopped.
 fn served<T: Send + 'static>(
     tag: &str,
-    exchange: impl FnOnce(PathBuf, SessionId) -> (Vec<Connection>, T) + Send + 'static,
+    exchange: impl FnOnce(PathBuf, SessionId, Arc<FakePtyBackend>) -> (Vec<Connection>, T)
+        + Send
+        + 'static,
 ) -> (Server, Arc<FakePtyBackend>, T) {
     #[cfg(unix)]
     let base = PathBuf::from("/tmp");
@@ -111,17 +121,37 @@ fn served<T: Send + 'static>(
     let ipc = IpcServer::start(&runtime_dir, session_id, inbox_tx.clone()).expect("start serving");
 
     let caller_dir = runtime_dir.clone();
+    let caller_fake = fake.clone();
     let caller = std::thread::spawn(move || {
         let _stop = StopDispatcher(inbox_tx);
-        exchange(caller_dir, session_id)
+        exchange(caller_dir, session_id, caller_fake)
     });
 
+    // The per-session server's own loop: block until an event is due, bounded
+    // by the next render deadline, apply it, hand a fresh snapshot to any
+    // subscriber that lost a critical event, then push every attached client
+    // its frame when a render is due.
     loop {
-        let Ok(event) = server.inbox_rx().recv() else {
-            break;
+        let now = Instant::now();
+        let event = match server.next_render_wakeup(now) {
+            Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
+                Ok(event) => Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match server.inbox_rx().recv() {
+                Ok(event) => Some(event),
+                Err(_) => break,
+            },
         };
-        if server.handle_runtime_event(event).is_break() {
-            break;
+        if let Some(event) = event {
+            if server.handle_runtime_event(event).is_break() {
+                break;
+            }
+        }
+        server.resync_lagged();
+        if server.poll_render(Instant::now()) {
+            server.push_frames();
         }
     }
 
@@ -298,18 +328,25 @@ fn submit(
     emitted_events
 }
 
-/// Read `connection`'s event stream until the goodbye frame, on a thread this
-/// one can give up waiting on. Returns every frame read, the goodbye last, and
-/// the connection so it stays open.
-fn read_to_goodbye(mut connection: Connection) -> (Connection, Vec<SessionEvent>) {
+/// Read `connection`'s event stream until `wanted` accepts a frame, on a thread
+/// this one can give up waiting on. Returns every frame read, the accepted one
+/// last, and the connection so it stays open.
+///
+/// Each frame is decoded as a [`SessionEvent`], so a response frame written on
+/// an attached client's connection fails the read: an [`IpcResponse`] is a
+/// two-field record where a `SessionEvent` is a single-variant one.
+fn read_frames_until(
+    mut connection: Connection,
+    wanted: impl Fn(&SessionEvent) -> bool + Send + 'static,
+) -> (Connection, Vec<SessionEvent>) {
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut frames = Vec::new();
         loop {
             let frame: SessionEvent = connection.recv().expect("an event frame");
-            let goodbye = frame == SessionEvent::Detached;
+            let last = wanted(&frame);
             frames.push(frame);
-            if goodbye {
+            if last {
                 break;
             }
         }
@@ -317,13 +354,27 @@ fn read_to_goodbye(mut connection: Connection) -> (Connection, Vec<SessionEvent>
     });
     done_rx
         .recv_timeout(PATIENCE)
-        .expect("the goodbye frame reaches the viewer")
+        .expect("the awaited frame reaches the viewer")
+}
+
+/// [`read_frames_until`] stopping at the goodbye frame.
+fn read_to_goodbye(connection: Connection) -> (Connection, Vec<SessionEvent>) {
+    read_frames_until(connection, |frame| *frame == SessionEvent::Detached)
+}
+
+/// The painted frame `frames` ends with. Panics unless the last frame read is
+/// a painted one.
+fn last_painted(frames: &[SessionEvent]) -> &PaintedFrame {
+    match frames.last() {
+        Some(SessionEvent::Painted { frame }) => frame,
+        other => panic!("expected the run to end with a painted frame, got {other:?}"),
+    }
 }
 
 #[test]
 fn one_attach_registers_the_client_the_server_minted() {
     let (server, _fake, (session_id, client_id, structure)) =
-        served("registers", |dir, session_id| {
+        served("registers", |dir, session_id, _fake| {
             let mut viewer = open(&dir, session_id);
             let (client_id, replied_session, structure) = attach(&mut viewer, 2);
             assert_eq!(replied_session, session_id);
@@ -353,7 +404,7 @@ fn one_attach_registers_the_client_the_server_minted() {
 
 #[test]
 fn nothing_in_the_request_can_raise_the_clients_authority() {
-    let (server, _fake, session_id) = served("strict", |dir, session_id| {
+    let (server, _fake, session_id) = served("strict", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
 
         // A well-framed request naming one field this build does not know.
@@ -393,7 +444,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
 #[test]
 fn the_structure_reply_is_written_before_the_first_event_frame() {
     let (server, _fake, (session_id, first_tab, second_tab)) =
-        served("reply-first", |dir, session_id| {
+        served("reply-first", |dir, session_id, _fake| {
             let mut viewer = open(&dir, session_id);
 
             // Frame one on this connection decodes as a response, so no event
@@ -433,7 +484,7 @@ fn the_structure_reply_is_written_before_the_first_event_frame() {
 #[test]
 fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first() {
     let (server, _fake, (session_id, first_client, second_client)) =
-        served("reattach", |dir, session_id| {
+        served("reattach", |dir, session_id, _fake| {
             let mut first = open(&dir, session_id);
             let (first_client, _, before) = attach(&mut first, 2);
             assert_eq!(before.tabs.len(), 1);
@@ -504,7 +555,7 @@ fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, req
 
 #[test]
 fn the_event_stream_ends_with_the_quit_frame() {
-    let (server, _fake, session_id) = served("quit-ends-stream", |dir, session_id| {
+    let (server, _fake, session_id) = served("quit-ends-stream", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
         let (_, _, structure) = attach(&mut viewer, 2);
         let only_tab = structure.tabs[0].id;
@@ -513,22 +564,9 @@ fn the_event_stream_ends_with_the_quit_frame() {
         assert_eq!(attached_client_count(&mut caller, 3), 1);
         close_tab(&mut caller, session_id, only_tab, 4);
 
-        // Reading a frame blocks with no deadline of its own, so the walk to
-        // the quit frame runs on a thread this one can give up waiting on.
-        // The connection comes back so it stays open below.
-        let (quit_tx, quit_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            loop {
-                let frame: SessionEvent = viewer.recv().expect("an event frame");
-                if matches!(frame, SessionEvent::Quit) {
-                    break;
-                }
-            }
-            let _ = quit_tx.send(viewer);
-        });
-        let viewer = quit_rx
-            .recv_timeout(PATIENCE)
-            .expect("the quit frame reaches the event stream");
+        // The quit frame is the last one the viewer's stream carries.
+        let (viewer, frames) = read_frames_until(viewer, |frame| *frame == SessionEvent::Quit);
+        assert_eq!(frames.last(), Some(&SessionEvent::Quit));
 
         // The quit frame ends the stream: its writing thread exits and
         // detaches the client. The viewer connection is still open, so the
@@ -553,7 +591,7 @@ fn the_event_stream_ends_with_the_quit_frame() {
 #[test]
 fn dropping_an_attached_connection_removes_its_client_record() {
     let (server, _fake, (session_id, client_id, tab_id, pane_id)) =
-        served("disconnect", |dir, session_id| {
+        served("disconnect", |dir, session_id, _fake| {
             let mut viewer = open(&dir, session_id);
             let (client_id, _, structure) = attach(&mut viewer, 2);
             let tab_id = structure.tabs[0].id;
@@ -607,7 +645,7 @@ fn dropping_an_attached_connection_removes_its_client_record() {
 #[test]
 fn detaching_one_client_leaves_every_other_stream_running() {
     let (server, _fake, (session_id, first_client, second_client, added_tab)) =
-        served("detach-one", |dir, session_id| {
+        served("detach-one", |dir, session_id, _fake| {
             let mut first = open(&dir, session_id);
             let (first_client, _, _) = attach(&mut first, 2);
             let mut second = open(&dir, session_id);
@@ -630,10 +668,9 @@ fn detaching_one_client_leaves_every_other_stream_running() {
             // held keeps its size and the detach emits nothing.
             assert_eq!(emitted, Vec::new());
 
-            // The goodbye is the only frame the first viewer was ever sent,
-            // and the last one its stream carries.
+            // The goodbye is the last frame the first viewer's stream carries.
             let (first, frames) = read_to_goodbye(first);
-            assert_eq!(frames, vec![SessionEvent::Detached]);
+            assert_eq!(frames.last(), Some(&SessionEvent::Detached));
             wait_for_client_count(&mut caller, 1, 5);
 
             // The client that stayed is untouched: a tab added now still
@@ -671,7 +708,7 @@ fn detaching_one_client_leaves_every_other_stream_running() {
 #[test]
 fn detach_all_takes_every_client_and_leaves_the_session_whole() {
     let (server, _fake, (session_id, first_client, second_client, tab_id, pane_id)) =
-        served("detach-all", |dir, session_id| {
+        served("detach-all", |dir, session_id, _fake| {
             let first = {
                 let mut connection = open(&dir, session_id);
                 let (client_id, _, structure) = attach(&mut connection, 2);
@@ -687,11 +724,11 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
             let emitted = submit(&mut caller, session_id, Command::DetachAll, 4);
             assert_eq!(emitted, Vec::new());
 
-            // Every attached client is sent the same goodbye.
+            // Every attached client's stream ends with the same goodbye.
             let (first, first_frames) = read_to_goodbye(first);
             let (second, second_frames) = read_to_goodbye(second);
-            assert_eq!(first_frames, vec![SessionEvent::Detached]);
-            assert_eq!(second_frames, vec![SessionEvent::Detached]);
+            assert_eq!(first_frames.last(), Some(&SessionEvent::Detached));
+            assert_eq!(second_frames.last(), Some(&SessionEvent::Detached));
             wait_for_client_count(&mut caller, 0, 5);
 
             // The session with nobody watching still holds its tab and pane.
@@ -738,7 +775,7 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
     // Half the columns of [`VIEWPORT`], which the session's pane spawned at.
     const NARROW: Size = Size { cols: 40, rows: 24 };
 
-    let (_server, fake, pane_id) = served("detach-reflow", |dir, session_id| {
+    let (_server, fake, pane_id) = served("detach-reflow", |dir, session_id, _fake| {
         // The narrow client attaches first and holds the tab down: the
         // effective tab size is the smallest viewport of every client viewing
         // it, so the pane's PTY shrinks.
@@ -763,7 +800,7 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
             4,
         );
         let (narrow, frames) = read_to_goodbye(narrow);
-        assert_eq!(frames, vec![SessionEvent::Detached]);
+        assert_eq!(frames.last(), Some(&SessionEvent::Detached));
         wait_for_client_count(&mut caller, 1, 5);
 
         (vec![caller, narrow, wide], pane_id)
@@ -785,4 +822,578 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
             full,
         ],
     );
+}
+
+#[test]
+fn dropping_a_smaller_client_connection_grows_the_tabs_pty_back() {
+    // Half the columns of [`VIEWPORT`], which the session's pane spawned at.
+    const NARROW: Size = Size { cols: 40, rows: 24 };
+
+    let (_server, fake, pane_id) = served("drop-reflow", |dir, session_id, _fake| {
+        // The narrow client attaches first and holds the tab down: the
+        // effective tab size is the smallest viewport of every client viewing
+        // it, so the pane's PTY shrinks.
+        let mut narrow = open(&dir, session_id);
+        let (_narrow_client, _, structure) = attach_sized(&mut narrow, 2, NARROW);
+        let pane_id = structure.panes[0].id;
+
+        let mut wide = open(&dir, session_id);
+        attach_sized(&mut wide, 3, VIEWPORT);
+
+        let mut caller = open(&dir, session_id);
+        assert_eq!(attached_client_count(&mut caller, 4), 2);
+
+        // Drop the narrow client's connection without sending Command::Detach.
+        // The record goes when the serving thread notices the connection ended,
+        // and the tab's PTY reflows immediately to the full width.
+        drop(narrow);
+
+        wait_for_client_count(&mut caller, 1, 5);
+
+        (vec![caller, wide], pane_id)
+    });
+
+    // Three resizes, in this order: the size the seeded session gave the pane,
+    // down by the difference in viewport width when the narrow client joined,
+    // and back to the first size when the narrow client's connection dropped.
+    let resizes = fake.resizes(pane_id).expect("the pane was spawned");
+    let full = resizes[0];
+    assert_eq!(
+        resizes,
+        vec![
+            full,
+            PtySize {
+                cols: full.cols - (VIEWPORT.cols - NARROW.cols),
+                rows: full.rows,
+            },
+            full,
+        ],
+        "connection drop triggers immediate PTY reconciliation"
+    );
+}
+
+#[test]
+fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
+    // Smaller than [`VIEWPORT`] on both axes, so this one client's report is
+    // the smallest of every client viewing the tab and the tab follows it.
+    const RESIZED: Size = Size { cols: 60, rows: 20 };
+
+    // `<C-a>` reaches the pane as the ASCII SOH byte.
+    const TYPED: KeyChord = KeyChord::new(ModFlags::CTRL, Key::Char('a'));
+    const TYPED_BYTES: &[u8] = &[0x01];
+
+    let (_server, fake, pane_id) = served("types-and-resizes", |dir, session_id, _fake| {
+        let mut viewer = open(&dir, session_id);
+        let (client_id, replied_session, structure) = attach(&mut viewer, 2);
+        assert_eq!(replied_session, session_id);
+        let tab_id = structure.tabs[0].id;
+        let pane_id = structure.panes[0].id;
+
+        // The attach records no focused pane, so the pane this client types
+        // into is named over a second connection, which never attaches.
+        let mut caller = open(&dir, session_id);
+        submit(
+            &mut caller,
+            session_id,
+            Command::FocusPane(FocusPaneArgs {
+                target: FocusTarget::Pane(pane_id),
+                client: Some(client_id),
+            }),
+            3,
+        );
+
+        // The first frame the session composes for this client, drawn at the
+        // size the attach reported.
+        let (mut viewer, frames) = read_frames_until(viewer, |frame| {
+            matches!(frame, SessionEvent::Painted { .. })
+        });
+        let painted = last_painted(&frames);
+        assert_eq!(painted.client.id, client_id);
+        assert_eq!(painted.session.id, session_id);
+        assert_eq!(painted.client.viewport, VIEWPORT);
+        assert_eq!(painted.client.active_tab, tab_id);
+        assert_eq!(painted.session.active_tab.id, tab_id);
+        assert_eq!(painted.client.focused_pane, Some(pane_id));
+
+        // Both requests travel up this one connection, so the dispatcher reads
+        // them in this order: the press has reached the pane by the time the
+        // resized frame is composed.
+        viewer
+            .send(&IpcRequest {
+                request_id: 4,
+                kind: IpcRequestKind::KeyPress { chord: TYPED },
+            })
+            .expect("send key press");
+        viewer
+            .send(&IpcRequest {
+                request_id: 5,
+                kind: IpcRequestKind::Resize { viewport: RESIZED },
+            })
+            .expect("send resize");
+
+        let (viewer, frames) = read_frames_until(
+            viewer,
+            |frame| matches!(frame, SessionEvent::Painted { frame } if frame.client.viewport == RESIZED),
+        );
+        // Nothing between the two frames drew at a third size.
+        for earlier in &frames[..frames.len() - 1] {
+            if let SessionEvent::Painted { frame } = earlier {
+                assert_eq!(frame.client.viewport, VIEWPORT);
+            }
+        }
+        let painted = last_painted(&frames);
+        assert_eq!(painted.client.id, client_id);
+        assert_eq!(painted.client.viewport, RESIZED);
+        assert_eq!(
+            painted.session.active_tab.effective_size,
+            pane_viewport(RESIZED),
+        );
+
+        // The stream still ends with the goodbye once the client is detached.
+        submit(
+            &mut caller,
+            session_id,
+            Command::Detach(DetachArgs {
+                client: Some(client_id),
+            }),
+            6,
+        );
+        let (viewer, frames) = read_to_goodbye(viewer);
+        assert_eq!(frames.last(), Some(&SessionEvent::Detached));
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| **frame == SessionEvent::Detached)
+                .count(),
+            1,
+        );
+
+        (vec![caller, viewer], pane_id)
+    });
+
+    // The press is the only thing written to the pane, and it arrived encoded.
+    assert_eq!(
+        fake.writes(pane_id).expect("the pane was spawned"),
+        vec![TYPED_BYTES.to_vec()],
+    );
+}
+
+/// [`read_frames_until`] stopping at the answer to mouse round `request_id`.
+fn read_to_mouse_answer(
+    connection: Connection,
+    request_id: u64,
+) -> (Connection, Vec<SessionEvent>) {
+    read_frames_until(connection, move |frame| match frame {
+        SessionEvent::MouseAnswer {
+            request_id: answered,
+            answers: _,
+        } => *answered == request_id,
+        _ => false,
+    })
+}
+
+/// Every mouse-round answer in `frames`, in the order they arrived: the round
+/// each one answers, and what that answer carried.
+fn mouse_answers(frames: &[SessionEvent]) -> Vec<(u64, Vec<MouseAnswer>)> {
+    frames
+        .iter()
+        .filter_map(|frame| match frame {
+            SessionEvent::MouseAnswer {
+                request_id,
+                answers,
+            } => Some((*request_id, answers.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Turn normal mouse tracking with SGR encoding on in `pane`, the way the
+/// program running there does, and read `connection`'s stream until a painted
+/// frame shows the pane asking for reports — the point from which a forwarded
+/// event is written to it.
+fn wait_for_mouse_tracking(
+    fake: &FakePtyBackend,
+    pane: PaneId,
+    connection: Connection,
+) -> Connection {
+    fake.push_output(pane, b"\x1b[?1000h\x1b[?1006h".to_vec())
+        .expect("the pane was spawned");
+    let (connection, _) = read_frames_until(connection, move |frame| match frame {
+        SessionEvent::Painted { frame } => frame
+            .panes
+            .iter()
+            .any(|painted| painted.id == pane && painted.mouse_tracking == MouseTracking::Normal),
+        _ => false,
+    });
+    connection
+}
+
+/// Print enough lines in `pane` to push at least `retained` of them into its
+/// scrollback, and read `connection`'s stream until a painted frame holds them.
+///
+/// Returns the line that frame shows on the pane's top row, which is the line a
+/// scroll up from here counts back from.
+fn fill_scrollback(
+    fake: &FakePtyBackend,
+    pane: PaneId,
+    retained: usize,
+    connection: Connection,
+) -> (Connection, u64) {
+    let lines = retained + usize::from(VIEWPORT.rows);
+    fake.push_output(pane, b"x\r\n".repeat(lines))
+        .expect("the pane was spawned");
+    let (connection, frames) = read_frames_until(connection, move |frame| match frame {
+        SessionEvent::Painted { frame } => frame
+            .panes
+            .iter()
+            .any(|painted| painted.id == pane && painted.scrollback.retained_lines >= retained),
+        _ => false,
+    });
+    let top_row = last_painted(&frames)
+        .panes
+        .iter()
+        .find(|painted| painted.id == pane)
+        .expect("the pane this client views")
+        .view_top_row;
+    (connection, top_row)
+}
+
+/// One left press with nothing held, at the client cell `at`.
+fn press(at: Point) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Press(MouseButton::Left),
+        at,
+        mods: ModFlags::NONE,
+    }
+}
+
+/// A cell above and left of any pane's content, so it clamps into the pane's
+/// top-left content cell whatever the chrome around it measures.
+const PRESSED: Point = Point { x: 0, y: 0 };
+
+/// The report the program in the pane reads for [`PRESSED`]: a left press at
+/// the pane's own column 1, row 1, in the SGR form the pane asked for.
+const REPORT: &[u8] = b"\x1b[<0;1;1M";
+
+#[test]
+fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
+    let (_server, fake, pane_id) = served("mouse-forward", |dir, session_id, fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, replied_session, structure) = attach(&mut viewer, 2);
+        assert_eq!(replied_session, session_id);
+        let pane_id = structure.panes[0].id;
+
+        // The program in the pane asks for mouse reports. Until it has, a
+        // forwarded event is written nowhere.
+        let mut viewer = wait_for_mouse_tracking(&fake, pane_id, viewer);
+        viewer
+            .send(&IpcRequest {
+                request_id: 4,
+                kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+                    pane: pane_id,
+                    mouse: press(PRESSED),
+                }]),
+            })
+            .expect("send mouse round");
+
+        // The answer says the round ran, so the write it carried has happened.
+        let (viewer, _) = read_to_mouse_answer(viewer, 4);
+
+        (vec![viewer], pane_id)
+    });
+
+    // The report is the only thing written to the pane, and it arrived encoded.
+    assert_eq!(
+        fake.writes(pane_id).expect("the pane was spawned"),
+        vec![REPORT.to_vec()],
+    );
+}
+
+#[test]
+fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
+    // The answer is what releases the viewer's gate: without this frame the
+    // viewer's mouse uplink never sends again, since it holds every later round
+    // back until the round in flight is answered.
+    let (_server, _fake, ()) = served("mouse-answer", |dir, session_id, fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach(&mut viewer, 2);
+        let pane_id = structure.panes[0].id;
+
+        let mut viewer = wait_for_mouse_tracking(&fake, pane_id, viewer);
+        viewer
+            .send(&IpcRequest {
+                request_id: 4,
+                kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+                    pane: pane_id,
+                    mouse: press(PRESSED),
+                }]),
+            })
+            .expect("send mouse round");
+
+        // A forward has nothing to report, and the round is answered anyway.
+        let (viewer, frames) = read_to_mouse_answer(viewer, 4);
+        assert_eq!(mouse_answers(&frames), vec![(4, Vec::new())]);
+
+        (vec![viewer], ())
+    });
+}
+
+#[test]
+fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
+    // Lines of history to print, and how far up the round scrolls.
+    const RETAINED: usize = 40;
+    const LINES: usize = 5;
+
+    let (_server, _fake, ()) = served("mouse-scroll", |dir, session_id, fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach(&mut viewer, 2);
+        let pane_id = structure.panes[0].id;
+
+        let (mut viewer, top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
+        viewer
+            .send(&IpcRequest {
+                request_id: 4,
+                kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                    pane: pane_id,
+                    up: true,
+                    lines: LINES,
+                }]),
+            })
+            .expect("send mouse round");
+
+        // The view landed five lines above the line it was showing.
+        let (viewer, frames) = read_to_mouse_answer(viewer, 4);
+        assert_eq!(
+            mouse_answers(&frames),
+            vec![(
+                4,
+                vec![MouseAnswer::Scrolled {
+                    pane: pane_id,
+                    top: Some(top_row - LINES as u64),
+                }],
+            )],
+        );
+
+        (vec![viewer], ())
+    });
+}
+
+#[test]
+fn a_border_move_round_answers_with_the_cells_the_wall_left_it() {
+    // Far more cells than the neighbour pane can give: the tab is 80 columns
+    // wide, the split leaves the neighbour 40 of them, and a pane's box holds a
+    // 2-column content minimum inside a 1-cell border, so it stops at 4 columns
+    // and the border takes the 36 cells above that.
+    const ASKED: u16 = 200;
+    const APPLIED: u16 = 36;
+
+    let (_server, _fake, ()) = served("mouse-border", |dir, session_id, _fake| {
+        let mut viewer = open(&dir, session_id);
+        let (client_id, _, structure) = attach(&mut viewer, 2);
+        let pane_id = structure.panes[0].id;
+
+        // The neighbour whose room the border move eats into, split off the
+        // client's own pane over a second connection, which never attaches.
+        let mut caller = open(&dir, session_id);
+        submit(
+            &mut caller,
+            session_id,
+            Command::NewPane(NewPaneArgs {
+                source: Some(pane_id),
+                tab: None,
+                direction: Direction::Right,
+                stacked: false,
+                cwd: None,
+                command: None,
+                client: Some(client_id),
+            }),
+            3,
+        );
+
+        viewer
+            .send(&IpcRequest {
+                request_id: 4,
+                kind: IpcRequestKind::Mouse(vec![WireMouseAction::Resize {
+                    pane: pane_id,
+                    side: Direction::Right,
+                    step: 1,
+                    count: ASKED,
+                }]),
+            })
+            .expect("send mouse round");
+
+        let (viewer, frames) = read_to_mouse_answer(viewer, 4);
+        assert_eq!(
+            mouse_answers(&frames),
+            vec![(
+                4,
+                vec![MouseAnswer::Resized {
+                    pane: pane_id,
+                    side: Direction::Right,
+                    step: 1,
+                    applied: APPLIED,
+                }]
+            )],
+        );
+
+        (vec![caller, viewer], ())
+    });
+}
+
+#[test]
+fn one_round_runs_every_action_it_holds_and_is_answered_once() {
+    // Lines of history to print, and how far up the round scrolls.
+    const RETAINED: usize = 40;
+    const LINES: usize = 5;
+
+    let (server, fake, (session_id, client_id, tab_id, pane_id)) =
+        served("mouse-round", |dir, session_id, fake| {
+            let mut viewer = open(&dir, session_id);
+            let (client_id, _, structure) = attach(&mut viewer, 2);
+            let tab_id = structure.tabs[0].id;
+            let pane_id = structure.panes[0].id;
+
+            // Splitting the pane this client attached on moves its focus to the
+            // new pane, so the pane the round asks for is not the one already
+            // focused. The split is made over a second connection, which never
+            // attaches.
+            let mut caller = open(&dir, session_id);
+            submit(
+                &mut caller,
+                session_id,
+                Command::NewPane(NewPaneArgs {
+                    source: Some(pane_id),
+                    tab: None,
+                    direction: Direction::Right,
+                    stacked: false,
+                    cwd: None,
+                    command: None,
+                    client: Some(client_id),
+                }),
+                3,
+            );
+
+            let viewer = wait_for_mouse_tracking(&fake, pane_id, viewer);
+            let (mut viewer, top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
+
+            viewer
+                .send(&IpcRequest {
+                    request_id: 4,
+                    kind: IpcRequestKind::Mouse(vec![
+                        WireMouseAction::Command(Box::new(Command::FocusPane(FocusPaneArgs {
+                            target: FocusTarget::Pane(pane_id),
+                            client: Some(client_id),
+                        }))),
+                        WireMouseAction::Scroll {
+                            pane: pane_id,
+                            up: true,
+                            lines: LINES,
+                        },
+                        WireMouseAction::Forward {
+                            pane: pane_id,
+                            mouse: press(PRESSED),
+                        },
+                    ]),
+                })
+                .expect("send mouse round");
+            let (mut viewer, mut frames) = read_to_mouse_answer(viewer, 4);
+
+            // A second round, sent once the first was answered. Its own answer
+            // is the frame after which no further answer to the first round can
+            // still be in flight.
+            viewer
+                .send(&IpcRequest {
+                    request_id: 5,
+                    kind: IpcRequestKind::Mouse(Vec::new()),
+                })
+                .expect("send empty mouse round");
+            let (viewer, rest) = read_to_mouse_answer(viewer, 5);
+            frames.extend(rest);
+
+            // One answer for the round, holding the scroll alone: the focus
+            // command and the forward each report nothing.
+            assert_eq!(
+                mouse_answers(&frames),
+                vec![
+                    (
+                        4,
+                        vec![MouseAnswer::Scrolled {
+                            pane: pane_id,
+                            top: Some(top_row - LINES as u64),
+                        }],
+                    ),
+                    (5, Vec::new()),
+                ],
+            );
+
+            (
+                vec![caller, viewer],
+                (session_id, client_id, tab_id, pane_id),
+            )
+        });
+
+    // The command the round carried went through the session's command door:
+    // the focus the split had moved away is back on the round's pane.
+    let session = server.sessions().get(&session_id).expect("session running");
+    let client = session.clients.get(client_id).expect("the viewing client");
+    assert_eq!(client.focused_pane(tab_id), Some(pane_id));
+
+    // And the forward the round carried reached the pane, encoded, once.
+    assert_eq!(
+        fake.writes(pane_id).expect("the pane was spawned"),
+        vec![REPORT.to_vec()],
+    );
+}
+
+#[test]
+fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
+    // Lines of history to print, then how far up each round scrolls.
+    const RETAINED: usize = 40;
+    const FIRST: usize = 2;
+    const SECOND: usize = 3;
+
+    let (_server, _fake, ()) = served("mouse-order", |dir, session_id, fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach(&mut viewer, 2);
+        let pane_id = structure.panes[0].id;
+
+        let (mut viewer, top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
+        for (request_id, lines) in [(4, FIRST), (5, SECOND)] {
+            viewer
+                .send(&IpcRequest {
+                    request_id,
+                    kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                        pane: pane_id,
+                        up: true,
+                        lines,
+                    }]),
+                })
+                .expect("send mouse round");
+        }
+
+        // Both rounds moved the same view, so the lines they answer with name
+        // the order they ran in: two lines up, then three more.
+        let (viewer, frames) = read_to_mouse_answer(viewer, 5);
+        assert_eq!(
+            mouse_answers(&frames),
+            vec![
+                (
+                    4,
+                    vec![MouseAnswer::Scrolled {
+                        pane: pane_id,
+                        top: Some(top_row - FIRST as u64),
+                    }],
+                ),
+                (
+                    5,
+                    vec![MouseAnswer::Scrolled {
+                        pane: pane_id,
+                        top: Some(top_row - (FIRST + SECOND) as u64),
+                    }],
+                ),
+            ],
+        );
+
+        (vec![viewer], ())
+    });
 }

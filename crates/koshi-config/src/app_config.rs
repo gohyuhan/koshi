@@ -70,6 +70,7 @@ const SECTIONS: &[&str] = &[
     "terminal",
     "logging",
     "allow-beta-features",
+    "auto-close-session",
 ];
 
 /// A parsed `koshi.kdl`.
@@ -149,6 +150,12 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
                 Ok(allowed) => partial.allow_beta_features = Some(allowed),
                 Err(detail) => {
                     warnings.push(format!("ignored `allow-beta-features`: {detail}"));
+                }
+            },
+            "auto-close-session" => match value_bool(node) {
+                Ok(close) => partial.auto_close_session = Some(close),
+                Err(detail) => {
+                    warnings.push(format!("ignored `auto-close-session`: {detail}"));
                 }
             },
             other => warnings.push(format!("ignored {}", unknown_key(other, SECTIONS))),

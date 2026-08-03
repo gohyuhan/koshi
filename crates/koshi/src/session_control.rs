@@ -2,14 +2,54 @@
 
 use std::path::Path;
 
+use koshi_beta::beta_feature;
 use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
+use koshi_ipc::router::{RouterRequestKind, RouterResult};
 
 use crate::cli::{parse_prefixed_uuid, SessionRef};
 use crate::discovery::{self, Discovered};
 use crate::error::CliError;
 use crate::ipc_client;
+use crate::router_client::router_request;
+
+/// The gated `koshi --headless` entry point: asks for a session with nothing
+/// attached to it. Forwards to `request_new_session`.
+#[beta_feature(otherwise = Err(CliError::Runtime {
+    detail: koshi_beta::blocked_message("koshi --headless"),
+}))]
+pub fn request_headless_session(
+    runtime_dir: &Path,
+    profile: Option<&str>,
+) -> Result<SessionId, CliError> {
+    request_new_session(runtime_dir, profile)
+}
+
+/// Ask the router to make a new session and hand back its id. Starts a router
+/// first when none is running.
+///
+/// The session's first shell opens in the directory this command was run in.
+/// A directory that cannot be read is sent as `None`, and the session server
+/// keeps the directory it inherited.
+pub(crate) fn request_new_session(
+    runtime_dir: &Path,
+    profile: Option<&str>,
+) -> Result<SessionId, CliError> {
+    let kind = RouterRequestKind::CreateSession {
+        profile: profile.map(str::to_string),
+        cwd: std::env::current_dir().ok(),
+    };
+    match router_request(runtime_dir, kind)? {
+        RouterResult::Created(address) => Ok(address.id),
+        RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
+            detail: refusal.message,
+        }),
+        other => Err(CliError::IpcUnavailable {
+            detail: format!("the router answered a create session with {other:?}"),
+        }),
+    }
+}
 
 /// End the session named by `session`, or the only running session when
 /// absent. An id goes straight to that session; a name is resolved against
@@ -87,7 +127,7 @@ fn select_kill_session(found: &Discovered, name: Option<&str>) -> Result<Session
     }
 }
 
-/// Detach the client the value after `--detach` names, leaving the session
+/// Detach the client the `koshi detach` argument names, leaving the session
 /// running and its panes untouched.
 ///
 /// The value is a client id, a session id, or a session display name. A value
@@ -109,7 +149,7 @@ fn detach_client_or_session_in(runtime_dir: &Path, raw: &str) -> Result<CommandR
 }
 
 /// The session to ask and the client it detaches, for the value typed after
-/// `--detach`.
+/// `koshi detach`.
 ///
 /// A `session-<uuid>` id names a session and goes straight there, asking no
 /// session to describe itself. Anything else is read against the running

@@ -10,8 +10,9 @@
 //! Everything here is a plain data package: scalar copies of the live state,
 //! plus the screen [`Grid`] behind an [`Arc`] so cloning a built snapshot
 //! shares the buffer by reference. The snapshot is built and read in the same
-//! process (the terminal `Grid`/`Cursor` types are not serializable); a
-//! detached client is served by the separate session-persistence path.
+//! process (the terminal `Grid`/`Cursor` types are not serializable); a client
+//! in another process is served the same frame as a [`Delivery::Frame`], which
+//! its connection thread turns into koshi-ipc's wire form.
 //!
 //! This module defines the *shape*. The runtime-side builder fills it from
 //! live state and renderer modules draw from it. This DTO is their contract.
@@ -78,16 +79,21 @@ impl RenderSnapshot {
     }
 }
 
-/// One item on a subscriber's queue: a live event, or a fresh frame that
-/// resyncs a subscriber whose queue overflowed.
+/// One item on a subscriber's queue: a live event, the frame composed for the
+/// subscriber's client, a fresh frame that resyncs a subscriber whose queue
+/// overflowed, the answers to one round of mouse actions, or bytes for the
+/// subscriber's own terminal.
 ///
-/// Both ride the same queue in order, so a subscriber that missed events reads
-/// the backlog it already had, then the frame, then live events again. The
+/// All of them ride the same queue in order, so a subscriber that missed events
+/// reads the backlog it already had, then the frame, then live events again. A
 /// frame is boxed to keep this type close to the size of an [`Event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
     /// A live event, as published.
     Event(Event),
+    /// The frame the session composed for the subscriber's client, to be drawn
+    /// whole.
+    Frame(Box<RenderSnapshot>),
     /// A frame the subscriber resumes from, with the report of what it missed.
     Snapshot {
         /// The state the subscriber picks up from, replacing the events it did
@@ -97,6 +103,19 @@ pub enum Delivery {
         /// class.
         lagged: SubscriberLagged,
     },
+    /// What one round of mouse actions did, for the client that asked for the
+    /// round.
+    MouseAnswer {
+        /// The `request_id` of the round being answered.
+        request_id: u64,
+        /// One entry per action in the round that had something to report, in
+        /// the order those actions ran. Empty when the round had nothing to
+        /// say.
+        answers: Vec<koshi_core::mouse::MouseAnswer>,
+    },
+    /// Bytes for the terminal the subscriber's client runs in, written to it
+    /// verbatim.
+    HostWrite(Vec<u8>),
 }
 
 /// The two things about a frame the viewer decides, not the session: which pane

@@ -28,6 +28,7 @@ use koshi_core::{
     process::ExitStatus,
 };
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_ipc::protocol::WireMouseAction;
 use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::EventFilter;
@@ -96,6 +97,27 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// Canonical chord used for keymap lookup.
         chord: KeyChord,
+    },
+    /// One key press an attached client's keymap did not bind, for the pane
+    /// that client is typing into.
+    ClientKeyPress {
+        /// Client whose keymap left the press unbound.
+        client_id: ClientId,
+        /// The chord the client read from its terminal.
+        chord: KeyChord,
+    },
+    /// One round of mouse actions an attached client's viewer decided for one
+    /// host mouse event, in the order the session must run them.
+    ///
+    /// The round is answered exactly once, on the client's own event queue,
+    /// and the answer carries `request_id` back.
+    ClientMouse {
+        /// Client whose viewer decided the round.
+        client_id: ClientId,
+        /// The `request_id` the round arrived under, repeated in its answer.
+        request_id: u64,
+        /// What to run, in order. An empty round is answered like any other.
+        actions: Vec<WireMouseAction>,
     },
     /// One decoded outer-terminal mouse event awaiting the viewer's answer.
     /// Carries the event alone: which pane it lands on, which gesture it

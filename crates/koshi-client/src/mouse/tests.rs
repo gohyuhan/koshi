@@ -808,37 +808,78 @@ fn resize_delta_grows_toward_each_border_and_ignores_the_other_axis() {
 }
 
 #[test]
-fn advance_toward_moves_the_anchor_toward_the_pointer_and_saturates() {
+fn advance_along_walks_the_anchor_the_way_the_answered_step_asked_and_saturates() {
     let from = Point { x: 3, y: 3 };
+    // A positive step grows the pane: a right or down border walks away from
+    // zero, a left or up border walks toward it.
     assert_eq!(
-        advance_toward(Direction::Right, from, Point { x: 9, y: 3 }, 2),
+        advance_along(Direction::Right, from, 1, 2),
         Point { x: 5, y: 3 }
     );
     assert_eq!(
-        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 2),
+        advance_along(Direction::Left, from, 1, 2),
         Point { x: 1, y: 3 }
     );
     assert_eq!(
-        advance_toward(Direction::Down, from, Point { x: 3, y: 9 }, 2),
+        advance_along(Direction::Down, from, 1, 2),
         Point { x: 3, y: 5 }
     );
     assert_eq!(
-        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 2),
+        advance_along(Direction::Up, from, 1, 2),
         Point { x: 3, y: 1 }
     );
-    // A left/right border reads only x; the pointer's y is ignored.
+    // A negative step shrinks it, so every border walks the other way.
     assert_eq!(
-        advance_toward(Direction::Right, from, Point { x: 9, y: 99 }, 2),
+        advance_along(Direction::Right, from, -1, 2),
+        Point { x: 1, y: 3 }
+    );
+    assert_eq!(
+        advance_along(Direction::Left, from, -1, 2),
         Point { x: 5, y: 3 }
     );
-    // Saturating: an anchor near an edge cannot wrap below zero.
     assert_eq!(
-        advance_toward(Direction::Left, from, Point { x: 0, y: 3 }, 10),
+        advance_along(Direction::Down, from, -1, 2),
+        Point { x: 3, y: 1 }
+    );
+    assert_eq!(
+        advance_along(Direction::Up, from, -1, 2),
+        Point { x: 3, y: 5 }
+    );
+    // The anchor lands exactly where `resize_delta` reads the move back.
+    for side in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        for step in [-1, 1] {
+            assert_eq!(
+                resize_delta(side, from, advance_along(side, from, step, 2)),
+                step * 2,
+                "{side:?} answered a step of {step}"
+            );
+        }
+    }
+    // Saturating: an anchor at an edge cannot wrap past either end.
+    assert_eq!(
+        advance_along(Direction::Left, from, 1, 10),
         Point { x: 0, y: 3 }
     );
     assert_eq!(
-        advance_toward(Direction::Up, from, Point { x: 3, y: 0 }, 10),
+        advance_along(Direction::Up, from, 1, 10),
         Point { x: 3, y: 0 }
+    );
+    assert_eq!(
+        advance_along(
+            Direction::Right,
+            Point {
+                x: u16::MAX - 1,
+                y: 3
+            },
+            1,
+            5
+        ),
+        Point { x: u16::MAX, y: 3 }
     );
 }
 

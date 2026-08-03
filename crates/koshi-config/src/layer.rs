@@ -175,6 +175,8 @@ pub struct PartialKoshiConfig {
     pub update: Option<PartialUpdateConfig>,
     /// Beta-feature gate override.
     pub allow_beta_features: Option<bool>,
+    /// Auto-close override.
+    pub auto_close_session: Option<bool>,
 }
 
 impl PartialKoshiConfig {
@@ -194,6 +196,7 @@ impl PartialKoshiConfig {
             logging.apply(&mut config.logging);
         }
         merge_field(&mut config.allow_beta_features, self.allow_beta_features);
+        merge_field(&mut config.auto_close_session, self.auto_close_session);
     }
 
     /// Applies the viewer-owned sections' overrides onto `config`, ignoring

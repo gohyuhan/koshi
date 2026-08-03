@@ -157,6 +157,27 @@ impl Server {
             None
         };
 
+        // A client with no focus in the tab it now views starts on that tab's
+        // most recent pane, which a session records when the tab is created. A
+        // client that already focused a pane here keeps it. Without this a
+        // client attaching to a session created with nothing attached has no
+        // focused pane, and every key it types reaches no shell.
+        let landed_on = session
+            .tabs
+            .get(&active_tab)
+            .and_then(|tab| tab.focus_mru().first().copied());
+        if let (Some(pane_id), Some(client)) = (landed_on, session.clients.get_mut(client_id)) {
+            if client.focused_pane(active_tab).is_none() {
+                client.update_focused_pane(active_tab, pane_id);
+                events.push(Event::PaneFocused(PaneFocused {
+                    client_id,
+                    tab_id: active_tab,
+                    pane_id,
+                    prior_pane: None,
+                }));
+            }
+        }
+
         // Reflow the tab the client now views, plus — on a same-session move —
         // the one it left.
         self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
@@ -213,9 +234,10 @@ impl Server {
     ///
     /// Runs for both detach triggers: a connection drop (either half of an
     /// attached client's connection ending) and the [`Command::Detach`] /
-    /// [`Command::DetachAll`] execution arms. Target resolution and the
-    /// in-process-viewer refusal happen at command resolution before this is
-    /// reached, so every `client_id` arriving here is detachable.
+    /// [`Command::DetachAll`] execution arms. Target resolution happens at
+    /// command resolution before this is reached. With `auto-close-session` on,
+    /// a detach that leaves the session with no client requests the same quit
+    /// [`Command::Quit`] does.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
@@ -234,9 +256,11 @@ impl Server {
 
         // Removing the client returns its record; its `active_tab` is the tab
         // whose effective size may now grow.
-        let active_tab = session
-            .detach_client(client_id)
-            .map(|client| client.active_tab());
+        let removed = session.detach_client(client_id);
+        let active_tab = removed.as_ref().map(|client| client.active_tab());
+        // Read while the session is still borrowed: a client did leave, and none
+        // is left attached.
+        let session_emptied = removed.is_some() && session.clients.is_empty();
         self.unsubscribe_client(client_id);
 
         let mut events = Vec::new();
@@ -248,6 +272,13 @@ impl Server {
 
         self.render_scheduler
             .invalidate(InvalidationReason::LayoutChanged);
+
+        // `auto-close-session` ends the session when its last client leaves.
+        // Each pane's child is asked to stop and given the graceful window
+        // before it is killed.
+        if session_emptied && self.config.auto_close_session {
+            self.request_graceful_quit();
+        }
 
         events
     }

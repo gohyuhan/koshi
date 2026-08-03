@@ -2,7 +2,11 @@
 //! events in order over their own queues, a dropped receiver ends its
 //! subscription, a lossy event that does not fit a full queue is dropped for
 //! that subscriber only, and a critical one that does not fit desyncs the
-//! subscriber until a snapshot resyncs it.
+//! subscriber until a snapshot resyncs it. Then the painted frame: it lands on
+//! a live subscriber's queue and is refused by a desynced one. Then a round's
+//! mouse answers, which ride the same queue and desync the subscriber when they
+//! do not fit. Then bytes for the terminal a subscriber's client runs in, which
+//! ride it the same way.
 //!
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
@@ -12,7 +16,7 @@ use koshi_core::event::{
     PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneSuppressed, TabClosed, TabCreated,
     TabFocused, TabMoved,
 };
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
@@ -490,6 +494,254 @@ fn unsubscribe_removes_that_subscriber_only() {
 }
 
 #[test]
+fn a_frame_lands_on_a_live_subscribers_queue() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    let frame = snapshot();
+
+    assert!(bus.try_send_frame(id, frame.clone()));
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(frame)]
+    );
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_frame_for_an_unknown_subscriber_is_refused() {
+    let mut bus = EventBus::new();
+    let (_id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(!bus.try_send_frame(SubscriberId::new(), snapshot()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    // Drained, so a refusal here cannot be a full queue.
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    assert!(!bus.try_send_frame(id, snapshot()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_frame() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    drop(rx);
+
+    assert!(!bus.try_send_frame(id, snapshot()));
+
+    assert!(!bus.contains(id));
+    assert_eq!(bus.subscriber_count(), 0);
+}
+
+#[test]
+fn an_answer_lands_on_a_live_subscribers_queue() {
+    let pane = PaneId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_answer(
+        id,
+        9,
+        vec![
+            MouseAnswer::Scrolled {
+                pane,
+                top: Some(41),
+            },
+            MouseAnswer::Resized {
+                pane,
+                side: Direction::Up,
+                step: -1,
+                applied: 3,
+            },
+        ]
+    ));
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::MouseAnswer {
+            request_id: 9,
+            answers: vec![
+                MouseAnswer::Scrolled {
+                    pane,
+                    top: Some(41),
+                },
+                MouseAnswer::Resized {
+                    pane,
+                    side: Direction::Up,
+                    step: -1,
+                    applied: 3,
+                },
+            ],
+        }]
+    );
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_round_with_nothing_to_report_lands_as_an_empty_list() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_answer(id, 1, Vec::new()));
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::MouseAnswer {
+            request_id: 1,
+            answers: Vec::new(),
+        }]
+    );
+    assert_eq!(bus.desynced(), Vec::new());
+}
+
+#[test]
+fn an_answer_for_an_unknown_subscriber_is_refused() {
+    let mut bus = EventBus::new();
+    let (_id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(!bus.try_send_answer(SubscriberId::new(), 4, Vec::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn an_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    // Drained, so a refusal here cannot be a full queue.
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    assert!(!bus.try_send_answer(id, 5, Vec::new()));
+
+    assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn an_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows() {
+    // A lost answer leaves the viewer's drag anchor where it was, so it may not
+    // pass silently: the desync it causes is what puts a fresh frame on the
+    // queue.
+    let tab = TabId::new();
+    let pane = PaneId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+
+    assert!(!bus.try_send_answer(
+        id,
+        7,
+        vec![MouseAnswer::Scrolled {
+            pane,
+            top: Some(12),
+        }]
+    ));
+
+    assert_eq!(bus.desynced(), vec![id]);
+
+    // The event published next is withheld, not delivered on top of the gap,
+    // and counted: 1 for the lost answer plus 1 for it.
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    let frame = snapshot();
+    assert!(bus.try_resync(id, frame.clone()));
+
+    let queued: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        queued,
+        vec![Delivery::Snapshot {
+            snapshot: frame,
+            lagged: SubscriberLagged {
+                subscriber_id: id,
+                dropped_count: 2,
+                event_class: EventClass::Critical,
+            },
+        }]
+    );
+    assert_eq!(
+        wire_event(&queued[0]),
+        Some(SessionEvent::Resync { dropped_count: 2 })
+    );
+    assert_eq!(bus.desynced(), Vec::new());
+}
+
+#[test]
+fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_answer() {
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    drop(rx);
+
+    assert!(!bus.try_send_answer(id, 2, Vec::new()));
+
+    assert!(!bus.contains(id));
+    assert_eq!(bus.subscriber_count(), 0);
+}
+
+#[test]
+fn a_host_write_reaches_the_subscriber_as_the_bytes_it_queued() {
+    // An OSC 52 copy of "hello", the sequence a clipboard write queues.
+    let bytes = b"\x1b]52;c;aGVsbG8=\x07".to_vec();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_host_write(id, bytes.clone()));
+
+    let queued: Vec<Delivery> = rx.try_iter().collect();
+    assert_eq!(queued, vec![Delivery::HostWrite(bytes.clone())]);
+    assert_eq!(
+        wire_event(&queued[0]),
+        Some(SessionEvent::HostWrite { bytes })
+    );
+    assert_eq!(bus.desynced(), Vec::new());
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+
+    assert!(!bus.try_send_host_write(id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+    // The backlog that filled the queue, and nothing else: the bytes are gone,
+    // and the desync is what puts a fresh frame on the queue.
+    assert_eq!(
+        rx.try_iter().collect::<Vec<Delivery>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
+    );
+}
+
+#[test]
 fn the_wire_filter_converts_to_the_bus_filter() {
     assert_eq!(EventFilter::from(EventFilterSpec::All), EventFilter::All);
 }
@@ -666,6 +918,18 @@ fn an_event_that_is_not_a_structure_change_converts_to_nothing() {
 }
 
 #[test]
+fn a_frame_converts_to_the_painted_picture() {
+    let frame = snapshot();
+
+    assert_eq!(
+        wire_event(&Delivery::Frame(frame.clone())),
+        Some(SessionEvent::Painted {
+            frame: Box::new(wire_frame(&frame)),
+        })
+    );
+}
+
+#[test]
 fn a_snapshot_converts_to_a_resync_carrying_the_dropped_count() {
     assert_eq!(
         wire_event(&Delivery::Snapshot {
@@ -677,5 +941,47 @@ fn a_snapshot_converts_to_a_resync_carrying_the_dropped_count() {
             },
         }),
         Some(SessionEvent::Resync { dropped_count: 4 })
+    );
+}
+
+#[test]
+fn a_round_of_answers_converts_to_the_wire_round_it_answers() {
+    let pane = PaneId::new();
+
+    assert_eq!(
+        wire_event(&Delivery::MouseAnswer {
+            request_id: 12,
+            answers: vec![
+                MouseAnswer::Scrolled { pane, top: None },
+                MouseAnswer::Resized {
+                    pane,
+                    side: Direction::Left,
+                    step: 1,
+                    applied: 5,
+                },
+            ],
+        }),
+        Some(SessionEvent::MouseAnswer {
+            request_id: 12,
+            answers: vec![
+                MouseAnswer::Scrolled { pane, top: None },
+                MouseAnswer::Resized {
+                    pane,
+                    side: Direction::Left,
+                    step: 1,
+                    applied: 5,
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        wire_event(&Delivery::MouseAnswer {
+            request_id: 13,
+            answers: Vec::new(),
+        }),
+        Some(SessionEvent::MouseAnswer {
+            request_id: 13,
+            answers: Vec::new(),
+        })
     );
 }

@@ -1,21 +1,24 @@
 //! The per-session server process: it owns one session's panes and PTYs and
 //! answers that session's control socket.
 //!
-//! It runs with no terminal of its own. Startup reads `koshi.kdl`, builds the
-//! server, seeds the session under the id and name it was started with, binds
-//! the control socket, and prints one JSON line saying where that socket is —
-//! the only thing this process ever writes to standard output. Then it drains
-//! the runtime inbox until a `core:quit` command arrives or the last pane's
-//! child exits, and tears down.
+//! It runs with no terminal of its own. Startup reads `koshi.kdl`, installs
+//! this session's log subscriber, builds the server, seeds the session under
+//! the id and name it was started with, binds the control socket, and prints
+//! one JSON line saying where that socket is — the only thing this process
+//! ever writes to standard output. Then it serves the runtime inbox — applying
+//! each event, timing renders, and handing every attached client its frame —
+//! until a `core:quit` command arrives or the last pane's child exits, and
+//! tears down.
 
 use std::io::Write;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
+use koshi_observability::logging::init_tracing;
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
@@ -43,12 +46,23 @@ pub fn run_session_server(
     runtime_dir: &Path,
     session_id: SessionId,
     session_name: String,
+    profile: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = crate::config::load_app_layer();
+    let params = crate::config::logging_params(app.as_ref(), session_id);
+    let (level, format) = (params.level, params.format);
+    let _ = init_tracing(params);
+    // The first line written, so a log file that exists at all already says
+    // which level and format the session ran under.
+    tracing::info!(
+        session_id = %session_id,
+        level = ?level,
+        format = ?format,
+        "logging started"
+    );
 
-    // The same server construction the interactive launch uses: panes deliver
-    // their child's output straight into this inbox from their own PTY reader
-    // threads.
+    // This session's server: panes deliver their child's output straight into
+    // this inbox from their own PTY reader threads.
     let (inbox_tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
     let pty_sink: Arc<dyn PtySink> = Arc::new(InboxSink::new(inbox_tx.clone()));
     let backend: Arc<dyn PtyBackend> = Arc::new(PortablePtyBackend::with_sink(pty_sink));
@@ -64,14 +78,32 @@ pub fn run_session_server(
     server.load_startup_config(app);
 
     // No client is minted here: this process serves whoever attaches over the
-    // control socket, and until one does the session holds none.
-    server.bootstrap_session(
-        session_id,
-        session_name,
-        STARTING_VIEWPORT,
-        SystemTime::now(),
-        None,
-    )?;
+    // control socket, and until one does the session holds none. A profile that
+    // will not launch falls back to one shell, so the session always comes up.
+    let now = SystemTime::now();
+    let template = profile.and_then(crate::config::load_profile);
+    let seeded = match template {
+        // The name is the router's, not a fresh one: the router registered this
+        // session under it and a `koshi attach <name>` resolves against it.
+        Some(template) => match server.bootstrap_profile_named(
+            session_id,
+            session_name.clone(),
+            template,
+            STARTING_VIEWPORT,
+            now,
+            None,
+        ) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%err, "profile could not launch; starting a single shell");
+                false
+            }
+        },
+        None => false,
+    };
+    if !seeded {
+        server.bootstrap_session(session_id, session_name, STARTING_VIEWPORT, now, None)?;
+    }
 
     // Binds the socket and writes the endpoint file advertising it; the
     // address it reports is the one the ready line carries.
@@ -90,22 +122,49 @@ pub fn run_session_server(
     Ok(())
 }
 
-/// Drain the runtime inbox one event at a time until the session ends: the
+/// Serve the runtime inbox until the session ends: block until an event is due
+/// (bounded by the next render deadline), apply it and any others already
+/// queued, hand a fresh snapshot to any subscriber that lost a critical event,
+/// push every attached client its frame when a render is due, and stop once the
 /// inbox loses its last sender, a [`RuntimeEvent::Quit`] arrives, a `core:quit`
 /// command is applied, or no pane is left running.
 ///
 /// Serving the inbox is what makes the control socket work: a command
 /// forwarded over it and a discovery query asking what this session holds both
 /// arrive here as events.
+///
+/// This process paints nothing itself; the frames it builds go out over the
+/// socket to the clients attached to it.
 fn serve(server: &mut Server) {
     loop {
-        let Ok(event) = server.inbox_rx().recv() else {
-            break;
+        let now = Instant::now();
+        let event = match server.next_render_wakeup(now) {
+            Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
+                Ok(event) => Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match server.inbox_rx().recv() {
+                Ok(event) => Some(event),
+                Err(_) => break,
+            },
         };
-        if server.handle_runtime_event(event).is_break() {
-            break;
+        let mut quit = false;
+        if let Some(event) = event {
+            quit |= server.handle_runtime_event(event).is_break();
         }
-        if server.quit_requested() || !server.has_active_panes() {
+        // Apply anything else already queued before building one frame.
+        while let Ok(event) = server.inbox_rx().try_recv() {
+            quit |= server.handle_runtime_event(event).is_break();
+        }
+        // A subscriber that lost a critical event is paused until it is handed
+        // a fresh snapshot; queue that snapshot now so it is applied in this
+        // pass and the frame pushed below is built from it.
+        server.resync_lagged();
+        if server.poll_render(Instant::now()) {
+            server.push_frames();
+        }
+        if quit || server.quit_requested() || !server.has_active_panes() {
             break;
         }
     }

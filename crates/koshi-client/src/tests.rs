@@ -1,7 +1,8 @@
 //! Tests for the viewer half: construction, viewport updates, the settings and
 //! colors it reads from its own config files, the keymap it validates before
 //! trusting, the hints one frame is painted from, and what it takes off its
-//! subscription — live events, and the frame it resumes from after a lag.
+//! subscription — live events, the frame it resumes from after a lag, and the
+//! items meant for a client in another process.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
@@ -15,8 +16,9 @@ use koshi_config::types::{
 use koshi_core::action::{ActionRef, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
 use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, SubscriberLagged};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{SessionId, SubscriberId};
+use koshi_core::ids::{PaneId, SessionId, SubscriberId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::mouse::MouseAnswer;
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -44,6 +46,38 @@ fn with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Delivery>) 
     (client, tx)
 }
 
+/// A frame naming `client_id` in `lock_mode` with mouse-select `mouse_select`:
+/// one empty tab, no panes, no plugin UI.
+fn frame(client_id: ClientId, lock_mode: LockMode, mouse_select: bool) -> Box<RenderSnapshot> {
+    let tab = TabId::new();
+    Box::new(RenderSnapshot {
+        session: SessionSnapshot {
+            id: SessionId::new(),
+            name: String::from("session"),
+            active_tab: TabSnapshot {
+                id: tab,
+                name: String::from("tab"),
+                layout_solved: Vec::new(),
+                effective_size: Size { cols: 80, rows: 24 },
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                all_suppressed: false,
+            },
+            tabs_metadata: Vec::new(),
+        },
+        panes: Vec::new(),
+        client: ClientSnapshot {
+            id: client_id,
+            viewport: Size { cols: 80, rows: 24 },
+            active_tab: tab,
+            focused_pane: None,
+            lock_mode,
+            mouse_select,
+        },
+        plugin_ui: PluginUiSnapshot::default(),
+    })
+}
+
 /// The frame the session sends a viewer whose queue overflowed, reporting
 /// `client_id` in `lock_mode` with mouse-select `mouse_select`, after
 /// `dropped_count` events it will never see.
@@ -53,34 +87,8 @@ fn resync(
     mouse_select: bool,
     dropped_count: u64,
 ) -> Delivery {
-    let tab = TabId::new();
     Delivery::Snapshot {
-        snapshot: Box::new(RenderSnapshot {
-            session: SessionSnapshot {
-                id: SessionId::new(),
-                name: String::from("session"),
-                active_tab: TabSnapshot {
-                    id: tab,
-                    name: String::from("tab"),
-                    layout_solved: Vec::new(),
-                    effective_size: Size { cols: 80, rows: 24 },
-                    stack_headers: Vec::new(),
-                    layout_mode: LayoutMode::Tiled,
-                    all_suppressed: false,
-                },
-                tabs_metadata: Vec::new(),
-            },
-            panes: Vec::new(),
-            client: ClientSnapshot {
-                id: client_id,
-                viewport: Size { cols: 80, rows: 24 },
-                active_tab: tab,
-                focused_pane: None,
-                lock_mode,
-                mouse_select,
-            },
-            plugin_ui: PluginUiSnapshot::default(),
-        }),
+        snapshot: frame(client_id, lock_mode, mouse_select),
         lagged: SubscriberLagged {
             subscriber_id: SubscriberId::new(),
             dropped_count,
@@ -823,6 +831,19 @@ fn a_mouse_select_report_for_another_viewer_is_ignored() {
 }
 
 #[test]
+fn setting_mouse_select_moves_the_viewers_copy_both_ways() {
+    // An attached viewer reads the mode off the frame its own connection
+    // carries, so the setter is the only thing that moves its copy.
+    let (mut client, _tx) = new_client();
+
+    client.set_mouse_select(true);
+    assert!(client.mouse_select(), "the setter turned it on");
+
+    client.set_mouse_select(false);
+    assert!(!client.mouse_select(), "and the next call turned it off");
+}
+
+#[test]
 fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
     // The reports that moved these two are exactly what a lagging subscriber
     // misses, so the frame's copies are the only ones left that are current.
@@ -845,6 +866,54 @@ fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
     assert_eq!(client.apply_events(), 1, "the frame was seen");
     assert_eq!(client.lock_mode(), LockMode::Normal);
     assert!(!client.mouse_select());
+}
+
+#[test]
+fn a_painted_frame_is_counted_and_moves_nothing_in_the_viewer() {
+    // A frame composed for a client in another process rides the same queue.
+    // This viewer paints from its own build, so it takes nothing from it.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    let id = client.id();
+    let viewport = client.viewport();
+
+    tx.send(Delivery::Frame(frame(
+        ClientId::new(),
+        LockMode::Normal,
+        true,
+    )))
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the frame was seen");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+    assert_eq!(client.viewport(), viewport);
+    assert_eq!(client.id(), id);
+}
+
+#[test]
+fn a_mouse_answer_is_counted_and_moves_nothing_in_the_viewer() {
+    // A round's answers belong to the attached viewer that asked for the round
+    // and reach it over its own connection.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    let id = client.id();
+
+    tx.send(Delivery::MouseAnswer {
+        request_id: 6,
+        answers: vec![MouseAnswer::Resized {
+            pane: PaneId::new(),
+            side: Direction::Up,
+            step: -1,
+            applied: 2,
+        }],
+    })
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the answer was seen");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+    assert_eq!(client.id(), id);
 }
 
 #[test]

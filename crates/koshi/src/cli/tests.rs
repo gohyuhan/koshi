@@ -1,5 +1,5 @@
 //! Parse tests for the `koshi` command-line grammar: the bare interactive
-//! launch, attach/detach root flags, lifecycle commands, the typed action
+//! launch, the headless launch, lifecycle commands, the typed action
 //! subcommands and their command mapping, and usage-error diagnostics.
 
 use clap::error::ErrorKind;
@@ -50,9 +50,7 @@ fn bare_koshi_is_the_interactive_launch() {
     assert_eq!(
         cli,
         Cli {
-            attach: None,
-            detach: None,
-            detach_all: None,
+            headless: false,
             profile: None,
             command: None,
         }
@@ -68,21 +66,12 @@ fn profile_names_a_launch_profile_and_stays_an_interactive_launch() {
 }
 
 #[test]
-fn profile_conflicts_with_attach() {
-    let err = parse_err(&["koshi", "--profile", "dev", "--attach", "3f2a"]);
-    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(err.exit_code(), 2);
-}
-
-#[test]
-fn attach_takes_a_required_session_id() {
-    let cli = parse(&["koshi", "--attach", "3f2a"]);
+fn headless_creates_a_session_without_the_interactive_launch() {
+    let cli = parse(&["koshi", "--headless"]);
     assert_eq!(
         cli,
         Cli {
-            attach: Some("3f2a".to_string()),
-            detach: None,
-            detach_all: None,
+            headless: true,
             profile: None,
             command: None,
         }
@@ -91,143 +80,107 @@ fn attach_takes_a_required_session_id() {
 }
 
 #[test]
-fn attach_without_a_session_id_is_a_usage_error() {
-    let err = parse_err(&["koshi", "--attach"]);
-    assert_eq!(err.kind(), ErrorKind::InvalidValue);
-    assert_eq!(err.exit_code(), 2);
-}
-
-#[test]
-fn detach_without_an_id_targets_the_current_session() {
-    let cli = parse(&["koshi", "--detach"]);
+fn attach_without_a_session_picks_one_at_runtime() {
+    let cli = parse(&["koshi", "attach"]);
     assert_eq!(
         cli,
         Cli {
-            attach: None,
-            detach: Some(None),
-            detach_all: None,
+            headless: false,
             profile: None,
-            command: None,
-        }
-    );
-    assert!(!cli.is_interactive_launch());
-}
-
-#[test]
-fn detach_with_an_id_targets_that_session() {
-    let cli = parse(&["koshi", "--detach", "3f2a"]);
-    assert_eq!(
-        cli,
-        Cli {
-            attach: None,
-            detach: Some(Some("3f2a".to_string())),
-            detach_all: None,
-            profile: None,
-            command: None,
+            command: Some(CliCommand::Attach { session: None }),
         }
     );
 }
 
 #[test]
-fn detach_binds_a_subcommand_looking_token_as_its_value() {
-    let cli = parse(&["koshi", "--detach", "list-sessions"]);
+fn attach_takes_the_session_as_a_positional() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        parse(&["koshi", "attach", &session]).command,
+        Some(CliCommand::Attach {
+            session: Some(session)
+        })
+    );
+}
+
+#[test]
+fn bare_detach_names_no_target_and_no_session() {
+    let cli = parse(&["koshi", "detach"]);
     assert_eq!(
         cli,
         Cli {
-            attach: None,
-            detach: Some(Some("list-sessions".to_string())),
-            detach_all: None,
+            headless: false,
             profile: None,
-            command: None,
+            command: Some(CliCommand::Detach {
+                target: None,
+                all: false,
+            }),
         }
     );
 }
 
 #[test]
-fn attach_and_detach_conflict() {
-    let err = parse_err(&["koshi", "--attach", "3f2a", "--detach"]);
+fn detach_takes_the_client_as_a_positional() {
+    assert_eq!(
+        parse(&["koshi", "detach", "3f2a"]).command,
+        Some(CliCommand::Detach {
+            target: Some("3f2a".to_string()),
+            all: false,
+        })
+    );
+}
+
+#[test]
+fn detach_all_without_a_session_names_no_target() {
+    assert_eq!(
+        parse(&["koshi", "detach", "--all"]).command,
+        Some(CliCommand::Detach {
+            target: None,
+            all: true,
+        })
+    );
+}
+
+#[test]
+fn detach_all_takes_the_session_as_a_positional() {
+    let session = format!("session-{}", fixed_uuid());
+    assert_eq!(
+        parse(&["koshi", "detach", "--all", &session]).command,
+        Some(CliCommand::Detach {
+            target: Some(session),
+            all: true,
+        })
+    );
+}
+
+#[test]
+fn the_removed_attach_and_detach_root_flags_are_usage_errors() {
+    for argv in [
+        ["koshi", "--attach", "x"].as_slice(),
+        ["koshi", "--detach"].as_slice(),
+        ["koshi", "--detach-all"].as_slice(),
+    ] {
+        let err = parse_err(argv);
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        assert_eq!(err.exit_code(), 2);
+    }
+}
+
+#[test]
+fn headless_conflicts_with_subcommands() {
+    let err = parse_err(&["koshi", "--headless", "list-sessions"]);
     assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn the_removed_new_verb_is_a_usage_error() {
+    let err = parse_err(&["koshi", "new"]);
+    assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     assert_eq!(err.exit_code(), 2);
-}
-
-#[test]
-fn detach_all_without_an_id_targets_this_panes_session() {
-    let cli = parse(&["koshi", "--detach-all"]);
-    assert_eq!(
-        cli,
-        Cli {
-            attach: None,
-            detach: None,
-            detach_all: Some(None),
-            profile: None,
-            command: None,
-        }
-    );
-    assert!(!cli.is_interactive_launch());
-}
-
-#[test]
-fn detach_all_with_an_id_targets_that_session() {
-    let cli = parse(&[
-        "koshi",
-        "--detach-all",
-        &format!("session-{}", fixed_uuid()),
-    ]);
-    assert_eq!(
-        cli,
-        Cli {
-            attach: None,
-            detach: None,
-            detach_all: Some(Some(SessionRef::Id(SessionId::from_uuid(fixed_uuid())))),
-            profile: None,
-            command: None,
-        }
-    );
-    assert!(!cli.is_interactive_launch());
-}
-
-#[test]
-fn detach_all_with_a_name_targets_the_session_carrying_it() {
-    let cli = parse(&["koshi", "--detach-all", "workspace"]);
-    assert_eq!(
-        cli,
-        Cli {
-            attach: None,
-            detach: None,
-            detach_all: Some(Some(SessionRef::Name("workspace".to_string()))),
-            profile: None,
-            command: None,
-        }
-    );
-}
-
-#[test]
-fn detach_all_conflicts_with_attach_and_with_detach() {
-    let with_attach = parse_err(&["koshi", "--attach", "3f2a", "--detach-all"]);
-    assert_eq!(with_attach.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(with_attach.exit_code(), 2);
-
-    let with_detach = parse_err(&["koshi", "--detach", "--detach-all"]);
-    assert_eq!(with_detach.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(with_detach.exit_code(), 2);
-}
-
-#[test]
-fn detach_all_conflicts_with_profile() {
-    let err = parse_err(&["koshi", "--profile", "dev", "--detach-all"]);
-    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(err.exit_code(), 2);
-}
-
-#[test]
-fn attach_conflicts_with_subcommands() {
-    let err = parse_err(&["koshi", "--attach", "3f2a", "list-sessions"]);
-    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
 }
 
 #[test]
 fn lifecycle_commands_parse() {
-    assert_eq!(parse(&["koshi", "new"]).command, Some(CliCommand::New));
     assert_eq!(
         parse(&["koshi", "list-sessions"]).command,
         Some(CliCommand::ListSessions {
@@ -242,7 +195,7 @@ fn lifecycle_commands_parse() {
 
 #[test]
 fn a_subcommand_is_not_the_interactive_launch() {
-    assert!(!parse(&["koshi", "new"]).is_interactive_launch());
+    assert!(!parse(&["koshi", "list-sessions"]).is_interactive_launch());
 }
 
 #[test]
@@ -665,9 +618,11 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
     names.sort();
     let mut expected: Vec<String> = [
         "actions",
+        "attach",
         "close-pane",
         "close-tab",
         "config",
+        "detach",
         "doctor",
         "focus-pane",
         "focus-tab",
@@ -681,7 +636,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "list-tabs",
         "lock",
         "move-tab",
-        "new",
         "new-pane",
         "new-tab",
         "next-tab",
@@ -1636,9 +1590,10 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
 #[test]
 fn non_action_subcommands_map_to_none() {
     let argvs: &[&[&str]] = &[
-        &["koshi", "new"],
         &["koshi", "list-sessions"],
         &["koshi", "kill-session"],
+        &["koshi", "attach"],
+        &["koshi", "detach"],
         &["koshi", "doctor"],
         &["koshi", "config", "path"],
         &["koshi", "plugin"],
@@ -1669,11 +1624,11 @@ fn non_action_subcommands_map_to_none() {
 fn a_repeated_single_valued_flag_is_a_usage_error_not_a_last_wins() {
     // clap's derived args do not override themselves by default: giving the
     // same single-valued flag twice is a hard usage error, not "the last one
-    // wins" — true for a root flag (`--attach`) and a subcommand flag
+    // wins" — true for a root flag (`--profile`) and a subcommand flag
     // (`--format`) alike.
-    let attach_twice = parse_err(&["koshi", "--attach", "first", "--attach", "second"]);
-    assert_eq!(attach_twice.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(attach_twice.exit_code(), 2);
+    let profile_twice = parse_err(&["koshi", "--profile", "first", "--profile", "second"]);
+    assert_eq!(profile_twice.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(profile_twice.exit_code(), 2);
 
     let format_twice = parse_err(&[
         "koshi",
@@ -1688,16 +1643,24 @@ fn a_repeated_single_valued_flag_is_a_usage_error_not_a_last_wins() {
 
 #[test]
 fn attach_accepts_an_empty_session_id() {
-    // `--attach` stores the raw string untyped; validation is a runtime
-    // concern, not a parse concern, so an empty value still parses.
-    let cli = parse(&["koshi", "--attach", ""]);
-    assert_eq!(cli.attach, Some(String::new()));
+    // `attach` stores the raw string untyped; validation is a runtime concern,
+    // not a parse concern, so an empty value still parses.
+    assert_eq!(
+        parse(&["koshi", "attach", ""]).command,
+        Some(CliCommand::Attach {
+            session: Some(String::new())
+        })
+    );
 }
 
 #[test]
 fn attach_accepts_a_unicode_session_id() {
-    let cli = parse(&["koshi", "--attach", "café-上海"]);
-    assert_eq!(cli.attach, Some("café-上海".to_string()));
+    assert_eq!(
+        parse(&["koshi", "attach", "café-上海"]).command,
+        Some(CliCommand::Attach {
+            session: Some("café-上海".to_string())
+        })
+    );
 }
 
 #[test]

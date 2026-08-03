@@ -3,9 +3,14 @@
 //! `EventBus::subscribe` registers a subscriber and hands back its id plus
 //! the receiving end of that subscriber's own bounded queue.
 //! `EventBus::publish` clones each event into every queue whose filter
-//! matches. Delivery never blocks the dispatcher: a subscriber whose receiver
-//! was dropped is removed on the next publish, and an event that does not fit
-//! a subscriber's full queue is handled by its class.
+//! matches, `EventBus::try_send_frame` puts the frame the session composed
+//! for one subscriber's client on that subscriber's own queue,
+//! `EventBus::try_send_answer` puts one round of mouse answers on it, and
+//! `EventBus::try_send_host_write` puts bytes aimed at that subscriber's own
+//! terminal on it. Delivery
+//! never blocks the dispatcher: a subscriber whose receiver was dropped is
+//! removed on the next publish, and an event that does not fit a subscriber's
+//! full queue is handled by its class.
 //!
 //! A dropped [`EventClass::Lossy`] event is logged and forgotten. A dropped
 //! [`EventClass::Critical`] event marks the subscriber desynced: it receives
@@ -24,9 +29,12 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
 use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
 use koshi_core::ids::SubscriberId;
+use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::EventFilterSpec;
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
+
+use crate::runtime::frame::wire_frame;
 
 /// How many undelivered events one subscriber's queue holds. An event
 /// published while the queue is full is dropped for that subscriber.
@@ -249,6 +257,126 @@ impl EventBus {
         }
     }
 
+    /// Put `snapshot` on live subscriber `id`'s queue as the frame its client
+    /// draws.
+    ///
+    /// Returns `true` once the frame is queued. Returns `false` when `id` is
+    /// unknown, when it is desynced — a paused subscriber takes its resync
+    /// snapshot first — or when its queue is full. A subscriber whose receiver
+    /// is gone is removed.
+    pub(crate) fn try_send_frame(
+        &mut self,
+        id: SubscriberId,
+        snapshot: Box<RenderSnapshot>,
+    ) -> bool {
+        let Some(index) = self
+            .subscribers
+            .iter()
+            .position(|subscriber| subscriber.id == id)
+        else {
+            return false;
+        };
+        let subscriber = &mut self.subscribers[index];
+        if subscriber.state != DeliveryState::Live {
+            return false;
+        }
+        match subscriber.tx.try_send(Delivery::Frame(snapshot)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(index);
+                false
+            }
+        }
+    }
+
+    /// Put the `answers` to mouse round `request_id` on live subscriber `id`'s
+    /// queue.
+    ///
+    /// Returns `true` once the answers are queued. Returns `false` when `id` is
+    /// unknown, when it is desynced — a paused subscriber takes its resync
+    /// snapshot first — or when its queue is full. A full queue marks the
+    /// subscriber desynced: a lost answer leaves the viewer's drag anchor where
+    /// it was, and a desynced subscriber is handed a fresh [`RenderSnapshot`] to
+    /// resume from.
+    /// A subscriber whose receiver is gone is removed.
+    pub(crate) fn try_send_answer(
+        &mut self,
+        id: SubscriberId,
+        request_id: u64,
+        answers: Vec<MouseAnswer>,
+    ) -> bool {
+        let Some(index) = self
+            .subscribers
+            .iter()
+            .position(|subscriber| subscriber.id == id)
+        else {
+            return false;
+        };
+        let subscriber = &mut self.subscribers[index];
+        if subscriber.state != DeliveryState::Live {
+            return false;
+        }
+        match subscriber.tx.try_send(Delivery::MouseAnswer {
+            request_id,
+            answers,
+        }) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                subscriber.state = DeliveryState::Desynced { dropped: 1 };
+                tracing::warn!(
+                    subscriber = %id,
+                    request_id,
+                    "mouse answer dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(index);
+                false
+            }
+        }
+    }
+
+    /// Put `bytes` for the terminal live subscriber `id`'s client runs in on
+    /// that subscriber's queue.
+    ///
+    /// Returns `true` once the bytes are queued. Returns `false` when `id` is
+    /// unknown, when it is desynced — a paused subscriber takes its resync
+    /// snapshot first — or when its queue is full. A full queue marks the
+    /// subscriber desynced: dropped bytes leave a clipboard copy unwritten, and
+    /// a desynced subscriber is handed a fresh [`RenderSnapshot`] to resume
+    /// from.
+    /// A subscriber whose receiver is gone is removed.
+    pub(crate) fn try_send_host_write(&mut self, id: SubscriberId, bytes: Vec<u8>) -> bool {
+        let Some(index) = self
+            .subscribers
+            .iter()
+            .position(|subscriber| subscriber.id == id)
+        else {
+            return false;
+        };
+        let subscriber = &mut self.subscribers[index];
+        if subscriber.state != DeliveryState::Live {
+            return false;
+        }
+        match subscriber.tx.try_send(Delivery::HostWrite(bytes)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                subscriber.state = DeliveryState::Desynced { dropped: 1 };
+                tracing::warn!(
+                    subscriber = %id,
+                    "host write dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(index);
+                false
+            }
+        }
+    }
+
     /// How many subscribers are registered. Counts subscribers whose receiver
     /// is already gone but whose removal awaits the next publish.
     #[cfg(test)]
@@ -261,9 +389,18 @@ impl EventBus {
 /// The frame an attached client is sent for one item off its queue, or `None`
 /// when the item says nothing about the session's structure.
 ///
+/// A [`Delivery::Frame`] becomes [`SessionEvent::Painted`] carrying the whole
+/// picture in koshi-ipc's wire spellings.
+///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed events. The frame itself does not go on the wire: the client
-/// attaches again, and the attach reply carries a fresh structure.
+/// of missed events. Its frame does not go on the wire: the client attaches
+/// again, and the attach reply carries a fresh structure.
+///
+/// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
+/// the id of the round it answers and that round's answers.
+///
+/// A [`Delivery::HostWrite`] becomes [`SessionEvent::HostWrite`] carrying the
+/// bytes the client writes to its own terminal.
 #[must_use]
 pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
@@ -313,8 +450,21 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             // per-client view events carry no structure change.
             _ => None,
         },
+        Delivery::Frame(snapshot) => Some(SessionEvent::Painted {
+            frame: Box::new(wire_frame(snapshot)),
+        }),
         Delivery::Snapshot { lagged, .. } => Some(SessionEvent::Resync {
             dropped_count: lagged.dropped_count,
+        }),
+        Delivery::MouseAnswer {
+            request_id,
+            answers,
+        } => Some(SessionEvent::MouseAnswer {
+            request_id: *request_id,
+            answers: answers.clone(),
+        }),
+        Delivery::HostWrite(bytes) => Some(SessionEvent::HostWrite {
+            bytes: bytes.clone(),
         }),
     }
 }

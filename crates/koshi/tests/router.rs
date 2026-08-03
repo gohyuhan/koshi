@@ -174,7 +174,13 @@ fn request(connection: &mut Connection, kind: RouterRequestKind) -> RouterResult
 
 /// Ask the router for a new session and hand back where it listens.
 fn create_session(connection: &mut Connection) -> SessionAddress {
-    match request(connection, RouterRequestKind::CreateSession) {
+    match request(
+        connection,
+        RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        },
+    ) {
         RouterResult::Created(address) => address,
         other => panic!("creating a session was answered with {other:?}"),
     }

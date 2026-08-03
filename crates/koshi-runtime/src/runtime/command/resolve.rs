@@ -291,9 +291,10 @@ impl Server {
                 .map(drop),
             // Detach names one client, resolved and vetted here so the handler
             // receives a client it may remove.
-            Command::Detach(args) => self
-                .resolve_detach_client(args.client, source, Self::require_session(session)?)
-                .map(drop),
+            Command::Detach(args) => {
+                Self::resolve_detach_client(args.client, source, Self::require_session(session)?)
+                    .map(drop)
+            }
             Command::Plugin(_) | Command::DetachAll | Command::Quit => Ok(()),
         }
     }
@@ -303,14 +304,7 @@ impl Server {
     /// ([`Self::resolve_acting_client`]) — the issuer while it is attached,
     /// else the session's sole attached client. Several attached with none
     /// named lists the ids to choose from.
-    ///
-    /// The in-process viewer is refused here, the one place every detach
-    /// spelling passes: `koshi --detach`, `koshi --detach <client-id>`, and the
-    /// bare form on a session whose only client is that viewer all stop before
-    /// the handler, so the window the session runs in keeps its client record,
-    /// its subscription, and its rendering.
     pub(super) fn resolve_detach_client(
-        &self,
         explicit: Option<ClientId>,
         source: &CommandSource,
         session: &Session,
@@ -344,12 +338,6 @@ impl Server {
                 }
             })?,
         };
-        if Some(client_id) == self.local_viewer {
-            return Err(Rejection::new(
-                RejectReason::InvalidState,
-                "this session runs inside the koshi window viewing it; that window cannot detach — kill-session ends the session",
-            ));
-        }
         Ok(client_id)
     }
 

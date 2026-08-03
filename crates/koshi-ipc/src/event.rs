@@ -1,31 +1,46 @@
-//! What an attached client is told after it attaches: the session's structure
-//! changing.
+//! What an attached client is told after it attaches: the picture to draw, and
+//! the session's structure changing.
 //!
 //! A client is handed
 //! [`AttachedSessionStructureSnapshot`](crate::attach::AttachedSessionStructureSnapshot)
 //! once, in the attach reply. [`SessionEvent`](crate::event::SessionEvent) is
-//! everything after it: one frame per change to which tabs exist, how each
-//! tab's panes are arranged, which pane a client focused, and which panes are
-//! alive.
+//! everything after it: the painted frames the client draws, plus one frame per
+//! change to which tabs exist, how each tab's panes are arranged, which pane a
+//! client focused, and which panes are alive.
 //!
-//! Nothing here describes pane content: no grid, no cursor, no scrollback, no
-//! colors.
+//! Pane content travels in
+//! [`Painted`](crate::event::SessionEvent::Painted) alone, as a whole
+//! [`PaintedFrame`](crate::frame::PaintedFrame). No other frame here carries a
+//! grid, a cursor, scrollback, or colors.
 //!
-//! [`Resync`](crate::event::SessionEvent::Resync) is the one frame that is not
-//! a session fact. The server sends it when a client's queue overflowed and
-//! dropped an event the stream cannot skip. A client that reads it connects
-//! again and attaches again, which hands it a fresh structure.
+//! Three frames here are not session facts.
+//! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
+//! sends it when a client's queue overflowed and dropped an event the stream
+//! cannot skip, and it names how many events went missing.
+//! [`MouseAnswer`](crate::event::SessionEvent::MouseAnswer) is the second: it
+//! answers one [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
+//! request and is addressed to the client that sent it.
+//! [`HostWrite`](crate::event::SessionEvent::HostWrite) is the third: bytes a
+//! pane aimed at the terminal the client runs in, such as an OSC 52 clipboard
+//! write.
 
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use serde::{Deserialize, Serialize};
+
+use crate::frame::PaintedFrame;
 
 /// One frame on an attached client's event stream.
 ///
 /// Decoding rejects any field the build does not know, so a misspelled name is
 /// an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum SessionEvent {
+    /// The picture the session composed for this client, drawn whole.
+    Painted {
+        /// The frame to draw.
+        frame: Box<PaintedFrame>,
+    },
     /// A pane was created and registered.
     PaneCreated {
         /// The new pane.
@@ -107,11 +122,26 @@ pub enum SessionEvent {
     /// again.
     Detached,
     /// The client's queue overflowed and dropped an event the stream cannot
-    /// skip. The client connects again and attaches again for a fresh
-    /// structure.
+    /// skip.
     Resync {
         /// How many events the client missed.
         dropped_count: u64,
+    },
+    /// What one round of mouse actions did. Sent once per
+    /// [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
+    /// request.
+    MouseAnswer {
+        /// The `request_id` of the round being answered.
+        request_id: u64,
+        /// One entry per action in the round that had something to report, in
+        /// the order those actions ran. An empty list is the normal case: the
+        /// session ran the round and had nothing to say.
+        answers: Vec<koshi_core::mouse::MouseAnswer>,
+    },
+    /// Bytes for the terminal this client runs in, written to it verbatim.
+    HostWrite {
+        /// The bytes to write, in the order the session queued them.
+        bytes: Vec<u8>,
     },
 }
 

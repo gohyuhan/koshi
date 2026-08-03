@@ -35,14 +35,23 @@ pub fn allowed() -> bool {
     ALLOWED.load(Ordering::Relaxed)
 }
 
+/// What a blocked entry point has to say for itself: that `function` did not
+/// run, and the knob that would let it.
+///
+/// A gated function whose `otherwise` is an error carries this as the error's
+/// text, so the user reads the same sentence the log would have carried.
+#[must_use]
+pub fn blocked_message(function: &str) -> String {
+    format!(
+        "`{function}` is a beta feature and did nothing; add a top-level \
+         `allow-beta-features #true` line to koshi.kdl to run it"
+    )
+}
+
 /// Logs that the entry point named `function` did not run, naming the knob
 /// that would let it. Callers log this at most once per gated function.
 pub fn log_blocked(function: &str) {
-    tracing::warn!(
-        function,
-        "beta feature is off, so `{function}` did nothing; add a top-level \
-         `allow-beta-features #true` line to koshi.kdl to run it"
-    );
+    tracing::warn!(function, "{}", blocked_message(function));
 }
 
 #[cfg(test)]

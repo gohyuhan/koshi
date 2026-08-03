@@ -9,6 +9,8 @@ pub mod endpoint;
 pub mod error;
 /// The events an attached client receives after the attach reply.
 pub mod event;
+/// One painted frame: the pane content a client draws.
+pub mod frame;
 /// Connection handshake checks.
 pub mod handshake;
 pub mod protocol;
