@@ -3,6 +3,7 @@
 use super::*;
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
+use koshi_core::key::{Key, ModFlags};
 use std::time::SystemTime;
 
 /// A deterministic, boundary-free envelope for the IPC/plugin variants.
@@ -62,6 +63,21 @@ fn resize_carries_its_client_and_size() {
     };
     assert_eq!(*client_id, client);
     assert_eq!(*size, Size { cols: 80, rows: 24 });
+}
+
+#[test]
+fn client_key_press_carries_its_client_and_chord() {
+    let client = ClientId::new();
+    let pressed = KeyChord::new(ModFlags::CTRL, Key::Char('t'));
+    let event = RuntimeEvent::ClientKeyPress {
+        client_id: client,
+        chord: pressed,
+    };
+    let RuntimeEvent::ClientKeyPress { client_id, chord } = &event else {
+        panic!("expected ClientKeyPress");
+    };
+    assert_eq!(*client_id, client);
+    assert_eq!(*chord, pressed);
 }
 
 #[test]

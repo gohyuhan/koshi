@@ -15,6 +15,7 @@ const KOSHI: &str = r#"
 version 1
 theme "default"
 allow-beta-features #false
+auto-close-session #false
 pane { min-cols 2; min-rows 1 }
 scrollback { max-lines 10000; max-bytes 33554432; scroll-on-input #true }
 layout { new-pane-direction "right" }

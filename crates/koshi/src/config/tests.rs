@@ -6,7 +6,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use koshi_beta::beta_feature;
+use koshi_config::layer::PartialLoggingConfig;
 use koshi_config::types::RgbColor;
+use koshi_core::log::{LogFormat, LogLevel};
 use tempfile::TempDir;
 
 use super::*;
@@ -464,4 +466,35 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     apply_beta_gate(load_app(&path, &mut warnings).map(|file| file.layer));
     assert_eq!(warnings, Vec::<String>::new());
     assert_eq!(mock_beta_entry_point(), 0);
+}
+
+#[test]
+fn logging_params_with_no_config_file_are_the_defaults() {
+    let session_id = SessionId::new();
+    let params = logging_params(None, session_id);
+
+    assert!(!params.enabled);
+    assert_eq!(params.level, LogLevel::Warning);
+    assert_eq!(params.format, LogFormat::Pretty);
+    assert_eq!(params.session_id, session_id);
+}
+
+#[test]
+fn logging_params_take_the_level_and_format_the_config_names() {
+    let session_id = SessionId::new();
+    let app = PartialKoshiConfig {
+        logging: Some(PartialLoggingConfig {
+            enabled: Some(true),
+            level: Some(LogLevel::Info),
+            format: Some(LogFormat::Json),
+        }),
+        ..Default::default()
+    };
+
+    let params = logging_params(Some(&app), session_id);
+
+    assert!(params.enabled);
+    assert_eq!(params.level, LogLevel::Info);
+    assert_eq!(params.format, LogFormat::Json);
+    assert_eq!(params.session_id, session_id);
 }

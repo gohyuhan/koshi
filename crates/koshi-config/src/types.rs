@@ -60,6 +60,8 @@ pub struct ServerConfig {
     pub logging: LoggingConfig,
     /// Whether entry points marked `#[beta_feature]` may run.
     pub allow_beta_features: bool,
+    /// Whether the session ends when its last client leaves.
+    pub auto_close_session: bool,
 }
 
 impl Default for ServerConfig {
@@ -71,6 +73,7 @@ impl Default for ServerConfig {
             terminal: TerminalConfig::default(),
             logging: LoggingConfig::default(),
             allow_beta_features: false,
+            auto_close_session: false,
         }
     }
 }

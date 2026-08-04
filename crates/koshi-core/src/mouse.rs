@@ -1,4 +1,4 @@
-//! Mouse vocabulary: the button, scroll direction, decoded-event, and
+//! Mouse vocabulary: the button, scroll direction, decoded-event, answer, and
 //! reporting-level types the rest of koshi reasons about — koshi's own terms,
 //! not the host library's.
 //!
@@ -19,8 +19,12 @@
 //! hit-tested later against the client's render layout. The type carries no
 //! client identity; the caller attaches that when it hands the event to the
 //! hit-test.
+//!
+//! [`MouseAnswer`] runs the other way — the session says what an action it
+//! carried out did, and the client folds that into its gesture state.
 
-use crate::geometry::Point;
+use crate::geometry::{Direction, Point};
+use crate::ids::PaneId;
 use crate::key::ModFlags;
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +60,7 @@ pub enum ScrollDirection {
 ///
 /// [`Motion`](MouseKind::Motion) is the pointer moving with no button held — a
 /// real event a program in application-mouse mode can ask to receive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseKind {
     /// A button went down. `Press(Left)` is a left click starting.
     Press(MouseButton),
@@ -75,7 +79,7 @@ pub enum MouseKind {
 ///
 /// A left click at column 10, row 3 with nothing held is
 /// `MouseInput { kind: Press(Left), at: Point { x: 10, y: 3 }, mods: NONE }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseInput {
     /// What the mouse did.
     pub kind: MouseKind,
@@ -85,11 +89,45 @@ pub struct MouseInput {
     pub mods: ModFlags,
 }
 
+/// What the session reports back about a mouse action it carried out.
+///
+/// An action that has nothing to report produces no `MouseAnswer` at all: there
+/// is no empty variant, and such an action simply contributes no entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseAnswer {
+    /// Where `pane`'s view landed after a scroll: `top` is the line now on its
+    /// top row, or `None` for a pane with no terminal. Consumed by
+    /// `Client::note_scroll_applied`.
+    Scrolled {
+        /// The pane whose view the scroll moved.
+        pane: PaneId,
+        /// The line the view now shows on its top row.
+        top: Option<u64>,
+    },
+    /// How many cells of a requested border move the session accepted, which is
+    /// fewer than asked for when the border hit a wall. Consumed by
+    /// `Client::note_resize_applied`.
+    ///
+    /// `pane`, `side` and `step` repeat the move this answers, so a round
+    /// carrying several border moves is read back move by move.
+    Resized {
+        /// The pane whose border the move was asked for.
+        pane: PaneId,
+        /// Which of the pane's borders the move was asked for.
+        side: Direction,
+        /// The direction the move was asked in: `1` grows the pane, `-1`
+        /// shrinks it.
+        step: i16,
+        /// The number of cells the border actually moved.
+        applied: u16,
+    },
+}
+
 /// Which mouse events the running app has asked to be reported, set via the DEC
 /// private modes `?9`/`?1000`/`?1002`/`?1003`. The levels form a ladder (each
 /// reports strictly more than the one above); an app enables exactly one, and
 /// the last enabling sequence wins. Independent of how a report is encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum MouseTracking {
     /// No mouse reporting (default).
     #[default]

@@ -123,7 +123,7 @@ fn apply(
                 count,
             } => {
                 let applied = rt.drag_resize(client_id, pane, side, step, count);
-                viewer.note_resize_applied(applied);
+                viewer.note_resize_applied(pane, side, step, applied);
             }
             MouseAction::Command(command) => {
                 let envelope = CommandEnvelope::new(

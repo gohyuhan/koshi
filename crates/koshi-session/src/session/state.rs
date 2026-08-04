@@ -248,10 +248,10 @@ impl Session {
     /// unused margin. It is independent of which client (if any) issued the
     /// command.
     ///
-    /// This fixes reconciliation to *smallest-wins* — the interim policy for the
-    /// current single-client-per-command paths. A configurable multi-client
-    /// reconciliation policy (smallest / largest / latest / manual), re-run when
-    /// clients attach and detach, generalizes this later.
+    /// Smallest-wins is the whole rule: a pane cannot scroll its content
+    /// sideways, so no client is ever handed a grid wider or taller than the
+    /// pane rect it draws. Every attach, detach, terminal resize and tab switch
+    /// recomputes this for each tab whose viewer set changed.
     #[must_use]
     pub fn tab_viewport(&self, tab_id: TabId) -> Option<Size> {
         self.clients

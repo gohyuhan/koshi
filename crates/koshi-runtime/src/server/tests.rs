@@ -2,15 +2,16 @@
 //! handles, the wired event inbox, a session with one tab and one pane, and
 //! the two doors — commands in via `submit_command`, events out via
 //! `subscribe` — including the identity every attached client carries, that
-//! detaching a client leaves the server healthy with its panes alive, and that
-//! a subscriber paused by a dropped critical event is handed a fresh frame or
-//! dropped.
+//! detaching a client leaves the server healthy with its panes alive, that a
+//! subscriber paused by a dropped critical event is handed a fresh frame or
+//! dropped, and that a due render hands every client its own frame, behind any
+//! bytes queued for that client's own terminal.
 
 use std::sync::mpsc;
 use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
-use koshi_core::event::{EventClass, InputMode, InputModeChanged, SubscriberLagged};
+use koshi_core::event::{EventClass, InputMode, InputModeChanged, PaneFocused, SubscriberLagged};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
@@ -23,6 +24,12 @@ use super::*;
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+/// The viewport of a second, out-of-process client, sized apart from
+/// [`VIEWPORT`] so a frame names which client it was built for.
+const REMOTE_VIEWPORT: Size = Size {
+    cols: 100,
+    rows: 30,
+};
 
 /// A server bootstrapped with one session, one tab, and one shell pane, plus
 /// its client id.
@@ -40,6 +47,21 @@ fn pause_subscribers(server: &mut Server) {
     while !server.event_bus.has_desynced() {
         server.event_bus.publish(&Event::Quit);
     }
+}
+
+/// Attach a second client at `viewport`, viewing the tab `first` views, and
+/// hand back its id.
+fn attach_second_client(server: &mut Server, first: ClientId, viewport: Size) -> ClientId {
+    let session_id = *server.sessions().keys().next().expect("session");
+    let active_tab = server.sessions()[&session_id]
+        .clients
+        .get(first)
+        .expect("client record")
+        .active_tab();
+    let second = ClientId::new();
+    let _ =
+        server.handle_client_attach(session_id, second, viewport, active_tab, SystemTime::now());
+    second
 }
 
 fn new_server() -> (Server, mpsc::Sender<RuntimeEvent>) {
@@ -183,7 +205,24 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
     let second = ClientId::new();
     let events =
         server.handle_client_attach(session_id, second, VIEWPORT, active_tab, SystemTime::now());
-    assert_eq!(events, Vec::new(), "same-size attach reflows nothing");
+    // Same size, so nothing reflows; the joining client still lands on the
+    // tab's pane, which is the one event a same-size attach carries.
+    let landed_on = server.sessions()[&session_id].tabs[&active_tab]
+        .layout()
+        .leaf_panes()
+        .first()
+        .copied()
+        .expect("the tab holds one pane");
+    assert_eq!(
+        events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id: second,
+            tab_id: active_tab,
+            pane_id: landed_on,
+            prior_pane: None,
+        })],
+        "same-size attach reflows nothing"
+    );
     let _ = server.handle_client_detach(second);
 
     // The server still holds the session, its pane, and its engine; the
@@ -468,6 +507,127 @@ fn a_paused_subscriber_whose_client_is_gone_is_unsubscribed() {
     assert_eq!(server.event_bus.subscriber_count(), 0);
     assert_eq!(rx.try_iter().collect::<Vec<_>>(), Vec::<Delivery>::new());
     assert_eq!(server.subscriptions, Vec::new());
+}
+
+#[test]
+fn pushing_frames_serves_every_client() {
+    let (mut server, local) = booted_server();
+    let remote = attach_second_client(&mut server, local, REMOTE_VIEWPORT);
+    let local_rx = server.subscribe(local, EventFilter::All);
+    let remote_rx = server.subscribe(remote, EventFilter::All);
+    let local_frame = server.build_snapshot(local).expect("frame");
+    let remote_frame = server.build_snapshot(remote).expect("frame");
+    assert_eq!(local_frame.client.viewport, VIEWPORT);
+    assert_eq!(remote_frame.client.viewport, REMOTE_VIEWPORT);
+
+    server.push_frames();
+
+    assert_eq!(
+        local_rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(Box::new(local_frame))]
+    );
+    assert_eq!(
+        remote_rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(Box::new(remote_frame))]
+    );
+}
+
+#[test]
+fn a_due_render_hands_a_clients_queued_host_bytes_to_its_subscriber_before_its_frame() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    // An OSC 52 copy of "hello", as `copy_to_clipboard` queues it.
+    let bytes = b"\x1b]52;c;aGVsbG8=\x07".to_vec();
+    server.queue_host_write(client_id, &bytes);
+    let expected = server.build_snapshot(client_id).expect("frame");
+
+    server.push_frames();
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            Delivery::HostWrite(bytes),
+            Delivery::Frame(Box::new(expected)),
+        ]
+    );
+    assert_eq!(server.host_writes.get(&client_id), None);
+}
+
+#[test]
+fn a_detach_drops_the_bytes_queued_for_that_clients_terminal() {
+    let (mut server, local) = booted_server();
+    let remote = attach_second_client(&mut server, local, VIEWPORT);
+    server.queue_host_write(remote, b"\x1b]52;c;aGVsbG8=\x07");
+
+    let _ = server.handle_client_detach(remote);
+
+    assert_eq!(server.host_writes.get(&remote), None);
+}
+
+#[test]
+fn pushing_frames_serves_no_client_that_detached() {
+    let (mut server, local) = booted_server();
+    let remote = attach_second_client(&mut server, local, VIEWPORT);
+    let remote_rx = server.subscribe(remote, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+
+    // The detach takes the subscription with the client record, so the push
+    // finds nobody to build a frame for.
+    let _ = server.handle_client_detach(remote);
+    server.push_frames();
+
+    assert_eq!(server.subscriptions, Vec::new());
+    assert!(!server.event_bus.contains(subscriber_id));
+    assert_eq!(
+        remote_rx.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
+}
+
+#[test]
+fn a_frame_for_a_gone_receiver_costs_that_subscription_its_recorded_client() {
+    let (mut server, client_id) = booted_server();
+    let keep = server.subscribe(client_id, EventFilter::All);
+    let gone = server.subscribe(client_id, EventFilter::All);
+    let (keep_id, _) = server.subscriptions[0];
+    let (gone_id, _) = server.subscriptions[1];
+    let expected = server.build_snapshot(client_id).expect("frame");
+    drop(gone);
+
+    server.push_frames();
+
+    assert!(!server.event_bus.contains(gone_id));
+    assert!(server.event_bus.contains(keep_id));
+    assert_eq!(server.subscriptions, vec![(keep_id, client_id)]);
+    assert_eq!(
+        keep.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(Box::new(expected))]
+    );
+}
+
+#[test]
+fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
+    let (mut server, client_id) = booted_server();
+    let rx = server.subscribe(client_id, EventFilter::All);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    // Free one slot and spend it on the resync frame: the subscriber is live
+    // again, with a queue that is full again.
+    let _oldest: Delivery = rx.recv().expect("queued event");
+    server.resync_lagged();
+    assert_eq!(server.event_bus.desynced(), Vec::new());
+
+    server.push_frames();
+
+    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    assert!(server.event_bus.contains(subscriber_id));
+    let delivered: Vec<Delivery> = rx.try_iter().collect();
+    assert!(
+        !delivered
+            .iter()
+            .any(|item| matches!(item, Delivery::Frame(_))),
+        "the frame did not fit, so none was queued"
+    );
 }
 
 #[test]

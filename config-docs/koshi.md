@@ -1,8 +1,8 @@
 # `koshi.kdl` — app settings
 
 Main settings for theme, panes, scrollback, layout, mouse, terminal values,
-logging, updates, and beta features. `version` is required. Other settings are
-optional.
+logging, updates, beta features, and session closing. `version` is required.
+Other settings are optional.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
@@ -12,7 +12,8 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `koshi config check` and `migrate` reject them. A bad value in `update` rejects
 the whole app file for that launch.
 
-Settings use blocks. `theme` and `allow-beta-features` are top-level.
+Settings use blocks. `theme`, `allow-beta-features` and `auto-close-session` are
+top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -128,14 +129,47 @@ all of them; there is no per-feature switch.
 Every koshi process reads this from your `koshi.kdl` when it starts, so the
 interactive session and the `koshi` commands you type all get the same answer.
 
-A beta feature that declines to run does nothing — nothing crashes and nothing
-is lost. It also writes one warning naming itself, but only inside a running
-session that has `logging` turned on. A `koshi` command writes no log, so there
-the feature goes quiet with no message.
+A beta feature you have not turned on refuses and says so, naming itself and the
+line to add:
+
+```text
+koshi: `koshi attach` is a beta feature and did nothing; add a top-level
+`allow-beta-features #true` line to koshi.kdl to run it
+```
+
+Nothing crashes and nothing is lost; the command exits non-zero having done
+nothing.
+
+**Until 0.2.0 is released this covers starting and attaching to sessions** —
+`koshi`, `koshi attach` and `koshi --headless`. Without the switch on, all three
+stop with that message. 0.2.0 turns them on for everyone.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 (coming soon) |
+
+## `auto-close-session`
+
+A terminal leaving a session normally leaves the session running with nothing
+attached to it, so `koshi attach` can rejoin it later. Turning this on ends the
+session once the last terminal leaves.
+
+Koshi counts the terminals after the one that left is gone. If any are still
+attached, the session keeps running; only an empty session is ended.
+
+Ending it asks every program in the session to stop, waits up to three seconds,
+then kills whatever has not exited. A shell writes its history and an editor
+writes its swap file in that window. `koshi kill-session` skips the wait.
+
+The session reads this, not each terminal: the session server takes the answer
+from the `koshi.kdl` it read when the session started, so a terminal that
+attaches later cannot change it from its own file.
+
+Both ways of leaving count: `koshi detach`, and simply closing the terminal.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `auto-close-session` | boolean — end the session when its last terminal leaves | `#false` | ≥ 0.2.0 (coming soon) |
 
 ## Full example
 
@@ -148,6 +182,7 @@ version 1
 
 theme "default"
 allow-beta-features #false
+auto-close-session #false
 
 pane {
     min-cols 2

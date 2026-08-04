@@ -52,11 +52,8 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     //
     // Two builds only understand each other's bytes when they agree on this
     // shape, and the version in the Hello is the only thing that catches a
-    // pair that does not. So a change here is a change to the wire: add,
-    // remove, rename, or retype anything below and `ROUTER_PROTOCOL_VERSION`
-    // goes up in the same commit — otherwise a build at the old shape passes
-    // the handshake and then fails to decode, which reads to the user as a
-    // router that is not running.
+    // pair that does not. The version moves once per release cycle, not once
+    // per change, so a shape edit inside an unreleased cycle leaves it alone.
     //
     // Shape as of control-plane protocol version 1. Round-trip tests cannot
     // catch this: one build encoding and decoding its own structs always
@@ -74,9 +71,32 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     assert_eq!(
         encode(&RouterRequest {
             request_id: 2,
-            kind: RouterRequestKind::CreateSession,
+            kind: RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+            },
         }),
-        r#"{"request_id":2,"kind":"CreateSession"}"#
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: Some("dev".to_string()),
+                cwd: None,
+            },
+        }),
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: Some("dev".to_string()),
+                cwd: Some(PathBuf::from("/home/dev/api")),
+            },
+        }),
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":"/home/dev/api"}}}"#
     );
     assert_eq!(
         encode(&RouterRequest {
@@ -160,6 +180,13 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
+fn the_control_plane_version_this_build_speaks_is_one() {
+    // Born in 0.2.0 and never released, so shape edits inside this cycle leave
+    // it at 1.
+    assert_eq!(ROUTER_PROTOCOL_VERSION, 1);
+}
+
+#[test]
 fn every_request_kind_names_itself_without_its_payload() {
     assert_eq!(
         RouterRequestKind::Hello {
@@ -169,7 +196,14 @@ fn every_request_kind_names_itself_without_its_payload() {
         .name(),
         "Hello"
     );
-    assert_eq!(RouterRequestKind::CreateSession.name(), "CreateSession");
+    assert_eq!(
+        RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        }
+        .name(),
+        "CreateSession"
+    );
     assert_eq!(
         RouterRequestKind::AttachLookup {
             selector: SessionSelector::Name("quiet-lake".to_string()),
@@ -240,7 +274,13 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
     })
     .expect("the Hello is accepted");
 
-    assert_eq!(gate.check(&RouterRequestKind::CreateSession), Ok(()));
+    assert_eq!(
+        gate.check(&RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        }),
+        Ok(())
+    );
     assert_eq!(gate.check(&RouterRequestKind::ListSessions), Ok(()));
 }
 
@@ -305,7 +345,10 @@ fn a_request_before_any_hello_is_refused_as_hello_required() {
     let mut gate = RouterHandshake::new(token());
 
     assert_eq!(
-        gate.check(&RouterRequestKind::CreateSession),
+        gate.check(&RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "CreateSession arrived before a Hello opened the connection".to_string(),
@@ -362,7 +405,13 @@ fn a_good_hello_after_a_refusal_opens_the_gate() {
     })
     .expect("the Hello is accepted");
 
-    assert_eq!(gate.check(&RouterRequestKind::CreateSession), Ok(()));
+    assert_eq!(
+        gate.check(&RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        }),
+        Ok(())
+    );
 }
 
 #[test]
@@ -380,7 +429,13 @@ fn a_refused_hello_on_an_open_gate_leaves_it_open() {
     })
     .expect_err("the Hello is refused");
 
-    assert_eq!(gate.check(&RouterRequestKind::CreateSession), Ok(()));
+    assert_eq!(
+        gate.check(&RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+        }),
+        Ok(())
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Tests for the control-socket server over real sockets: serving lifecycle,
-//! handshake gating, fault containment per connection, and the reply path
-//! from a stand-in dispatcher thread.
+//! handshake gating, fault containment per connection, the reply path from a
+//! stand-in dispatcher thread, and what an attached connection's reading half
+//! carries.
 
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
@@ -10,9 +11,18 @@ use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{SessionInfo, SessionOverview};
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{CommandId, PaneId, SessionId};
+use koshi_core::key::{Key, KeyChord, ModFlags};
+use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_ipc::protocol::{EventFilterSpec, WireMouseAction};
+
+use crate::runtime::event::AttachAccepted;
 
 use super::*;
+
+/// The terminal size every attaching client in these tests reports.
+const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
 /// A fresh directory to stand in for the runtime dir, under a short base so
 /// the Unix socket path stays inside the OS path-length cap.
@@ -53,6 +63,112 @@ fn spawn_dispatcher(
             }
         }
     })
+}
+
+/// The structure a stand-in attach answers with: the session, named, with
+/// nothing in it.
+fn attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot {
+    AttachedSessionStructureSnapshot {
+        id: session_id,
+        name: "attachable".to_string(),
+        tabs: Vec::new(),
+        panes: Vec::new(),
+    }
+}
+
+/// A stand-in dispatcher that accepts attaches: it answers every attach as
+/// `client_id`, holds the queue it hands out open so the writing thread stays
+/// blocked, and closes those queues on a detach the way the real dispatcher
+/// does. Every other event it drains is forwarded to the returned receiver, so
+/// a test reads exactly what an attached connection sent. Exits when every
+/// inbox sender is gone.
+fn spawn_attaching_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    client_id: ClientId,
+    session_id: SessionId,
+) -> (JoinHandle<()>, Receiver<RuntimeEvent>) {
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut queues = Vec::new();
+        while let Ok(event) = inbox_rx.recv() {
+            match event {
+                RuntimeEvent::IpcAttach { reply, .. } => {
+                    let (events_tx, events_rx) = mpsc::channel();
+                    queues.push(events_tx);
+                    let _ = reply.send(Some(AttachAccepted {
+                        client_id,
+                        session_id,
+                        structure: attached_structure(session_id),
+                        events: events_rx,
+                    }));
+                }
+                detached @ RuntimeEvent::ClientDetached { .. } => {
+                    queues.clear();
+                    if seen_tx.send(detached).is_err() {
+                        break;
+                    }
+                }
+                other => {
+                    if seen_tx.send(other).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (handle, seen_rx)
+}
+
+/// A served socket whose stand-in dispatcher accepts an attach as `client_id`,
+/// plus the events that attached connection sends the dispatcher.
+fn serve_attachable(
+    tag: &str,
+    client_id: ClientId,
+) -> (
+    IpcServer,
+    SessionId,
+    PathBuf,
+    JoinHandle<()>,
+    Receiver<RuntimeEvent>,
+) {
+    let runtime_dir = test_runtime_dir(tag);
+    let session = SessionId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client_id, session);
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    (server, session, runtime_dir, dispatcher, seen)
+}
+
+/// Open a connection, say hello, attach on it, and read both replies back.
+/// The connection comes back carrying `client_id`'s stream.
+fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Connection {
+    let mut connection = connect_to(runtime_dir, session);
+    connection
+        .send(&hello_for(runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Attach {
+                viewport: VIEWPORT,
+                filter: EventFilterSpec::All,
+            },
+        })
+        .expect("send attach");
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attach_reply.request_id, Some(2));
+    assert_eq!(
+        attach_reply.result,
+        IpcResult::Attached {
+            client_id,
+            session_id: session,
+            structure: attached_structure(session),
+        },
+    );
+    connection
 }
 
 /// A served socket in a fresh runtime dir, with a stand-in dispatcher
@@ -290,6 +406,167 @@ fn raw_connect(addr: &str) -> std::fs::File {
         .write(true)
         .open(format!(r"\\.\pipe\{addr}"))
         .expect("raw connect")
+}
+
+#[test]
+fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_request() {
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("attached-input", client);
+    let mut connection = attach_to(&runtime_dir, session, client);
+    let pressed = KeyChord::new(ModFlags::CTRL, Key::Char('t'));
+    let resized = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let env = envelope();
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::KeyPress { chord: pressed },
+        })
+        .expect("send key press");
+    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    else {
+        panic!("expected ClientKeyPress");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(chord, pressed);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Resize { viewport: resized },
+        })
+        .expect("send resize");
+    let RuntimeEvent::Resize { client_id, size } = seen.recv().expect("resize event") else {
+        panic!("expected Resize");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(size, resized);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 5,
+            kind: IpcRequestKind::SubmitCommand(Box::new(env.clone())),
+        })
+        .expect("send submit");
+    let RuntimeEvent::Ipc { envelope, reply } = seen.recv().expect("submit event") else {
+        panic!("expected Ipc");
+    };
+    assert_eq!(envelope, env);
+    assert!(
+        reply
+            .send(CommandResult::Ok {
+                command_id: env.id,
+                emitted_events: Vec::new(),
+            })
+            .is_err(),
+        "the reply channel's receiving end is already gone",
+    );
+
+    let round = vec![WireMouseAction::Scroll {
+        pane: PaneId::new(),
+        up: true,
+        lines: 3,
+    }];
+    connection
+        .send(&IpcRequest {
+            request_id: 6,
+            kind: IpcRequestKind::Mouse(round.clone()),
+        })
+        .expect("send mouse round");
+    let RuntimeEvent::ClientMouse {
+        client_id,
+        request_id,
+        actions,
+    } = seen.recv().expect("mouse round event")
+    else {
+        panic!("expected ClientMouse");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(request_id, 6, "the round's own id crosses with it");
+    assert_eq!(actions, round);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 7,
+            kind: IpcRequestKind::Paste {
+                text: String::from("hello\nworld"),
+            },
+        })
+        .expect("send paste");
+    let RuntimeEvent::HostPaste { client_id, text } = seen.recv().expect("paste event") else {
+        panic!("expected HostPaste");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(text, "hello\nworld");
+
+    // A kind the reading half does not forward ends it, which detaches.
+    connection
+        .send(&IpcRequest {
+            request_id: 8,
+            kind: IpcRequestKind::Discovery,
+        })
+        .expect("send discovery");
+    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+
+    // The goodbye is the first frame after the attach reply, so none of the
+    // five requests above was answered with an `IpcResponse`.
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("goodbye frame"),
+        SessionEvent::Detached,
+    );
+    assert!(
+        matches!(
+            connection.recv::<SessionEvent>(),
+            Err(IpcError::Disconnected),
+        ),
+        "the stream ends after the goodbye",
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_mouse_round_before_an_attach_closes_the_connection() {
+    // A round names no client until the connection carries one, so it belongs
+    // on an attached connection only.
+    let (server, session, runtime_dir, dispatcher) = serve("mouse-unattached", None);
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                pane: PaneId::new(),
+                up: true,
+                lines: 3,
+            }]),
+        })
+        .expect("send mouse round");
+    assert!(
+        connection.recv::<IpcResponse>().is_err(),
+        "no reply comes back, and the connection is closed",
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
 }
 
 #[test]

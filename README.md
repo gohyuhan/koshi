@@ -213,6 +213,17 @@ Remove-Item (Join-Path $env:LOCALAPPDATA "koshi") `
 
 ## Quick start
 
+> **Before 0.2.0 is released**, starting and attaching to sessions is behind the
+> beta switch. Put this in `koshi.kdl` first, or every command below stops with a
+> message telling you to:
+>
+> ```kdl
+> version 1
+> allow-beta-features #true
+> ```
+>
+> 0.2.0 ships these on for everyone and the switch goes away.
+
 Open one tab with one shell pane:
 
 ```bash
@@ -254,7 +265,7 @@ Koshi uses four optional KDL file types. Each present file must declare
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, and beta-feature settings |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, and session-closing settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, and environment values |

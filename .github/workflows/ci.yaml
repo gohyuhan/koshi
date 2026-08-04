@@ -11,6 +11,7 @@ jobs:
   formatting:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -33,6 +34,7 @@ jobs:
   dep-guard:
     name: dependency guard
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: formatting
     steps:
       - uses: actions/checkout@v7
@@ -48,6 +50,7 @@ jobs:
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: dep-guard
     steps:
       - uses: actions/checkout@v7
@@ -69,6 +72,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

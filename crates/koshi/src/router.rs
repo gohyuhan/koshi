@@ -70,9 +70,14 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 /// The subcommand the router starts itself under to run one session server.
-/// The arguments after it are the session id, the session name, and
-/// [`RUNTIME_DIR_FLAG`] with the directory this router serves.
+/// The arguments after it are the session id, the session name,
+/// [`RUNTIME_DIR_FLAG`] with the directory this router serves, and
+/// [`PROFILE_FLAG`] when the create named a profile.
 const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
+
+/// The flag carrying a `--profile` name to the session server the router
+/// starts, so the session opens that profile's tabs and panes.
+const PROFILE_FLAG: &str = "--profile";
 
 /// The running sessions, keyed by id. Owned by the dispatcher loop alone.
 type Registry = HashMap<SessionId, SessionEntry>;
@@ -342,7 +347,13 @@ fn serve_request(
         RouterRequestKind::Hello { .. } => {
             unreachable!("Hello is answered by the connection thread before dispatch")
         }
-        RouterRequestKind::CreateSession => create_session(runtime_dir, registry, events_tx),
+        RouterRequestKind::CreateSession { profile, cwd } => create_session(
+            runtime_dir,
+            registry,
+            events_tx,
+            profile.as_deref(),
+            cwd.as_deref(),
+        ),
         RouterRequestKind::AttachLookup { selector } => {
             attach_lookup(runtime_dir, registry, &selector)
         }
@@ -353,24 +364,27 @@ fn serve_request(
     }
 }
 
-/// Start a session server and register the session it reports.
+/// Start a session server and register the session it reports. `cwd` is the
+/// directory the new session's first shell opens in.
 ///
 /// The child is started first and answered only once it reports the address
 /// it bound. A start that fails, reports nothing within [`READY_WAIT`],
 /// reports something unreadable, or speaks another control-plane protocol
 /// version ends with the child killed, nothing registered, and whatever it
-/// advertised removed.
+/// advertised removed. A `cwd` the child cannot enter fails the start.
 fn create_session(
     runtime_dir: &Path,
     registry: &mut Registry,
     events_tx: &Sender<RouterEvent>,
+    profile: Option<&str>,
+    cwd: Option<&Path>,
 ) -> RouterResult {
     let id = SessionId::new();
     let name = generate_name(NameKind::Session, |candidate| {
         name_is_taken(registry, candidate)
     });
 
-    let mut child = match spawn_session_server(runtime_dir, id, &name) {
+    let mut child = match spawn_session_server(runtime_dir, id, &name, profile, cwd) {
         Ok(child) => child,
         Err(error) => return refused(format!("the session could not be started: {error}")),
     };
@@ -561,19 +575,45 @@ fn unregister(runtime_dir: &Path, registry: &mut Registry, id: SessionId) {
     remove_socket_file(&socket_addr(runtime_dir, id));
 }
 
-/// Start one session server as a child of this router, with its identity on
-/// the command line and its output piped back for the ready report.
-fn spawn_session_server(runtime_dir: &Path, id: SessionId, name: &str) -> std::io::Result<Child> {
-    std::process::Command::new(std::env::current_exe()?)
+/// Build the command that starts one session server: its identity on the
+/// command line, its output piped back for the ready report, and the
+/// directory its first shell opens in.
+fn session_server_command(
+    runtime_dir: &Path,
+    id: SessionId,
+    name: &str,
+    profile: Option<&str>,
+    cwd: Option<&Path>,
+) -> std::io::Result<std::process::Command> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
         .arg(SESSION_SERVER_SUBCOMMAND)
         .arg(id.to_string())
         .arg(name)
         .arg(RUNTIME_DIR_FLAG)
-        .arg(runtime_dir)
+        .arg(runtime_dir);
+    if let Some(profile) = profile {
+        command.arg(PROFILE_FLAG).arg(profile);
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
+/// Start one session server as a child of this router.
+fn spawn_session_server(
+    runtime_dir: &Path,
+    id: SessionId,
+    name: &str,
+    profile: Option<&str>,
+    cwd: Option<&Path>,
+) -> std::io::Result<Child> {
+    session_server_command(runtime_dir, id, name, profile, cwd)?.spawn()
 }
 
 /// Watch one session server until it exits, then report the exit so its

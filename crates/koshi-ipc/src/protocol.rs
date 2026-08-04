@@ -15,10 +15,12 @@
 
 use std::fmt;
 
-use koshi_core::command::{CommandEnvelope, CommandResult};
+use koshi_core::command::{Command, CommandEnvelope, CommandResult};
 use koshi_core::discovery::SessionOverview;
-use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::geometry::{Direction, Size};
+use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::key::KeyChord;
+use koshi_core::mouse::MouseInput;
 use koshi_core::redact::REDACTED;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -29,8 +31,17 @@ use crate::attach::AttachedSessionStructureSnapshot;
 /// [`IpcRequestKind::Hello`] names a different version is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// Any change to the shape of a wire struct bumps this, in the same commit.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// Bumps when an existing wire field changes its type or its meaning, in the
+/// same commit as that change: the first such change after a release sets
+/// this to the released value plus one, and the value then holds until the
+/// next release. A field added or removed with both sides still decoding
+/// cleanly does not bump it.
+///
+/// Versions 3 and 4 were bumped for pure additions, under an older reading
+/// that bumped on every change. The rule above resets the number to the last
+/// released value — v0.1.0 is the only released build and speaks 1 — so 0.2.0
+/// speaks 2.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
@@ -43,7 +54,7 @@ pub const PROTOCOL_VERSION: u32 = 4;
 ///
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` yields
-///   `{"protocol_version":3, "token":"k7Qx…"}`, secret included.
+///   `{"protocol_version":2, "token":"k7Qx…"}`, secret included.
 /// - `Debug` and `Display` write `***`, so a token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
@@ -127,6 +138,17 @@ pub struct IpcRequest {
 }
 
 /// What a request asks for.
+///
+/// On a connection already serving an attached client's event stream,
+/// [`KeyPress`](Self::KeyPress), [`Resize`](Self::Resize),
+/// [`Paste`](Self::Paste) and [`SubmitCommand`](Self::SubmitCommand) are
+/// answered by the next painted frame rather than by an [`IpcResponse`].
+///
+/// [`Mouse`](Self::Mouse) is answered by exactly one
+/// [`SessionEvent::MouseAnswer`](crate::event::SessionEvent::MouseAnswer)
+/// carrying that request's `request_id`, always — including when the round
+/// produced nothing to report, where the answer's list is empty. That answer
+/// is what moves the viewer's drag anchor over the cells the session took.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum IpcRequestKind {
@@ -155,6 +177,29 @@ pub enum IpcRequestKind {
         /// Which of the session's events the client receives.
         filter: EventFilterSpec,
     },
+    /// One key press the attached client's keymap did not bind, for the pane
+    /// it is typing into.
+    KeyPress {
+        /// The chord the client read from its terminal.
+        chord: KeyChord,
+    },
+    /// The attached client's terminal changed size.
+    Resize {
+        /// The client's new terminal size in cells.
+        viewport: Size,
+    },
+    /// Text the attached client's outer terminal pasted, for the pane it is
+    /// typing into. Carried whole, so no character of it can fire a
+    /// keybinding.
+    Paste {
+        /// The pasted text, exactly as the client's terminal delivered it.
+        text: String,
+    },
+    /// One round of mouse actions the attached client decided, in the order
+    /// the session must run them. A round is what the viewer accumulated for
+    /// one host mouse event, so it carries one `request_id` and receives one
+    /// answer.
+    Mouse(Vec<WireMouseAction>),
     /// Dispatch a command against the session.
     SubmitCommand(Box<CommandEnvelope>),
     /// Ask the session to describe itself in full. The caller narrows the
@@ -171,10 +216,71 @@ impl IpcRequestKind {
         match self {
             IpcRequestKind::Hello { .. } => "Hello",
             IpcRequestKind::Attach { .. } => "Attach",
+            IpcRequestKind::KeyPress { .. } => "KeyPress",
+            IpcRequestKind::Resize { .. } => "Resize",
+            IpcRequestKind::Paste { .. } => "Paste",
+            IpcRequestKind::Mouse(_) => "Mouse",
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
         }
     }
+}
+
+/// One thing an attached client asks the session to do for a mouse event.
+///
+/// The wire spelling of the viewer's own `MouseAction`, variant for variant.
+/// Every variant names its target explicitly, so the session hit-tests
+/// nothing.
+///
+/// [`Command`](Self::Command) is here rather than on
+/// [`IpcRequestKind::SubmitCommand`] so a command the mouse issued arrives
+/// inside its round, in its place among the other actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum WireMouseAction {
+    /// Move this client's scrollback view of `pane` by `lines`, up into
+    /// history or back down toward live output.
+    Scroll {
+        /// The pane whose view moves.
+        pane: PaneId,
+        /// Up into history, or down toward live output.
+        up: bool,
+        /// Lines to move.
+        lines: usize,
+    },
+    /// Hand the event to the program in `pane` as a mouse report. The session
+    /// encodes it from that pane's live tracking level and encoding.
+    Forward {
+        /// The pane whose program receives the report.
+        pane: PaneId,
+        /// The event, with the cell it landed on and the modifiers held.
+        mouse: MouseInput,
+    },
+    /// Send `count` cursor arrow keys to `pane` — the alternate-scroll
+    /// (`?1007`) translation of a wheel tick on the alternate screen.
+    AltScrollArrows {
+        /// The pane whose program receives the arrows.
+        pane: PaneId,
+        /// Up-arrows, or down-arrows.
+        up: bool,
+        /// How many.
+        count: usize,
+    },
+    /// Move `pane`'s `side` border `count` cells, one cell per step, in the
+    /// direction `step` names.
+    Resize {
+        /// The pane whose border moves.
+        pane: PaneId,
+        /// Which of the pane's borders was grabbed.
+        side: Direction,
+        /// `1` grows the pane, `-1` shrinks it.
+        step: i16,
+        /// How many single-cell steps the pointer travelled.
+        count: u16,
+    },
+    /// Run the command through the session's command door, attributed to this
+    /// client's mouse.
+    Command(Box<Command>),
 }
 
 /// Which of the session's events an attaching client asks for.

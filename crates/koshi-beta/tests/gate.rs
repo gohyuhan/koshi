@@ -73,7 +73,7 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     // for would send the user to write KDL that does not parse.
     assert!(
         warnings[0].contains(
-            "beta feature is off, so `warns_once` did nothing; \
+            "`warns_once` is a beta feature and did nothing; \
              add a top-level `allow-beta-features #true` line to koshi.kdl to run it"
         ),
         "{warnings:?}"

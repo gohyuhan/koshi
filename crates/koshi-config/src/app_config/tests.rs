@@ -158,6 +158,35 @@ fn a_repeated_allow_beta_features_line_keeps_the_first_and_warns() {
 }
 
 #[test]
+fn auto_close_session_records_what_it_is_set_to() {
+    assert_eq!(
+        parse("auto-close-session #true").auto_close_session,
+        Some(true)
+    );
+    assert_eq!(
+        parse("auto-close-session #false").auto_close_session,
+        Some(false)
+    );
+}
+
+#[test]
+fn an_absent_auto_close_session_sets_no_layer() {
+    // Absent leaves the field unset, so the built-in `false` stands and a
+    // session outlives the client that left it.
+    assert_eq!(parse("").auto_close_session, None);
+}
+
+#[test]
+fn a_non_boolean_auto_close_session_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("auto-close-session \"yes\"");
+    assert_eq!(layer.auto_close_session, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `auto-close-session`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
 fn a_colors_block_in_the_app_file_is_ignored() {
     // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
     // is an unknown top-level node and sets nothing, so one file's settings

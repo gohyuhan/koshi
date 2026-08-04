@@ -78,6 +78,37 @@ fn a_later_layer_can_turn_beta_features_back_off() {
 }
 
 #[test]
+fn a_session_stays_open_unless_the_file_closes_it() {
+    // The built-in default, so a session with no `koshi.kdl` survives the
+    // client that leaves it and can be attached to again.
+    let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert!(!server.auto_close_session);
+}
+
+#[test]
+fn auto_close_session_folds_onto_the_session_side_only() {
+    let layer = PartialKoshiConfig {
+        auto_close_session: Some(true),
+        ..Default::default()
+    };
+
+    // The session owns the knob, so it is the side that changes.
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    assert!(server.auto_close_session);
+    assert_eq!(
+        server,
+        ServerConfig {
+            auto_close_session: true,
+            ..ServerConfig::default()
+        }
+    );
+
+    // A viewer folds the same file and is untouched by it.
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+    assert_eq!(client, ClientConfig::default());
+}
+
+#[test]
 fn single_field_override_keeps_sibling() {
     let layer = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {

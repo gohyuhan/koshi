@@ -11,7 +11,9 @@
 //! - **Where does it go?** A per-session file `logs/koshi-log-<id>.log` under
 //!   the user's state directory (see [`logging::session_log_path`]). The file is
 //!   created on the *first* line written and re-created if it is removed while
-//!   koshi runs.
+//!   koshi runs. Two processes write one session's file — the session server
+//!   and the client attached to it — and every line is one open-append-close,
+//!   so the two processes' lines interleave whole.
 //! - **What passes the bar?** [`logging::LoggingParams::level`] — the lowest severity
 //!   that gets written; a line below it is dropped before it reaches the file.
 //!

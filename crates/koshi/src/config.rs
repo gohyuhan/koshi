@@ -36,7 +36,9 @@ use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME};
 use koshi_core::geometry::Direction;
+use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
+use koshi_observability::logging::LoggingParams;
 
 #[cfg(test)]
 mod tests;
@@ -96,6 +98,26 @@ pub fn load_app_layer() -> Option<PartialKoshiConfig> {
     let dir = koshi_paths::config_dir()?;
     let mut warnings = Vec::new();
     load_app(&dir.join("koshi.kdl"), &mut warnings).map(|file| file.layer)
+}
+
+/// The tracing subscriber's settings for `session_id`: `app`'s `logging`
+/// section over the built-in defaults. The session server and every client
+/// attached to it build their params here, so one session's lines all land in
+/// one file.
+#[must_use]
+pub(crate) fn logging_params(
+    app: Option<&PartialKoshiConfig>,
+    session_id: SessionId,
+) -> LoggingParams {
+    let logging = app
+        .map(PartialKoshiConfig::logging_config)
+        .unwrap_or_default();
+    LoggingParams {
+        enabled: logging.enabled,
+        level: logging.level,
+        format: logging.format,
+        session_id,
+    }
 }
 
 /// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate, so

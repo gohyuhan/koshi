@@ -1220,3 +1220,17 @@ fn two_full_percent_children_over_the_total_share_donate_at_the_floor() {
     assert_tiles_exactly(&result, tab);
     assert_min_size_respected(&result.panes, MIN_PANE_SIZE).unwrap();
 }
+
+#[test]
+fn a_stack_header_survives_a_serde_round_trip() {
+    let header = StackHeader {
+        pane: PaneId::new(),
+        rect: rect(0, 23, 80, 1),
+        position: 1,
+        total: 5,
+    };
+
+    let json = serde_json::to_string(&header).expect("serialize");
+    let restored: StackHeader = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(header, restored);
+}

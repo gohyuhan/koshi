@@ -9,9 +9,11 @@ use std::time::{Duration, UNIX_EPOCH};
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::key::{Key, ModFlags};
 use koshi_core::lock::LockMode;
+use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneKind;
@@ -154,6 +156,42 @@ fn populated_structure() -> AttachedSessionStructureSnapshot {
     }
 }
 
+/// Every mouse action a round can carry, in the order the enum declares them,
+/// at fixed ids.
+fn every_mouse_action() -> Vec<WireMouseAction> {
+    let pane = PaneId::from_uuid(fixed_uuid());
+
+    vec![
+        WireMouseAction::Scroll {
+            pane,
+            up: true,
+            lines: 3,
+        },
+        WireMouseAction::Forward {
+            pane,
+            mouse: MouseInput {
+                kind: MouseKind::Press(MouseButton::Left),
+                at: Point { x: 10, y: 3 },
+                mods: ModFlags::CTRL,
+            },
+        },
+        WireMouseAction::AltScrollArrows {
+            pane,
+            up: false,
+            count: 5,
+        },
+        WireMouseAction::Resize {
+            pane,
+            side: Direction::Left,
+            step: -1,
+            count: 2,
+        },
+        WireMouseAction::Command(Box::new(Command::ToggleLockMode(
+            ToggleLockModeArgs::default(),
+        ))),
+    ]
+}
+
 /// The one UUID every fixed id above uses.
 fn fixed_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
@@ -178,6 +216,11 @@ fn tag_of(value: &serde_json::Value) -> String {
 }
 
 #[test]
+fn the_protocol_version_this_build_speaks_is_two() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+}
+
+#[test]
 fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // Every field of every struct a `Discovery` answer carries, pinned.
     //
@@ -189,7 +232,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     // and then fails to decode the answer, which reads to the user as a
     // session that is not running.
     //
-    // Shape as of protocol version 4. Round-trip tests cannot catch this:
+    // Shape as of protocol version 2. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
     // itself.
     assert_eq!(
@@ -249,7 +292,7 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // `Option<Direction>` and encoded `null` when unset; it is now a bare
     // `"Down"`, and a version-1 CLI's `null` no longer decodes.
     //
-    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 2. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let request = IpcRequest {
         request_id: 2,
@@ -314,7 +357,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
     // including inside `AttachedSessionStructureSnapshot` — turns this red,
     // and `PROTOCOL_VERSION` goes up in the same commit.
     //
-    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 2. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let request = IpcRequest {
         request_id: 4,
@@ -486,6 +529,101 @@ fn an_attach_naming_its_own_authority_is_refused() {
                 viewport: Size { cols: 80, rows: 24 },
                 filter: EventFilterSpec::All,
             },
+        }
+    );
+}
+
+#[test]
+fn key_press_request_round_trips() {
+    let request = IpcRequest {
+        request_id: 5,
+        kind: IpcRequestKind::KeyPress {
+            chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+        },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn resize_request_round_trips() {
+    let request = IpcRequest {
+        request_id: 6,
+        kind: IpcRequestKind::Resize {
+            viewport: Size {
+                cols: 120,
+                rows: 40,
+            },
+        },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn every_mouse_action_round_trips() {
+    for action in every_mouse_action() {
+        assert_eq!(round_trip(&action), action);
+    }
+}
+
+#[test]
+fn a_mouse_request_keeps_its_round_in_the_order_it_was_sent() {
+    // Three actions that differ from one another, so any reordering — not just
+    // a lost element — turns this red. The session runs them in this order.
+    let pane = PaneId::from_uuid(fixed_uuid());
+    let request = IpcRequest {
+        request_id: 7,
+        kind: IpcRequestKind::Mouse(vec![
+            WireMouseAction::Scroll {
+                pane,
+                up: true,
+                lines: 3,
+            },
+            WireMouseAction::Command(Box::new(Command::ToggleLockMode(
+                ToggleLockModeArgs::default(),
+            ))),
+            WireMouseAction::Resize {
+                pane,
+                side: Direction::Left,
+                step: -1,
+                count: 2,
+            },
+        ]),
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn a_mouse_action_carrying_an_unknown_field_is_refused() {
+    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3,"pixels":9}}]}}"#,
+    );
+
+    let error =
+        decoded.expect_err("an unknown field inside a mouse action decoded instead of failing");
+    assert!(
+        error.to_string().contains("unknown field `pixels`"),
+        "unexpected error: {error}"
+    );
+
+    // The same round without that one field decodes, so the refusal above is
+    // the field's doing and not a typo elsewhere in the bytes.
+    let without_it: IpcRequest = serde_json::from_str(
+        r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3}}]}}"#,
+    )
+    .expect("the same round without the extra field decodes");
+
+    assert_eq!(
+        without_it,
+        IpcRequest {
+            request_id: 7,
+            kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                pane: PaneId::from_uuid(fixed_uuid()),
+                up: true,
+                lines: 3,
+            }]),
         }
     );
 }
@@ -775,6 +913,31 @@ fn every_request_kind_names_itself_without_its_payload() {
         .name(),
         "Attach"
     );
+    assert_eq!(
+        IpcRequestKind::KeyPress {
+            chord: KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+        }
+        .name(),
+        "KeyPress"
+    );
+    assert_eq!(
+        IpcRequestKind::Resize {
+            viewport: Size {
+                cols: 120,
+                rows: 40,
+            },
+        }
+        .name(),
+        "Resize"
+    );
+    assert_eq!(
+        IpcRequestKind::Paste {
+            text: String::from("hello\nworld"),
+        }
+        .name(),
+        "Paste"
+    );
+    assert_eq!(IpcRequestKind::Mouse(every_mouse_action()).name(), "Mouse");
     assert_eq!(
         IpcRequestKind::SubmitCommand(Box::new(envelope())).name(),
         "SubmitCommand"

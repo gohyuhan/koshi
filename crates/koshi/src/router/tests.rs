@@ -433,3 +433,38 @@ fn a_listing_drops_every_session_that_does_not_answer() {
     assert_eq!(answer, RouterResult::Sessions(Vec::new()));
     assert_eq!(registry, Registry::new());
 }
+
+#[test]
+fn the_session_server_starts_in_the_directory_the_request_named() {
+    // The first shell inherits the session server's directory, so the caller's
+    // directory reaches the shell only if it is set on the child here.
+    let runtime_dir = test_runtime_dir();
+    let dir = test_runtime_dir();
+
+    let command = session_server_command(
+        runtime_dir.path(),
+        SessionId::new(),
+        "S-quiet-lake",
+        None,
+        Some(dir.path()),
+    )
+    .expect("the command is built");
+
+    assert_eq!(command.get_current_dir(), Some(dir.path()));
+}
+
+#[test]
+fn a_create_that_names_no_directory_leaves_the_child_where_the_router_is() {
+    let runtime_dir = test_runtime_dir();
+
+    let command = session_server_command(
+        runtime_dir.path(),
+        SessionId::new(),
+        "S-quiet-lake",
+        None,
+        None,
+    )
+    .expect("the command is built");
+
+    assert_eq!(command.get_current_dir(), None);
+}

@@ -27,7 +27,7 @@ use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::error::PtyError;
-use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
+use koshi_renderer::snapshot::{Delivery, MouseFrame, ViewerChrome};
 use koshi_renderer::{hit_test, pane_local_cell, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -138,7 +138,7 @@ fn apply(
                 count,
             } => {
                 let applied = runtime.drag_resize(client_id, pane, side, step, count);
-                viewer.note_resize_applied(applied);
+                viewer.note_resize_applied(pane, side, step, applied);
             }
             MouseAction::Command(command) => {
                 let envelope = CommandEnvelope::new(
@@ -2014,4 +2014,312 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
         Vec::new(),
         "with no drag under way the pointer asks for no border move"
     );
+}
+
+/// The runtime, its fake PTY backend, a client, and that client's own
+/// subscriber queue — the queue a mouse round's answer lands on.
+fn runtime_with_queue() -> (
+    Server,
+    Arc<FakePtyBackend>,
+    ClientId,
+    mpsc::Receiver<Delivery>,
+) {
+    let (mut runtime, fake, client) = runtime_with_fake();
+    let queue = runtime.subscribe(client, EventFilter::All);
+    (runtime, fake, client, queue)
+}
+
+/// Every mouse answer waiting on `queue`, in order, as its round id and its
+/// list. The frames and events that share the queue are left out.
+fn answers(queue: &mpsc::Receiver<Delivery>) -> Vec<(u64, Vec<MouseAnswer>)> {
+    queue
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::MouseAnswer {
+                request_id,
+                answers,
+            } => Some((request_id, answers)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_round_holding_one_scroll_answers_with_the_line_the_view_landed_on() {
+    let (mut runtime, _fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+
+    runtime.run_client_mouse(
+        client,
+        7,
+        vec![WireMouseAction::Scroll {
+            pane,
+            up: true,
+            lines: 5,
+        }],
+    );
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        5,
+        "the view moved five lines into history"
+    );
+    // A zero-line move reads the same line back off the door without touching
+    // the view, so the answer is checked against the door's own number.
+    let top = runtime.scroll_pane_view(client, pane, true, 0);
+    // 40 lines through a 20-row pane push 21 into history, so the live view's
+    // top row is line 21 and five lines up is line 16.
+    assert_eq!(top, Some(16));
+    assert_eq!(
+        answers(&queue),
+        vec![(7, vec![MouseAnswer::Scrolled { pane, top }])],
+        "the round is answered with the line the scroll landed on"
+    );
+}
+
+#[test]
+fn a_round_holding_one_border_move_answers_with_the_cells_it_took() {
+    let (mut runtime, _fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    split_focused(&mut runtime, client);
+    let before = pane_cols(&runtime, client, pane);
+
+    runtime.run_client_mouse(
+        client,
+        8,
+        vec![WireMouseAction::Resize {
+            pane,
+            side: Direction::Right,
+            step: 1,
+            count: 3,
+        }],
+    );
+
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before + 3,
+        "the border moved three cells"
+    );
+    assert_eq!(
+        answers(&queue),
+        vec![(
+            8,
+            vec![MouseAnswer::Resized {
+                pane,
+                side: Direction::Right,
+                step: 1,
+                applied: 3,
+            }]
+        )],
+        "the answer names the border it moved and the cells it really took"
+    );
+}
+
+#[test]
+fn a_round_holding_one_forward_writes_the_report_and_answers_with_an_empty_list() {
+    let (mut runtime, fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    // The program turns on normal tracking with SGR encoding.
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+
+    runtime.run_client_mouse(
+        client,
+        9,
+        vec![WireMouseAction::Forward {
+            pane,
+            mouse: press(at.x, at.y),
+        }],
+    );
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
+        "the press reached the program as an SGR report"
+    );
+    assert_eq!(
+        answers(&queue),
+        vec![(9, Vec::new())],
+        "a forward reports nothing, and the round is still answered"
+    );
+}
+
+#[test]
+fn a_round_holding_one_alt_scroll_writes_the_arrows_and_answers_with_an_empty_list() {
+    let (mut runtime, fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    // Enter the alternate screen and turn alternate-scroll on.
+    runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
+
+    runtime.run_client_mouse(
+        client,
+        10,
+        vec![WireMouseAction::AltScrollArrows {
+            pane,
+            up: true,
+            count: 3,
+        }],
+    );
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
+        "wheel up became three up-arrows under default cursor keys"
+    );
+    assert_eq!(
+        answers(&queue),
+        vec![(10, Vec::new())],
+        "arrows report nothing, and the round is still answered"
+    );
+}
+
+#[test]
+fn a_round_holding_one_command_runs_it_and_answers_with_an_empty_list() {
+    let (mut runtime, _fake, client, queue) = runtime_with_queue();
+    let tabs = |runtime: &Server| {
+        runtime
+            .build_snapshot(client)
+            .expect("snapshot")
+            .session
+            .tabs_metadata
+            .len()
+    };
+    assert_eq!(tabs(&runtime), 1, "the session starts on one tab");
+
+    runtime.run_client_mouse(
+        client,
+        11,
+        vec![WireMouseAction::Command(Box::new(Command::NewTab(
+            NewTabArgs::default(),
+        )))],
+    );
+
+    assert_eq!(tabs(&runtime), 2, "the command the round carried ran");
+    assert_eq!(
+        answers(&queue),
+        vec![(11, Vec::new())],
+        "a command reports nothing, and the round is still answered"
+    );
+}
+
+#[test]
+fn a_round_that_reports_nothing_is_still_answered() {
+    // The answer is what releases the viewer's gate: skipping it stalls that
+    // client's whole mouse uplink until it detaches.
+    let (mut runtime, fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+    let forward = WireMouseAction::Forward {
+        pane,
+        mouse: press(at.x, at.y),
+    };
+
+    runtime.run_client_mouse(client, 12, vec![forward.clone(), forward]);
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![
+            format!("\x1b[<0;{col};{row}M").into_bytes(),
+            format!("\x1b[<0;{col};{row}M").into_bytes(),
+        ],
+        "both presses reached the program"
+    );
+    assert_eq!(
+        answers(&queue),
+        vec![(12, Vec::new())],
+        "exactly one answer, holding an empty list"
+    );
+}
+
+#[test]
+fn the_answers_follow_the_order_of_the_actions_that_reported() {
+    let (mut runtime, fake, client, queue) = runtime_with_queue();
+    let pane = only_pane(&runtime);
+    split_focused(&mut runtime, client);
+    feed_scrollback(&mut runtime, pane, 40);
+    runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
+    let (at, col, row) = a_content_cell(&runtime, client, pane);
+    let before = pane_cols(&runtime, client, pane);
+
+    runtime.run_client_mouse(
+        client,
+        13,
+        vec![
+            WireMouseAction::Scroll {
+                pane,
+                up: true,
+                lines: 5,
+            },
+            WireMouseAction::Forward {
+                pane,
+                mouse: press(at.x, at.y),
+            },
+            WireMouseAction::Resize {
+                pane,
+                side: Direction::Right,
+                step: 1,
+                count: 3,
+            },
+        ],
+    );
+
+    assert_eq!(
+        fake.writes(pane).expect("writes"),
+        vec![format!("\x1b[<0;{col};{row}M").into_bytes()],
+        "the forward in the middle of the round still reached the program"
+    );
+    assert_eq!(
+        pane_cols(&runtime, client, pane),
+        before + 3,
+        "the border move at the end of the round still ran"
+    );
+    assert_eq!(
+        answers(&queue),
+        vec![(
+            13,
+            vec![
+                MouseAnswer::Scrolled {
+                    pane,
+                    top: Some(16),
+                },
+                MouseAnswer::Resized {
+                    pane,
+                    side: Direction::Right,
+                    step: 1,
+                    applied: 3,
+                },
+            ]
+        )],
+        "the scroll and the border move answer in that order; the forward is silent"
+    );
+}
+
+#[test]
+fn a_client_with_no_subscription_is_answered_nothing() {
+    // A client with no subscription is no attached viewer: it waits on no
+    // answer, so there is no gate to release.
+    let (mut runtime, _fake, client) = runtime_with_fake();
+    let pane = only_pane(&runtime);
+    feed_scrollback(&mut runtime, pane, 40);
+    // Another client's queue, which would catch an answer sent to the wrong one.
+    let queue = runtime.subscribe(ClientId::new(), EventFilter::All);
+
+    runtime.run_client_mouse(
+        client,
+        14,
+        vec![WireMouseAction::Scroll {
+            pane,
+            up: true,
+            lines: 5,
+        }],
+    );
+
+    assert_eq!(
+        scroll_offset(&runtime, client, pane),
+        5,
+        "the round still ran"
+    );
+    assert_eq!(answers(&queue), Vec::new(), "and nothing was answered");
 }

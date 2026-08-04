@@ -38,6 +38,19 @@ fn explain_answers_for_the_top_level_beta_knob() {
     );
 }
 
+/// The auto-close knob is top-level like `theme`, and `explain` answers for it
+/// the same way it answers for every other key the parser accepts.
+#[test]
+fn explain_answers_for_the_top_level_auto_close_knob() {
+    let output = explain("koshi.auto-close-session").unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.auto-close-session\nfile: koshi.kdl\ndefault: #false\n\
+         End the session when its last client leaves.\n"
+    );
+}
+
 #[test]
 fn explain_unknown_key_suggests_the_nearest_key() {
     let error = explain("koshi.pane.min-col").unwrap_err();

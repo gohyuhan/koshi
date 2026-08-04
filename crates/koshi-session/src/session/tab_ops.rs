@@ -111,6 +111,13 @@ pub fn commit_new_tab(
     // Switch the focused client onto the new tab and focus its root pane,
     // remembering the tab it left for the caller to reflow.
     let mut previous_tab = None;
+    // The tab's own most-recent focus, recorded whether or not a client is here
+    // to hold one. A session created with nothing attached still names the pane
+    // a client landing on this tab starts in.
+    if let Some(tab) = session.tabs.get_mut(&new_tab_id) {
+        tab.record_focus_mru(new_pane_id);
+    }
+
     if let Some(client_id) = focus {
         // `focus` was already filtered to attached clients above, so this
         // lookup should always succeed; the early return is a defensive
@@ -127,9 +134,6 @@ pub fn commit_new_tab(
             prior_tab,
         }));
         let prior_pane = client.update_focused_pane(new_tab_id, new_pane_id);
-        if let Some(tab) = session.tabs.get_mut(&new_tab_id) {
-            tab.record_focus_mru(new_pane_id);
-        }
         events.push(Event::PaneFocused(PaneFocused {
             client_id,
             tab_id: new_tab_id,

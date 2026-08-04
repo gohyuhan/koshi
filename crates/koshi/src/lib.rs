@@ -1,7 +1,7 @@
 //! `koshi` — binary entrypoint library: `clap` definitions, subcommands,
 //! startup mode, and IPC client calls. Must not contain core runtime behavior.
 
-/// Startup, the event loop, and terminal I/O for the interactive binary.
+/// The bare `koshi` launch, and the terminal I/O every attached client uses.
 pub mod app;
 
 /// The attached client: join a running session over its control socket and
@@ -9,7 +9,7 @@ pub mod app;
 /// connection breaks.
 pub mod attach;
 
-/// Command-line grammar: root parser, attach/detach flags, subcommand tree.
+/// Command-line grammar: root parser, root flags, subcommand tree.
 pub mod cli;
 
 /// Reading the config files at startup into override layers for the runtime.

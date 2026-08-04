@@ -1,13 +1,11 @@
-//! Command-line grammar for the `koshi` binary: the root parser, its
-//! attach/detach flags, and the subcommand tree.
+//! Command-line grammar for the `koshi` binary: the root parser and the
+//! subcommand tree.
 //!
 //! A bare `koshi` launches the interactive app: it spawns a new session and
-//! attaches this terminal to it. `--attach`, `--detach` and `--detach-all` are
-//! root flags rather than subcommands: each is a sub-action of that client
-//! spawn, redirecting it at an existing session (attach) or reversing it for
-//! one client (detach) or for every client of a session (detach-all). Every
-//! other verb is a subcommand. Parsing yields typed values only; no command
-//! here talks to a runtime.
+//! attaches this terminal to it. The root `--headless` flag spawns the session
+//! and attaches nothing. Every verb is a subcommand, `attach` and `detach`
+//! included. Parsing yields typed values only; no command here talks to a
+//! runtime.
 //!
 //! Action subcommands carry typed arguments and map to the core command
 //! vocabulary through [`CliCommand::to_action`](crate::cli::CliCommand::to_action),
@@ -41,30 +39,14 @@ use uuid::Uuid;
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
-    /// Attach this client to the session with the given id instead of
-    /// creating a new session.
-    #[arg(long, value_name = "SESSION_ID", conflicts_with = "detach")]
-    pub attach: Option<String>,
-
-    /// Detach one client: bare, this pane's client; with an id, that client —
-    /// or the named session's only attached client.
-    #[arg(long, value_name = "CLIENT_OR_SESSION", num_args = 0..=1)]
-    pub detach: Option<Option<String>>,
-
-    /// Detach every client attached to a session: with an id or name, that
-    /// session's clients; without one, the clients of this pane's session.
-    #[arg(
-        long,
-        value_name = "SESSION",
-        num_args = 0..=1,
-        value_parser = parse_session_ref,
-        conflicts_with_all = ["attach", "detach"],
-    )]
-    pub detach_all: Option<Option<SessionRef>>,
+    /// Create a session, print its id, and return to the shell with nothing
+    /// attached.
+    #[arg(long)]
+    pub headless: bool,
 
     /// Launch with a named profile: read `profile/<name>.kdl` from the config
     /// directory and open its tabs and panes instead of a single shell.
-    #[arg(long, value_name = "NAME", conflicts_with_all = ["attach", "detach", "detach_all"])]
+    #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
     /// The verb to run; absent on the bare interactive launch.
@@ -74,13 +56,10 @@ pub struct Cli {
 
 impl Cli {
     /// True for the bare `koshi` invocation — no subcommand and no
-    /// attach/detach flag — which launches the interactive app.
+    /// `--headless` — which launches the interactive app.
     #[must_use]
     pub fn is_interactive_launch(&self) -> bool {
-        self.attach.is_none()
-            && self.detach.is_none()
-            && self.detach_all.is_none()
-            && self.command.is_none()
+        !self.headless && self.command.is_none()
     }
 }
 
@@ -129,9 +108,9 @@ pub enum TabRef {
     Name(String),
 }
 
-/// Parse a `--session` flag value: an id when the value reads as one, else a
+/// Parse a session argument: an id when the value reads as one, else a
 /// display name.
-fn parse_session_ref(value: &str) -> Result<SessionRef, String> {
+pub fn parse_session_ref(value: &str) -> Result<SessionRef, String> {
     if value.is_empty() {
         return Err("expected a session id or name".to_string());
     }
@@ -176,19 +155,18 @@ pub enum FormatArg {
 
 /// The `koshi` subcommand tree.
 ///
-/// Lifecycle commands (`new`, `list-sessions`, `kill-session`, `doctor`) run
-/// outside any session. Action subcommands carry their typed arguments and
-/// map to core commands via [`CliCommand::to_action`]; execution arrives
-/// with the IPC client. The discovery queries (`inspect`, the `list-*`
-/// verbs) carry typed target and `--format` arguments; their answers are
-/// rendered by [`crate::output`]. `actions` introspects the action registry
-/// through its `list`/`explain` subcommands, and `keys` introspects the
-/// keymap through its own subcommand tree. `config` validates and migrates
+/// Lifecycle commands (`new`, `list-sessions`, `kill-session`, `attach`,
+/// `detach`, `doctor`) run outside any session, except a bare `detach`, which
+/// names this pane's own client. Action subcommands carry their typed
+/// arguments and map to core commands via [`CliCommand::to_action`];
+/// execution arrives with the IPC client. The discovery queries (`inspect`,
+/// the `list-*` verbs) carry typed target and `--format` arguments; their
+/// answers are rendered by [`crate::output`]. `actions` introspects the action
+/// registry through its `list`/`explain` subcommands, and `keys` introspects
+/// the keymap through its own subcommand tree. `config` validates and migrates
 /// files locally. `plugin` remains bare until its argument surface is built.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
-    /// Create a new session (its name is system-generated).
-    New,
     /// List running sessions.
     ListSessions {
         /// Output format.
@@ -200,6 +178,25 @@ pub enum CliCommand {
         /// Session to kill, by id or name.
         #[arg(value_parser = parse_session_ref, value_name = "SESSION")]
         session: Option<SessionRef>,
+    },
+    /// Attach this terminal to a running session as a second window onto it.
+    Attach {
+        /// Session to attach to, by id or name; without one, pick from the
+        /// sessions running for this user.
+        #[arg(value_name = "SESSION")]
+        session: Option<String>,
+    },
+    /// Detach one client, or with `--all` every client of a session. The
+    /// session keeps running and its panes are untouched.
+    Detach {
+        /// Without `--all`: the client to detach, by client id, session id, or
+        /// session name. With `--all`: the session whose clients all detach,
+        /// by id or name. Without a value, this pane's own client or session.
+        #[arg(value_name = "CLIENT_OR_SESSION")]
+        target: Option<String>,
+        /// Detach every client attached to the session instead of one client.
+        #[arg(long)]
+        all: bool,
     },
     /// Check the local koshi installation and environment.
     Doctor,
@@ -465,6 +462,9 @@ pub enum CliCommand {
         /// Runtime directory to serve; defaults to this user's own.
         #[arg(long, value_name = "DIR")]
         runtime_dir: Option<PathBuf>,
+        /// Open this profile's tabs and panes instead of one shell.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
 }
 
@@ -631,9 +631,10 @@ impl CliCommand {
     /// command that reaches the session already names a side.
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
-    /// (`new`, `list-sessions`, `kill-session`, `doctor`), the read-only
-    /// discovery and local queries (`inspect`, the `list-*` verbs, `actions`,
-    /// `keys`, and `config`), plus `plugin`, whose arguments are not built.
+    /// (`new`, `list-sessions`, `kill-session`, `attach`, `detach`, `doctor`),
+    /// the read-only discovery and local queries (`inspect`, the `list-*`
+    /// verbs, `actions`, `keys`, and `config`), plus `plugin`, whose arguments
+    /// are not built.
     #[must_use]
     pub fn to_action(
         &self,
@@ -799,9 +800,10 @@ impl CliCommand {
                     client: *client,
                 }),
             ),
-            CliCommand::New
-            | CliCommand::ListSessions { .. }
+            CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
+            | CliCommand::Attach { .. }
+            | CliCommand::Detach { .. }
             | CliCommand::Doctor
             | CliCommand::Config { .. }
             | CliCommand::Plugin

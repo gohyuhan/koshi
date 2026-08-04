@@ -5,7 +5,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use koshi::attach;
 use koshi::cli::{
-    ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand, ResolvedTargets, SessionRef,
+    parse_session_ref, ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand,
+    ResolvedTargets, SessionRef,
 };
 use koshi::config;
 use koshi::config_command;
@@ -43,7 +44,9 @@ fn main() -> ExitCode {
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
 /// `actions` query and the read-only `keys` queries render locally; the
 /// discovery queries render what the running sessions report about
-/// themselves; the interactive launch runs the app; the action verbs travel
+/// themselves; the headless launch creates a session and prints its id; the
+/// bare launch creates a session and attaches this terminal to it; the action
+/// verbs travel
 /// a session's control socket as commands. Inside a pane they go to the pane's own
 /// session; outside one, the routing layer picks the target session from the
 /// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
@@ -89,6 +92,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         session_id,
         session_name,
         runtime_dir,
+        profile,
     }) = &cli.command
     {
         // This process becomes one session's server: the router started it
@@ -97,10 +101,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Some(dir) => dir.clone(),
             None => ipc_client::runtime_dir()?,
         };
-        return session_server::run_session_server(&runtime_dir, *session_id, session_name.clone())
-            .map_err(|err| CliError::Runtime {
-                detail: err.to_string(),
-            });
+        return session_server::run_session_server(
+            &runtime_dir,
+            *session_id,
+            session_name.clone(),
+            profile.as_deref(),
+        )
+        .map_err(|err| CliError::Runtime {
+            detail: err.to_string(),
+        });
     }
 
     if let Some(CliCommand::Update) = &cli.command {
@@ -120,56 +129,61 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return finish_command(session_control::kill_session(session.as_ref())?);
     }
 
+    if cli.headless {
+        // The session is created and left running with nothing attached, so
+        // the id it prints is how the shell reaches it again.
+        let runtime_dir = ipc_client::runtime_dir()?;
+        let session_id =
+            session_control::request_headless_session(&runtime_dir, cli.profile.as_deref())?;
+        println!("[SESSION ID]: {session_id}");
+        return Ok(());
+    }
+
     if cli.is_interactive_launch() {
         // Offer a newer release before entering raw mode, so the prompt is a
         // plain stdin read; failures never block the launch.
         updater::maybe_prompt_startup_update();
-        return koshi::app::run(cli.profile.as_deref()).map_err(|err| CliError::Runtime {
-            detail: err.to_string(),
-        });
+        return koshi::app::run(cli.profile.as_deref());
     }
 
-    // Attach is a root flag rather than an action verb, so it dispatches here
-    // rather than through the routing layer. It joins a session this process
-    // is outside of, so it reads no in-session identity.
-    if let Some(selector) = cli.attach.as_deref() {
-        return attach::run(selector);
+    // Attach is not an action verb, so it dispatches here rather than through
+    // the routing layer. It joins a session this process is outside of, so it
+    // reads no in-session identity.
+    if let Some(CliCommand::Attach { session }) = &cli.command {
+        return attach::run(session.as_deref());
     }
 
     // Session verbs read the in-session identity first, so a broken pane
     // environment reports itself rather than as a missing daemon.
     let in_session = InSessionContext::from_env()?;
 
-    // Detach is a root flag rather than an action verb, so it dispatches here
-    // rather than through the routing layer. Success prints nothing; a detach
-    // the session refuses comes back as a rejected command.
-    match cli.detach.as_ref() {
-        Some(None) => {
-            let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
-                detail: "bare --detach only works inside a koshi session; outside one use koshi --detach <id>".to_string(),
-            })?;
-            return finish_command(ipc_client::submit_in_session(
-                context,
-                Command::Detach(DetachArgs { client: None }),
-            )?);
-        }
-        Some(Some(raw)) => {
-            return finish_command(session_control::detach_client_or_session(raw)?);
-        }
-        None => {}
-    }
-
-    match cli.detach_all.as_ref() {
-        Some(None) => {
-            let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
-                detail: "bare --detach-all only works inside a koshi session; outside one use koshi --detach-all <session>".to_string(),
-            })?;
-            return finish_command(ipc_client::submit_in_session(context, Command::DetachAll)?);
-        }
-        Some(Some(session)) => {
-            return finish_command(session_control::detach_all_session(Some(session))?);
-        }
-        None => {}
+    // Detach is not an action verb, so it dispatches here rather than through
+    // the routing layer. Success prints nothing; a detach the session refuses
+    // comes back as a rejected command.
+    if let Some(CliCommand::Detach { target, all }) = &cli.command {
+        return match (target.as_deref(), all) {
+            (None, false) => {
+                let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
+                    detail: "bare koshi detach only works inside a koshi session; outside one use koshi detach <id>".to_string(),
+                })?;
+                finish_command(ipc_client::submit_in_session(
+                    context,
+                    Command::Detach(DetachArgs { client: None }),
+                )?)
+            }
+            (Some(raw), false) => finish_command(session_control::detach_client_or_session(raw)?),
+            (None, true) => {
+                let context = in_session.as_ref().ok_or_else(|| CliError::InvalidArgs {
+                    detail: "bare koshi detach --all only works inside a koshi session; outside one use koshi detach --all <session>".to_string(),
+                })?;
+                finish_command(ipc_client::submit_in_session(context, Command::DetachAll)?)
+            }
+            (Some(raw), true) => {
+                let session =
+                    parse_session_ref(raw).map_err(|detail| CliError::InvalidArgs { detail })?;
+                finish_command(session_control::detach_all_session(Some(&session))?)
+            }
+        };
     }
 
     // This CLI is a client, so it reads its own `layout.new-pane-direction`

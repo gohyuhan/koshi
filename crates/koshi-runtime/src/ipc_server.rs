@@ -10,9 +10,10 @@
 //! connection's response frame.
 //!
 //! An `Attach` is the one request that keeps its connection: once the reply
-//! carrying the session's structure is written, the connection is split and
-//! serves that client's event stream until the peer goes away, which detaches
-//! the client.
+//! carrying the session's structure is written, the connection is split. The
+//! writing half carries that client's event stream, and the reading half
+//! carries that client's key presses, resizes, pasted text and commands to the
+//! dispatcher and writes nothing back. The peer going away detaches the client.
 //!
 //! A connection fault stays on its connection: a malformed-but-aligned
 //! frame is answered with `MalformedRequest` and the connection keeps
@@ -209,8 +210,8 @@ fn accept_loop(
 /// [`IpcErrorCode::MalformedRequest`] while the connection keeps serving.
 ///
 /// An answered `Attach` ends the request loop: the connection is handed to
-/// [`stream_events`], which carries that client's events for as long as the
-/// connection lives.
+/// [`stream_events`], which carries that client's events out and that client's
+/// input in for as long as the connection lives.
 fn serve_connection(
     mut connection: Connection,
     token: ConnectionToken,
@@ -295,10 +296,18 @@ fn serve_connection(
                         return;
                     }
                     // The reply is written; from here the connection carries
-                    // the client's event stream and nothing else.
+                    // the client's event stream and the client's own input.
                     stream_events(connection, accepted.client_id, accepted.events, inbox_tx);
                     return;
                 }
+                // A key press, a resize, a paste and a mouse round belong on an
+                // attached client's connection, which the `Attach` arm above
+                // hands to `stream_events`. On this control path they name no
+                // client, so they close the connection.
+                IpcRequestKind::KeyPress { .. }
+                | IpcRequestKind::Resize { .. }
+                | IpcRequestKind::Paste { .. }
+                | IpcRequestKind::Mouse(_) => return,
                 IpcRequestKind::Discovery => {
                     let answer =
                         ask_dispatcher(inbox_tx, |reply| RuntimeEvent::IpcDiscovery { reply });
@@ -320,24 +329,29 @@ fn serve_connection(
     }
 }
 
-/// Carry `client_id`'s event stream on its own connection until the peer goes
-/// away, then detach the client.
+/// Carry `client_id`'s event stream and input on its own connection until the
+/// peer goes away, then detach the client.
 ///
 /// The connection is split: a spawned thread drains the client's queue and
 /// writes one frame per delivery that says something about the session's
-/// structure, while this thread blocks on the reading half. No frame is
-/// expected there in this release, so a frame arriving is as much a reason to
-/// close as end of stream or a transport fault is.
+/// structure, while this thread reads the client's own frames. A `KeyPress`, a
+/// `Resize`, a `Paste`, a `SubmitCommand` and a `Mouse` round all cross to the
+/// dispatcher over the inbox, and this half writes nothing back for any of
+/// them: the first four are answered by the next painted frame, and a `Mouse`
+/// round is answered on the writing half by exactly one
+/// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A request
+/// of any other kind, end of stream, a transport fault, or a dispatcher that is
+/// gone all end the reading loop.
 ///
 /// Either half ending detaches the client, which removes its record and drops
 /// its subscription; the closed queue, or the terminal `Quit` frame, then
-/// ends the writing thread. Both
-/// notify, so a write that fails while the reading half still blocks is
-/// cleaned up too — a detach for a client already gone changes nothing.
+/// ends the writing thread. Both notify, so a write that fails while the
+/// reading half is still reading is cleaned up too — a detach for a client
+/// already gone changes nothing.
 ///
 /// A detach the server starts closes the client's queue: the writing thread
 /// drains what is already queued, writes [`SessionEvent::Detached`] as its
-/// last frame, and ends. The reading half stays blocked until the client
+/// last frame, and ends. The reading half keeps reading until the client
 /// closes its end, and that close reads as end of stream — a second detach for
 /// a client already gone.
 fn stream_events(
@@ -358,8 +372,15 @@ fn stream_events(
                 break;
             };
             if let Some(event) = wire_event(&delivery) {
-                if writer.send(&event).is_err() {
-                    break;
+                match writer.send(&event) {
+                    Ok(()) => {}
+                    // A frame over the cap is refused with nothing written, so
+                    // the connection is whole and the next frame carries the
+                    // session's picture again.
+                    Err(IpcError::FrameTooLarge { len, max }) => {
+                        tracing::warn!(%client_id, len, max, "frame over the cap was not sent");
+                    }
+                    Err(_) => break,
                 }
                 // `Quit` is the stream's terminal frame; the loop ends with
                 // it rather than waiting for the queue to close.
@@ -371,7 +392,37 @@ fn stream_events(
         let _ = writer_inbox.send(RuntimeEvent::ClientDetached { client_id });
     });
 
-    let _ = reader.recv::<IpcRequest>();
+    while let Ok(request) = reader.recv::<IpcRequest>() {
+        let event = match request.kind {
+            IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
+            IpcRequestKind::Resize { viewport } => RuntimeEvent::Resize {
+                client_id,
+                size: viewport,
+            },
+            IpcRequestKind::Paste { text } => RuntimeEvent::HostPaste { client_id, text },
+            IpcRequestKind::Mouse(actions) => RuntimeEvent::ClientMouse {
+                client_id,
+                request_id: request.request_id,
+                actions,
+            },
+            IpcRequestKind::SubmitCommand(envelope) => {
+                // The result is answered by the next painted frame, so the
+                // reply channel's receiving end goes straight away and the
+                // dispatcher's send into it fails harmlessly.
+                let (reply, _) = mpsc::channel();
+                RuntimeEvent::Ipc {
+                    envelope: *envelope,
+                    reply,
+                }
+            }
+            IpcRequestKind::Hello { .. }
+            | IpcRequestKind::Attach { .. }
+            | IpcRequestKind::Discovery => break,
+        };
+        if inbox_tx.send(event).is_err() {
+            break;
+        }
+    }
     let _ = inbox_tx.send(RuntimeEvent::ClientDetached { client_id });
 }
 

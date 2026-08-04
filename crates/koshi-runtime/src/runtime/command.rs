@@ -431,14 +431,25 @@ impl Server {
         self.sessions.get(&session_id)?.panes.get(pane)?.cwd.clone()
     }
 
-    /// Handle [`Command::Quit`]: mark the process for immediate teardown.
-    ///
-    /// Sets the quit request the event loop polls after each event batch and
-    /// flags zero-grace shutdown, so the loop exits on this iteration and
-    /// teardown group-kills every pane's child without the graceful window.
-    fn handle_quit(&mut self, command_id: CommandId) -> CommandResult {
-        self.quit_requested = true;
+    /// Mark the process for immediate teardown: the event loop polls the quit
+    /// request after each event batch and exits, and teardown group-kills every
+    /// pane's child without the graceful window.
+    pub(crate) fn request_quit(&mut self) {
+        self.request_graceful_quit();
         self.immediate_shutdown = true;
+    }
+
+    /// Mark the process for teardown, keeping the graceful window: the event
+    /// loop exits as above, and teardown asks each pane's process group to stop
+    /// and waits up to [`GRACEFUL_TIMEOUT_DURATION`](koshi_core::constant::GRACEFUL_TIMEOUT_DURATION)
+    /// before group-killing it.
+    pub(crate) fn request_graceful_quit(&mut self) {
+        self.quit_requested = true;
+    }
+
+    /// Handle [`Command::Quit`]: mark the process for immediate teardown.
+    fn handle_quit(&mut self, command_id: CommandId) -> CommandResult {
+        self.request_quit();
         CommandResult::Ok {
             command_id,
             emitted_events: Vec::new(),
@@ -451,8 +462,7 @@ impl Server {
     /// running; the other clients keep their records.
     ///
     /// The client is resolved through
-    /// [`Server::resolve_detach_client`], the same call validation made, so
-    /// this never reaches the in-process viewer.
+    /// [`Server::resolve_detach_client`], the same call validation made.
     fn handle_detach(
         &mut self,
         command_id: CommandId,
@@ -460,7 +470,7 @@ impl Server {
         args: &DetachArgs,
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.acting_session(source)?)?;
-        let client_id = self.resolve_detach_client(args.client, source, session)?;
+        let client_id = Self::resolve_detach_client(args.client, source, session)?;
 
         let mut scope = TransactionScope::new();
         for event in self.handle_client_detach(client_id) {
@@ -470,22 +480,19 @@ impl Server {
     }
 
     /// Handle [`Command::DetachAll`]: remove every client attached to the
-    /// acting session except the in-process viewer, one
-    /// [`Server::handle_client_detach`] each, and report the events they
-    /// emitted together. A session whose only client is that viewer — or which
-    /// has no client at all — emits nothing.
+    /// acting session, one [`Server::handle_client_detach`] each, and report
+    /// the events they emitted together. A session with no attached client
+    /// emits nothing.
     fn handle_detach_all(
         &mut self,
         command_id: CommandId,
         source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.acting_session(source)?)?;
-        let local_viewer = self.local_viewer;
         let clients: Vec<ClientId> = session
             .clients
             .list_attached()
             .map(|client| client.id())
-            .filter(|client_id| Some(*client_id) != local_viewer)
             .collect();
 
         let mut scope = TransactionScope::new();

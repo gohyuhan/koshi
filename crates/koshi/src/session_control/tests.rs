@@ -1,6 +1,7 @@
-//! Tests for choosing and ending a running session.
+//! Tests for creating, choosing and ending a running session.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
@@ -8,7 +9,14 @@ use koshi_core::command::CliExitCode;
 use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_core::event::Event;
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    IpcResult,
+};
+use koshi_ipc::router::{
+    router_endpoint_path, router_socket_addr, RouterHandshake, RouterRequest, RouterResponse,
+    SessionAddress,
+};
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
 
@@ -159,6 +167,191 @@ fn serve_kill_only(runtime_dir: &Path, session_id: SessionId) -> JoinHandle<()> 
             }),
         );
     })
+}
+
+/// What a stand-in router saw on the one connection it served.
+#[derive(Default)]
+struct RouterLog {
+    /// Whether the Hello presented a token the gate accepted.
+    hello_ok: bool,
+    /// The request pipelined behind the Hello.
+    request: Option<RouterRequestKind>,
+}
+
+/// The create a caller is expected to put on the wire for `profile`.
+fn expected_create(profile: Option<&str>) -> RouterRequestKind {
+    RouterRequestKind::CreateSession {
+        profile: profile.map(str::to_string),
+        cwd: Some(std::env::current_dir().expect("this test process has a directory")),
+    }
+}
+
+/// A stand-in router that accepts one caller's Hello and answers the request
+/// pipelined behind it with `answer`. What it saw goes in the returned log for
+/// the test to assert on.
+///
+/// The bind and the endpoint file are both done before this returns, so a
+/// caller that runs next finds the stand-in ready and never starts a router of
+/// its own.
+///
+/// It records before it replies, so a caller that has its answer is a caller
+/// whose request is already in the log. That ordering is what lets a test read
+/// the log without joining the thread.
+///
+/// Both replies go out whatever the Hello and the request turn out to be: a
+/// stand-in that stops early strands the caller on a reply that never comes.
+fn serve_router(runtime_dir: &Path, answer: RouterResult) -> Arc<Mutex<RouterLog>> {
+    let token = ConnectionToken::generate();
+    let addr = router_socket_addr(runtime_dir);
+    let listener = Listener::bind(&addr).expect("stand-in router binds");
+    EndpointFile {
+        socket: addr,
+        token: token.clone(),
+        pid: std::process::id(),
+    }
+    .write(&router_endpoint_path(runtime_dir))
+    .expect("endpoint file written");
+
+    let log = Arc::new(Mutex::new(RouterLog::default()));
+    let recorded = Arc::clone(&log);
+    std::thread::spawn(move || {
+        let Ok(mut connection) = listener.accept() else {
+            return;
+        };
+        let mut gate = RouterHandshake::new(token);
+        let Ok(hello) = connection.recv::<RouterRequest>() else {
+            return;
+        };
+        let Ok(request) = connection.recv::<RouterRequest>() else {
+            return;
+        };
+
+        {
+            let mut seen = recorded.lock().expect("the log outlives every panic");
+            seen.hello_ok = gate.check(&hello.kind).is_ok();
+            seen.request = Some(request.kind);
+        }
+
+        let _ = connection.send(&RouterResponse {
+            request_id: Some(hello.request_id),
+            result: RouterResult::Hello,
+        });
+        let _ = connection.send(&RouterResponse {
+            request_id: Some(request.request_id),
+            result: answer,
+        });
+    });
+    log
+}
+
+/// The Hello and the request a stand-in router saw, once its caller has been
+/// answered.
+fn saw(log: &Arc<Mutex<RouterLog>>) -> (bool, Option<RouterRequestKind>) {
+    let seen = log.lock().expect("the log outlives every panic");
+    (seen.hello_ok, seen.request.clone())
+}
+
+#[test]
+fn a_created_answer_hands_back_the_new_session_id() {
+    let runtime_dir = test_runtime_dir("headless-created");
+    let session_id = SessionId::from_uuid(Uuid::from_u128(7));
+    let router = serve_router(
+        &runtime_dir,
+        RouterResult::Created(SessionAddress {
+            id: session_id,
+            name: "quiet-lake".to_string(),
+            socket: "unused".to_string(),
+            pid: std::process::id(),
+        }),
+    );
+
+    let created = request_new_session(&runtime_dir, None).expect("the router created a session");
+
+    assert_eq!(created, session_id);
+    let (hello_ok, request) = saw(&router);
+    assert!(hello_ok, "the hello opens the gate");
+    assert_eq!(request, Some(expected_create(None)));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+/// `request_headless_session` forwards to `request_new_session`, so this one request
+/// is what either entry point puts on the wire.
+#[test]
+fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
+    let runtime_dir = test_runtime_dir("create-with-profile");
+    let session_id = SessionId::from_uuid(Uuid::from_u128(11));
+    let router = serve_router(
+        &runtime_dir,
+        RouterResult::Created(SessionAddress {
+            id: session_id,
+            name: "amber-fox".to_string(),
+            socket: "unused".to_string(),
+            pid: std::process::id(),
+        }),
+    );
+
+    let created =
+        request_new_session(&runtime_dir, Some("work")).expect("the router created a session");
+
+    assert_eq!(created, session_id);
+    let (hello_ok, request) = saw(&router);
+    assert!(hello_ok, "the hello opens the gate");
+    assert_eq!(request, Some(expected_create(Some("work"))));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn creating_a_session_with_the_beta_knob_off_says_so_and_asks_no_router() {
+    // The knob starts off, so no router is started and none is needed: the
+    // refusal happens before the runtime directory is read.
+    let error = request_headless_session(Path::new("/nonexistent"), None)
+        .expect_err("the beta knob is off in this process");
+
+    assert_eq!(
+        error.to_string(),
+        "`koshi --headless` is a beta feature and did nothing; add a top-level \
+         `allow-beta-features #true` line to koshi.kdl to run it"
+    );
+}
+
+#[test]
+fn a_refused_create_reports_the_routers_own_message() {
+    let runtime_dir = test_runtime_dir("headless-refused");
+    let router = serve_router(
+        &runtime_dir,
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "the session server did not start".to_string(),
+        }),
+    );
+
+    let error = request_new_session(&runtime_dir, None).expect_err("the router refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "the session server did not start");
+    let (hello_ok, request) = saw(&router);
+    assert!(hello_ok, "the hello opens the gate");
+    assert_eq!(request, Some(expected_create(None)));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn an_answer_to_another_request_names_what_came_back() {
+    let runtime_dir = test_runtime_dir("headless-wrong-answer");
+    let router = serve_router(&runtime_dir, RouterResult::Killed);
+
+    let error = request_new_session(&runtime_dir, None).expect_err("the answer fits no create");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "the router answered a create session with Killed");
+    let (hello_ok, request) = saw(&router);
+    assert!(hello_ok, "the hello opens the gate");
+    assert_eq!(request, Some(expected_create(None)));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
 #[test]

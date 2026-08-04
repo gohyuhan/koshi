@@ -32,7 +32,6 @@ use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::{PaneKind, PaneRecord};
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::error::PtyError;
-use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{pane_viewport, Client, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::{Session, Tab};
@@ -9200,17 +9199,28 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
 
     // A smaller second client attaches to the same tab: the effective size drops
     // to the per-axis minimum, so the live pane's PTY reflows down.
-    let events = rt.handle_client_attach(sid, ClientId::new(), small, tab_id, SystemTime::now());
+    let joining = ClientId::new();
+    let events = rt.handle_client_attach(sid, joining, small, tab_id, SystemTime::now());
 
     let expected = size_root_pane(pane, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+    // The joining client had focused nothing here, so it lands on the tab's
+    // pane before the reflow it caused.
     assert_eq!(
         events,
-        vec![Event::PtyResized(PtyResized {
-            pane_id: pane,
-            size: expected,
-        })]
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: joining,
+                tab_id,
+                pane_id: pane,
+                prior_pane: None,
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: pane,
+                size: expected,
+            })
+        ]
     );
 }
 
@@ -9261,10 +9271,107 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
 
     // The larger client cannot lower the per-axis minimum, so the effective size
     // stays 40x24: no reflow, no resize event.
-    let events = rt.handle_client_attach(sid, ClientId::new(), big, tab_id, SystemTime::now());
+    let joining = ClientId::new();
+    let events = rt.handle_client_attach(sid, joining, big, tab_id, SystemTime::now());
 
-    assert!(events.is_empty());
+    // No reflow, but the joining client still lands on the tab's pane.
+    assert_eq!(
+        events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id: joining,
+            tab_id,
+            pane_id: pane,
+            prior_pane: None,
+        })]
+    );
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before);
+}
+
+#[test]
+fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
+    // Exactly what a session server started with nothing attached holds: one
+    // tab and one pane, and no client to have focused anything.
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    let sid = SessionId::new();
+    rt.bootstrap_session(
+        sid,
+        "seeded-with-no-client".to_string(),
+        viewport,
+        SystemTime::now(),
+        None,
+    )
+    .expect("bootstrap a session holding no client");
+    let (_, tab_id, pane) = only_slot(&rt);
+    assert!(
+        rt.sessions[&sid].clients.list_attached().next().is_none(),
+        "the session starts with no client"
+    );
+
+    let client = ClientId::new();
+    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+
+    // The attaching client lands focused on the tab's only pane, so the first
+    // key it types reaches that pane's shell.
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client)
+            .expect("the client attached")
+            .focused_pane(tab_id),
+        Some(pane)
+    );
+    assert_eq!(
+        events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id: client,
+            tab_id,
+            pane_id: pane,
+            prior_pane: None,
+        })]
+    );
+}
+
+#[test]
+fn reattaching_keeps_the_pane_the_client_already_focused() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, pane) = only_slot(&rt);
+
+    // Attach once to take the tab's first pane, then split so the tab holds a
+    // second pane and focus moves onto it.
+    let client = ClientId::new();
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+    let second = PaneId::new();
+    rt.sessions
+        .get_mut(&sid)
+        .expect("the session")
+        .clients
+        .get_mut(client)
+        .expect("the client")
+        .update_focused_pane(tab_id, second);
+
+    // Re-attaching does not drag focus back to the tab's first pane.
+    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+
+    assert_eq!(
+        rt.sessions[&sid]
+            .clients
+            .get(client)
+            .expect("the client is still attached")
+            .focused_pane(tab_id),
+        Some(second),
+        "a client that already focused a pane keeps it"
+    );
+    assert_ne!(second, pane);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::PaneFocused(_))),
+        "no focus change is announced, got {events:?}"
+    );
 }
 
 #[test]
@@ -9315,6 +9422,173 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before);
     assert!(rt.sessions[&sid].clients.get(client).is_none());
     assert!(rt.sessions[&sid].panes.get(pane).is_some());
+}
+
+#[test]
+fn a_client_leaving_does_not_end_the_session_by_default() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, pane) = only_slot(&rt);
+
+    // `auto-close-session` defaults off, so the session and its pane outlive the
+    // last client.
+    rt.handle_client_detach(client);
+
+    assert!(!rt.quit_requested());
+    assert!(!rt.immediate_shutdown);
+    assert!(rt.sessions[&sid].panes.get(pane).is_some());
+}
+
+#[test]
+fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    let first = rt
+        .bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+
+    let second = ClientId::new();
+    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now());
+
+    // One of two clients leaves: one is still attached, so nothing quits.
+    rt.handle_client_detach(first);
+
+    assert!(!rt.quit_requested());
+    assert_eq!(rt.sessions[&sid].clients.len(), 1);
+}
+
+#[test]
+fn auto_close_ends_the_session_when_the_last_client_leaves() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    rt.config.auto_close_session = true;
+
+    rt.handle_client_detach(client);
+
+    assert!(rt.quit_requested());
+    // Teardown asks each pane's child to stop and waits before killing it, the
+    // branch `Server::shutdown` takes while `immediate_shutdown` is unset.
+    assert!(!rt.immediate_shutdown);
+}
+
+#[test]
+fn a_quit_command_tears_down_without_the_graceful_window() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.bootstrap_local(
+        SessionId::new(),
+        Size { cols: 80, rows: 24 },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+
+    rt.request_quit();
+
+    assert!(rt.quit_requested());
+    assert!(rt.immediate_shutdown);
+}
+
+#[test]
+fn auto_close_ends_the_session_when_detach_all_empties_it() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now());
+    assert_eq!(rt.sessions[&sid].clients.len(), 2);
+
+    // `DetachAll` runs the same per-client departure the setting watches, so the
+    // pass that removes the last one ends the session.
+    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let _ = rt.dispatch(env);
+
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(rt.quit_requested());
+    assert!(!rt.immediate_shutdown);
+}
+
+#[test]
+fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now());
+
+    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let _ = rt.dispatch(env);
+
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(!rt.quit_requested());
+}
+
+#[test]
+fn auto_close_leaves_a_headless_session_with_no_clients_running() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.config.auto_close_session = true;
+
+    // A headless start seeds the session with no client at all.
+    rt.bootstrap_session(
+        SessionId::new(),
+        "s".to_string(),
+        Size { cols: 80, rows: 24 },
+        SystemTime::now(),
+        None,
+    )
+    .expect("bootstrap the headless session");
+    assert!(!rt.quit_requested());
+
+    // A detach for a client this runtime never held is dropped, so the
+    // already-empty session is not closed by it either.
+    rt.handle_client_detach(ClientId::new());
+    assert!(!rt.quit_requested());
+}
+
+#[test]
+fn a_detach_command_ends_the_session_under_auto_close() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+
+    // The client detaches itself: the command path lands in the same handler a
+    // connection drop does.
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::Detach(DetachArgs { client: None }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.submit_command(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert!(rt.quit_requested());
 }
 
 #[test]
@@ -9400,12 +9674,28 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     let expected = size_root_pane(pane_1, pane_viewport(big), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
     assert_eq!(*fake.resizes(pane_1).unwrap().last().unwrap(), expected);
+    // `client_c` moved onto `tab_2`, where it had focused nothing, so it lands
+    // on that tab's pane; the reflow it caused on `tab_1` follows.
+    let pane_2 = rt.sessions[&sid].tabs[&tab_2]
+        .layout()
+        .leaf_panes()
+        .first()
+        .copied()
+        .expect("the created tab holds one pane");
     assert_eq!(
         events,
-        vec![Event::PtyResized(PtyResized {
-            pane_id: pane_1,
-            size: expected,
-        })]
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: client_c,
+                tab_id: tab_2,
+                pane_id: pane_2,
+                prior_pane: None,
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: pane_1,
+                size: expected,
+            })
+        ]
     );
     assert_eq!(
         rt.sessions[&sid]
@@ -9674,12 +9964,22 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
     let expected = size_root_pane(pane_2, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(*fake.resizes(pane_2).unwrap().last().unwrap(), expected);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), pane_1_resizes_before);
+    // The client had focused nothing in session 2, so it lands on that tab's
+    // pane before the reflow its smaller viewport caused.
     assert_eq!(
         events,
-        vec![Event::PtyResized(PtyResized {
-            pane_id: pane_2,
-            size: expected,
-        })]
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: client,
+                tab_id: tab_2,
+                pane_id: pane_2,
+                prior_pane: None,
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: pane_2,
+                size: expected,
+            })
+        ]
     );
 }
 
@@ -10920,62 +11220,10 @@ fn new_tab_with_no_cwd_opens_in_the_focused_panes_directory() {
     assert_eq!(last_spawn_cwd(&fake), Some(PathBuf::from("/tmp/reported")));
 }
 
-/// The message every detach spelling that resolves to the in-process viewer
-/// comes back with.
-const VIEWER_REFUSAL: &str = "this session runs inside the koshi window viewing it; that window cannot detach — kill-session ends the session";
-
-/// The socket path an in-session CLI envelope carries in these tests; the
-/// source only has to be well-formed, nothing reads the path.
-fn cli_socket() -> PathBuf {
-    PathBuf::from("/tmp/koshi-detach-tests.sock")
-}
-
 #[test]
-fn detach_naming_the_in_process_viewer_is_refused_and_keeps_its_record() {
+fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    let viewer = rt
-        .bootstrap_local(
-            SessionId::new(),
-            Size { cols: 80, rows: 24 },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
-    let (sid, _tab, _pane) = only_slot(&rt);
-    rt.set_local_viewer(viewer);
-    let events = rt.subscribe(viewer, EventFilter::All);
-
-    let env = envelope_from(
-        CommandSource::external_cli(Some(sid)),
-        Command::Detach(DetachArgs {
-            client: Some(viewer),
-        }),
-    );
-    let command_id = env.id;
-
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some(VIEWER_REFUSAL.to_string()),
-        }
-    );
-
-    // The record, and the subscription feeding the window's rendering, both
-    // outlive the refused detach.
-    assert_eq!(rt.sessions[&sid].clients.len(), 1);
-    assert_eq!(
-        rt.sessions[&sid].clients.get(viewer).map(Client::id),
-        Some(viewer)
-    );
-    assert_eq!(rt.event_bus.subscriber_count(), 1);
-    drop(events);
-}
-
-#[test]
-fn a_bare_detach_from_inside_the_koshi_window_is_refused() {
-    let (mut rt, _fake, _tx) = new_runtime_with_fake();
-    let viewer = rt
+    let client = rt
         .bootstrap_local(
             SessionId::new(),
             Size { cols: 80, rows: 24 },
@@ -10983,84 +11231,76 @@ fn a_bare_detach_from_inside_the_koshi_window_is_refused() {
         )
         .expect("bootstrap the genesis client");
     let (sid, _tab, pane) = only_slot(&rt);
-    rt.set_local_viewer(viewer);
+    let events = rt.subscribe(client, EventFilter::All);
 
-    // `koshi --detach` typed in a pane of the window the session runs in: no
-    // client named, and the issuing pane carries the viewer's id.
     let env = envelope_from(
-        CommandSource::in_session_cli(sid, Some(viewer), pane, cli_socket()),
-        Command::Detach(DetachArgs { client: None }),
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs {
+            client: Some(client),
+        }),
     );
     let command_id = env.id;
 
-    assert_eq!(
-        rt.dispatch(env),
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some(VIEWER_REFUSAL.to_string()),
-        }
-    );
-    assert_eq!(
-        rt.sessions[&sid].clients.get(viewer).map(Client::id),
-        Some(viewer)
-    );
-}
-
-#[test]
-fn detach_all_takes_every_client_except_the_in_process_viewer() {
-    let (mut rt, fake, _tx) = new_runtime_with_fake();
-    let big = Size { cols: 80, rows: 24 };
-    let small = Size { cols: 40, rows: 24 };
-    let viewer = rt
-        .bootstrap_local(SessionId::new(), big, SystemTime::now())
-        .expect("bootstrap the genesis client");
-    let (sid, tab, pane) = only_slot(&rt);
-    rt.set_local_viewer(viewer);
-
-    // A second, smaller client joins over the socket and holds the tab at
-    // 40x24.
-    let socket_client = ClientId::new();
-    rt.handle_client_attach(sid, socket_client, small, tab, SystemTime::now());
-    let viewer_events = rt.subscribe(viewer, EventFilter::All);
-    let socket_events = rt.subscribe(socket_client, EventFilter::All);
-
-    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
-    let command_id = env.id;
-
-    // Only the socket client leaves, so the tab grows back to the viewer's own
-    // size and the pane's PTY reflows up.
-    let expected = size_root_pane(pane, pane_viewport(big), MIN_PANE_SIZE);
+    // The tab loses its last viewer, so it has no viewport to reflow to and the
+    // detach emits nothing.
     assert_eq!(
         rt.dispatch(env),
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PtyResized(PtyResized {
-                pane_id: pane,
-                size: expected,
-            })],
+            emitted_events: Vec::new(),
         }
     );
-    assert_eq!(*fake.resizes(pane).unwrap().last().unwrap(), expected);
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert_eq!(rt.event_bus.subscriber_count(), 0);
 
-    assert_eq!(rt.sessions[&sid].clients.len(), 1);
+    // The session outlives its last client: the pane is still registered and
+    // still holds its PTY.
     assert_eq!(
-        rt.sessions[&sid].clients.get(viewer).map(Client::id),
-        Some(viewer)
+        rt.sessions[&sid].panes.get(pane).map(PaneRecord::id),
+        Some(pane)
     );
-    assert!(rt.sessions[&sid].clients.get(socket_client).is_none());
+    assert!(rt.pty_handles.contains_key(&pane));
+    drop(events);
+}
 
-    // The viewer keeps its subscription, and the reflow reaches it; the socket
-    // client's subscription is dropped with its record.
-    assert_eq!(rt.event_bus.subscriber_count(), 1);
+#[test]
+fn detach_all_takes_every_attached_client() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    let first = rt
+        .bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab, pane) = only_slot(&rt);
+    let second = ClientId::new();
+    rt.handle_client_attach(sid, second, size, tab, SystemTime::now());
+    let first_events = rt.subscribe(first, EventFilter::All);
+    let second_events = rt.subscribe(second, EventFilter::All);
+
+    let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
+    let command_id = env.id;
+
+    // Both clients view the tab at the same size, so neither departure changes
+    // it and nothing reflows.
     assert_eq!(
-        viewer_events.try_iter().collect::<Vec<Delivery>>(),
-        vec![Delivery::Event(Event::PtyResized(PtyResized {
-            pane_id: pane,
-            size: expected,
-        }))]
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
     );
-    drop(socket_events);
+
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(rt.sessions[&sid].clients.get(first).is_none());
+    assert!(rt.sessions[&sid].clients.get(second).is_none());
+
+    // Both subscriptions go with the records, and the session's pane lives on.
+    assert_eq!(rt.event_bus.subscriber_count(), 0);
+    assert_eq!(
+        rt.sessions[&sid].panes.get(pane).map(PaneRecord::id),
+        Some(pane)
+    );
+    drop(first_events);
+    drop(second_events);
 }
 
 #[test]
