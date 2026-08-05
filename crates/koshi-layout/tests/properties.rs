@@ -13,15 +13,20 @@
 //!
 //! Failures shrink to a minimal op sequence and persist a regression seed
 //! under `proptest-regressions/` — check those files in when they appear.
+//!
+//! One fixed op sequence runs beside the random ones. It uses every op kind
+//! and asserts the exact tree and the exact solved rects it ends on, so those
+//! ops are covered on every run and not only when the random search picks
+//! them.
 
 use std::collections::HashSet;
 
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use koshi_layout::edit::{add_to_stack, remove_pane, split_leaf};
 use koshi_layout::normalize::normalize;
 use koshi_layout::resize::resize;
-use koshi_layout::solver::{fits, solve, MIN_PANE_SIZE};
+use koshi_layout::solver::{fits, solve, StackHeader, MIN_PANE_SIZE};
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::layout_assert::{
     assert_all_space_occupied, assert_live_pane_refs, assert_min_size_respected, assert_no_outside,
@@ -230,4 +235,93 @@ fn normalizing_after_any_random_edit_sequence_is_idempotent() {
             Ok(())
         })
         .unwrap();
+}
+
+/// The fixed sequence replayed by [`a_fixed_op_sequence_lands_on_its_exact_layout`],
+/// holding one of every op kind [`op_strategy`] can generate.
+///
+/// Each target is an index into the leaf list at that step: split pane 0 to
+/// the right, split the new pane downward, stack a pane onto the last leaf,
+/// widen pane 0 by five columns, remove leaf 1, then normalize.
+const PINNED_OPS: [Op; 6] = [
+    Op::Split {
+        target: 0,
+        direction: 1,
+    },
+    Op::Split {
+        target: 1,
+        direction: 3,
+    },
+    Op::Stack { target: 2 },
+    Op::Resize {
+        target: 0,
+        direction: 1,
+        size: 5,
+    },
+    Op::Remove { target: 1 },
+    Op::Normalize,
+];
+
+/// Replay [`PINNED_OPS`] over a fixed 80x24 tab: the invariants hold after
+/// every step, and the run ends on one exact tree and one exact placement.
+#[test]
+fn a_fixed_op_sequence_lands_on_its_exact_layout() {
+    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 });
+    let first = PaneId::new();
+    let mut tree = LayoutNode::Pane(first);
+    let mut live: HashSet<PaneId> = HashSet::from([first]);
+
+    assert_invariants(&tree, tab, &live);
+    for op in &PINNED_OPS {
+        apply(op, &mut tree, tab, &mut live);
+        assert_invariants(&tree, tab, &live);
+    }
+
+    // The removal left a column holding only the stack; normalization
+    // collapsed it, so the stack now hangs straight off the root.
+    let LayoutNode::Split(root) = &tree else {
+        panic!("the root must be a split");
+    };
+    assert_eq!(root.direction, SplitDirection::Horizontal);
+    assert_eq!(root.children.len(), 2);
+    let LayoutNode::Split(stack) = &root.children[1].node else {
+        panic!("the stack must sit directly under the root");
+    };
+    assert_eq!(stack.direction, SplitDirection::Stacked);
+    assert_eq!(stack.active, 1);
+
+    // Three panes survive: the resized one holds 45 of the 80 columns, and the
+    // stack's 35 split into one header row plus the active member's 23.
+    let leaves = tree.leaf_panes();
+    assert_eq!(leaves.len(), 3);
+    assert_eq!(live.len(), 3);
+    let result = solve(&tree, tab);
+    assert_eq!(
+        result.panes,
+        [
+            (
+                leaves[0],
+                Rect::new(Point { x: 0, y: 0 }, Size { cols: 45, rows: 24 })
+            ),
+            (
+                leaves[1],
+                Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 })
+            ),
+            (
+                leaves[2],
+                Rect::new(Point { x: 45, y: 1 }, Size { cols: 35, rows: 23 })
+            ),
+        ]
+    );
+    assert!(result.suppressed.is_empty());
+    assert!(!result.all_suppressed);
+    assert_eq!(
+        result.stack_headers,
+        [StackHeader {
+            pane: leaves[1],
+            rect: Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 }),
+            position: 0,
+            total: 2,
+        }]
+    );
 }

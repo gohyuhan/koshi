@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use koshi_core::event::Event;
+use koshi_core::event::{
+    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
+};
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
@@ -24,11 +26,12 @@ use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::cascade::on_child_exit;
+use koshi_session::session::cascade::{on_child_exit, remove_pane_cascade};
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_session::session::policy::EmptyTabPolicy;
 use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops::close_tab;
+use koshi_test_support::event_queue::RecordedEvents;
 use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PtyBackend, PtyHandle};
 
 /// A fixed epoch timestamp so every lifecycle transition stays deterministic.
@@ -203,6 +206,15 @@ fn route_output(session: &Session, handle: &PtyHandle) -> Option<bool> {
 /// The position of the first event matching `pred`, for ordering assertions.
 fn position(events: &[Event], pred: impl Fn(&Event) -> bool) -> Option<usize> {
     events.iter().position(pred)
+}
+
+/// Assert an emitted burst is exactly `expected` — same events, same order,
+/// nothing extra — through the shared recorder's index-aligned diff.
+fn assert_events(events: Vec<Event>, expected: &[Event]) {
+    let mut recorded = RecordedEvents::new();
+    let mut emitted = events.into_iter();
+    recorded.drain_from(|| emitted.next());
+    recorded.assert_exact(expected);
 }
 
 #[test]
@@ -536,6 +548,65 @@ fn last_pane_exit_under_respawn_tab_policy_keeps_the_tab() {
 }
 
 #[test]
+fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
+    let pty = FakePtyBackend::new();
+    let (a, _handle_a) = spawn_child(&pty);
+    let (b, _handle_b) = spawn_child(&pty);
+    let tab_id = TabId::new();
+    let mut session = session_with(
+        vec![two_pane_tab(tab_id, a, b)],
+        vec![
+            running_pane(a, PaneExitPolicy::CloseOnExit),
+            running_pane(b, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let client = focused_client(session.id, tab_id, a);
+    let client_id = client.id();
+    session.attach_client(client);
+
+    // An explicit close, not a child exit: the user asks for the focused pane
+    // to go while its child is still running.
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
+
+    // The closed pane is gone, the layout collapsed onto the survivor, and the
+    // client that was watching it follows.
+    assert!(session.panes.get(a).is_none());
+    assert_eq!(session.panes.get(b).expect("the survivor stays").id(), b);
+    assert_eq!(session.tabs[&tab_id].layout().leaf_panes(), vec![b]);
+    assert_eq!(
+        session.clients.get(client_id).unwrap().focused_pane(tab_id),
+        Some(b)
+    );
+
+    // The whole burst, in order. No process-exited event: no child exited.
+    assert_events(
+        events,
+        &[
+            Event::PaneClosing(PaneClosing { pane_id: a }),
+            Event::PaneRemoved(PaneRemoved { pane_id: a, tab_id }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id,
+                pane_id: b,
+                prior_pane: Some(a),
+            }),
+        ],
+    );
+
+    // Closing is a pure state op: the session layer drops the record but never
+    // kills the real process, so the backend recorded no kill.
+    assert!(pty.kills(a).unwrap().is_empty());
+}
+
+#[test]
 fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
     let pty = FakePtyBackend::new();
     let (a, _handle_a) = spawn_child(&pty);
@@ -613,7 +684,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
 
     pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
-    let _ = pump_exit(
+    let events = pump_exit(
         &mut session,
         &handle_a,
         tab_id,
@@ -625,6 +696,21 @@ fn child_exit_drops_the_pane_from_focus_history() {
     let history = session.tabs[&tab_id].focus_mru();
     assert!(!history.contains(&a));
     assert!(history.contains(&b));
+
+    // No client watched the pane, so the burst is the exit and the removal
+    // alone: the history cleanup is state, never an event of its own.
+    assert_events(
+        events,
+        &[
+            Event::PaneProcessExited(PaneProcessExited {
+                pane_id: a,
+                exit_code: Some(0),
+            }),
+            Event::PaneClosing(PaneClosing { pane_id: a }),
+            Event::PaneRemoved(PaneRemoved { pane_id: a, tab_id }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+        ],
+    );
 }
 
 #[test]
@@ -649,7 +735,7 @@ fn output_for_a_removed_pane_is_dropped() {
     // Remove the pane through a child-exit.
     pty.trigger_child_exit(a, ExitStatus::ExitCode(0))
         .expect("pane a is known to the backend");
-    let _ = pump_exit(
+    let events = pump_exit(
         &mut session,
         &handle_a,
         tab_id,
@@ -657,6 +743,18 @@ fn output_for_a_removed_pane_is_dropped() {
         EmptyTabPolicy::CloseTab,
     );
     assert!(session.panes.get(a).is_none());
+    assert_events(
+        events,
+        &[
+            Event::PaneProcessExited(PaneProcessExited {
+                pane_id: a,
+                exit_code: Some(0),
+            }),
+            Event::PaneClosing(PaneClosing { pane_id: a }),
+            Event::PaneRemoved(PaneRemoved { pane_id: a, tab_id }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+        ],
+    );
 
     // Output that arrives after removal still reaches the PTY boundary — the
     // backend never knew about the session-side removal — but the session has no

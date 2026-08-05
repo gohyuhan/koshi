@@ -1234,3 +1234,124 @@ fn a_stack_header_survives_a_serde_round_trip() {
     let restored: StackHeader = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(header, restored);
 }
+
+#[test]
+fn clicking_a_collapsed_members_header_strip_activates_it() {
+    use crate::focus::stack_activate;
+
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 0));
+    let tab = rect(0, 0, 80, 24);
+
+    // a is expanded over rows 0..22; b and c sit on the two header rows below.
+    let before = solve(&tree, tab);
+    assert_eq!(
+        before.panes,
+        [
+            (a, rect(0, 0, 80, 22)),
+            (b, rect(0, 22, 80, 1)),
+            (c, rect(0, 23, 80, 1)),
+        ]
+    );
+
+    // Mouse routing hit-tests the strips: the cell at column 40, row 23 lies
+    // on c's header, so c is the pane the click selects.
+    let clicked = before
+        .stack_headers
+        .iter()
+        .find(|header| header.rect.contains(Point { x: 40, y: 23 }))
+        .expect("row 23 is a header strip")
+        .pane;
+    assert_eq!(clicked, c);
+
+    let stack = tree
+        .stack_containing_mut(clicked)
+        .expect("c lives in a stack");
+    let change = stack_activate(stack, clicked).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, Some(a));
+
+    // c now holds the content region and a took over a header strip.
+    let after = solve(&tree, tab);
+    assert_eq!(
+        after.panes,
+        [
+            (a, rect(0, 0, 80, 1)),
+            (b, rect(0, 1, 80, 1)),
+            (c, rect(0, 2, 80, 22)),
+        ]
+    );
+    assert_eq!(
+        after.stack_headers,
+        [
+            StackHeader {
+                pane: a,
+                rect: rect(0, 0, 80, 1),
+                position: 0,
+                total: 3,
+            },
+            StackHeader {
+                pane: b,
+                rect: rect(0, 1, 80, 1),
+                position: 1,
+                total: 3,
+            },
+        ]
+    );
+    assert_tiles_exactly(&after, tab);
+}
+
+#[test]
+fn targeting_a_collapsed_stack_member_by_name_expands_it() {
+    use crate::focus::{focus_candidates, stack_activate};
+
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let mut tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![leaf(a), LayoutChild::new(stack)],
+    ));
+    let tab = rect(0, 0, 80, 24);
+
+    // b is the expanded member of the stack; c is collapsed onto the bottom row.
+    let before = solve(&tree, tab);
+    assert_eq!(
+        before.panes,
+        [
+            (a, rect(0, 0, 40, 24)),
+            (b, rect(40, 0, 40, 23)),
+            (c, rect(40, 23, 40, 1)),
+        ]
+    );
+
+    // The normal focus path never offers c: its rect is a header strip.
+    let candidates = focus_candidates(rect(40, 23, 40, 1), &before.panes, &before.stack_headers);
+    assert_eq!(candidates.layout_order, [a, b]);
+    assert_eq!(candidates.spatial_neighbor, Some(b));
+
+    // Naming c reaches it anyway, through the stack that holds it.
+    let stack = tree.stack_containing_mut(c).expect("c lives in a stack");
+    let change = stack_activate(stack, c).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, Some(b));
+
+    let after = solve(&tree, tab);
+    assert_eq!(
+        after.panes,
+        [
+            (a, rect(0, 0, 40, 24)),
+            (b, rect(40, 0, 40, 1)),
+            (c, rect(40, 1, 40, 23)),
+        ]
+    );
+    assert_eq!(
+        after.stack_headers,
+        [StackHeader {
+            pane: b,
+            rect: rect(40, 0, 40, 1),
+            position: 0,
+            total: 2,
+        }]
+    );
+    assert_tiles_exactly(&after, tab);
+}
