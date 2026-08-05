@@ -39,7 +39,7 @@ use crate::runtime::frame::wire_frame;
 
 /// How many undelivered events one subscriber's queue holds. An event
 /// published while the queue is full is dropped for that subscriber.
-const SUBSCRIBER_QUEUE_CAPACITY: usize = 1024;
+pub(crate) const SUBSCRIBER_QUEUE_CAPACITY: usize = 1024;
 
 /// Which published events a subscriber receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,8 +82,7 @@ enum DeliveryState {
     },
 }
 
-/// What putting one delivery on a subscriber's queue did, so the caller can
-/// name the thing that was lost in its own log line.
+/// What putting one delivery on a subscriber's queue did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Queued {
     /// The delivery is on the queue.
@@ -308,9 +307,9 @@ impl EventBus {
     /// Put `delivery` on live subscriber `id`'s queue, and report what that did.
     ///
     /// A full queue drops the delivery and marks the subscriber desynced, so it
-    /// is handed a fresh [`RenderSnapshot`] to resume from; the caller says what
-    /// was lost. A subscriber that is unknown or already paused takes nothing,
-    /// and one whose receiver is gone is removed.
+    /// is handed a fresh [`RenderSnapshot`] to resume from. A subscriber that is
+    /// unknown or already paused takes nothing, and one whose receiver is gone
+    /// is removed.
     fn try_send_direct(&mut self, id: SubscriberId, delivery: Delivery) -> Queued {
         let Some(index) = self
             .subscribers
@@ -393,7 +392,7 @@ impl EventBus {
     ///
     /// Returns `true` once the switch is queued, `false` otherwise
     /// ([`Self::try_send_direct`]). A dropped switch leaves the client in this
-    /// session, so the user asks for the switch again.
+    /// session.
     pub(crate) fn try_send_switch(&mut self, id: SubscriberId, session_id: SessionId) -> bool {
         match self.try_send_direct(id, Delivery::SwitchTo(session_id)) {
             Queued::Sent => true,

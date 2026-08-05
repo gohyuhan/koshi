@@ -316,8 +316,8 @@ impl Server {
     /// named lists the ids to choose from.
     ///
     /// Shared by [`Command::Detach`], which removes the client it resolves, and
-    /// [`Command::SwitchSession`], which moves it to another session. Both
-    /// validation and the handler call it, so they always pick the same client.
+    /// [`Command::SwitchSession`], which moves it to another session. Validation
+    /// and the handler both call it.
     pub(super) fn resolve_target_client(
         explicit: Option<ClientId>,
         source: &CommandSource,

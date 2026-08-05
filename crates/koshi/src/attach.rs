@@ -255,8 +255,7 @@ pub fn run(selector: Option<&str>) -> Result<(), CliError> {
 /// session.
 ///
 /// `selector` names the session to move to, resolved exactly as [`run`]
-/// resolves it. This terminal already holds a client, so the session moves that
-/// one rather than a second client opening on top of it.
+/// resolves it. The session moves the client this terminal already holds.
 #[beta_feature(otherwise = Err(CliError::Runtime {
     detail: koshi_beta::blocked_message("koshi attach"),
 }))]

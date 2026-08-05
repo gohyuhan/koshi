@@ -366,8 +366,8 @@ pub struct SwitchSessionArgs {
     /// attached clients and no named target is rejected.
     #[serde(default)]
     pub client: Option<ClientId>,
-    /// Session the client moves to. The caller resolves it, so this session
-    /// never looks a name up.
+    /// Session the client moves to. The caller resolves it; this session never
+    /// looks a name up.
     pub session: SessionId,
 }
 

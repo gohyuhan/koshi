@@ -493,8 +493,9 @@ impl Server {
     /// the client's own subscriber queues and that client re-attaches from
     /// there.
     ///
-    /// A move into this session is refused: a switch detaches before it
-    /// attaches, so a client that never left has nothing to rejoin.
+    /// A move into this session is refused — a switch detaches before it
+    /// attaches. A client whose queue is full is refused too: the move is
+    /// dropped there and never replayed.
     ///
     /// The client leaving is an ordinary detach, so `auto-close-session` ends
     /// this session when the client that moved was the last one attached.
@@ -505,9 +506,7 @@ impl Server {
         args: &SwitchSessionArgs,
     ) -> Result<CommandResult, Rejection> {
         // The plugin host grants `session_switch`; a plugin source holds none.
-        // A plugin resolves no session ([`Server::acting_session`]), so today it
-        // is refused before this runs; the check is what names the capability
-        // if a plugin ever acts inside a session.
+        // A plugin resolves no session, so validation refuses it before this.
         if matches!(source, CommandSource::Plugin { .. }) {
             return Err(Rejection::new(
                 RejectReason::Unauthorized,
@@ -522,7 +521,12 @@ impl Server {
             ));
         }
         let client_id = Self::resolve_target_client(args.client, source, session)?;
-        self.send_switch(client_id, args.session);
+        if !self.send_switch(client_id, args.session) {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "the client is too far behind to be moved right now; try again",
+            ));
+        }
         tracing::info!(
             command_id = %command_id,
             client = %client_id,
