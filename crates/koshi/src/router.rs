@@ -32,7 +32,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use fs4::{FileExt, TryLockError};
-use koshi_core::command::Command;
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
@@ -46,7 +45,6 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
-use crate::error::CliError;
 use crate::ipc_client;
 use crate::router_client::RUNTIME_DIR_FLAG;
 
@@ -358,9 +356,6 @@ fn serve_request(
             attach_lookup(runtime_dir, registry, &selector)
         }
         RouterRequestKind::ListSessions => list_sessions(runtime_dir, registry),
-        RouterRequestKind::KillSession { selector } => {
-            kill_session(runtime_dir, registry, &selector)
-        }
     }
 }
 
@@ -492,29 +487,6 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
     }
     rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     RouterResult::Sessions(rows)
-}
-
-/// End one session by forwarding the quit to its own server.
-///
-/// The entry stays: the child's exit, or the next probe that finds nothing
-/// listening, is what removes it. A session that cannot be reached at all is
-/// already gone, so it is removed here.
-fn kill_session(
-    runtime_dir: &Path,
-    registry: &mut Registry,
-    selector: &SessionSelector,
-) -> RouterResult {
-    let Some(id) = resolve(registry, selector) else {
-        return refused(no_such_session(selector));
-    };
-    match ipc_client::submit_external_via_runtime_dir(runtime_dir, id, Command::Quit) {
-        Ok(_) => RouterResult::Killed,
-        Err(CliError::SessionNotFound { .. }) => {
-            unregister(runtime_dir, registry, id);
-            refused(no_such_session(selector))
-        }
-        Err(error) => refused(format!("the session could not be reached: {error}")),
-    }
 }
 
 /// Rebuild the session list from what is already running.

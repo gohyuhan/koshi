@@ -293,7 +293,7 @@ fn visual_variant_names_are_canonical() {
 
 /// `Command::kind` must report the matching discriminant for every variant.
 /// Reusing the canonical command instances keeps `CommandKind` pinned to the
-/// same 19-variant set as `Command`; a new command variant added without a
+/// same 22-variant set as `Command`; a new command variant added without a
 /// `kind` arm fails to compile, and a mismatched arm fails this assert.
 #[test]
 fn command_kind_mirrors_command() {
@@ -390,8 +390,15 @@ fn command_kind_mirrors_command() {
         (Command::Quit, CommandKind::Quit),
         (Command::Detach(DetachArgs::default()), CommandKind::Detach),
         (Command::DetachAll, CommandKind::DetachAll),
+        (
+            Command::SwitchSession(SwitchSessionArgs {
+                client: None,
+                session: SessionId::new(),
+            }),
+            CommandKind::SwitchSession,
+        ),
     ];
-    assert_eq!(cases.len(), 19);
+    assert_eq!(cases.len(), 20);
     for (command, kind) in &cases {
         assert_eq!(command.kind(), *kind);
         roundtrip(kind);

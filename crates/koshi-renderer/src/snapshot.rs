@@ -81,8 +81,8 @@ impl RenderSnapshot {
 
 /// One item on a subscriber's queue: a live event, the frame composed for the
 /// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, the answers to one round of mouse actions, or bytes for the
-/// subscriber's own terminal.
+/// overflowed, the answers to one round of mouse actions, bytes for the
+/// subscriber's own terminal, or the session its client moves to.
 ///
 /// All of them ride the same queue in order, so a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again. A
@@ -116,6 +116,8 @@ pub enum Delivery {
     /// Bytes for the terminal the subscriber's client runs in, written to it
     /// verbatim.
     HostWrite(Vec<u8>),
+    /// The session the subscriber's client leaves this one for.
+    SwitchTo(SessionId),
 }
 
 /// The two things about a frame the viewer decides, not the session: which pane

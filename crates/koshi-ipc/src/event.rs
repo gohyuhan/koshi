@@ -13,7 +13,7 @@
 //! [`PaintedFrame`](crate::frame::PaintedFrame). No other frame here carries a
 //! grid, a cursor, scrollback, or colors.
 //!
-//! Three frames here are not session facts.
+//! Four frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
 //! sends it when a client's queue overflowed and dropped an event the stream
 //! cannot skip, and it names how many events went missing.
@@ -23,8 +23,10 @@
 //! [`HostWrite`](crate::event::SessionEvent::HostWrite) is the third: bytes a
 //! pane aimed at the terminal the client runs in, such as an OSC 52 clipboard
 //! write.
+//! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fourth: it names
+//! the session the client leaves this one for.
 
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::PaintedFrame;
@@ -142,6 +144,12 @@ pub enum SessionEvent {
     HostWrite {
         /// The bytes to write, in the order the session queued them.
         bytes: Vec<u8>,
+    },
+    /// The client drops this session and attaches to the named one.
+    SwitchTo {
+        /// The session to attach to. The client reads that session's socket
+        /// and connection token from the endpoint file keyed by this id.
+        session_id: SessionId,
     },
 }
 

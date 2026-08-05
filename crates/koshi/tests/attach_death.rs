@@ -289,7 +289,8 @@ fn waited_for_exit(session: &mut RunningSession) -> bool {
 }
 
 /// The `koshi` binary, set to keep its files under `home` rather than in the
-/// developer's own directories. Standard input is closed, and both output
+/// developer's own directories, and stripped of the pane identity so it runs
+/// as a CLI outside any session. Standard input is closed, and both output
 /// streams are pipes the test reads.
 #[cfg(unix)]
 fn koshi_under(home: &Path) -> std::process::Command {
@@ -297,6 +298,14 @@ fn koshi_under(home: &Path) -> std::process::Command {
     command
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", home)
+        // The five variables the runtime injects at pane spawn; `KOSHI` is the
+        // marker `InSessionContext::from_env` reads, and a test run from
+        // inside a koshi pane would hand every one of them to this child.
+        .env_remove("KOSHI")
+        .env_remove("KOSHI_SESSION_ID")
+        .env_remove("KOSHI_CLIENT_ID")
+        .env_remove("KOSHI_PANE_ID")
+        .env_remove("KOSHI_SOCKET")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

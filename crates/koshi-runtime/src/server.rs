@@ -298,6 +298,26 @@ impl Server {
         self.subscriptions.retain(|&(id, _)| bus.contains(id));
     }
 
+    /// Put the session `client_id` moves to on the queue of every subscriber
+    /// that views that client.
+    ///
+    /// `true` when at least one subscriber holds the move. `false` when the
+    /// client has no subscriber, or every queue was full: a full queue drops
+    /// the move and desyncs that subscriber, and the move is never replayed.
+    pub(crate) fn send_switch(&mut self, client_id: ClientId, session_id: SessionId) -> bool {
+        let viewers: Vec<SubscriberId> = self
+            .subscriptions
+            .iter()
+            .filter(|&&(_, viewed)| viewed == client_id)
+            .map(|&(id, _)| id)
+            .collect();
+        let mut moved = false;
+        for id in viewers {
+            moved |= self.event_bus.try_send_switch(id, session_id);
+        }
+        moved
+    }
+
     /// Log each of `events`, then deliver it to every subscriber. The shared
     /// tail of every handler that emits events outside a command transaction
     /// (attach, detach, resize, child exit); a command's events pass through

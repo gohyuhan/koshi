@@ -94,12 +94,6 @@ pub enum RouterRequestKind {
     },
     /// List the running sessions.
     ListSessions,
-    /// End a running session: the router forwards the request to that
-    /// session's server.
-    KillSession {
-        /// Which session to end.
-        selector: SessionSelector,
-    },
 }
 
 impl RouterRequestKind {
@@ -113,7 +107,6 @@ impl RouterRequestKind {
             RouterRequestKind::CreateSession { .. } => "CreateSession",
             RouterRequestKind::AttachLookup { .. } => "AttachLookup",
             RouterRequestKind::ListSessions => "ListSessions",
-            RouterRequestKind::KillSession { .. } => "KillSession",
         }
     }
 }
@@ -166,8 +159,6 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::ListSessions`]: one record per running
     /// session.
     Sessions(Vec<SessionInfo>),
-    /// Answers [`RouterRequestKind::KillSession`]: the session has ended.
-    Killed,
     /// The request was refused.
     Error(IpcErrorPayload),
 }

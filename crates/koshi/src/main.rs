@@ -146,16 +146,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return koshi::app::run(cli.profile.as_deref());
     }
 
-    // Attach is not an action verb, so it dispatches here rather than through
-    // the routing layer. It joins a session this process is outside of, so it
-    // reads no in-session identity.
-    if let Some(CliCommand::Attach { session }) = &cli.command {
-        return attach::run(session.as_deref());
-    }
-
     // Session verbs read the in-session identity first, so a broken pane
     // environment reports itself rather than as a missing daemon.
     let in_session = InSessionContext::from_env()?;
+
+    // Attach is not an action verb, so it dispatches here rather than through
+    // the routing layer. Typed inside a pane it moves that pane's client to
+    // the named session; typed outside one it joins that session in this
+    // terminal.
+    if let Some(CliCommand::Attach { session }) = &cli.command {
+        return match in_session.as_ref() {
+            Some(context) => {
+                finish_command(attach::switch_in_session(context, session.as_deref())?)
+            }
+            None => attach::run(session.as_deref()),
+        };
+    }
 
     // Detach is not an action verb, so it dispatches here rather than through
     // the routing layer. Success prints nothing; a detach the session refuses

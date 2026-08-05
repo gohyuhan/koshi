@@ -103,6 +103,8 @@ impl Server {
     /// from an external CLI (`kill-session`) but not from inside a pane.
     /// `Detach` and `DetachAll` are accepted from both, since a client detaches
     /// itself from inside the session and by id from outside it.
+    /// `SwitchSession` is accepted from both, since an in-pane
+    /// `koshi attach <session>` sends it.
     /// Non-CLI sources are unrestricted here.
     pub(super) fn allowed_from_source(command: &Command, source: &CommandSource) -> bool {
         let cli_verb = matches!(
@@ -122,6 +124,7 @@ impl Server {
                 | Command::ToggleLockMode(_)
                 | Command::Detach(_)
                 | Command::DetachAll
+                | Command::SwitchSession(_)
         );
         match source {
             CommandSource::InSessionCli { .. } => cli_verb,
@@ -138,7 +141,8 @@ impl Server {
     /// [`Self::resolve_acting_client`] alone decides which client it lands on.
     ///
     /// [`Command::FocusPane`], [`Command::FocusTab`], [`Command::NewTab`],
-    /// [`Command::SetLockMode`], and [`Command::ToggleLockMode`] are absent
+    /// [`Command::SetLockMode`], [`Command::ToggleLockMode`], and
+    /// [`Command::SwitchSession`] are absent
     /// because they also accept an explicit `client` argument that outranks
     /// the source; their resolvers call the same helper for the rest.
     /// [`Command::Visual`] is absent for the opposite reason: a highlight
@@ -292,19 +296,29 @@ impl Server {
             // Detach names one client, resolved and vetted here so the handler
             // receives a client it may remove.
             Command::Detach(args) => {
-                Self::resolve_detach_client(args.client, source, Self::require_session(session)?)
+                Self::resolve_target_client(args.client, source, Self::require_session(session)?)
+                    .map(drop)
+            }
+            // The switch names one client the same way a detach does, and the
+            // handler resolves it again through the same helper.
+            Command::SwitchSession(args) => {
+                Self::resolve_target_client(args.client, source, Self::require_session(session)?)
                     .map(drop)
             }
             Command::Plugin(_) | Command::DetachAll | Command::Quit => Ok(()),
         }
     }
 
-    /// Resolve the client a [`Command::Detach`] removes: the explicit `client`
-    /// argument when set, else the acting client
+    /// Resolve the client a command names in its own `client` argument: that
+    /// client when set, else the acting client
     /// ([`Self::resolve_acting_client`]) — the issuer while it is attached,
     /// else the session's sole attached client. Several attached with none
     /// named lists the ids to choose from.
-    pub(super) fn resolve_detach_client(
+    ///
+    /// Shared by [`Command::Detach`], which removes the client it resolves, and
+    /// [`Command::SwitchSession`], which moves it to another session. Validation
+    /// and the handler both call it.
+    pub(super) fn resolve_target_client(
         explicit: Option<ClientId>,
         source: &CommandSource,
         session: &Session,

@@ -41,6 +41,7 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use crate::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::RuntimeEvent;
+use koshi_renderer::snapshot::Delivery;
 
 use super::*;
 
@@ -11478,5 +11479,283 @@ fn detach_all_only_detaches_clients_of_the_acting_session() {
     assert_eq!(
         rt.sessions[&sid_b].clients.get(client_b).map(Client::id),
         Some(client_b)
+    );
+}
+
+#[test]
+fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    let events = rt.subscribe(client, EventFilter::All);
+    let target = SessionId::new();
+
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: target,
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+
+    let moves: Vec<SessionId> = events
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::SwitchTo(session_id) => Some(session_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moves, vec![target]);
+}
+
+#[test]
+fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    let events = rt.subscribe(client, EventFilter::All);
+
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: sid,
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("this client is already in that session".to_string()),
+        }
+    );
+    assert!(
+        !events
+            .try_iter()
+            .any(|delivery| matches!(delivery, Delivery::SwitchTo(_))),
+        "a refused switch queues no move"
+    );
+}
+
+/// A plugin source resolves no session, so validation refuses the switch
+/// before the handler's own `session_switch` check runs.
+#[test]
+fn a_switch_is_refused_for_a_plugin() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let _ = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+
+    let env = envelope_from(
+        CommandSource::plugin(PluginId::new()),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: SessionId::new(),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("no session context".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    let stranger = ClientId::new();
+
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: Some(stranger),
+            session: SessionId::new(),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_client_that_switched_away_ends_the_session_under_auto_close() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+    // An attach registers the client and its subscriber together, so a client
+    // that can be moved always has one.
+    let _events = rt.subscribe(client, EventFilter::All);
+
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: SessionId::new(),
+        }),
+    );
+    let command_id = env.id;
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    // Queueing the move leaves the client attached; the session ends only once
+    // that client's connection goes, which is an ordinary detach.
+    assert!(!rt.quit_requested());
+
+    rt.handle_client_detach(client);
+
+    assert!(rt.quit_requested());
+}
+
+/// The switch honours an explicitly named client the way a detach does. Both
+/// resolve through the same helper, in validation and again in the handler, so
+/// naming a client is enough even when the source names none of its own.
+#[test]
+fn a_switch_moves_the_client_it_names_with_several_attached() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let first = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, tab, _pane) = only_slot(&rt);
+    let second = ClientId::new();
+    add_client(
+        rt.sessions.get_mut(&sid).expect("the session"),
+        second,
+        tab,
+        None,
+    );
+    let moves = rt.subscribe(first, EventFilter::All);
+    let target = SessionId::new();
+
+    // An external source names no client of its own, so only `client` says who
+    // moves.
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: Some(first),
+            session: target,
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(
+        moves
+            .try_iter()
+            .filter_map(|delivery| match delivery {
+                Delivery::SwitchTo(session_id) => Some(session_id),
+                _ => None,
+            })
+            .collect::<Vec<SessionId>>(),
+        vec![target]
+    );
+}
+
+/// A client so far behind that its queue is full cannot be handed the move, and
+/// the move is never replayed, so the switch is refused rather than reported as
+/// done.
+#[test]
+fn a_switch_is_refused_when_the_clients_queue_is_full() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, tab, pane) = only_slot(&rt);
+    let _events = rt.subscribe(client, EventFilter::All);
+
+    // Nothing reads the queue, so publishing its whole capacity fills it.
+    let backlog: Vec<Event> = (0..crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY)
+        .map(|_| Event::TabCreated(koshi_core::event::TabCreated { tab_id: tab }))
+        .collect();
+    rt.publish_events(&backlog);
+
+    let env = envelope_from(
+        CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: SessionId::new(),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("the client is too far behind to be moved right now; try again".to_string()),
+        }
     );
 }

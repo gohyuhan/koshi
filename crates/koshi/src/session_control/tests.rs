@@ -340,14 +340,14 @@ fn a_refused_create_reports_the_routers_own_message() {
 #[test]
 fn an_answer_to_another_request_names_what_came_back() {
     let runtime_dir = test_runtime_dir("headless-wrong-answer");
-    let router = serve_router(&runtime_dir, RouterResult::Killed);
+    let router = serve_router(&runtime_dir, RouterResult::Hello);
 
     let error = request_new_session(&runtime_dir, None).expect_err("the answer fits no create");
 
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
-    assert_eq!(detail, "the router answered a create session with Killed");
+    assert_eq!(detail, "the router answered a create session with Hello");
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
     assert_eq!(request, Some(expected_create(None)));

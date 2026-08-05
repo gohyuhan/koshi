@@ -136,6 +136,9 @@ fn every_event() -> Vec<SessionEvent> {
         SessionEvent::Quit,
         SessionEvent::Detached,
         SessionEvent::Resync { dropped_count: 4 },
+        SessionEvent::SwitchTo {
+            session_id: SessionId::from_uuid(fixed_uuid()),
+        },
     ]
 }
 
@@ -338,6 +341,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!("Quit"),
             json!("Detached"),
             json!({ "Resync": { "dropped_count": 4 } }),
+            json!({ "SwitchTo": { "session_id": id } }),
         ]
     );
 }
