@@ -321,7 +321,7 @@ fn resolve_core(
             client: None,
         }),
 
-        // --- Quit ---
+        // --- Session ---
         ("quit", ActionArgs::None) => Command::Quit,
 
         // --- Lock ---

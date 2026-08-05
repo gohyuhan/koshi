@@ -114,15 +114,6 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         }),
         r#"{"request_id":4,"kind":"ListSessions"}"#
     );
-    assert_eq!(
-        encode(&RouterRequest {
-            request_id: 5,
-            kind: RouterRequestKind::KillSession {
-                selector: SessionSelector::Name("quiet-lake".to_string()),
-            },
-        }),
-        r#"{"request_id":5,"kind":{"KillSession":{"selector":{"Name":"quiet-lake"}}}}"#
-    );
 
     assert_eq!(
         encode(&RouterResponse {
@@ -151,13 +142,6 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             result: RouterResult::Sessions(vec![session_info()]),
         }),
         r#"{"request_id":4,"result":{"Sessions":[{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","created_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"attached_clients":["00000000-0000-0000-0000-000000000001"],"pane_count":1}]}}"#
-    );
-    assert_eq!(
-        encode(&RouterResponse {
-            request_id: Some(5),
-            result: RouterResult::Killed,
-        }),
-        r#"{"request_id":5,"result":"Killed"}"#
     );
     assert_eq!(
         encode(&RouterResponse {
@@ -212,13 +196,6 @@ fn every_request_kind_names_itself_without_its_payload() {
         "AttachLookup"
     );
     assert_eq!(RouterRequestKind::ListSessions.name(), "ListSessions");
-    assert_eq!(
-        RouterRequestKind::KillSession {
-            selector: SessionSelector::Name("quiet-lake".to_string()),
-        }
-        .name(),
-        "KillSession"
-    );
 }
 
 #[test]

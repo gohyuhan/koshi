@@ -5,8 +5,9 @@
 pub mod app;
 
 /// The attached client: join a running session over its control socket and
-/// read its event stream until it detaches, the session ends, or the
-/// connection breaks.
+/// read its event stream. A switch re-attaches the same terminal to the named
+/// session; a detach, the session ending, or a broken connection ends the
+/// client.
 pub mod attach;
 
 /// Command-line grammar: root parser, root flags, subcommand tree.

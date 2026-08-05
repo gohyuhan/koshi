@@ -165,7 +165,9 @@ The session reads this, not each terminal: the session server takes the answer
 from the `koshi.kdl` it read when the session started, so a terminal that
 attaches later cannot change it from its own file.
 
-Both ways of leaving count: `koshi detach`, and simply closing the terminal.
+Every way of leaving counts: `koshi detach`, closing the terminal, and moving
+the terminal to another session with `koshi attach <session>` from inside a
+pane. A terminal that moves away has left, so a session it leaves empty ends.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

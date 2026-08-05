@@ -194,7 +194,6 @@ fn unexpected_reply(result: &RouterResult) -> CliError {
         RouterResult::Created(_) => "Created",
         RouterResult::Found(_) => "Found",
         RouterResult::Sessions(_) => "Sessions",
-        RouterResult::Killed => "Killed",
         RouterResult::Error(_) => "Error",
     };
     CliError::IpcUnavailable {

@@ -11,10 +11,11 @@
 //! is the point: a new `Command` variant cannot be added without giving it an
 //! arm here, and each handler replaces its arm in place as it ships.
 //!
-//! This file holds the dispatch table, target resolution types, and the
-//! helpers every handler shares. The handlers themselves live in submodules
-//! by what they act on: `pane`, `tab`, `client`, `visual`, with target
-//! resolution in `resolve`.
+//! This file holds the dispatch table, target resolution types, the helpers
+//! every handler shares, and the handlers for the commands that act on a
+//! session as a whole — quit, detach, detach-all, and the switch that moves one
+//! client to another session. The rest live in submodules by what they act on:
+//! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -32,8 +33,8 @@ use koshi_core::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos,
         LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
-        Selection, SelectionKind, SetSelectionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
-        WriteToPaneArgs,
+        Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
@@ -249,6 +250,9 @@ impl Server {
                 self.handle_toggle_pane_fullscreen(command_id, &envelope.source)
             }
             Command::MoveTab(args) => self.handle_move_tab(command_id, &envelope.source, &args),
+            Command::SwitchSession(args) => {
+                self.handle_switch_session(command_id, &envelope.source, &args)
+            }
         };
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
@@ -462,7 +466,7 @@ impl Server {
     /// running; the other clients keep their records.
     ///
     /// The client is resolved through
-    /// [`Server::resolve_detach_client`], the same call validation made.
+    /// [`Server::resolve_target_client`], the same call validation made.
     fn handle_detach(
         &mut self,
         command_id: CommandId,
@@ -470,13 +474,65 @@ impl Server {
         args: &DetachArgs,
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.acting_session(source)?)?;
-        let client_id = Self::resolve_detach_client(args.client, source, session)?;
+        let client_id = Self::resolve_target_client(args.client, source, session)?;
 
         let mut scope = TransactionScope::new();
         for event in self.handle_client_detach(client_id) {
             scope.emit(event);
         }
         Ok(scope.commit(command_id, &mut self.event_bus))
+    }
+
+    /// Handle [`Command::SwitchSession`]: move one client out of this session
+    /// and into the session `args` names.
+    ///
+    /// The client is resolved by [`Server::resolve_target_client`], the same
+    /// call validation made: a named client must be attached here, and no name
+    /// means the issuing client. The caller resolved the target session, so this
+    /// reads no other session and reaches no other process; it puts the move on
+    /// the client's own subscriber queues and that client re-attaches from
+    /// there.
+    ///
+    /// A move into this session is refused: a switch detaches before it
+    /// attaches, so a client that never left has nothing to rejoin.
+    ///
+    /// The client leaving is an ordinary detach, so `auto-close-session` ends
+    /// this session when the client that moved was the last one attached.
+    fn handle_switch_session(
+        &mut self,
+        command_id: CommandId,
+        source: &CommandSource,
+        args: &SwitchSessionArgs,
+    ) -> Result<CommandResult, Rejection> {
+        // The plugin host grants `session_switch`; a plugin source holds none.
+        // A plugin resolves no session ([`Server::acting_session`]), so today it
+        // is refused before this runs; the check is what names the capability
+        // if a plugin ever acts inside a session.
+        if matches!(source, CommandSource::Plugin { .. }) {
+            return Err(Rejection::new(
+                RejectReason::Unauthorized,
+                "plugin lacks the session_switch capability",
+            ));
+        }
+        let session = Self::require_session(self.acting_session(source)?)?;
+        if args.session == session.id {
+            return Err(Rejection::new(
+                RejectReason::InvalidState,
+                "this client is already in that session",
+            ));
+        }
+        let client_id = Self::resolve_target_client(args.client, source, session)?;
+        self.send_switch(client_id, args.session);
+        tracing::info!(
+            command_id = %command_id,
+            client = %client_id,
+            session = %args.session,
+            "a client was moved to another session"
+        );
+        Ok(CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        })
     }
 
     /// Handle [`Command::DetachAll`]: remove every client attached to the

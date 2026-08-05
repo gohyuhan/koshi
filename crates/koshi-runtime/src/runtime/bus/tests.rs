@@ -5,8 +5,8 @@
 //! subscriber until a snapshot resyncs it. Then the painted frame: it lands on
 //! a live subscriber's queue and is refused by a desynced one. Then a round's
 //! mouse answers, which ride the same queue and desync the subscriber when they
-//! do not fit. Then bytes for the terminal a subscriber's client runs in, which
-//! ride it the same way.
+//! do not fit. Then bytes for the terminal a subscriber's client runs in, and
+//! the session a subscriber's client moves to, which ride it the same way.
 //!
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
@@ -731,6 +731,48 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
     assert_eq!(bus.desynced(), vec![id]);
     assert_eq!(bus.subscriber_count(), 1);
     // The backlog that filled the queue, and nothing else: the bytes are gone,
+    // and the desync is what puts a fresh frame on the queue.
+    assert_eq!(
+        rx.try_iter().collect::<Vec<Delivery>>(),
+        vec![
+            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }));
+            SUBSCRIBER_QUEUE_CAPACITY
+        ]
+    );
+}
+
+#[test]
+fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
+    let session = SessionId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_switch(id, session));
+
+    let queued: Vec<Delivery> = rx.try_iter().collect();
+    assert_eq!(queued, vec![Delivery::SwitchTo(session)]);
+    assert_eq!(
+        wire_event(&queued[0]),
+        Some(SessionEvent::SwitchTo {
+            session_id: session
+        })
+    );
+    assert_eq!(bus.desynced(), Vec::new());
+    assert_eq!(bus.subscriber_count(), 1);
+}
+
+#[test]
+fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+
+    assert!(!bus.try_send_switch(id, SessionId::new()));
+
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(bus.subscriber_count(), 1);
+    // The backlog that filled the queue, and nothing else: the switch is gone,
     // and the desync is what puts a fresh frame on the queue.
     assert_eq!(
         rx.try_iter().collect::<Vec<Delivery>>(),

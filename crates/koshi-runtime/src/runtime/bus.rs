@@ -5,9 +5,10 @@
 //! `EventBus::publish` clones each event into every queue whose filter
 //! matches, `EventBus::try_send_frame` puts the frame the session composed
 //! for one subscriber's client on that subscriber's own queue,
-//! `EventBus::try_send_answer` puts one round of mouse answers on it, and
+//! `EventBus::try_send_answer` puts one round of mouse answers on it,
 //! `EventBus::try_send_host_write` puts bytes aimed at that subscriber's own
-//! terminal on it. Delivery
+//! terminal on it, and `EventBus::try_send_switch` puts the session that
+//! subscriber's client moves to on it. Delivery
 //! never blocks the dispatcher: a subscriber whose receiver was dropped is
 //! removed on the next publish, and an event that does not fit a subscriber's
 //! full queue is handled by its class.
@@ -28,7 +29,7 @@
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
 use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
-use koshi_core::ids::SubscriberId;
+use koshi_core::ids::{SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::EventFilterSpec;
@@ -79,6 +80,20 @@ enum DeliveryState {
         /// that caused the pause.
         dropped: u64,
     },
+}
+
+/// What putting one delivery on a subscriber's queue did, so the caller can
+/// name the thing that was lost in its own log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Queued {
+    /// The delivery is on the queue.
+    Sent,
+    /// The queue was full: the delivery is gone and the subscriber is now
+    /// desynced, awaiting a snapshot.
+    Dropped,
+    /// Nothing was queued and nothing is owed — the subscriber is unknown,
+    /// already paused, or its receiver was gone and it has been removed.
+    Skipped,
 }
 
 /// One registered subscriber: its id, its filter, its delivery state, and the
@@ -290,40 +305,58 @@ impl EventBus {
         }
     }
 
+    /// Put `delivery` on live subscriber `id`'s queue, and report what that did.
+    ///
+    /// A full queue drops the delivery and marks the subscriber desynced, so it
+    /// is handed a fresh [`RenderSnapshot`] to resume from; the caller says what
+    /// was lost. A subscriber that is unknown or already paused takes nothing,
+    /// and one whose receiver is gone is removed.
+    fn try_send_direct(&mut self, id: SubscriberId, delivery: Delivery) -> Queued {
+        let Some(index) = self
+            .subscribers
+            .iter()
+            .position(|subscriber| subscriber.id == id)
+        else {
+            return Queued::Skipped;
+        };
+        let subscriber = &mut self.subscribers[index];
+        if subscriber.state != DeliveryState::Live {
+            return Queued::Skipped;
+        }
+        match subscriber.tx.try_send(delivery) {
+            Ok(()) => Queued::Sent,
+            Err(TrySendError::Full(_)) => {
+                subscriber.state = DeliveryState::Desynced { dropped: 1 };
+                Queued::Dropped
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(index);
+                Queued::Skipped
+            }
+        }
+    }
+
     /// Put the `answers` to mouse round `request_id` on live subscriber `id`'s
     /// queue.
     ///
-    /// Returns `true` once the answers are queued. Returns `false` when `id` is
-    /// unknown, when it is desynced — a paused subscriber takes its resync
-    /// snapshot first — or when its queue is full. A full queue marks the
-    /// subscriber desynced: a lost answer leaves the viewer's drag anchor where
-    /// it was, and a desynced subscriber is handed a fresh [`RenderSnapshot`] to
-    /// resume from.
-    /// A subscriber whose receiver is gone is removed.
+    /// Returns `true` once the answers are queued, `false` otherwise
+    /// ([`Self::try_send_direct`]). A lost answer leaves the viewer's drag
+    /// anchor where it was.
     pub(crate) fn try_send_answer(
         &mut self,
         id: SubscriberId,
         request_id: u64,
         answers: Vec<MouseAnswer>,
     ) -> bool {
-        let Some(index) = self
-            .subscribers
-            .iter()
-            .position(|subscriber| subscriber.id == id)
-        else {
-            return false;
-        };
-        let subscriber = &mut self.subscribers[index];
-        if subscriber.state != DeliveryState::Live {
-            return false;
-        }
-        match subscriber.tx.try_send(Delivery::MouseAnswer {
-            request_id,
-            answers,
-        }) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                subscriber.state = DeliveryState::Desynced { dropped: 1 };
+        match self.try_send_direct(
+            id,
+            Delivery::MouseAnswer {
+                request_id,
+                answers,
+            },
+        ) {
+            Queued::Sent => true,
+            Queued::Dropped => {
                 tracing::warn!(
                     subscriber = %id,
                     request_id,
@@ -331,49 +364,48 @@ impl EventBus {
                 );
                 false
             }
-            Err(TrySendError::Disconnected(_)) => {
-                self.subscribers.remove(index);
-                false
-            }
+            Queued::Skipped => false,
         }
     }
 
     /// Put `bytes` for the terminal live subscriber `id`'s client runs in on
     /// that subscriber's queue.
     ///
-    /// Returns `true` once the bytes are queued. Returns `false` when `id` is
-    /// unknown, when it is desynced — a paused subscriber takes its resync
-    /// snapshot first — or when its queue is full. A full queue marks the
-    /// subscriber desynced: dropped bytes leave a clipboard copy unwritten, and
-    /// a desynced subscriber is handed a fresh [`RenderSnapshot`] to resume
-    /// from.
-    /// A subscriber whose receiver is gone is removed.
+    /// Returns `true` once the bytes are queued, `false` otherwise
+    /// ([`Self::try_send_direct`]). Dropped bytes leave a clipboard copy
+    /// unwritten.
     pub(crate) fn try_send_host_write(&mut self, id: SubscriberId, bytes: Vec<u8>) -> bool {
-        let Some(index) = self
-            .subscribers
-            .iter()
-            .position(|subscriber| subscriber.id == id)
-        else {
-            return false;
-        };
-        let subscriber = &mut self.subscribers[index];
-        if subscriber.state != DeliveryState::Live {
-            return false;
-        }
-        match subscriber.tx.try_send(Delivery::HostWrite(bytes)) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                subscriber.state = DeliveryState::Desynced { dropped: 1 };
+        match self.try_send_direct(id, Delivery::HostWrite(bytes)) {
+            Queued::Sent => true,
+            Queued::Dropped => {
                 tracing::warn!(
                     subscriber = %id,
                     "host write dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
             }
-            Err(TrySendError::Disconnected(_)) => {
-                self.subscribers.remove(index);
+            Queued::Skipped => false,
+        }
+    }
+
+    /// Put the session live subscriber `id`'s client moves to on that
+    /// subscriber's queue.
+    ///
+    /// Returns `true` once the switch is queued, `false` otherwise
+    /// ([`Self::try_send_direct`]). A dropped switch leaves the client in this
+    /// session, so the user asks for the switch again.
+    pub(crate) fn try_send_switch(&mut self, id: SubscriberId, session_id: SessionId) -> bool {
+        match self.try_send_direct(id, Delivery::SwitchTo(session_id)) {
+            Queued::Sent => true,
+            Queued::Dropped => {
+                tracing::warn!(
+                    subscriber = %id,
+                    session = %session_id,
+                    "session switch dropped; subscriber desynced, awaiting snapshot"
+                );
                 false
             }
+            Queued::Skipped => false,
         }
     }
 
@@ -401,6 +433,9 @@ impl EventBus {
 ///
 /// A [`Delivery::HostWrite`] becomes [`SessionEvent::HostWrite`] carrying the
 /// bytes the client writes to its own terminal.
+///
+/// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
+/// of the session the client attaches to next.
 #[must_use]
 pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
@@ -465,6 +500,9 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
         }),
         Delivery::HostWrite(bytes) => Some(SessionEvent::HostWrite {
             bytes: bytes.clone(),
+        }),
+        Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
+            session_id: *session_id,
         }),
     }
 }

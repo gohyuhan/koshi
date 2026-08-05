@@ -917,6 +917,25 @@ fn a_mouse_answer_is_counted_and_moves_nothing_in_the_viewer() {
 }
 
 #[test]
+fn a_session_switch_is_counted_and_moves_nothing_in_the_viewer() {
+    // The switch belongs to the attached viewer that moves, and reaches it over
+    // its own connection.
+    let (mut client, tx) = new_client();
+    client.set_lock_mode(LockMode::Locked);
+    let id = client.id();
+    let viewport = client.viewport();
+
+    tx.send(Delivery::SwitchTo(SessionId::new()))
+        .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the switch was seen");
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+    assert!(!client.mouse_select());
+    assert_eq!(client.viewport(), viewport);
+    assert_eq!(client.id(), id);
+}
+
+#[test]
 fn an_empty_queue_leaves_the_viewer_exactly_as_it_was() {
     // The pump calls this every pass, so the common case is nothing waiting.
     let (mut client, _tx) = new_client();

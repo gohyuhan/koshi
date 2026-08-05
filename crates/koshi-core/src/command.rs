@@ -69,6 +69,8 @@ pub enum Command {
     /// Detach every client attached to this session. The session keeps running
     /// and its panes are untouched.
     DetachAll,
+    /// Move a client out of this session and into another one.
+    SwitchSession(SwitchSessionArgs),
 }
 
 /// The payload-free discriminant of a [`Command`] — one unit variant per
@@ -118,6 +120,8 @@ pub enum CommandKind {
     Detach,
     /// Discriminant of [`Command::DetachAll`].
     DetachAll,
+    /// Discriminant of [`Command::SwitchSession`].
+    SwitchSession,
 }
 
 impl Command {
@@ -144,6 +148,7 @@ impl Command {
             Command::Quit => CommandKind::Quit,
             Command::Detach(_) => CommandKind::Detach,
             Command::DetachAll => CommandKind::DetachAll,
+            Command::SwitchSession(_) => CommandKind::SwitchSession,
         }
     }
 }
@@ -352,6 +357,18 @@ pub struct DetachArgs {
     /// [`NewPaneArgs::client`].
     #[serde(default)]
     pub client: Option<ClientId>,
+}
+
+/// Arguments for [`Command::SwitchSession`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchSessionArgs {
+    /// Client to move; `None` moves the issuing client. A session with several
+    /// attached clients and no named target is rejected.
+    #[serde(default)]
+    pub client: Option<ClientId>,
+    /// Session the client moves to. The caller resolves it, so this session
+    /// never looks a name up.
+    pub session: SessionId,
 }
 
 /// Selection and copy commands — the commands of visual mode.

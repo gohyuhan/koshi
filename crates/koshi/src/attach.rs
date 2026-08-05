@@ -61,7 +61,9 @@ use koshi_client::input::KeyOutcome;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client;
 use koshi_config::types::BoundAction;
-use koshi_core::command::{Command, CommandEnvelope, CommandSource, VisualCommand};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, CommandSource, SwitchSessionArgs, VisualCommand,
+};
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
 use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
@@ -85,6 +87,7 @@ use crate::attach::paint::to_snapshot;
 use crate::cli::parse_prefixed_uuid;
 use crate::discovery::{self, SessionRow};
 use crate::error::CliError;
+use crate::in_session::InSessionContext;
 use crate::ipc_client;
 use crate::router_client::router_request;
 
@@ -145,6 +148,8 @@ enum Ending {
     Died,
     /// This terminal went away while the session kept running.
     TerminalGone,
+    /// The session moved this client to the session named here.
+    Switch(SessionId),
 }
 
 /// One thing the loop reacts to: a frame read off the session's event stream,
@@ -216,33 +221,83 @@ impl Uplink {
     }
 }
 
-/// Resolve what the user typed to a session id, then join that session.
+/// Resolve what the user typed to one running session, and report where it
+/// listens.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
 /// name. `None` picks one from the sessions running for this user instead:
-/// nothing running is a failure, one session is joined straight away, and more
+/// nothing running is a failure, one session is taken straight away, and more
+/// than one is printed as a numbered list to answer on stdin.
+fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<SessionAddress, CliError> {
+    let selector = match selector {
+        Some(selector) => selector.to_string(),
+        None => choose(runtime_dir)?,
+    };
+    lookup(runtime_dir, &selector)
+}
+
+/// Join a running session in this terminal as a new client.
+///
+/// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
+/// name. `None` picks one from the sessions running for this user instead:
+/// nothing running is a failure, one session is taken straight away, and more
 /// than one is printed as a numbered list to answer on stdin.
 #[beta_feature(otherwise = Err(CliError::Runtime {
     detail: koshi_beta::blocked_message("koshi attach"),
 }))]
 pub fn run(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
-    let selector = match selector {
-        Some(selector) => selector.to_string(),
-        None => choose(&runtime_dir)?,
-    };
-    let address = lookup(&runtime_dir, &selector)?;
+    let address = resolve_session(&runtime_dir, selector)?;
     attach_session(&runtime_dir, address.id)
 }
 
+/// Ask the session this CLI runs inside to move its own client to another
+/// session.
+///
+/// `selector` names the session to move to, resolved exactly as [`run`]
+/// resolves it. This terminal already holds a client, so the session moves that
+/// one rather than a second client opening on top of it.
+#[beta_feature(otherwise = Err(CliError::Runtime {
+    detail: koshi_beta::blocked_message("koshi attach"),
+}))]
+pub fn switch_in_session(
+    context: &InSessionContext,
+    selector: Option<&str>,
+) -> Result<CommandResult, CliError> {
+    let runtime_dir = ipc_client::runtime_dir()?;
+    let address = resolve_session(&runtime_dir, selector)?;
+    ipc_client::submit_in_session(
+        context,
+        Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: address.id,
+        }),
+    )
+}
+
 /// Join the session `session_id` names and run until this client detaches, the
-/// session ends, or the connection breaks.
+/// session ends, the connection breaks, or the session moves this client to
+/// another session, in which case this attaches there and keeps running.
 ///
 /// Paints every frame the session composes for this terminal and sends this
 /// terminal's keys, mouse and resizes back. A broken connection reports the
-/// cause and how to reattach, and exits non-zero; the other two endings print
-/// what happened and exit zero.
+/// cause and how to reattach, and exits non-zero; the other endings print what
+/// happened and exit zero.
 pub(crate) fn attach_session(runtime_dir: &Path, session_id: SessionId) -> Result<(), CliError> {
+    let mut session_id = session_id;
+    while let Some(next) = attach_once(runtime_dir, session_id)? {
+        session_id = next;
+    }
+    Ok(())
+}
+
+/// Join the session `session_id` names and run one attachment of it, handing
+/// back the session to attach to next when this one moved the client on.
+///
+/// The terminal enters raw mode and the alternate screen behind a cleanup
+/// guard this call owns, and leaves both before it returns, so the terminal is
+/// restored between one session and the next.
+fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
     let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
     let mut connection = ipc_client::connect(&endpoint, session_id)?;
     let (client_id, session_id) = join(&mut connection, &endpoint.token)?;
@@ -1196,23 +1251,27 @@ fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
     match frame {
         Ok(SessionEvent::Detached) => Some(Ending::Detached),
         Ok(SessionEvent::Quit) => Some(Ending::SessionEnded),
+        Ok(SessionEvent::SwitchTo { session_id }) => Some(Ending::Switch(*session_id)),
         Ok(_) => None,
         Err(_) => Some(Ending::Died),
     }
 }
 
-/// Print how the stream ended and hand back the process outcome: a broken
-/// connection names the cause and how to reattach, and exits non-zero.
-fn report(ending: Ending, session_id: SessionId) -> Result<(), CliError> {
+/// Print how the stream ended and hand back both the process outcome and the
+/// session to attach to next: a broken connection names the cause and how to
+/// reattach, and exits non-zero; a switch names the session and prints
+/// nothing.
+fn report(ending: Ending, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
     match ending {
         Ending::Detached => {
             println!("detached from session {session_id}");
-            Ok(())
+            Ok(None)
         }
         Ending::SessionEnded => {
             println!("the session ended");
-            Ok(())
+            Ok(None)
         }
+        Ending::Switch(target) => Ok(Some(target)),
         Ending::Died => Err(CliError::Runtime {
             detail: format!(
                 "the session ended unexpectedly\n  \
@@ -1225,7 +1284,7 @@ fn report(ending: Ending, session_id: SessionId) -> Result<(), CliError> {
         // closes behind it.
         Ending::TerminalGone => {
             tracing::info!(%session_id, "this terminal went away; leaving the session running");
-            Ok(())
+            Ok(None)
         }
     }
 }

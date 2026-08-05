@@ -298,6 +298,24 @@ impl Server {
         self.subscriptions.retain(|&(id, _)| bus.contains(id));
     }
 
+    /// Put the session `client_id` moves to on the queue of every subscriber
+    /// that views that client.
+    ///
+    /// A subscriber whose queue is full drops the switch and is resynced from
+    /// a fresh frame, so that client stays in this session and the user presses
+    /// the key again.
+    pub(crate) fn send_switch(&mut self, client_id: ClientId, session_id: SessionId) {
+        let viewers: Vec<SubscriberId> = self
+            .subscriptions
+            .iter()
+            .filter(|&&(_, viewed)| viewed == client_id)
+            .map(|&(id, _)| id)
+            .collect();
+        for id in viewers {
+            self.event_bus.try_send_switch(id, session_id);
+        }
+    }
+
     /// Log each of `events`, then deliver it to every subscriber. The shared
     /// tail of every handler that emits events outside a command transaction
     /// (attach, detach, resize, child exit); a command's events pass through

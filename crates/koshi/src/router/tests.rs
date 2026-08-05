@@ -402,27 +402,6 @@ fn a_lookup_finding_nothing_listening_drops_the_session_and_its_files() {
 }
 
 #[test]
-fn a_kill_for_a_session_the_list_does_not_hold_is_refused_by_id() {
-    let absent = SessionId::new();
-    let runtime_dir = test_runtime_dir();
-    let mut registry = Registry::new();
-
-    let answer = kill_session(
-        runtime_dir.path(),
-        &mut registry,
-        &SessionSelector::Id(absent),
-    );
-
-    assert_eq!(
-        answer,
-        RouterResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
-            message: format!("no session {absent} is running"),
-        })
-    );
-}
-
-#[test]
 fn a_listing_drops_every_session_that_does_not_answer() {
     let dead = SessionId::new();
     let runtime_dir = test_runtime_dir();

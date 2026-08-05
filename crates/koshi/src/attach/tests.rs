@@ -209,6 +209,15 @@ fn the_quit_frame_ends_the_stream_with_the_session() {
 }
 
 #[test]
+fn the_switch_frame_ends_the_stream_with_the_session_to_join_next() {
+    let session_id = SessionId::new();
+    assert_eq!(
+        classify(&Ok(SessionEvent::SwitchTo { session_id })),
+        Some(Ending::Switch(session_id))
+    );
+}
+
+#[test]
 fn a_closed_socket_ends_the_stream_as_a_death() {
     assert_eq!(classify(&Err(IpcError::Disconnected)), Some(Ending::Died));
 }
@@ -312,10 +321,25 @@ fn a_death_reports_the_cause_and_how_to_reattach() {
 }
 
 #[test]
-fn a_detach_and_a_session_end_both_succeed() {
+fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
     let session_id = SessionId::new();
-    assert!(report(Ending::Detached, session_id).is_ok());
-    assert!(report(Ending::SessionEnded, session_id).is_ok());
+    assert_eq!(
+        report(Ending::Detached, session_id).expect("a detach is a success"),
+        None
+    );
+    assert_eq!(
+        report(Ending::SessionEnded, session_id).expect("a session ending is a success"),
+        None
+    );
+}
+
+#[test]
+fn a_switch_names_the_session_to_join_next() {
+    let target = SessionId::new();
+    assert_eq!(
+        report(Ending::Switch(target), SessionId::new()).expect("a switch is a success"),
+        Some(target)
+    );
 }
 
 /// The terminal size every mouse fixture below is built at.

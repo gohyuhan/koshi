@@ -373,15 +373,9 @@ fn the_router_ends_itself_once_no_session_is_left() {
     let created = create_session(&mut connection);
     let _sessions = RunningSessions(vec![created.pid]);
 
-    assert_eq!(
-        request(
-            &mut connection,
-            RouterRequestKind::KillSession {
-                selector: SessionSelector::Id(created.id),
-            }
-        ),
-        RouterResult::Killed
-    );
+    // The router spawned this session server, so it is the parent and the
+    // child's exit reaches it directly and empties the list.
+    end_process(created.pid);
     drop(connection);
 
     // With the list empty the router waits one idle window for a request and

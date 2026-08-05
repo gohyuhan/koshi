@@ -315,8 +315,10 @@ impl Client {
     ///
     /// A [`Delivery::Frame`] is the picture composed for a client in another
     /// process. It is counted, and nothing is taken from it. So is a
-    /// [`Delivery::MouseAnswer`], which answers that client's mouse round, and
-    /// a [`Delivery::HostWrite`], which that client writes to its own terminal.
+    /// [`Delivery::MouseAnswer`], which answers that client's mouse round, a
+    /// [`Delivery::HostWrite`], which that client writes to its own terminal,
+    /// and a [`Delivery::SwitchTo`], which moves that client to another
+    /// session.
     pub fn apply_events(&mut self) -> usize {
         let mut seen = 0;
         while let Ok(delivery) = self.events.try_recv() {
@@ -343,6 +345,9 @@ impl Client {
                 // Bytes for a client's own terminal, written by that client off
                 // its own connection.
                 Delivery::HostWrite(_) => {}
+                // The session a client moves to, read by the attached viewer
+                // off its own connection.
+                Delivery::SwitchTo(_) => {}
                 Delivery::Snapshot { snapshot, lagged } => {
                     debug_assert_eq!(
                         snapshot.client.id, self.id,
