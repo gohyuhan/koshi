@@ -2412,6 +2412,62 @@ fn a_wide_write_splitting_an_adjacent_wide_clears_its_far_half() {
     assert_eq!(far.width(), 1);
 }
 
+// --- Cursor motion across a wide glyph (a pair spans two columns, and motion
+// counts columns) ---
+
+#[test]
+fn cursor_forward_counts_columns_so_one_step_lands_inside_a_wide_glyph() {
+    let mut state = state(6, 2);
+    print_str(&mut state, "漢字"); // 漢 on cols 0-1, 字 on cols 2-3
+    advance(&mut state, b"\x1b[1;1H"); // home, on the 漢 base
+    advance(&mut state, b"\x1b[C"); // one column forward → the 漢 continuation
+    assert_eq!(state.active_cursor().col, 1);
+    assert_eq!(state.active_grid().cell(0, 1).map(Cell::width), Some(0));
+    advance(&mut state, b"\x1b[C"); // one more → the 字 base
+    assert_eq!(state.active_cursor().col, 2);
+    assert_eq!(glyph(&state, 0, 2), Some('字'));
+    assert_eq!(state.active_grid().cell(0, 2).map(Cell::width), Some(2));
+}
+
+#[test]
+fn cursor_back_from_past_a_wide_glyph_lands_on_its_continuation_then_its_base() {
+    let mut state = state(6, 2);
+    state.print('漢'); // cols 0-1, cursor rests at col 2
+    assert_eq!(state.active_cursor().col, 2);
+    advance(&mut state, b"\x1b[D"); // back one column → the continuation
+    assert_eq!(state.active_cursor().col, 1);
+    advance(&mut state, b"\x1b[D"); // back one more → the base
+    assert_eq!(state.active_cursor().col, 0);
+    assert_eq!(glyph(&state, 0, 0), Some('漢'));
+    assert_eq!(state.active_grid().cell(0, 0).map(Cell::width), Some(2));
+}
+
+#[test]
+fn backspacing_over_a_wide_glyph_and_blanking_it_leaves_no_orphan_half() {
+    let mut state = state(6, 2);
+    state.print('漢'); // cols 0-1, cursor at col 2
+    state.execute(0x08); // BS → col 1
+    state.execute(0x08); // BS → col 0
+    assert_eq!(state.active_cursor().col, 0);
+
+    // The two spaces a shell erases a wide glyph with. The first one lands on
+    // the base and takes the far half with it, so no continuation is left
+    // pointing at a base that is gone.
+    state.print(' ');
+    let orphan = state.active_grid().cell(0, 1).expect("in bounds");
+    assert_eq!(orphan.ch(), ' ');
+    assert_eq!(orphan.width(), 1);
+
+    state.print(' ');
+    let base = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(base.ch(), ' ');
+    assert_eq!(base.width(), 1);
+    let right = state.active_grid().cell(0, 1).expect("in bounds");
+    assert_eq!(right.ch(), ' ');
+    assert_eq!(right.width(), 1);
+    assert_eq!(state.active_cursor().col, 2);
+}
+
 // --- Wide-pair integrity across erase / insert / delete cell ops ---
 
 #[test]

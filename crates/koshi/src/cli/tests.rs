@@ -704,6 +704,72 @@ fn every_subcommand_answers_help() {
     }
 }
 
+#[test]
+fn an_unknown_flag_prints_the_flag_and_the_usage_lines() {
+    assert_eq!(
+        parse_err(&["koshi", "--frobnicate"]).to_string(),
+        "error: unexpected argument '--frobnicate' found\n\n\
+         Usage: koshi [OPTIONS]\n       koshi <COMMAND>\n\n\
+         For more information, try '--help'.\n"
+    );
+}
+
+#[test]
+fn an_unknown_subcommand_prints_the_subcommand_and_the_usage_lines() {
+    assert_eq!(
+        parse_err(&["koshi", "explode"]).to_string(),
+        "error: unrecognized subcommand 'explode'\n\n\
+         Usage: koshi [OPTIONS]\n       koshi <COMMAND>\n\n\
+         For more information, try '--help'.\n"
+    );
+}
+
+#[test]
+fn an_invalid_direction_prints_every_direction_it_accepts() {
+    assert_eq!(
+        parse_err(&["koshi", "new-pane", "--direction", "sideways"]).to_string(),
+        "error: invalid value 'sideways' for '--direction <DIRECTION>'\n  \
+         [possible values: right, down, left, up]\n\n\
+         For more information, try '--help'.\n"
+    );
+}
+
+/// `lock` acts on a client, so `--session` is not one of its flags: the
+/// argument grammar refuses it before any session is reached.
+#[test]
+fn a_session_target_on_lock_prints_the_flag_and_the_lock_usage_line() {
+    assert_eq!(
+        parse_err(&["koshi", "lock", "--session", "work"]).to_string(),
+        "error: unexpected argument '--session' found\n\n\
+         Usage: koshi lock [OPTIONS]\n\n\
+         For more information, try '--help'.\n"
+    );
+}
+
+/// The rendered help of one verb, byte for byte: the about line, the usage
+/// line, and every flag with its own help and default.
+#[test]
+fn resize_pane_help_renders_its_about_usage_and_flags() {
+    assert_eq!(
+        parse_err(&["koshi", "resize-pane", "--help"]).to_string(),
+        "Move one of a pane's borders: a positive size grows the pane toward the direction, \
+         a negative size shrinks it\n\n\
+         Usage: koshi resize-pane [OPTIONS] --direction <DIRECTION>\n\n\
+         Options:\n      \
+         --direction <DIRECTION>\n          Which of the pane's borders moves\n\n          \
+         Possible values:\n          \
+         - right: Rightward\n          \
+         - down:  Downward\n          \
+         - left:  Leftward\n          \
+         - up:    Upward\n\n      \
+         --size <SIZE>\n          \
+         Signed number of cells the border moves; defaults to 1\n          \n          \
+         [default: 1]\n\n      \
+         --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n  \
+         -h, --help\n          Print help (see a summary with '-h')\n"
+    );
+}
+
 // --- Typed action arguments ---
 
 #[test]

@@ -742,6 +742,33 @@ fn error_response_encodes_its_code_in_snake_case() {
     );
 }
 
+/// A caller branches on the refusal code, so each one keeps its own wire
+/// spelling: a rejected token reads `bad_token`, never the name of another
+/// refusal.
+#[test]
+fn every_refusal_code_encodes_to_its_own_wire_name() {
+    // The match is exhaustive, so a refusal code added later does not compile
+    // until its wire name is written here.
+    let wire_name = |code: IpcErrorCode| match code {
+        IpcErrorCode::BadToken => "bad_token",
+        IpcErrorCode::UnsupportedVersion => "unsupported_version",
+        IpcErrorCode::MalformedRequest => "malformed_request",
+        IpcErrorCode::HelloRequired => "hello_required",
+    };
+
+    for code in [
+        IpcErrorCode::BadToken,
+        IpcErrorCode::UnsupportedVersion,
+        IpcErrorCode::MalformedRequest,
+        IpcErrorCode::HelloRequired,
+    ] {
+        assert_eq!(
+            serde_json::to_value(code).expect("code encodes"),
+            json!(wire_name(code)),
+        );
+    }
+}
+
 #[test]
 fn a_response_to_unreadable_bytes_names_no_request() {
     let response = IpcResponse {

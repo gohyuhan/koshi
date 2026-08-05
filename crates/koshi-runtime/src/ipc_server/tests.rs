@@ -331,6 +331,88 @@ fn a_wrong_token_is_refused_as_bad_token() {
 }
 
 #[test]
+fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
+    let (server, session, runtime_dir, dispatcher) = serve("restart-token", None);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let first = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let restarted_dispatcher = spawn_dispatcher(inbox_rx, None);
+    let restarted = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving again");
+    let second = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+    assert_ne!(
+        second.token, first.token,
+        "the restarted server advertises a new secret",
+    );
+
+    let mut old = connect_to(&runtime_dir, session);
+    old.send(&IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Hello {
+            protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+            token: first.token,
+        },
+    })
+    .expect("send hello with the token from before the restart");
+    let refusal: IpcResponse = old.recv().expect("reply");
+    assert_eq!(
+        refusal.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let mut fresh = connect_to(&runtime_dir, session);
+    fresh
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello with the new secret");
+    let accepted: IpcResponse = fresh.recv().expect("hello reply");
+    assert_eq!(accepted.result, IpcResult::Hello);
+
+    drop(old);
+    drop(fresh);
+    restarted.shutdown();
+    restarted_dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_detach_leaves_the_sessions_token_unchanged() {
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) = serve_attachable("detach-token", client);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let before = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+
+    let attached = attach_to(&runtime_dir, session, client);
+    drop(attached);
+    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+
+    let after = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+    assert_eq!(
+        after.token, before.token,
+        "the detached client's departure leaves the session's secret alone",
+    );
+
+    let mut connection = connect_to(&runtime_dir, session);
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello with the secret from before the detach");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
 fn a_malformed_frame_is_answered_and_the_connection_keeps_serving() {
     let (server, session, runtime_dir, dispatcher) = serve("malformed", None);
     let mut connection = connect_to(&runtime_dir, session);
