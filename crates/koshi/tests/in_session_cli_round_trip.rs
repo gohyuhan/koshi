@@ -602,8 +602,8 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
     );
     assert_eq!(code, CliExitCode::Success);
 
-    // No `--force`, so the pane's own close policy picks the kill: the child
-    // gets its grace window to shut down.
+    // No `--force`, so the pane's own close policy picks the kill: a graceful
+    // one carrying the standard window.
     assert_eq!(
         kills_of(&session, created),
         vec![KillPolicy::Graceful {

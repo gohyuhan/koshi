@@ -275,7 +275,8 @@ impl Server {
 
         // `auto-close-session` ends the session when its last client leaves.
         // Each pane's child is asked to stop and given the graceful window
-        // before it is killed.
+        // before it is killed; a stop request that cannot be delivered goes
+        // straight to the kill.
         if session_emptied && self.config.auto_close_session {
             self.request_graceful_quit();
         }

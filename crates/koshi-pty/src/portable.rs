@@ -44,7 +44,7 @@ use crate::{
     backend::state::{PtyBackend, PtyHandle, PtySink},
     env::build_env,
     error::PtyError,
-    kill::PtyChildKillControl,
+    kill::{PtyChildKillControl, StopRequest},
 };
 
 /// Bytes read from a pane's master end in one go. Sized to hold a burst of
@@ -1414,20 +1414,19 @@ impl PtyBackend for PortablePtyBackend {
             }
             KillPolicy::Graceful { timeout } => {
                 if !entry.exited.load(Ordering::SeqCst) {
-                    // Ask the leader to exit, give it the grace window; SIGKILL
-                    // only if it overstays the deadline.
-                    let _ = entry.killer.request_stop();
-                    if !wait_for_exit(&entry.exited, timeout) {
+                    // Ask the leader to exit and give it the grace window; SIGKILL when the
+                    // window runs out, or at once when the request never reached it.
+                    if !stopped_within_grace(entry.killer.request_stop(), &entry.exited, timeout) {
                         let _ = entry.killer.force();
                     }
                 }
             }
             KillPolicy::GracefulTree { timeout } => {
                 if !entry.exited.load(Ordering::SeqCst) {
-                    // Ask the whole group to exit — every member gets the stop
-                    // request and the grace window — then wait for the leader.
-                    let _ = entry.killer.request_stop_tree();
-                    wait_for_exit(&entry.exited, timeout);
+                    // Ask the whole group to exit — every member gets the stop request and
+                    // the grace window — then wait for the leader. The wait is skipped
+                    // only when no member received the request.
+                    stopped_within_grace(entry.killer.request_stop_tree(), &entry.exited, timeout);
                 }
 
                 // Group-kill even when the leader already exited: a disowned
@@ -1464,9 +1463,21 @@ impl PtyBackend for PortablePtyBackend {
     }
 }
 
+/// Whether the leader is gone after being asked to stop.
+///
+/// Polls [`wait_for_exit`] for up to `timeout` when anything received the stop
+/// request, including a group where only part of it did. Returns `false` at
+/// once when nothing received it, so no grace window is spent.
+fn stopped_within_grace(requested: StopRequest, exited: &AtomicBool, timeout: Duration) -> bool {
+    match requested {
+        StopRequest::Delivered | StopRequest::Unknown => wait_for_exit(exited, timeout),
+        StopRequest::NotDelivered => false,
+    }
+}
+
 /// Poll the watcher's `exited` flag every 25ms until it flips or `timeout`
-/// elapses, returning whether the child exited within the window. The shared
-/// grace-window wait of the `Graceful` and `GracefulTree` kill policies.
+/// elapses, returning whether the child exited within the window. The
+/// grace-window wait behind [`stopped_within_grace`].
 fn wait_for_exit(exited: &AtomicBool, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

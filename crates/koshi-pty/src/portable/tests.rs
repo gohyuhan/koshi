@@ -202,6 +202,77 @@ fn map_status_maps_a_signal_through_sig_no() {
     );
 }
 
+/// Nothing received the stop request, so the 3-second window is not spent.
+#[test]
+fn an_undelivered_stop_request_skips_the_grace_window() {
+    let exited = AtomicBool::new(false);
+    let started = Instant::now();
+    let stopped = stopped_within_grace(StopRequest::NotDelivered, &exited, Duration::from_secs(3));
+    let took = started.elapsed();
+    assert!(
+        !stopped,
+        "an undelivered stop request must report the child as still running"
+    );
+    assert!(
+        took < Duration::from_millis(100),
+        "an undelivered stop request must not spend the grace window; took {took:?}"
+    );
+}
+
+/// A stop request that reached the child still waits the whole 200ms window
+/// while the child stays alive.
+#[test]
+fn a_delivered_stop_request_waits_out_the_window_when_the_child_stays() {
+    let exited = AtomicBool::new(false);
+    let started = Instant::now();
+    let stopped = stopped_within_grace(StopRequest::Delivered, &exited, Duration::from_millis(200));
+    let took = started.elapsed();
+    assert!(
+        !stopped,
+        "a child that never sets the exited flag must report as still running"
+    );
+    assert!(
+        took >= Duration::from_millis(200),
+        "a delivered stop request must still spend the whole window; took {took:?}"
+    );
+}
+
+/// Part of a group may have received the stop request, so those members get the
+/// whole 200ms window to exit on their own.
+#[test]
+fn a_partly_delivered_stop_request_waits_out_the_window() {
+    let exited = AtomicBool::new(false);
+    let started = Instant::now();
+    let stopped = stopped_within_grace(StopRequest::Unknown, &exited, Duration::from_millis(200));
+    let took = started.elapsed();
+    assert!(
+        !stopped,
+        "a group that never sets the exited flag must report as still running"
+    );
+    assert!(
+        took >= Duration::from_millis(200),
+        "a partly delivered stop request must still spend the whole window; took {took:?}"
+    );
+}
+
+/// A child that already exited is reported as stopped at once, without waiting
+/// out the 3-second window.
+#[test]
+fn a_delivered_stop_request_reports_a_child_that_has_already_exited() {
+    let exited = AtomicBool::new(true);
+    let started = Instant::now();
+    let stopped = stopped_within_grace(StopRequest::Delivered, &exited, Duration::from_secs(3));
+    assert!(
+        stopped,
+        "a child whose exited flag is set must report as stopped"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "an already-exited child must not spend the grace window; took {:?}",
+        started.elapsed()
+    );
+}
+
 /// A sink that keeps everything it is handed, so a test can check exactly what
 /// reached the consumer.
 struct CountingSink {
