@@ -357,7 +357,8 @@ fn draw_paints_session_tab_and_mode_with_their_styles() {
     assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
 
     // Then the version badge `[v0.1.0] `: the same ramp color as the name,
-    // without its bold.
+    // without its bold. The expected text is spelled out here rather than taken
+    // from `version_badge`, so this pins the badge's shape.
     let badge: String = (3..3 + BADGE).map(|x| cell(&buf, x)).collect();
     assert_eq!(badge, format!("[v{KOSHI_VERSION}] "));
     assert_eq!(buf[(4, 0)].fg, Color::Rgb(0xd0, 0xa5, 0xff));
@@ -539,7 +540,7 @@ fn the_version_badge_is_kept_at_exactly_enough_room_and_dropped_one_cell_short()
     let frame = fixture.layout();
 
     let full = session_texts(frame, u16::MAX);
-    let badge_width = text_width(&format!("[v{KOSHI_VERSION}] "));
+    let badge_width = text_width(&version_badge());
     let exactly_enough = text_width(&full.name) + badge_width;
 
     assert!(

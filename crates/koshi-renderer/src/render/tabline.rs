@@ -239,6 +239,15 @@ fn right_block(frame: FrameLayout<'_>, theme: &Theme) -> Line<'static> {
 /// own `CARGO_PKG_VERSION` is the running binary's version.
 const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The `[v…] ` badge text the tabline paints, trailing space included.
+///
+/// The one place the badge's shape is written. A test that sizes a row around
+/// the badge measures this rather than rebuilding the string, so the row keeps
+/// the same room whatever the version string is.
+pub(crate) fn version_badge() -> String {
+    format!("[v{KOSHI_VERSION}] ")
+}
+
 /// The tabline's left-anchored block text: the session name, then the `[v…]`
 /// badge naming the koshi version that is running — ` my-session [v0.1.0] `.
 ///
@@ -248,7 +257,7 @@ const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// never the half-written ` s [v0.1.0`.
 fn session_texts(frame: FrameLayout<'_>, room: u16) -> SessionBlock {
     let name = format!(" {} ", frame.session.name);
-    let badge = format!("[v{KOSHI_VERSION}] ");
+    let badge = version_badge();
     let name_width = text_width(&name);
     let badge_width = text_width(&badge);
     if name_width.saturating_add(badge_width) <= room {
