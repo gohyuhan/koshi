@@ -33,9 +33,9 @@ fn version_number_packs_two_digits_per_component() {
 
 #[test]
 fn version_number_counts_an_unparseable_component_as_zero() {
-    // "0-alpha" fails to parse, so the patch digit contributes zero.
-    assert_eq!(version_number("0.1.0-alpha"), 100);
+    assert_eq!(version_number("1.x.2"), 10002);
     assert_eq!(version_number("dev"), 0);
+    assert_eq!(version_number(""), 0);
 }
 
 #[test]
@@ -53,10 +53,30 @@ fn da1_with_a_nonzero_parameter_gets_no_reply() {
     assert_eq!(replies_for(b"\x1b[1c"), b"");
 }
 
+/// The reply carries whatever version this build is, so the expected bytes are
+/// built from the same packing. What that packing produces is pinned
+/// independently by the `version_number_*` tests below.
 #[test]
 fn da2_reports_type_version_and_zero_cartridge() {
     let expected = format!("\x1b[>1;{};0c", version_number(env!("CARGO_PKG_VERSION")));
     assert_eq!(replies_for(b"\x1b[>c"), expected.as_bytes());
+}
+
+#[test]
+fn version_number_cuts_a_prerelease_or_build_suffix() {
+    // A prerelease packs as the version it precedes, keeping its patch digit:
+    // `0.2.0-pr.1` is 0.2.0, not a fourth component.
+    assert_eq!(version_number("0.2.0-pr.1"), 200);
+    assert_eq!(version_number("0.2.0-rc.10"), 200);
+    assert_eq!(version_number("0.2.0-nightly.20260806"), 200);
+    // A suffix carrying no dot, and one on a nonzero patch.
+    assert_eq!(version_number("0.1.0-alpha"), 100);
+    assert_eq!(version_number("0.1.2-alpha"), 102);
+    // A prerelease may itself hold `-`; the first one still starts the suffix.
+    assert_eq!(version_number("0.2.0-pre-release.1"), 200);
+    // Build metadata, with and without a prerelease before it.
+    assert_eq!(version_number("1.16.2+build.7"), 11602);
+    assert_eq!(version_number("1.16.2-rc.1+build.7"), 11602);
 }
 
 #[test]

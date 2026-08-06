@@ -624,6 +624,11 @@ use tabline::draw_tabline;
 // reads this one from here rather than keeping its own copy.
 pub(crate) use style::bar_style;
 pub(crate) use tabline::tabline_layout;
+// A test that sizes a row around the version badge measures this rather than
+// rebuilding the badge text. `tabline` calls it directly, so the re-export
+// carries it to the sibling test modules only.
+#[cfg(test)]
+pub(crate) use tabline::version_badge;
 
 #[cfg(test)]
 mod tests;

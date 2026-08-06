@@ -14,6 +14,17 @@ use koshi_pane::pane::state::PaneKind;
 
 use crate::snapshot::ViewerChrome;
 
+/// Cells the tabline's version badge takes, measured from the badge the tabline
+/// actually paints.
+///
+/// A test that needs room beside the badge asks for `badge_cols() + <room>`
+/// rather than a fixed total, so a longer version string moves the layout
+/// instead of failing the test. A semver version is ASCII, so counting
+/// characters counts display cells.
+fn badge_cols() -> u16 {
+    crate::render::version_badge().chars().count() as u16
+}
+
 /// A viewer with nothing hovered and its tab strip following the active tab.
 fn chrome() -> ViewerChrome {
     ViewerChrome::default()
@@ -222,9 +233,12 @@ fn tabs_hit_by_column() {
     // The session block and its version badge hold the left, then each 7-cell
     // tab ribbon with a one-cell gap between them. The columns come from the
     // same solve the paint uses, so the badge's width is never spelled out.
+    // The row is sized from the badge, so a longer version string widens the
+    // row instead of squeezing the tabs out of it.
+    let cols = badge_cols() + 31;
     let s = snap(
-        Size { cols: 40, rows: 10 },
-        Size { cols: 40, rows: 10 },
+        Size { cols, rows: 10 },
+        Size { cols, rows: 10 },
         &[],
         &[],
         &[(a, "a"), (b, "b")],
@@ -234,7 +248,7 @@ fn tabs_hit_by_column() {
         RatatuiRect {
             x: 0,
             y: 0,
-            width: 40,
+            width: cols,
             height: 1,
         },
     )
@@ -267,9 +281,12 @@ fn scroll_arrows_hit_test_to_their_targets() {
 
     let ids: Vec<TabId> = (0..8).map(|_| TabId::new()).collect();
     let tabs: Vec<(TabId, &str)> = ids.iter().map(|&id| (id, "tab")).collect();
+    // Sized from the version badge, so a longer version string widens the row
+    // instead of starving the tab strip the arrows are measured against.
+    let cols = badge_cols() + 21;
     let s = snap(
-        Size { cols: 30, rows: 8 },
-        Size { cols: 30, rows: 8 },
+        Size { cols, rows: 8 },
+        Size { cols, rows: 8 },
         &[],
         &[],
         &tabs,
@@ -283,7 +300,7 @@ fn scroll_arrows_hit_test_to_their_targets() {
     let area = RatatuiRect {
         x: 0,
         y: 0,
-        width: 30,
+        width: cols,
         height: 8,
     };
     let layout = tabline_layout(s.layout(peeking), area);

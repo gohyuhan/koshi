@@ -249,15 +249,16 @@ fn row_text(buf: &Buffer, y: u16) -> String {
 #[test]
 fn renders_tabline_pane_border_and_reserved_hint_bar() {
     let pane = PaneId::new();
+    let cols = badge_cols() + 31;
     let snap = build(
         "sess",
         &[("shell", true)],
-        &[(pane, rect(0, 1, 40, 6), true)],
+        &[(pane, rect(0, 1, cols, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 40, rows: 8 },
+        Size { cols, rows: 8 },
     );
-    let buf = render(&snap, 40, 8);
+    let buf = render(&snap, cols, 8);
 
     // Tabline (row 0): session block + tab on the left, mode tag right-aligned.
     let tabline = row_text(&buf, 0);
@@ -268,11 +269,11 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
         "tabline: {tabline:?}"
     );
 
-    // Pane border box on rows 1..=6, columns 0..=39.
+    // Pane border box on rows 1..=6, spanning the full width.
     assert_eq!(buf[(0, 1)].symbol(), "┌");
-    assert_eq!(buf[(39, 1)].symbol(), "┐");
+    assert_eq!(buf[(cols - 1, 1)].symbol(), "┐");
     assert_eq!(buf[(0, 6)].symbol(), "└");
-    assert_eq!(buf[(39, 6)].symbol(), "┘");
+    assert_eq!(buf[(cols - 1, 6)].symbol(), "┘");
     assert_eq!(buf[(1, 1)].symbol(), "─");
     assert_eq!(buf[(0, 2)].symbol(), "│");
 
@@ -316,15 +317,16 @@ fn hint_bar_paints_the_bottom_row_from_the_hints_it_is_given() {
 #[test]
 fn tabline_lists_tabs_with_active_marker() {
     let pane = PaneId::new();
+    let cols = badge_cols() + 51;
     let snap = build(
         "sess",
         &[("code", true), ("logs", false)],
-        &[(pane, rect(0, 1, 60, 6), true)],
+        &[(pane, rect(0, 1, cols, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 60, rows: 8 },
+        Size { cols, rows: 8 },
     );
-    let buf = render(&snap, 60, 8);
+    let buf = render(&snap, cols, 8);
 
     // The session block ` sess `, then the version badge, a gap, and each
     // padded tab.
@@ -357,6 +359,7 @@ fn tabline_lists_tabs_with_active_marker() {
 #[test]
 fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     let pane = PaneId::new();
+    let cols = badge_cols() + 31;
     let snap = build(
         "sess",
         &[
@@ -366,12 +369,12 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
             ("delta", false),
             ("echo", false),
         ],
-        &[(pane, rect(0, 1, 40, 6), true)],
+        &[(pane, rect(0, 1, cols, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 40, rows: 8 },
+        Size { cols, rows: 8 },
     );
-    let buf = render(&snap, 40, 8);
+    let buf = render(&snap, cols, 8);
     let tabline = row_text(&buf, 0);
 
     // The session block and the mode tag always render whole. The active tab
@@ -386,6 +389,17 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     assert!(tabline.contains('▶'), "tabline: {tabline:?}");
     assert!(!tabline.contains('◀'), "no tabs hidden left: {tabline:?}");
     assert!(!tabline.contains("#5  echo"), "tabline: {tabline:?}");
+}
+
+/// Cells the tabline's version badge takes, measured from the badge the tabline
+/// actually paints.
+///
+/// A test that needs room beside the badge asks for `badge_cols() + <room>`
+/// rather than a fixed total, so a longer version string moves the layout
+/// instead of failing the test. A semver version is ASCII, so counting
+/// characters counts display cells.
+fn badge_cols() -> u16 {
+    crate::render::version_badge().chars().count() as u16
 }
 
 /// Overflowing tabs, offset unset: the window scrolls to reveal the active tab
@@ -405,12 +419,15 @@ fn tabline_follows_focus_into_the_overflow() {
             ("t6", false),
             ("t7", false),
         ],
-        &[(pane, rect(0, 1, 30, 6), true)],
+        &[(pane, rect(0, 1, badge_cols() + 21, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 30, rows: 8 },
+        Size {
+            cols: badge_cols() + 21,
+            rows: 8,
+        },
     );
-    let tabline = row_text(&render(&snap, 30, 8), 0);
+    let tabline = row_text(&render(&snap, badge_cols() + 21, 8), 0);
 
     assert!(tabline.contains("t5"), "active tab revealed: {tabline:?}");
     assert!(
@@ -445,16 +462,19 @@ fn tabline_peek_offset_ignores_the_active_tab() {
             ("t6", false),
             ("t7", false),
         ],
-        &[(pane, rect(0, 1, 30, 6), true)],
+        &[(pane, rect(0, 1, badge_cols() + 21, 6), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 30, rows: 8 },
+        Size {
+            cols: badge_cols() + 21,
+            rows: 8,
+        },
     );
     let peeking = ViewerChrome {
         hovered_pane: None,
         tabline_offset: Some(0),
     };
-    let tabline = row_text(&render_peeking(&snap, peeking, 30, 8), 0);
+    let tabline = row_text(&render_peeking(&snap, peeking, badge_cols() + 21, 8), 0);
 
     assert!(
         tabline.contains("t0"),
@@ -609,7 +629,10 @@ fn reused_buffer_is_blanked_before_painting() {
         &[(pane, rect(0, 1, 20, 4), true)],
         Some(pane),
         LockMode::Normal,
-        Size { cols: 24, rows: 6 },
+        Size {
+            cols: badge_cols() + 15,
+            rows: 6,
+        },
     );
 
     // A buffer reused across frames holds the previous frame's cells; simulate
@@ -617,7 +640,7 @@ fn reused_buffer_is_blanked_before_painting() {
     let area = RatatuiRect {
         x: 0,
         y: 0,
-        width: 24,
+        width: badge_cols() + 15,
         height: 6,
     };
     let mut buf = Buffer::empty(area);
@@ -638,9 +661,9 @@ fn reused_buffer_is_blanked_before_painting() {
     );
 
     // Tabline gap between the left tab list and the right status: blanked.
-    assert_eq!(buf[(12, 0)].symbol(), " ");
+    assert_eq!(buf[(badge_cols() + 3, 0)].symbol(), " ");
     // A cell outside every pane box: blanked, not the stale glyph.
-    assert_eq!(buf[(22, 2)].symbol(), " ");
+    assert_eq!(buf[(badge_cols() + 13, 2)].symbol(), " ");
     // Reserved hint row (bottom): fully blank.
     assert!(row_text(&buf, 5).chars().all(|c| c == ' '));
 }
@@ -1589,12 +1612,24 @@ fn a_custom_theme_recolors_the_chrome() {
         "sess",
         &[("shell", true), ("logs", false)],
         &[
-            (left, rect(0, 1, 20, 6), true),
-            (right, rect(20, 1, 20, 6), true),
+            (left, rect(0, 1, (badge_cols() + 31) / 2, 6), true),
+            (
+                right,
+                rect(
+                    (badge_cols() + 31) / 2,
+                    1,
+                    badge_cols() + 31 - (badge_cols() + 31) / 2,
+                    6,
+                ),
+                true,
+            ),
         ],
         Some(left),
         LockMode::Normal,
-        Size { cols: 40, rows: 8 },
+        Size {
+            cols: badge_cols() + 31,
+            rows: 8,
+        },
     );
     let theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
@@ -1603,17 +1638,18 @@ fn a_custom_theme_recolors_the_chrome() {
         border_unfocused: Color::Rgb(0x11, 0x22, 0x33),
         ..Theme::default()
     };
-    let buf = render_with(&snap, &theme, 40, 8);
+    let cols = badge_cols() + 31;
+    let buf = render_with(&snap, &theme, cols, 8);
 
     // Borders take the theme's border colors.
     assert_eq!(buf[(0, 1)].fg, Color::Rgb(0xff, 0x88, 0x00));
-    assert_eq!(buf[(20, 1)].fg, Color::Rgb(0x11, 0x22, 0x33));
+    assert_eq!(buf[(cols / 2, 1)].fg, Color::Rgb(0x11, 0x22, 0x33));
     // The session name takes the custom ramp's start end, the mode tag its
     // other end.
     assert_eq!(buf[(1, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
-    assert_eq!(buf[(38, 0)].fg, Color::Rgb(0x00, 0x00, 0xff));
+    assert_eq!(buf[(cols - 2, 0)].fg, Color::Rgb(0x00, 0x00, 0xff));
     // The first tab's ribbon sits on the custom ramp's start stop.
-    let tab_x = (0..40)
+    let tab_x = (0..cols)
         .find(|&x| buf[(x, 0)].symbol() == "#")
         .expect("tab marker drawn");
     assert_eq!(buf[(tab_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));

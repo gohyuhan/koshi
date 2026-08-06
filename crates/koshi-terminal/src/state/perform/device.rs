@@ -29,10 +29,18 @@ fn mode_flag(on: bool) -> u16 {
 /// decimal digits per component: `MAJOR * 10_000 + MINOR * 100 + PATCH`.
 /// A component that fails to parse counts as `0`.
 ///
-/// `"1.16.2"` → `11602`.
+/// A prerelease or build suffix is cut before packing, so a prerelease reports
+/// the version it precedes. `MAJOR.MINOR.PATCH` holds only digits and dots, so
+/// the first `-` or `+` starts the suffix.
+///
+/// `"1.16.2"` → `11602`; `"0.2.0-pr.1"` → `200`.
 fn version_number(version: &str) -> u32 {
+    let core = match version.find(['-', '+']) {
+        Some(suffix_at) => &version[..suffix_at],
+        None => version,
+    };
     let mut number: u32 = 0;
-    for part in version.split('.') {
+    for part in core.split('.') {
         number = number
             .saturating_mul(100)
             .saturating_add(part.parse::<u32>().unwrap_or(0));
