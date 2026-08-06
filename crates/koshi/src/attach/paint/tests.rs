@@ -244,8 +244,8 @@ fn a_highlight_scrolled_entirely_off_screen_arrives_as_no_highlight() {
 }
 
 /// The session decides this viewer's lock mode and whether mouse-select is on,
-/// so a painted frame is where both are read from, and the frame handed back is
-/// what the next mouse event is placed against.
+/// so a painted frame is where both are read from, and the same frame cut down
+/// to [`MouseFrame`] is what the next mouse event is placed against.
 #[test]
 fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     let (_events_tx, events_rx) = std::sync::mpsc::sync_channel(8);
@@ -255,8 +255,8 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
         events_rx,
         koshi_observability::cleanup::TerminalCleanupGuard::new(),
     );
-    // A fresh viewer is unlocked with mouse-select off; the frame carries both
-    // the other way, so neither assertion below can pass by coincidence.
+    // A fresh viewer is unlocked with mouse-select off. The frame carries both
+    // the other way.
     assert_eq!(client.lock_mode(), LockMode::Normal);
     assert!(!client.mouse_select());
 
@@ -264,10 +264,12 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     let active_tab = sent.client.active_tab;
     let focused_pane = sent.client.focused_pane;
 
-    let frame = super::super::adopt_frame(&mut client, sent);
+    super::super::adopt_frame(&mut client, &sent);
 
     assert_eq!(client.lock_mode(), LockMode::Locked);
     assert!(client.mouse_select());
+
+    let frame = koshi_renderer::snapshot::MouseFrame::from(sent);
     assert_eq!(frame.client.active_tab, active_tab);
     assert_eq!(frame.client.focused_pane, focused_pane);
 }
