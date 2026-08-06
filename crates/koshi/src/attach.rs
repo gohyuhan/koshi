@@ -39,9 +39,10 @@
 //!
 //! The keymap, the colors and the hint bar are this terminal's own, read from
 //! this user's config files. So are the pane under the pointer, the tab strip's
-//! position, the input mode the hint bar lists, and the sequence being typed. A
-//! loop pass that moves one of those and receives no frame draws the frame
-//! already on the screen again, with the new chrome.
+//! position, the input mode the hint bar lists, and the sequence being typed.
+//! The session reports none of them, so every pass ends by checking them: one
+//! that moved any of them draws the frame on the screen again, with the new
+//! chrome.
 
 use std::io;
 use std::io::Write;
@@ -146,8 +147,8 @@ struct SentBorderMove {
 /// frame the session sent: the pane under the pointer, where the tab strip is
 /// scrolled, the input mode, and the sequence being typed.
 ///
-/// The loop reads it before each pass and again after. When the two differ, it
-/// draws the frame already on the screen again.
+/// [`Screen`] holds the value the frame on the screen was drawn with, and
+/// compares it against a fresh read at the end of every loop pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViewerPaint {
     /// The pane under the pointer and where the tab strip sits, for the tab the
@@ -173,6 +174,98 @@ impl ViewerPaint {
             mode: client.lock_mode(),
             pending: client.pending_sequence().cloned(),
         }
+    }
+}
+
+/// This terminal's screen: the frame drawn on it, and what the viewer
+/// contributed to that frame.
+///
+/// Every draw goes through here, so one place decides whether the screen is out
+/// of date. [`draw`](Self::draw) puts a frame the session sent on the screen.
+/// [`refresh`](Self::refresh) ends every loop pass and draws the frame already
+/// there again when the viewer has moved under it — which is what shows a
+/// change no frame reports, such as an opened key sequence.
+struct Screen<B: Backend> {
+    /// The ratatui terminal the renderer paints into.
+    terminal: Terminal<B>,
+    /// The window title last written to the outer terminal.
+    last_title: String,
+    /// The cursor style last written to the outer terminal.
+    last_cursor: Option<CursorStyle>,
+    /// The frame last drawn, kept so a viewer-only change can draw it again.
+    /// `None` until the first draw.
+    last_painted: Option<Box<PaintedFrame>>,
+    /// What the viewer contributed to the frame on the screen. `None` until the
+    /// first draw.
+    shown: Option<ViewerPaint>,
+}
+
+impl<B: Backend> Screen<B> {
+    /// A screen that has drawn nothing yet.
+    fn new(terminal: Terminal<B>) -> Self {
+        Screen {
+            terminal,
+            last_title: String::new(),
+            last_cursor: None,
+            last_painted: None,
+            shown: None,
+        }
+    }
+
+    /// Draw one frame the session sent, and hand back the frame a mouse event
+    /// is placed against.
+    ///
+    /// It runs [`adopt_frame`] before it paints, so the paint reads the mode the
+    /// frame reports: a frame carrying `LockMode::Locked` draws the locked
+    /// mode's hint bar on that same frame.
+    ///
+    /// The returned [`MouseFrame`] holds where the surfaces sat and what the
+    /// cells under them were, which is what the next mouse event is answered
+    /// from.
+    fn draw(&mut self, client: &mut Client, frame: Box<PaintedFrame>) -> MouseFrame {
+        let snapshot = to_snapshot(&frame);
+        adopt_frame(client, &snapshot);
+        self.paint(client, &snapshot);
+        self.shown = Some(ViewerPaint::read(client, snapshot.client.active_tab));
+        self.last_painted = Some(frame);
+        MouseFrame::from(snapshot)
+    }
+
+    /// Draw the frame already on the screen again when the viewer has moved
+    /// under it: a new hovered pane, a scrolled tab strip, another input mode,
+    /// or a key sequence opened or closed.
+    ///
+    /// `active_tab` is the tab that frame shows, and `None` before any frame has
+    /// been drawn. A viewer that has not moved is left alone, so an idle pass
+    /// draws nothing.
+    fn refresh(&mut self, client: &Client, active_tab: Option<TabId>) {
+        let Some(active_tab) = active_tab else {
+            return;
+        };
+        let current = Some(ViewerPaint::read(client, active_tab));
+        if current == self.shown {
+            return;
+        }
+        let Some(snapshot) = self.last_painted.as_ref().map(|frame| to_snapshot(frame)) else {
+            return;
+        };
+        self.paint(client, &snapshot);
+        self.shown = current;
+    }
+
+    /// Paint `snapshot` with [`app::paint_frame`].
+    ///
+    /// A draw that fails is logged; the loop keeps running and the next frame
+    /// repaints the whole viewport.
+    fn paint(&mut self, client: &Client, snapshot: &RenderSnapshot) {
+        let _ = app::paint_frame(
+            &mut self.terminal,
+            client,
+            snapshot,
+            &mut self.last_title,
+            &mut self.last_cursor,
+        )
+        .inspect_err(|error| tracing::warn!(%error, "could not paint the frame"));
     }
 }
 
@@ -366,7 +459,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
     // buffer. A terminal that reports no size — which is what a `koshi
     // attach` with redirected output finds — gets a buffer of
     // [`FALLBACK_VIEWPORT`], the size this client told the session it has.
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout())).unwrap_or_else(|error| {
+    let terminal = Terminal::new(CrosstermBackend::new(io::stdout())).unwrap_or_else(|error| {
         tracing::warn!(%error, "could not size the output terminal");
         Terminal::with_options(
             CrosstermBackend::new(io::stdout()),
@@ -421,10 +514,8 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
         registry: ActionRegistry::new(),
         next_request_id: FIRST_LOOP_REQUEST_ID,
     };
-    let mut last_title = String::new();
-    let mut last_cursor = None;
+    let mut screen = Screen::new(terminal);
     let mut last_frame: Option<MouseFrame> = None;
-    let mut last_painted: Option<Box<PaintedFrame>> = None;
     // What the viewer has decided and not yet written. The pass that decided it
     // ends by writing all of it, so this holds one pass's worth: the events that
     // arrived together. It is bounded by [`MAX_PENDING_MOUSE`], which every path
@@ -459,14 +550,6 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
             batch.push(received);
         }
 
-        // What the frame on the screen was drawn from on this viewer's side,
-        // read before anything in the pass can move it. `None` until the first
-        // frame: nothing is on the screen to draw again.
-        let before = last_frame
-            .as_ref()
-            .map(|frame| ViewerPaint::read(&client, frame.client.active_tab));
-        // Set once the pass draws a frame the session sent.
-        let mut painted = false;
         let mut ended = None;
         for received in batch {
             match received {
@@ -477,15 +560,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
                     }
                     match frame {
                         Ok(SessionEvent::Painted { frame }) => {
-                            last_frame = Some(draw_frame(
-                                &mut terminal,
-                                &mut client,
-                                to_snapshot(&frame),
-                                &mut last_title,
-                                &mut last_cursor,
-                            ));
-                            last_painted = Some(frame);
-                            painted = true;
+                            last_frame = Some(screen.draw(&mut client, frame));
                         }
                         Ok(SessionEvent::MouseAnswer {
                             request_id,
@@ -557,32 +632,22 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
                 client.expire_mouse_scroll(Instant::now(), frame),
             );
         }
-        // A pass that moved any part of `ViewerPaint` and drew no frame draws
-        // the frame the session last sent again, with the new chrome.
-        let after = last_frame
-            .as_ref()
-            .map(|frame| ViewerPaint::read(&client, frame.client.active_tab));
-        if !painted && after != before {
-            if let Some(frame) = last_painted.as_ref() {
-                let snapshot = to_snapshot(frame);
-                paint(
-                    &mut terminal,
-                    &client,
-                    &snapshot,
-                    &mut last_title,
-                    &mut last_cursor,
-                );
-            }
-        }
+        // Every pass ends here, whether or not it drew a frame: the events it
+        // handled may have moved the viewer after that frame was drawn.
+        screen.refresh(
+            &client,
+            last_frame.as_ref().map(|frame| frame.client.active_tab),
+        );
         flush_round(&mut uplink, &mut sent, &mut pending);
     };
 
     // Restore the terminal before anything is printed, so the message lands on
     // the shell's own screen rather than the alternate one, and nothing follows
-    // it. Dropping the ratatui terminal shows the cursor a painted frame hid,
-    // which belongs on the alternate screen; dropping the client then runs the
-    // cleanup guard it holds, which leaves that screen.
-    drop(terminal);
+    // it. Dropping the screen drops the ratatui terminal it holds, which shows
+    // the cursor a painted frame hid, and that cursor belongs on the alternate
+    // screen; dropping the client then runs the cleanup guard it holds, which
+    // leaves that screen.
+    drop(screen);
     drop(client);
     report(ending, session_id)
 }
@@ -1261,42 +1326,6 @@ fn adopt_frame(client: &mut Client, snapshot: &RenderSnapshot) {
     client.set_lock_mode(snapshot.client.lock_mode);
     client.note_active_tab(snapshot.client.active_tab);
     client.set_mouse_select(snapshot.client.mouse_select);
-}
-
-/// Draw one frame the session sent, and hand back the frame a mouse event is
-/// placed against.
-///
-/// It runs [`adopt_frame`] first and paints second, so the paint reads the mode
-/// the frame reports: a frame carrying `LockMode::Locked` draws the locked
-/// mode's hint bar on that same frame.
-///
-/// The returned [`MouseFrame`] holds where the surfaces sat and what the cells
-/// under them were, which is what the next mouse event is answered from.
-fn draw_frame<B: Backend>(
-    terminal: &mut Terminal<B>,
-    client: &mut Client,
-    snapshot: RenderSnapshot,
-    last_title: &mut String,
-    last_cursor: &mut Option<CursorStyle>,
-) -> MouseFrame {
-    adopt_frame(client, &snapshot);
-    paint(terminal, client, &snapshot, last_title, last_cursor);
-    MouseFrame::from(snapshot)
-}
-
-/// Paint one frame the session sent, with [`app::paint_frame`].
-///
-/// A draw that fails is logged rather than ending the loop, and the next frame
-/// repaints the whole viewport.
-fn paint<B: Backend>(
-    terminal: &mut Terminal<B>,
-    client: &Client,
-    snapshot: &RenderSnapshot,
-    last_title: &mut String,
-    last_cursor: &mut Option<CursorStyle>,
-) {
-    let _ = app::paint_frame(terminal, client, snapshot, last_title, last_cursor)
-        .inspect_err(|error| tracing::warn!(%error, "could not paint the frame"));
 }
 
 /// Classify one frame read from the event stream. `None` keeps the loop
