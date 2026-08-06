@@ -159,7 +159,9 @@ attached, the session keeps running; only an empty session is ended.
 
 Ending it asks every program in the session to stop, waits up to three seconds,
 then kills whatever has not exited. A shell writes its history and an editor
-writes its swap file in that window. `koshi kill-session` skips the wait.
+writes its swap file in that window. On Windows a program cannot be asked to
+stop, so there is no window and everything is killed at once.
+`koshi kill-session` skips the wait.
 
 The session reads this, not each terminal: the session server takes the answer
 from the `koshi.kdl` it read when the session started, so a terminal that

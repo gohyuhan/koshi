@@ -446,7 +446,8 @@ impl Server {
     /// Mark the process for teardown, keeping the graceful window: the event
     /// loop exits as above, and teardown asks each pane's process group to stop
     /// and waits up to [`GRACEFUL_TIMEOUT_DURATION`](koshi_core::constant::GRACEFUL_TIMEOUT_DURATION)
-    /// before group-killing it.
+    /// before group-killing it; a stop request that cannot be delivered goes
+    /// straight to the group-kill.
     pub(crate) fn request_graceful_quit(&mut self) {
         self.quit_requested = true;
     }

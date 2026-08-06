@@ -189,14 +189,15 @@ impl Server {
     ///
     /// The pane's close policy picks how the child dies: `--force` overrides
     /// it with an immediate force-kill, `Graceful` requests a stop and
-    /// escalates after its grace window, and `ConfirmIfBusy` proceeds only for
+    /// escalates after its grace window — or at once when the stop request
+    /// cannot be delivered — and `ConfirmIfBusy` proceeds only for
     /// a pane whose child already exited, rejecting otherwise with a hint at
     /// `--force`. The removal itself is the shared cascade behind shell-exit
     /// and user close: registry drop, layout collapse, per-client focus
     /// repair, and — when the last pane of the last tab goes — tab close and
     /// session quit. The kill runs on a detached thread because a graceful
-    /// kill sleeps out its grace window, and the dispatcher thread must never
-    /// stall.
+    /// kill can sleep out its grace window, and the dispatcher thread must
+    /// never stall.
     ///
     /// After the removal the survivors reflow: the tab re-solves against its
     /// viewport and each live PTY whose size changed is resized, one
@@ -274,7 +275,7 @@ impl Server {
             &mut events,
         );
 
-        // Kill the child off-thread: a graceful kill sleeps out its grace
+        // Kill the child off-thread: a graceful kill can sleep out its grace
         // window, and the dispatcher must keep draining. The kill also purges
         // the backend's own entry for the pane, even when the child already
         // exited.

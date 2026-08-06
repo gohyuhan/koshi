@@ -9,11 +9,14 @@
 //!
 //! `force` targets only the child process (`kill(pid)` / `TerminateProcess`);
 //! `tree` targets the whole group (`killpg` / `TerminateJobObject`). The stop
-//! requests split the same way: `request_stop` asks the child to exit
-//! (`SIGTERM` / Ctrl-Break), `request_stop_tree` asks the whole group.
+//! requests split the same way: `request_stop` asks the child to exit,
+//! `request_stop_tree` asks the whole group. Both answer with a
+//! [`crate::kill::StopRequest`], which says whether anything received the
+//! request.
 
 #[cfg(unix)]
 use nix::{
+    errno::Errno,
     sys::signal::{kill, killpg, Signal},
     unistd::Pid,
 };
@@ -22,12 +25,25 @@ use std::os::windows::io::RawHandle;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, DuplicateHandle, HANDLE},
-    System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
     System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
     System::Threading::{GetCurrentProcess, TerminateProcess, PROCESS_TERMINATE},
 };
 
 use crate::error::PtyError;
+
+/// What became of a request asking a child to exit on its own.
+///
+/// The caller spends a grace window only when something can act on the request,
+/// so `Unknown` is grouped with `Delivered` rather than with `NotDelivered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRequest {
+    /// The target received the request.
+    Delivered,
+    /// Nothing received the request.
+    NotDelivered,
+    /// Part of the target may have received the request.
+    Unknown,
+}
 
 /// Terminates a spawned child by PID and process group.
 ///
@@ -70,14 +86,27 @@ impl PtyChildKillControl {
     }
 
     /// SIGTERM the child, asking it to exit on its own.
-    pub fn request_stop(&self) -> Result<(), PtyError> {
-        self.signal(false, Signal::SIGTERM)
+    ///
+    /// Any error means the signal did not arrive: `ESRCH` when the child is
+    /// already gone, `EPERM` when this process may not signal it.
+    pub fn request_stop(&self) -> StopRequest {
+        match kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+            Ok(()) => StopRequest::Delivered,
+            Err(_) => StopRequest::NotDelivered,
+        }
     }
 
     /// SIGTERM the child's whole process group, asking every member to exit on
     /// its own.
-    pub fn request_stop_tree(&self) -> Result<(), PtyError> {
-        self.signal(true, Signal::SIGTERM)
+    ///
+    /// `EPERM` reports that at least one member could not be signalled, so the
+    /// remaining members may still have received the signal.
+    pub fn request_stop_tree(&self) -> StopRequest {
+        match killpg(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+            Ok(()) => StopRequest::Delivered,
+            Err(Errno::EPERM) => StopRequest::Unknown,
+            Err(_) => StopRequest::NotDelivered,
+        }
     }
 
     /// The PID of the child process this control targets.
@@ -215,32 +244,23 @@ impl PtyChildKillControl {
         Ok(())
     }
 
-    /// Best-effort Ctrl-Break to the child; callers escalate to `force` if it
-    /// does not exit.
+    /// Reports that the child cannot be asked to exit on its own; callers go
+    /// straight to [`force`](Self::force).
     ///
-    /// NOTE: `GenerateConsoleCtrlEvent` targets a process group, and a child is
-    /// its own group only when spawned with `CREATE_NEW_PROCESS_GROUP` — which
-    /// portable-pty's ConPTY spawn does not set and `CommandBuilder` does not
-    /// expose. So for these children the call usually does nothing and graceful
-    /// effectively becomes wait-then-`force`. (No POSIX signals on Windows;
-    /// fixing this needs control over `CreateProcess` we don't have here.)
-    pub fn request_stop(&self) -> Result<(), PtyError> {
-        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid) } == 0 {
-            return Err(PtyError::Signal {
-                detail: "GenerateConsoleCtrlEvent failed".to_string(),
-            });
-        }
-        Ok(())
+    /// A console control signal reaches only a process group created by the
+    /// `CREATE_NEW_PROCESS_GROUP` flag, which portable-pty's ConPTY spawn does
+    /// not set, and only processes sharing this process's console, which a
+    /// pseudoconsole child does not.
+    pub fn request_stop(&self) -> StopRequest {
+        StopRequest::NotDelivered
     }
 
-    /// Best-effort Ctrl-Break to the child's process group; callers escalate to
-    /// [`tree`](Self::tree) if members do not exit.
+    /// Reports that the child's process group cannot be asked to exit on its
+    /// own; callers go straight to [`tree`](Self::tree).
     ///
-    /// `GenerateConsoleCtrlEvent` already addresses a process group, so this
-    /// shares [`request_stop`](Self::request_stop)'s delivery — including its
-    /// NOTE about children not spawned with `CREATE_NEW_PROCESS_GROUP`.
-    pub fn request_stop_tree(&self) -> Result<(), PtyError> {
-        self.request_stop()
+    /// Shares [`request_stop`](Self::request_stop)'s reason.
+    pub fn request_stop_tree(&self) -> StopRequest {
+        StopRequest::NotDelivered
     }
 
     /// The PID of the child process this control targets.

@@ -162,7 +162,7 @@ impl Server {
     /// removal itself is [`tab_ops::close_tab`]: pane records drop, the tab
     /// goes, viewers move to the nearest surviving tab, and closing the last
     /// tab quits the session. The kills run on one detached thread per pane —
-    /// a graceful kill sleeps out its grace window, so every child gets its
+    /// a graceful kill can sleep out its grace window, so every child gets its
     /// stop request immediately and the dispatcher never stalls.
     ///
     /// After the removal, the tab the displaced viewers landed on reflows to
@@ -225,8 +225,8 @@ impl Server {
             self.reflow_tab_if_viewed(backend.as_ref(), session_id, destination, &mut events);
         }
 
-        // Kill the children off-thread: a graceful kill sleeps out its grace
-        // window, and the dispatcher must keep draining. One thread per pane
+        // Kill the children off-thread: a graceful kill can sleep out its
+        // grace window, and the dispatcher must keep draining. One thread per pane
         // so every child receives its stop request immediately; each kill
         // also purges the backend's own entry for its pane.
         for (pane_id, kill_policy) in kills {

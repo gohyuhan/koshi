@@ -11,7 +11,7 @@
 #[cfg(unix)]
 mod unix {
     use crate::error::PtyError;
-    use crate::kill::PtyChildKillControl;
+    use crate::kill::{PtyChildKillControl, StopRequest};
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
@@ -35,13 +35,40 @@ mod unix {
         let mut child = spawn_sleeper();
         let control = PtyChildKillControl::new(child.id());
 
-        control.request_stop().expect("SIGTERM delivered");
+        assert_eq!(control.request_stop(), StopRequest::Delivered);
 
         let status = child.wait().expect("reap child");
         // SIGTERM = 15; sleep does not catch it, so it dies by that signal and
         // carries no exit code.
         assert_eq!(status.signal(), Some(15));
         assert_eq!(status.code(), None);
+    }
+
+    #[test]
+    fn a_stop_request_to_a_reaped_child_reports_nothing_received_it() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        child.kill().expect("kill the child");
+        child.wait().expect("reap child");
+
+        // The pid is gone, so `kill` answers ESRCH and nothing was signalled.
+        let control = PtyChildKillControl::new(pid);
+        assert_eq!(control.request_stop(), StopRequest::NotDelivered);
+    }
+
+    #[test]
+    fn a_group_stop_request_that_finds_no_group_reports_nothing_received_it() {
+        let mut child = spawn_sleeper();
+        let control = PtyChildKillControl::new(child.id());
+
+        // The child is not a process-group leader, so no group carries its pid
+        // and `killpg` answers ESRCH. It signals nothing, so the child is still
+        // alive to clean up below.
+        assert_eq!(control.request_stop_tree(), StopRequest::NotDelivered);
+
+        control.force().expect("clean up the still-live child");
+        let status = child.wait().expect("reap child");
+        assert_eq!(status.signal(), Some(9));
     }
 
     #[test]
