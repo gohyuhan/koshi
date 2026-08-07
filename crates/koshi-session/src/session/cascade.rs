@@ -129,13 +129,10 @@ pub fn remove_pane_cascade(
                     .clients
                     .list_attached()
                     .filter(|client| client.focused_pane(tab_id) == Some(pane_id))
-                    .map(|client| client.id())
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|client_id| {
+                    .map(|client| {
                         let verdict =
                             repair_focus(tab, &session.panes, candidates.clone(), empty_tab_policy);
-                        (client_id, verdict)
+                        (client.id(), verdict)
                     })
                     .collect()
             };

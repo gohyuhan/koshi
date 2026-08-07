@@ -6,6 +6,7 @@
 //! `Serialize`: a redacted map is dumped through `Display`.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 /// What replaces a hidden value in any text output. Every type that withholds
 /// a secret prints this, so redacted output looks the same wherever it appears.
@@ -99,30 +100,21 @@ pub fn redact_env_map(env: &BTreeMap<String, String>) -> BTreeMap<String, Redact
 /// Replace every occurrence of each marker's literal with `***`. Used to scrub
 /// known secret values out of text before it is logged or dumped.
 pub fn redact_string(input: &str, markers: &[Marker]) -> String {
-    // A byte range of `input` that holds a secret and must become `***`.
-    struct Span {
-        start: usize,
-        end: usize,
-    }
-
-    // 1. Find every span a secret covers.
-    let mut spans: Vec<Span> = Vec::new();
+    // 1. Find every byte range of `input` a secret covers.
+    let mut spans: Vec<Range<usize>> = Vec::new();
     for marker in markers {
         let secret = marker.0.as_str();
         if secret.is_empty() {
             continue;
         }
         for (start, found) in input.match_indices(secret) {
-            spans.push(Span {
-                start,
-                end: start + found.len(),
-            });
+            spans.push(start..start + found.len());
         }
     }
 
     // 2. Merge overlapping spans, so an overlap is redacted once as a whole.
     spans.sort_by_key(|span| span.start);
-    let mut merged: Vec<Span> = Vec::new();
+    let mut merged: Vec<Range<usize>> = Vec::new();
     for span in spans {
         if let Some(last) = merged.last_mut() {
             if span.start <= last.end {

@@ -24,8 +24,8 @@ const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// Only a [`RowEnd::Hard`] row is trimmed. A [`RowEnd::Soft`] row wrapped
 /// because it filled the width, so every cell is content; a
 /// [`RowEnd::SoftWide`] row's final blank is the spacer standing in for the
-/// wide glyph that begins the next row. Shortening either would change where a
-/// reflow re-joins the logical line.
+/// wide glyph that begins the next row. Both keep every cell, so their length
+/// still marks where a reflow re-joins the logical line.
 ///
 /// A styled blank — a background-colored prompt segment, say — is not a
 /// default blank and is kept, so its color survives.

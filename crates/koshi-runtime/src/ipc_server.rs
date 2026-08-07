@@ -143,8 +143,7 @@ impl IpcServer {
     /// reaches an explicit shutdown — a panic unwinding the server — still
     /// withdraws the files.
     pub fn shutdown(self) {
-        // Teardown lives in `Drop`, so consuming `self` is the whole job;
-        // the method exists so call sites read as intent.
+        // Teardown lives in `Drop`, so consuming `self` is the whole job.
         drop(self);
     }
 

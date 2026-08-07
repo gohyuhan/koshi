@@ -475,11 +475,8 @@ impl Server {
             };
         };
 
-        let mut scope = TransactionScope::new();
-        for event in self.handle_client_detach(client_id) {
-            scope.emit(event);
-        }
-        scope.commit(command_id, &mut self.event_bus)
+        let events = self.handle_client_detach(client_id);
+        Self::commit_events(&mut self.event_bus, command_id, events)
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session
@@ -498,11 +495,8 @@ impl Server {
         let session = Self::require_session(self.acting_session(source)?)?;
         let client_id = Self::resolve_target_client(args.client, source, session)?;
 
-        let mut scope = TransactionScope::new();
-        for event in self.handle_client_detach(client_id) {
-            scope.emit(event);
-        }
-        Ok(scope.commit(command_id, &mut self.event_bus))
+        let events = self.handle_client_detach(client_id);
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// Handle [`Command::SwitchSession`]: move one client out of this session
@@ -577,13 +571,11 @@ impl Server {
             .map(|client| client.id())
             .collect();
 
-        let mut scope = TransactionScope::new();
+        let mut events = Vec::new();
         for client_id in clients {
-            for event in self.handle_client_detach(client_id) {
-                scope.emit(event);
-            }
+            events.extend(self.handle_client_detach(client_id));
         }
-        Ok(scope.commit(command_id, &mut self.event_bus))
+        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }
 
     /// The session's only attached client, or a rejection saying why — none
@@ -679,10 +671,9 @@ impl Server {
             return Vec::new();
         };
 
-        // Merge by pane id, not by position: a pane's smallest rect across the
-        // viewers that draw it. Keying on the id means the merge cannot depend on
-        // two different solves listing their panes in the same order, so a change
-        // to either traversal can never quietly hand a pane another pane's size.
+        // Merge by pane id: a pane's smallest rect across the viewers that draw
+        // it. The merge keys on the id alone, so it holds however each solve
+        // orders its panes.
         let mut smallest: HashMap<PaneId, Option<Rect>> = HashMap::new();
         for viewer in &per_viewer {
             for &(pane_id, content) in viewer {

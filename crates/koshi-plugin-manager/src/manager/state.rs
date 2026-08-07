@@ -1,1 +1,1 @@
-//! State model. Placeholder per standard source layout.
+//! State model. This module is empty.

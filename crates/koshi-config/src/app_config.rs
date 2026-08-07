@@ -479,7 +479,7 @@ fn value_scrollback(node: &KdlNode) -> Result<usize, String> {
 
 /// Reads the node's single value as a split [`Direction`].
 fn value_direction(node: &KdlNode) -> Result<Direction, String> {
-    match value_string(node)?.as_str() {
+    match value_string(node)? {
         "left" => Ok(Direction::Left),
         "right" => Ok(Direction::Right),
         "up" => Ok(Direction::Up),
@@ -491,7 +491,7 @@ fn value_direction(node: &KdlNode) -> Result<Direction, String> {
 /// Reads the node's single value as a [`LogLevel`] — the lowest severity that
 /// gets written to the log file.
 fn value_log_level(node: &KdlNode) -> Result<LogLevel, String> {
-    match value_string(node)?.as_str() {
+    match value_string(node)? {
         "info" => Ok(LogLevel::Info),
         "warning" => Ok(LogLevel::Warning),
         "error" => Ok(LogLevel::Error),
@@ -502,7 +502,7 @@ fn value_log_level(node: &KdlNode) -> Result<LogLevel, String> {
 /// Reads the node's single value as a [`LogFormat`] — how each written line is
 /// rendered.
 fn value_log_format(node: &KdlNode) -> Result<LogFormat, String> {
-    match value_string(node)?.as_str() {
+    match value_string(node)? {
         "pretty" => Ok(LogFormat::Pretty),
         "json" => Ok(LogFormat::Json),
         _ => Err(r#"expected "pretty" or "json""#.to_string()),
@@ -511,7 +511,7 @@ fn value_log_format(node: &KdlNode) -> Result<LogFormat, String> {
 
 /// Reads the node's single value as a [`WheelScroll`] behavior.
 fn value_wheel(node: &KdlNode) -> Result<WheelScroll, String> {
-    match value_string(node)?.as_str() {
+    match value_string(node)? {
         "scroll-scrollback" => Ok(WheelScroll::ScrollScrollback),
         "ignore" => Ok(WheelScroll::Ignore),
         _ => Err(r#"expected "scroll-scrollback" or "ignore""#.to_string()),

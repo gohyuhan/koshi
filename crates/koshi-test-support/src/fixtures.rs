@@ -1,4 +1,4 @@
-//! Test fixtures — reusable terminal and layout state stubs for integration tests.
+//! Test fixtures — placeholder module.
 //!
-//! Placeholder for common test fixtures shared across the test suite —
-//! pre-built terminal states, known pane configurations. Currently empty.
+//! The module is empty. It is reserved for test fixtures shared across the
+//! suite, such as pre-built terminal states and known pane configurations.

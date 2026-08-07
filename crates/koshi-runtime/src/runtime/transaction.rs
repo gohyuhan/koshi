@@ -10,8 +10,7 @@
 //! Sealing is also where each event becomes a log line, via
 //! [`koshi_observability::logging::event_log::log_event`], and where the batch
 //! is delivered to subscribers over the [`EventBus`]. Every committed event
-//! passes through here, so no handler has to remember to log or publish, and
-//! an uncommitted scope delivers nothing for the same reason it reports
+//! passes through here; an uncommitted scope logs nothing and delivers
 //! nothing.
 
 use koshi_core::{command::CommandResult, event::Event, ids::CommandId};

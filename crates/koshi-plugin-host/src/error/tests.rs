@@ -46,10 +46,8 @@ fn runtime_error_display_with_empty_name_and_detail() {
 
 #[test]
 fn display_does_not_escape_backticks_in_name() {
-    // The plugin name is untrusted (comes from a plugin manifest); the
-    // `#[error]` format is a plain string substitution, so an embedded
-    // backtick is not escaped and can visually break out of the `name`
-    // delimiters. Verified as the actual, current behavior.
+    // The `#[error]` format substitutes `name` as plain text. A backtick in
+    // `name` reaches the message unescaped.
     let err = PluginError::Load {
         name: "evil`plugin".to_string(),
         detail: "boom".to_string(),

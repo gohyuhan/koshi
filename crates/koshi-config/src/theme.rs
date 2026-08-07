@@ -156,7 +156,7 @@ fn set<T>(
 
 /// Reads the node's single value as a `#RRGGBB` color.
 fn value_color(node: &KdlNode) -> Result<RgbColor, String> {
-    RgbColor::from_hex(&value_string(node)?).map_err(|err| err.to_string())
+    RgbColor::from_hex(value_string(node)?).map_err(|err| err.to_string())
 }
 
 /// Builds a [`ConfigError::Validation`] for a bad top-level field.

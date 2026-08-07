@@ -135,9 +135,8 @@ pub fn resize_with_min(
 
     let mut result = tree.clone();
     let split = result.split_at_mut(&path[..depth]);
-    // A deserialized split may carry fewer weights than children (stale format);
-    // pad each missing weight with the default share — the normalization repair
-    // that realigns weights with children — before indexing into them.
+    // A deserialized split may carry fewer weights than children; pad the
+    // missing ones with the default share before indexing into them.
     if split.weights.len() < split.children.len() {
         split
             .weights
@@ -183,21 +182,18 @@ fn find_border(
     wanted: SplitDirection,
     direction: Direction,
 ) -> Option<(usize, usize, usize)> {
-    // Splits inside a collapsed stack member are invisible — its panes
-    // resize the stack as a unit, so only borders above the first collapsed
-    // crossing are candidates and the search bubbles to the outer levels.
+    // Splits inside a collapsed stack member are invisible: only borders
+    // above the first collapsed crossing are candidates, so the search
+    // bubbles up to the outer levels.
     let mut visible = path.len();
     let mut node = tree;
     for (depth, &index) in path.iter().enumerate() {
         let LayoutNode::Split(split) = node else {
             break;
         };
-        if split.direction == SplitDirection::Stacked {
-            let active = split.active.min(split.children.len().saturating_sub(1));
-            if index != active {
-                visible = depth;
-                break;
-            }
+        if split.direction == SplitDirection::Stacked && index != split.active_index() {
+            visible = depth;
+            break;
         }
         node = &split.children[index].node;
     }
@@ -241,11 +237,10 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect
                 directional_child_rects(split, rect, min)[index]
             }
             SplitDirection::Stacked => {
-                // Mirror `solve_stacked`: same clamp on the active index,
-                // one header row per other member carved out of the active
-                // rect, headers above the active member shifting it down.
-                let active = split.active.min(split.children.len().saturating_sub(1));
-                if index == active {
+                // Mirror `solve_stacked`: one header row per other member
+                // carved out of the active rect, headers above the active
+                // member shifting it down.
+                if index == split.active_index() {
                     let header_rows = split.children.len().saturating_sub(1) as u16;
                     Rect::new(
                         Point {

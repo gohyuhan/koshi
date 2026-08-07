@@ -5,9 +5,7 @@
 //! rectangles — only these relative constraints — so the same tree re-solves
 //! cleanly at any terminal size.
 //!
-//! Every variant is kept even where unused: adding a kind later forces a solver
-//! rewrite. All sizing is discrete cell math; nothing is stored as a bare
-//! percentage.
+//! All sizing is discrete cell math; nothing is stored as a bare percentage.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::{Deserialize, Serialize};

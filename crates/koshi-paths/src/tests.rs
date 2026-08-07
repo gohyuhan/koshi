@@ -212,13 +212,11 @@ fn ensure_private_dir_creates_owner_only() {
 #[cfg(unix)]
 #[test]
 fn ensure_private_dir_repairs_a_pre_existing_wide_open_directory() {
-    // `ensure_dir_creates_nested_and_accepts_existing` proves the *directory*
-    // half of "already existing is success" for `ensure_dir`. This is the
-    // matching case for `ensure_private_dir`'s *permission* half: the prior
-    // state is "the directory is already there, but at mode 0755 (world
-    // readable/executable) from some earlier run" — `create_dir_all` alone
-    // would silently leave it wide open. `ensure_private_dir` must reset it
-    // to 0700 on every call, not just on first creation.
+    // The permission half of "already existing is success", matching
+    // `ensure_dir_creates_nested_and_accepts_existing` for `ensure_dir`. The
+    // directory is already there from an earlier run at mode 0755, world
+    // readable and executable. `ensure_private_dir` resets it to 0700 on
+    // every call, not only on first creation.
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().expect("tempdir");

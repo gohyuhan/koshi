@@ -68,6 +68,19 @@ impl TemplateNode {
         leaves
     }
 
+    /// How many leaves this subtree holds — the length
+    /// [`TemplateNode::leaves`] returns, counted without building the list.
+    fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Split(split) => split
+                .children
+                .iter()
+                .map(|child| child.node.leaf_count())
+                .sum(),
+        }
+    }
+
     /// Recursively appends leaves to `out`, depth-first in layout order.
     fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a LeafTemplate>) {
         match self {
@@ -103,7 +116,7 @@ impl TemplateNode {
                 };
                 let skipped: usize = split.children[..pick]
                     .iter()
-                    .map(|earlier| earlier.node.leaves().len())
+                    .map(|earlier| earlier.node.leaf_count())
                     .sum();
                 skipped + child.node.first_visible_leaf()
             }
@@ -119,7 +132,7 @@ impl TemplateNode {
     /// [`TemplateError::PaneCountMismatch`] when `ids` does not hold exactly
     /// one id per leaf.
     pub fn to_layout_node(&self, ids: &[PaneId]) -> Result<LayoutNode, TemplateError> {
-        let expected = self.leaves().len();
+        let expected = self.leaf_count();
         if ids.len() != expected {
             return Err(TemplateError::PaneCountMismatch {
                 expected,

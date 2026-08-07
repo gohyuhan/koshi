@@ -2,8 +2,8 @@
 //!
 //! Idle view groups every top-level hint under one human modifier header such
 //! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
-//! A modifier-less key (bare `Tab`) is its own opener, so it wears the header
-//! style itself rather than a block inside a neighboring group.
+//! A modifier-less key (bare `Tab`) is its own opener and wears the header
+//! style itself.
 //! Pending view paints the pressed prefix as an accent breadcrumb, then shows
 //! only its next chords. Internal config spellings such as `C-` and `A-` never
 //! leak into user-facing text. The row is filled with the theme's bar
@@ -21,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
-use crate::render::bar_style;
+use crate::render::{bar_style, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
@@ -29,6 +29,18 @@ const REVERT_MARKER: &str = " keys! ";
 
 /// Paint one chrome-owned hint row from `hints` — the viewer's keybinding data
 /// for the mode it is in.
+///
+/// Does nothing for a zero-size area. Otherwise paints in this order:
+///
+/// 1. Blanks the row, then fills it with the theme's bar background.
+/// 2. Draws the ` keys! ` marker against the right edge when the user keymap
+///    was reverted. The marker holds that edge, and every hint below stops
+///    short of it.
+/// 3. Draws one accent ribbon per already-pressed chord of `pending`, left to
+///    right, then a ` ▶ ` arrow.
+/// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+///    two-block ribbon per action.
+/// 5. Draws a `…` marker where the row ran out of room, and stops there.
 pub fn draw_hint_bar(
     hints: &KeymapHints,
     theme: &Theme,
@@ -75,10 +87,9 @@ pub fn draw_hint_bar(
     let groups = display_groups(hint_items(hints, pending));
     let count = groups.len();
     for (group_index, group) in groups.into_iter().enumerate() {
-        // A modifier-less binding has no header: its key IS the sequence's
-        // first key, so it wears the header's plain-text style instead of a
-        // continuation key's block — `Tab` reads as its own opener, not as
-        // another key inside the preceding modifier group.
+        // A modifier-less binding has no header: its key is the sequence's
+        // first key, so it wears the header's plain-text style. `Tab` reads
+        // as its own opener.
         let key_style = if group.mods.is_empty() {
             ramp_header_style(theme, group_index, count)
         } else {
@@ -171,14 +182,10 @@ fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
             let (text, pinned) = match (bucket.leaf, bucket.deeper) {
                 (Some((label, pinned)), 0) => (label, pinned),
                 (Some((label, pinned)), count) => (format!("{label} +{count}"), pinned),
-                (None, count) => {
-                    let untouched = !bucket.any_user && !removed_under(hints, pending, chord);
-                    let text = untouched
-                        .then(|| hints.prefix_labels.get(&chord).cloned())
-                        .flatten()
-                        .unwrap_or_else(|| format!("+{count}"));
-                    (text, false)
-                }
+                (None, count) => (
+                    prefix_label(hints, pending, chord, count, bucket.any_user),
+                    false,
+                ),
             };
             HintItem {
                 chord,
@@ -187,7 +194,9 @@ fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
             }
         })
         .collect();
-    items.sort_by_key(|item| {
+    // Cached: the sort key builds a string, so it is computed once per item
+    // rather than once per comparison.
+    items.sort_by_cached_key(|item| {
         (
             !item.pinned,
             modifier_rank(item.chord.mods),
@@ -200,20 +209,18 @@ fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
 fn display_groups(items: Vec<HintItem>) -> Vec<DisplayGroup> {
     let mut groups: Vec<DisplayGroup> = Vec::new();
     for item in items {
-        let group = match groups
-            .iter_mut()
-            .find(|group| group.mods == item.chord.mods)
-        {
-            Some(group) => group,
+        let mods = item.chord.mods;
+        let index = match groups.iter().position(|group| group.mods == mods) {
+            Some(index) => index,
             None => {
-                let index = groups.len();
                 groups.push(DisplayGroup {
-                    mods: item.chord.mods,
+                    mods,
                     entries: Vec::new(),
                 });
-                &mut groups[index]
+                groups.len() - 1
             }
         };
+        let group = &mut groups[index];
         if let Some(entry) = group
             .entries
             .iter_mut()
@@ -245,13 +252,28 @@ fn prefix_text(hints: &KeymapHints, chord: KeyChord) -> Option<String> {
     if count == 0 {
         return None;
     }
-    let untouched = !any_user && !removed_under(hints, &[], chord);
-    Some(
-        untouched
-            .then(|| hints.prefix_labels.get(&chord).cloned())
-            .flatten()
-            .unwrap_or_else(|| format!("+{count}")),
-    )
+    Some(prefix_label(hints, &[], chord, count, any_user))
+}
+
+/// The text a prefix chord shows: its shipped label, or a `+N` marker counting
+/// the `count` bindings under it.
+///
+/// The shipped label comes from `hints.prefix_labels`. The `+N` marker stands
+/// when that map has no entry for `chord`, when `any_user` says a user surface
+/// authored a binding under the prefix, or when [`removed_under`] says one was
+/// removed there.
+fn prefix_label(
+    hints: &KeymapHints,
+    pending: &[KeyChord],
+    chord: KeyChord,
+    count: usize,
+    any_user: bool,
+) -> String {
+    let untouched = !any_user && !removed_under(hints, pending, chord);
+    untouched
+        .then(|| hints.prefix_labels.get(&chord).cloned())
+        .flatten()
+        .unwrap_or_else(|| format!("+{count}"))
 }
 
 fn removed_under(hints: &KeymapHints, pending: &[KeyChord], chord: KeyChord) -> bool {
@@ -360,12 +382,6 @@ fn paint_whole(buf: &mut Buffer, x: &mut u16, y: u16, right_edge: u16, line: &Li
     set_line_clipped(buf, *x, y, line, width);
     *x += width;
     true
-}
-
-fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
-    if y >= buf.area.top() && y < buf.area.bottom() {
-        buf.set_line(x, y, line, max_width);
-    }
 }
 
 /// A modifier group's `Ctrl +` header: its ramp stop as plain colored text.

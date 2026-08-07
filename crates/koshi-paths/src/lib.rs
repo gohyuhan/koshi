@@ -70,15 +70,17 @@ pub fn state_dir() -> Option<PathBuf> {
 }
 
 /// The directory for sockets and other per-boot runtime files. Linux uses
-/// `$XDG_RUNTIME_DIR/koshi` when that variable is set. Everything else —
-/// macOS, Windows, Linux without `XDG_RUNTIME_DIR` — uses `run/` under
-/// [`data_dir`]. Create it with [`ensure_private_dir`]; runtime files are
-/// per-user private.
+/// `$XDG_RUNTIME_DIR/koshi` when that variable holds an absolute path.
+/// Everything else — macOS, Windows, Linux without an absolute
+/// `XDG_RUNTIME_DIR` — uses `run/` under [`data_dir`]. Create it with
+/// [`ensure_private_dir`]; runtime files are per-user private.
 #[must_use]
 pub fn runtime_dir() -> Option<PathBuf> {
-    project_dirs()
-        .and_then(|d| d.runtime_dir().map(Path::to_path_buf))
-        .or_else(|| data_dir().map(|d| d.join("run")))
+    let dirs = project_dirs()?;
+    Some(match dirs.runtime_dir() {
+        Some(runtime) => runtime.to_path_buf(),
+        None => dirs.data_dir().join("run"),
+    })
 }
 
 /// Create `path` and any missing parents. Already existing is success.

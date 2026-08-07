@@ -1,4 +1,4 @@
-//! Plugin manager domain. Placeholder per standard source layout.
+//! Plugin manager domain: commands, events, and state.
 
 pub mod command;
 pub mod event;

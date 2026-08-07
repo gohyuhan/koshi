@@ -108,10 +108,9 @@ pub fn add_to_stack(
     if let Some(stack) = result.stack_containing_mut(anchor) {
         // anchor already sits inside a stack: append the new pane and make
         // it the active (expanded) member, collapsing the rest.
-        stack.children.push(LayoutChild {
-            node: LayoutNode::Pane(new_pane),
-            collapsed: false,
-        });
+        stack
+            .children
+            .push(LayoutChild::new(LayoutNode::Pane(new_pane)));
         stack.weights.push(SizeWeight::default());
         stack.active = stack.children.len() - 1;
         for (index, child) in stack.children.iter_mut().enumerate() {
@@ -170,9 +169,9 @@ pub struct RemovalInfo {
 /// Remove the leaf holding `pane`; its space flows to the siblings on the
 /// next solve.
 ///
-/// Splits emptied by the removal are pruned so no region of the tab goes
-/// dead, but a split left with a single child is kept — normalization is a
-/// separate, explicit step. Inside a stack, removal keeps exactly one child
+/// Splits emptied by the removal are pruned. A split left with a single
+/// child is kept; normalization is a separate, explicit step. Inside a
+/// stack, removal keeps exactly one child
 /// expanded: removing the active member activates the one that slides into
 /// its place, removing any other member leaves the active one alone.
 ///
@@ -304,7 +303,7 @@ fn reseat_active(split: &mut SplitNode, removed_index: usize) {
     if removed_index < split.active {
         split.active -= 1;
     }
-    split.active = split.active.min(split.children.len().saturating_sub(1));
+    split.active = split.active_index();
     if split.direction == SplitDirection::Stacked {
         for (index, child) in split.children.iter_mut().enumerate() {
             child.collapsed = index != split.active;

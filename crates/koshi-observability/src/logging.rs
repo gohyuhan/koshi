@@ -148,8 +148,8 @@ pub fn init_to_path(path: &Path, level: LogLevel, format: LogFormat) -> Result<(
     let writer = SessionLogMaker {
         path: path.to_path_buf(),
     };
-    // `with_ansi(false)`: the file is plain text, never a color terminal. The
-    // format method (`pretty`/`json`) is the only thing that differs per arm.
+    // `with_ansi(false)` keeps the file plain text. The format method
+    // (`pretty`/`json`) is the only thing that differs per arm.
     let builder = fmt()
         .with_max_level(max_level(level))
         .with_ansi(false)
@@ -179,8 +179,8 @@ fn max_level(level: LogLevel) -> Level {
 /// mid-session come back on the next line. On a local disk that costs about
 /// 25µs per line. The write runs on the runtime's dispatch thread, so a command
 /// committing several events pays it once per event before dispatch returns.
-// ponytail: reopen-per-line buys surviving `rm` of the log file for ~24µs a
-// line. Hold the handle, reopening when a write fails, if dispatch latency
+// ponytail: reopen-per-line buys surviving `rm` of the log file for the ~25µs
+// above. Hold the handle, reopening when a write fails, if dispatch latency
 // needs those microseconds back.
 struct SessionLogMaker {
     path: PathBuf,

@@ -1,9 +1,10 @@
 //! Crossterm keyboard boundary: the two halves of one key press.
 //!
-//! [`decode_key`] turns one host key event into a canonical [`KeyChord`] — the
-//! form the keymap matches bindings against. [`encode`] turns a chord back into
-//! the bytes a program running inside a pane expects, for the keys no binding
-//! consumed.
+//! [`decode_key`] turns one host key event into a canonical [`KeyChord`]. A
+//! chord is one key plus the modifiers held with it, such as `<C-a>`. The chord
+//! is the form the keymap matches keybindings against. [`encode`] turns a chord
+//! back into the bytes a program running inside a pane expects, for the keys no
+//! keybinding consumed.
 //!
 //! Encoding depends on the chord *and* the receiving pane's mode, so it happens
 //! where the bytes are written. A bare Up arrow is `ESC [ A` to a shell but
@@ -60,11 +61,12 @@ pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
 /// Every chord encodes to something.
 ///
 /// Super rides along only where a sequence has room for it. A CSI key carries
-/// it in the modifier parameter (`<D-Up>` → `ESC [ 1 ; 9 A`), the same slot
-/// Shift and Control use; a C0 key has no field for any modifier but Control
-/// and Alt, so `<D-a>` reaches the pane as a plain `a`. Shift splits the same
-/// way, folding into the character (`<S-a>` → `A`) but riding the parameter on
-/// a named key.
+/// Super in the modifier parameter, the same slot Shift and Control use:
+/// `<D-Up>` → `ESC [ 1 ; 9 A`. A C0 key has room for Control and Alt only, so
+/// `<D-a>` reaches the pane as a plain `a`.
+///
+/// Shift splits the same way. It folds into the character (`<S-a>` → `A`), and
+/// it rides the parameter on a named key.
 #[must_use]
 pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
     match chord.key {
@@ -233,12 +235,25 @@ fn c0(byte: u8, mods: ModFlags) -> Vec<u8> {
 /// `<Up>` → `ESC [ A`; `<Up>` into an application-mode pane → `ESC O A`;
 /// `<C-Up>` → `ESC [ 1 ; 5 A` into either.
 fn cursor_key(final_byte: u8, param: u8, app_cursor_keys: bool) -> Vec<u8> {
-    if param == UNMODIFIED {
-        let introducer = if app_cursor_keys { b'O' } else { b'[' };
-        return vec![ESC, introducer, final_byte];
+    if param == UNMODIFIED && !app_cursor_keys {
+        return vec![ESC, b'[', final_byte];
     }
-    let mut bytes = vec![ESC, b'[', b'1', b';'];
-    bytes.extend_from_slice(param.to_string().as_bytes());
+    ss3_key(final_byte, param)
+}
+
+/// A key of the SS3 family — the `ESC O` introducer. Unmodified, the key is
+/// `ESC O <final>`. A held modifier takes the CSI form `ESC [ 1 ; <param>
+/// <final>`, which has room for the parameter that carries it.
+///
+/// `<F1>` → `ESC O P`; `<C-F1>` → `ESC [ 1 ; 5 P`.
+fn ss3_key(final_byte: u8, param: u8) -> Vec<u8> {
+    if param == UNMODIFIED {
+        return vec![ESC, b'O', final_byte];
+    }
+    // `ESC [ 1 ;` plus a two-digit parameter and the final byte.
+    let mut bytes = Vec::with_capacity(7);
+    bytes.extend_from_slice(&[ESC, b'[', b'1', b';']);
+    push_decimal(&mut bytes, param);
     bytes.push(final_byte);
     bytes
 }
@@ -248,14 +263,30 @@ fn cursor_key(final_byte: u8, param: u8, app_cursor_keys: bool) -> Vec<u8> {
 ///
 /// `<Del>` → `ESC [ 3 ~`; `<C-Del>` → `ESC [ 3 ; 5 ~`.
 fn tilde(code: u8, param: u8) -> Vec<u8> {
-    let mut bytes = vec![ESC, b'['];
-    bytes.extend_from_slice(code.to_string().as_bytes());
+    // `ESC [` plus a two-digit code, `;`, a two-digit parameter, and `~`.
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&[ESC, b'[']);
+    push_decimal(&mut bytes, code);
     if param != UNMODIFIED {
         bytes.push(b';');
-        bytes.extend_from_slice(param.to_string().as_bytes());
+        push_decimal(&mut bytes, param);
     }
     bytes.push(b'~');
     bytes
+}
+
+/// Append a control sequence number — a key code or a modifier parameter — as
+/// its decimal digits.
+///
+/// `3` appends one digit, `3`. `16` appends two, `1` then `6`.
+fn push_decimal(bytes: &mut Vec<u8>, value: u8) {
+    if value >= 100 {
+        bytes.push(b'0' + value / 100);
+    }
+    if value >= 10 {
+        bytes.push(b'0' + value / 10 % 10);
+    }
+    bytes.push(b'0' + value % 10);
 }
 
 /// A function key. F1–F4 have sequences of their own (`ESC O P` … `ESC O S`,
@@ -274,17 +305,8 @@ fn function_key(n: u8, mods: ModFlags) -> Vec<u8> {
     let param = modifier_param(mods);
 
     match n {
-        1..=4 => {
-            // The four final bytes run in key order: `P`, `Q`, `R`, `S`.
-            let final_byte = b'P' + (n - 1);
-            if param == UNMODIFIED {
-                return vec![ESC, b'O', final_byte];
-            }
-            let mut bytes = vec![ESC, b'[', b'1', b';'];
-            bytes.extend_from_slice(param.to_string().as_bytes());
-            bytes.push(final_byte);
-            bytes
-        }
+        // The four final bytes run in key order: `P`, `Q`, `R`, `S`.
+        1..=4 => ss3_key(b'P' + (n - 1), param),
         5 => tilde(15, param),
         6..=9 => tilde(11 + n, param),
         10 => tilde(21, param),

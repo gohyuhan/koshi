@@ -120,10 +120,8 @@ pub(crate) fn logging_params(
     }
 }
 
-/// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate, so
-/// entry points carrying `#[beta_feature]` know whether to run. Called once
-/// per process; without it the gate stays closed and every beta-gated entry
-/// point does nothing.
+/// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate that
+/// every `#[beta_feature]` entry point reads.
 pub fn apply_beta_gate(app: Option<PartialKoshiConfig>) {
     let server = merge_server(ServerConfig::default(), app.into_iter().collect());
     koshi_beta::set_allowed(server.allow_beta_features);

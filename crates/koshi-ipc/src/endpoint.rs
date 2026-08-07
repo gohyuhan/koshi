@@ -117,22 +117,20 @@ impl EndpointFile {
     /// whose bytes are not a readable endpoint file is
     /// [`IpcError::EndpointFileUnreadable`].
     pub fn read(path: &Path) -> Result<EndpointFile, IpcError> {
+        let unreadable = |detail: String| IpcError::EndpointFileUnreadable {
+            path: path.display().to_string(),
+            detail,
+        };
         let data = std::fs::read(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 IpcError::EndpointFileMissing {
                     path: path.display().to_string(),
                 }
             } else {
-                IpcError::EndpointFileUnreadable {
-                    path: path.display().to_string(),
-                    detail: error.to_string(),
-                }
+                unreadable(error.to_string())
             }
         })?;
-        serde_json::from_slice(&data).map_err(|error| IpcError::EndpointFileUnreadable {
-            path: path.display().to_string(),
-            detail: error.to_string(),
-        })
+        serde_json::from_slice(&data).map_err(|error| unreadable(error.to_string()))
     }
 }
 

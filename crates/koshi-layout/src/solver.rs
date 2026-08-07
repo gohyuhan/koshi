@@ -22,8 +22,7 @@
 //!
 //! Cells that integer division leaves over go to the *trailing* children, one
 //! each: a 101-column 50/50 split solves to 50 and 51. When no flexible child
-//! exists to absorb slack, the last child takes it — no region of the tab may
-//! go dead.
+//! exists to absorb slack, the last child takes it.
 
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
@@ -46,13 +45,11 @@ pub struct SolveResult {
     /// rectangle. A collapsed stack member's rect is its one-row header
     /// strip; a zero-area rect means the pane is not visible at all.
     pub panes: Vec<(PaneId, Rect)>,
-    /// Panes clipped to zero area *because the layout no longer fits* —
-    /// space-driven suppression only. Panes that are zero-area for other
-    /// reasons (hidden behind a fullscreen pane, or a collapsed stack
-    /// member's non-header leaves) are not listed here; those states are
-    /// reversible by a mode toggle or stack activation, not by space.
-    /// Stable trailing order: the same panes suppress and restore as space
-    /// changes.
+    /// Panes clipped to zero area because the layout no longer fits. A pane
+    /// that is zero-area for another reason is not listed here: one hidden
+    /// behind a fullscreen pane, or a collapsed stack member's non-header
+    /// leaves. Trailing order is stable: the same panes suppress and restore
+    /// as space changes.
     pub suppressed: Vec<PaneId>,
     /// `true` when suppression left nothing visible at all; the caller shows
     /// a terminal-too-small overlay instead of a pane grid.
@@ -172,15 +169,15 @@ pub fn solve_with_mode_min(
     }
 
     let mut state = SolveState::new(min);
-    // Same border-inclusive floor the tiled backstop uses: a tab too small to
-    // inset the focused pane to its content minimum suppresses it instead of
-    // drawing it under an overlapping border, so fullscreen and tiled agree on
-    // when the too-small overlay shows.
+    // A tab too small to inset the focused pane to its content minimum
+    // suppresses it, against the same border-inclusive floor the tiled
+    // path uses.
     let floor = border_inclusive_min(min, true);
+    let too_small = tab_rect.size.cols < floor.cols || tab_rect.size.rows < floor.rows;
     for pane in tree.leaf_panes() {
         if pane != focused {
             state.panes.push((pane, Rect::zero()));
-        } else if tab_rect.size.cols < floor.cols || tab_rect.size.rows < floor.rows {
+        } else if too_small {
             state.panes.push((pane, Rect::zero()));
             state.suppressed.push(pane);
         } else {
@@ -219,12 +216,12 @@ pub fn border_inclusive_min(content_min: Size, has_borders: bool) -> Size {
 /// The smallest rectangle this subtree can be solved into.
 ///
 /// Each leaf reserves its one-cell border ([`border_inclusive_min`]) on top of
-/// the content floor, since every visible pane is drawn inside that border
-/// ([`crate::content::content_rects`] insets the outer rect by one cell per
-/// side). Borders are per-pane boxes, never shared between siblings, so
-/// directional splits sum their children's border-inclusive floors along the
-/// split axis and take the largest across it. A stack needs its widest child,
-/// one header row per collapsed child, plus the active child's rows.
+/// the content floor; [`crate::content::content_rects`] insets the outer rect
+/// by one cell per side. Borders are per-pane boxes, never shared between
+/// siblings, so directional splits sum their children's border-inclusive
+/// floors along the split axis and take the largest across it. A stack needs
+/// its widest child, one header row per collapsed child, plus the active
+/// child's rows.
 #[must_use]
 pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
     match node {
@@ -237,12 +234,8 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
                 let mut along: u16 = 0;
                 let mut across: u16 = 0;
                 for (index, child) in split.children.iter().enumerate() {
-                    let child_min = min_size(&child.node, default_min);
-                    let (axis_min, cross_min) = if horizontal {
-                        (child_min.cols, child_min.rows)
-                    } else {
-                        (child_min.rows, child_min.cols)
-                    };
+                    let (axis_min, cross_min) =
+                        axis_and_cross(min_size(&child.node, default_min), horizontal);
                     along = along.saturating_add(child_floor(split, index, axis_min));
                     across = across.max(cross_min);
                 }
@@ -271,12 +264,9 @@ fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
         cols = cols.max(min_size(&child.node, default_min).cols);
     }
     let header_rows = split.children.len().saturating_sub(1) as u16;
-    // Clamp like `solve_stacked` does, so both agree on which member is
-    // active when a deserialized stack carries an out-of-range index.
-    let active = split.active.min(split.children.len().saturating_sub(1));
     let active_rows = split
         .children
-        .get(active)
+        .get(split.active_index())
         .map_or(0, |child| min_size(&child.node, default_min).rows);
     Size {
         cols,
@@ -293,12 +283,17 @@ pub(crate) fn slot_floor(split: &SplitNode, index: usize, horizontal: bool, min:
         .map_or(Size { cols: 0, rows: 0 }, |child| {
             min_size(&child.node, min)
         });
-    let axis_min = if horizontal {
-        child_min.cols
+    child_floor(split, index, axis_and_cross(child_min, horizontal).0)
+}
+
+/// The `size` measures along the split axis and across it: columns then rows
+/// for a horizontal split, rows then columns for a vertical one.
+fn axis_and_cross(size: Size, horizontal: bool) -> (u16, u16) {
+    if horizontal {
+        (size.cols, size.rows)
     } else {
-        child_min.rows
-    };
-    child_floor(split, index, axis_min)
+        (size.rows, size.cols)
+    }
 }
 
 /// The floor for one child slot along the split axis: the larger of the
@@ -317,11 +312,9 @@ fn child_floor(split: &SplitNode, index: usize, subtree_axis_min: u16) -> u16 {
 fn solve_node(node: &LayoutNode, rect: Rect, state: &mut SolveState) {
     match node {
         LayoutNode::Pane(id) => {
-            // Backstop: a leaf whose outer rect cannot hold the border plus a
-            // usable content cell is suppressed, never rendered as a sliver
-            // under an overlapping border. Mirrors the border-inclusive floor
-            // `min_size` feeds the distribution path, so this only fires when an
-            // upstream rect slips below it.
+            // A leaf whose outer rect cannot hold the border plus one content
+            // cell is suppressed. The floor is the same border-inclusive one
+            // `min_size` feeds into the distribution.
             let floor = border_inclusive_min(state.min, true);
             if rect.size.cols < floor.cols || rect.size.rows < floor.rows {
                 state.panes.push((*id, Rect::zero()));
@@ -353,7 +346,7 @@ fn suppress_subtree(node: &LayoutNode, state: &mut SolveState) {
 /// whose cross-axis minimum exceeds the rect is dropped individually, and
 /// once the running sum of axis floors overflows the rect, that child and
 /// everything after it drop too (trailing suppression). The children that
-/// remain always fit at floor, so the recursion below never overlaps.
+/// remain always fit at their floor.
 fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
     let rects = directional_child_rects(split, rect, state.min);
     for (child, child_rect) in split.children.iter().zip(rects) {
@@ -373,48 +366,36 @@ fn solve_directional(split: &SplitNode, rect: Rect, state: &mut SolveState) {
 /// the child's floor, so an empty rect here always means "suppressed".
 pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect, min: Size) -> Vec<Rect> {
     let horizontal = split.direction == SplitDirection::Horizontal;
-    let (available, available_cross) = if horizontal {
-        (rect.size.cols, rect.size.rows)
-    } else {
-        (rect.size.rows, rect.size.cols)
-    };
+    let (available, available_cross) = axis_and_cross(rect.size, horizontal);
 
     // Decide who fits: per-child cross-axis check, then trailing suppression
-    // along the split axis.
+    // along the split axis. The kept children's weights and floors are
+    // collected in the same pass, in child order. A child whose weight is
+    // missing (a deserialized split may carry fewer weights than children)
+    // takes the default share, as normalization repairs it.
     let mut kept = vec![false; split.children.len()];
+    let mut kept_weights: Vec<SizeWeight> = Vec::with_capacity(split.children.len());
+    let mut kept_floors: Vec<u16> = Vec::with_capacity(split.children.len());
     let mut floors_fit = true;
     let mut claimed: u32 = 0;
-    let mut floors = vec![0u16; split.children.len()];
     for (index, child) in split.children.iter().enumerate() {
-        let child_min = min_size(&child.node, min);
-        let (axis_min, cross_min) = if horizontal {
-            (child_min.cols, child_min.rows)
-        } else {
-            (child_min.rows, child_min.cols)
-        };
-        floors[index] = child_floor(split, index, axis_min);
+        let (axis_min, cross_min) = axis_and_cross(min_size(&child.node, min), horizontal);
+        let floor = child_floor(split, index, axis_min);
         if cross_min > available_cross {
             continue;
         }
-        if floors_fit && claimed + u32::from(floors[index]) <= u32::from(available) {
+        if floors_fit && claimed + u32::from(floor) <= u32::from(available) {
             kept[index] = true;
-            claimed += u32::from(floors[index]);
+            claimed += u32::from(floor);
+            kept_weights.push(split.weights.get(index).copied().unwrap_or_default());
+            kept_floors.push(floor);
         } else {
             floors_fit = false;
         }
     }
 
     // Distribute over the kept children only, then lay rects in child order;
-    // suppressed children sit at their position with zero area. A child
-    // whose weight is missing (a deserialized split may carry fewer weights
-    // than children) takes the default share, as normalization repairs it.
-    let kept_weights: Vec<SizeWeight> = kept
-        .iter()
-        .enumerate()
-        .filter(|&(_, &keep)| keep)
-        .map(|(index, _)| split.weights.get(index).copied().unwrap_or_default())
-        .collect();
-    let kept_floors: Vec<u16> = filter_kept(&floors, &kept);
+    // suppressed children sit at their position with zero area.
     let sizes = distribute(&kept_weights, &kept_floors, available);
 
     let mut rects = Vec::with_capacity(split.children.len());
@@ -456,15 +437,6 @@ pub(crate) fn directional_child_rects(split: &SplitNode, rect: Rect, min: Size) 
     rects
 }
 
-/// Keep only the elements whose flag is set, preserving order.
-fn filter_kept<T: Copy>(items: &[T], kept: &[bool]) -> Vec<T> {
-    items
-        .iter()
-        .zip(kept)
-        .filter_map(|(&item, &keep)| keep.then_some(item))
-        .collect()
-}
-
 /// Stacked children share the rect: the active child expands into whatever
 /// remains after every collapsed member takes a one-row header strip.
 ///
@@ -481,7 +453,7 @@ fn solve_stacked(split: &SplitNode, rect: Rect, state: &mut SolveState) {
     if split.children.is_empty() {
         return;
     }
-    let active = split.active.min(split.children.len() - 1);
+    let active = split.active_index();
     let total = split.children.len();
     let header_count = (total - 1) as u16;
 
@@ -571,9 +543,8 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
         }
     }
 
-    // Percentages are shares of the whole axis, floored to cells. Clamped
-    // to 100 for robustness: a raw tree may bypass validation, and an
-    // unclamped product can truncate through the cast.
+    // Percentages are shares of the whole axis, floored to cells, and
+    // clamped to 100 — a raw tree can carry a larger value.
     for (index, weight) in weights.iter().enumerate() {
         if let SizeConstraint::Percent(percent) = weight.primary {
             let want = (u32::from(available) * u32::from(percent.min(100)) / 100) as u16;
@@ -593,9 +564,8 @@ fn distribute(weights: &[SizeWeight], floors: &[u16], available: u16) -> Vec<u16
             SizeConstraint::Fixed(_) | SizeConstraint::Percent(_) => None,
         })
         .collect();
-    // Validated flex weights are at least 1, but `Flex(0)` is still
-    // representable (public variant, serde), so the division is checked: a
-    // zero total yields zero shares and the leftover pass hands out the pool.
+    // `Flex(0)` is representable, so the division is checked: a zero total
+    // weight yields zero shares and the leftover pass hands out the pool.
     let total_weight: u64 = flex.iter().map(|&(_, w)| w).sum();
     if !flex.is_empty() {
         let pool = u64::from(remaining);
@@ -646,8 +616,8 @@ fn preferred_target(weight: &SizeWeight) -> Option<u16> {
 
 /// Pull each preferred child toward its target using only slack: donors are
 /// flexible siblings with cells above their floor, never `Fixed`/`Percent`
-/// children — a preference is a hint and must not override an exact size.
-/// Children are visited in order, so an earlier target wins contested slack.
+/// children. Children are visited in order, so an earlier target wins
+/// contested slack.
 fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
     for index in 0..weights.len() {
         let Some(target) = preferred_target(&weights[index]) else {
@@ -656,7 +626,7 @@ fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
         let current = sizes[index];
         if current > target {
             // Surplus above the target flows to the trailing-most flexible
-            // sibling; without one there is no slack to rebalance into.
+            // sibling; without one the surplus stays where it is.
             let floor = floors.get(index).copied().unwrap_or(0);
             let surplus = current.saturating_sub(target.max(floor));
             let receiver = (0..weights.len())
@@ -675,8 +645,7 @@ fn honor_preferred(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16]) {
 }
 
 /// Raise every child to its floor, funding the deficit from siblings above
-/// theirs. Skipped entirely when the floors cannot fit — that is the
-/// suppression path, not a clamping problem.
+/// theirs. Does nothing when the floors do not fit in `available`.
 fn clamp_to_floors(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16], available: u16) {
     let total_floor: u64 = floors.iter().map(|&cells| u64::from(cells)).sum();
     if total_floor > u64::from(available) {
@@ -692,9 +661,8 @@ fn clamp_to_floors(sizes: &mut [u16], weights: &[SizeWeight], floors: &[u16], av
     }
 }
 
-/// Who may give up cells in [`take_cells`]. A minimum-size clamp may tap
-/// anyone — floors outrank exact sizes — but a preferred target is only a
-/// hint and must stay within flexible slack.
+/// Who may give up cells in [`take_cells`]: `FlexibleOnly` limits donors to
+/// flexible children, `Anyone` also taps `Fixed` and `Percent` ones.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DonorPool {
     FlexibleOnly,
@@ -739,7 +707,7 @@ fn take_cells(
 ///
 /// Slack (all-fixed splits that underfill, or resize deltas that drifted)
 /// goes to the last child; excess is trimmed from the trailing children
-/// toward zero. Trailing-first keeps the leading panes stable.
+/// toward zero, leaving the leading ones untouched.
 fn repair_sum(sizes: &mut [u16], available: u16) {
     let sum: u64 = sizes.iter().map(|&cells| u64::from(cells)).sum();
     let available = u64::from(available);

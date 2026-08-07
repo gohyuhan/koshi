@@ -1,6 +1,5 @@
-//! Plugin host domain: instance state, command dispatch, event handling, and tests.
-//!
-//! Placeholder structure — the submodules are scaffolding pending implementation.
+//! Plugin host domain: instance state, command dispatch, and event handling.
+//! Placeholder per standard source layout.
 
 /// Command dispatch.
 pub mod command;

@@ -1,18 +1,19 @@
-//! Atomic file replacement. A reader never sees a half-written file: the new
-//! bytes are staged in a temp sibling, flushed to disk, then renamed over the
-//! target. `rename` swaps the destination in one step on every platform, so
-//! the target holds either the whole old file or the whole new one, even if
-//! the process dies mid-write.
+//! Atomic file replacement. A reader never sees a half-written file.
 //!
-//! The temp comes from [`tempfile`]: a unique name, opened with `O_EXCL` so it
-//! never follows a symlink or truncates an existing file, and mode `0600` on
-//! Unix.
+//! The new bytes go to a temp file beside the target, get fsynced, then get
+//! renamed over it. `rename` swaps the destination in one step on every
+//! platform, so the target holds either the whole old file or the whole new
+//! one, even if the process dies mid-write.
 //!
-//! On Unix the target's directory is fsynced after the rename. On Windows
-//! durability rests on the filesystem's own journaling, and a replace racing
-//! another writer is retried briefly so concurrent writes converge.
+//! The temp comes from [`tempfile`]. It carries a unique name, and mode `0600`
+//! on Unix. It opens with `O_EXCL`, which never follows a symlink and never
+//! truncates an existing file.
 //!
-//! Nothing here guards the target's directory: anyone who can write that
+//! Unix fsyncs the target's directory after the rename. Windows relies on the
+//! filesystem's own journaling, and briefly retries a replace that races
+//! another writer, so concurrent writes converge.
+//!
+//! Nothing here guards the target's directory. Anyone who can write that
 //! directory can replace the file directly. koshi writes only under its own
 //! user-private directories.
 //!
@@ -20,10 +21,10 @@
 //! handling, symlink replacement, and the failure cases.
 //!
 //! Example: `write_atomic("keybinding.kdl", new)` stages a private temp beside
-//! `keybinding.kdl`, fsyncs it, then renames it onto `keybinding.kdl`. A crash
-//! before the rename leaves the old `keybinding.kdl` intact; the partial bytes
-//! sit only in the temp sibling, which normal error paths remove and a hard
-//! kill can leave behind as a stray private file — never in the target.
+//! `keybinding.kdl`, fsyncs it, then renames it on top. A crash before the
+//! rename leaves the old `keybinding.kdl` whole, and the partial bytes sit in
+//! the temp sibling, never in the target. Every error path removes that temp;
+//! a hard kill can leave it behind as a stray private file.
 
 use std::fs;
 use std::io::Write;
@@ -38,20 +39,20 @@ mod tests;
 
 /// Writes `data` to `dst`, replacing any existing file atomically.
 ///
-/// Stages `data` in a private temp beside `dst`, gives the temp `dst`'s mode
-/// when `dst` is an existing regular file (Unix; a new file keeps the private
-/// `0600` default), fsyncs it, renames it over `dst`, then fsyncs the directory
-/// (Unix). A relative `dst` is resolved against the current directory once at
-/// entry. If any step up to and including the rename fails, the temp is removed
-/// and `dst` is left untouched.
+/// Resolves a relative `dst` against the current directory once, at entry.
+/// Stages `data` in a private temp beside `dst`. On Unix the temp takes `dst`'s
+/// mode when `dst` is an existing regular file; a new file keeps the private
+/// `0600` default. Fsyncs the temp, renames it over `dst`, then fsyncs the
+/// directory on Unix. If any step up to and including the rename fails, removes
+/// the temp and leaves `dst` untouched.
 ///
-/// A symlink at `dst` is replaced by a regular file, the same as `rename`. The
-/// replacement counts as a new file and stays private; it never inherits the
+/// Replaces a symlink at `dst` with a regular file, the same as `rename`. The
+/// replacement counts as a new file and stays private. It never inherits the
 /// mode of the file the link pointed at.
 ///
-/// On Windows, replacing a read-only file fails, as does a path past the OS
-/// path-length limit; `dst` is left untouched in both cases. On Unix the
-/// directory's permissions govern, not the file's own mode.
+/// On Windows the replace fails for a read-only file, and for a path past the
+/// OS path-length limit. `dst` stays untouched in both cases. On Unix the
+/// directory's permissions decide whether the replace succeeds.
 ///
 /// Returns [`StorageError::Io`] if the write is not durably persisted. A
 /// directory-fsync failure surfaces here even though `dst` may already hold the
@@ -60,9 +61,9 @@ mod tests;
 /// Example: overwriting `cfg.kdl` that currently holds `a=1` with `a=2` yields
 /// a `cfg.kdl` reading exactly `a=2`; a crash mid-write leaves exactly `a=1`.
 pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
-    // Anchor a relative path to the current directory once, so the temp and
-    // the rename below always resolve inside the same directory even if the
-    // process working directory changes mid-call.
+    // Anchor a relative path to the current directory once. The temp and the
+    // rename below then resolve inside the same directory even if the process
+    // working directory changes mid-call.
     let anchored;
     let dst = if dst.is_absolute() {
         dst
@@ -73,18 +74,18 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
         anchored.as_path()
     };
     let dir = parent_dir(dst);
-    // Read the mode to restore before the temp shadows it.
+    // Read `dst`'s mode before the rename replaces `dst`.
     let target_mode = target_permissions(dst)?;
 
     // A failed `?` up to and including `persist` drops the NamedTempFile, which
-    // removes the temp — so every early-return leaves `dst` and the directory
+    // removes the temp. Every early return leaves `dst` and the directory
     // untouched.
     let mut tmp = NamedTempFile::new_in(dir)
         .map_err(|e| io_err(format!("create temp in {}: {e}", dir.display())))?;
     tmp.write_all(data)
         .map_err(|e| io_err(format!("write temp for {}: {e}", dst.display())))?;
-    // Set the final mode before the fsync so it lands in the durable inode; the
-    // rename then never loosens who can read the file.
+    // Set the final mode before the fsync, so the durable inode carries it. The
+    // renamed file is never readable by anyone the final mode excludes.
     if let Some(perms) = target_mode {
         fs::set_permissions(tmp.path(), perms)
             .map_err(|e| io_err(format!("set perms for {}: {e}", dst.display())))?;

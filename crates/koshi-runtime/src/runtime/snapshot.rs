@@ -117,11 +117,10 @@ impl Server {
         // One `PaneSlot` per leaf: outer rect from the solve, inner (content) rect
         // from `content_rects` — both in the same solve order, so they zip.
         //
-        // `suppressed` is indexed before the walk, not scanned inside it: a tab
-        // with no room suppresses every pane it holds, so scanning it per pane
-        // would cost pane-count squared on a path that runs for every painted
-        // frame and for every mouse event forwarded to a pane that asked for
-        // the mouse.
+        // `suppressed` is indexed once before the walk, so each pane's lookup
+        // is a single hash probe. A tab with no room suppresses every pane it
+        // holds, and this path runs for every painted frame and for every
+        // mouse event forwarded to a pane that asked for the mouse.
         let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let layout_solved: Vec<PaneSlot> = solve
             .panes
@@ -322,10 +321,8 @@ fn display_path(path: &std::path::Path) -> String {
 
 /// The home directory as display text, read from the environment on the first
 /// call and reused after — `HOME`, or `USERPROFILE` on Windows. `None` when
-/// neither is set, which leaves every path whole.
-///
-/// A pane's title is resolved once per pane per frame, so the value is read
-/// far more often than the environment can change.
+/// neither is set, which leaves every path whole. A later change to either
+/// variable does not alter the stored value.
 fn home_text() -> Option<&'static str> {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
     HOME.get_or_init(|| {

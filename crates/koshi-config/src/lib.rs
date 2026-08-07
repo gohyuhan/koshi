@@ -7,8 +7,15 @@
 //! detection across those layers ([`conflict`]), merging them into the
 //! per-mode lookup tables ([`keymap_merge`]), profile files parsed into
 //! templates ([`profile`]), and the config error types ([`error`]).
-//! Discovering config files on disk, full validation, and migrating older
-//! files forward belong to this system too.
+//!
+//! The other modules serve those. [`parser`] holds the KDL entry point and
+//! the field readers the file parsers share. [`app_config`] parses
+//! `koshi.kdl`. [`theme`] parses one `themes/<name>.kdl`. [`migration`]
+//! validates a versioned file and moves it forward to the current schema.
+//! [`hints`] resolves the merged keymap into the table the hint bar reads.
+//! [`config`] is a placeholder for the standard source layout.
+//!
+//! No module here reads a file. The caller reads the text and passes it in.
 
 pub mod app_config;
 pub mod conflict;

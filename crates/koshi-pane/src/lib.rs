@@ -1,11 +1,12 @@
-//! `koshi-pane` — pane domain: runtime metadata, lifecycle state machine, and
-//! policies for every pane in a session.
+//! `koshi-pane` — the pane domain: runtime metadata, the lifecycle state
+//! machine, and the policies for every pane in a session.
 //!
-//! The pane domain owns all per-pane state except content: the [`pane::state::PaneRecord`]
-//! (command, cwd, lifecycle, exit code), [`pane::policy`] rules (how to close,
-//! what happens on process exit), and the [`pane::lifecycle`] state machine. The layout
-//! tree holds only [`koshi_core::ids::PaneId`] leaves; the [`registry::PaneRegistry`] is
-//! the single owner of everything else, keyed by id.
+//! This crate holds all per-pane state except the pane content.
+//! [`pane::state::PaneRecord`] carries the command, the working directory, the
+//! lifecycle state and the exit code. [`pane::policy`] sets how a pane closes,
+//! and what happens when its process ends. [`pane::lifecycle`] holds the state
+//! machine. A layout tree stores only [`koshi_core::ids::PaneId`] leaves.
+//! [`registry::PaneRegistry`] owns every record, keyed by id.
 
 pub mod error;
 pub mod types;

@@ -1,39 +1,33 @@
 //! Layout invariant assertions for pure-layout tests.
 //!
 //! The layout engine maps a layout tree over a tab rect to placed pane
-//! rectangles. Its correctness rests on a handful of geometric invariants:
-//! the live panes tile the whole tab area, no two panes overlap, nothing
-//! spills outside the tab, and every live pane respects the minimum cell
-//! size. These helpers let a test state each invariant directly against a
-//! slice of placed panes and get a structured, pane-identifying error when
-//! one breaks.
+//! rectangles. Each helper here checks one geometric invariant against a slice
+//! of placed panes: the live panes tile the whole tab area, no two panes
+//! overlap, nothing spills outside the tab, and every live pane respects the
+//! minimum cell size. A broken invariant returns a
+//! [`layout_assert::LayoutAssertionError`] that names the panes involved.
 //!
-//! Each assertion is single-purpose so a test can check exactly one invariant.
-//! "Exact tiling" is the conjunction of three of them:
+//! Exact tiling is the conjunction of three checks:
 //! [`layout_assert::assert_all_space_occupied`] (area is fully accounted for),
 //! [`layout_assert::assert_no_overlap`] (no cell is double-counted), and
-//! [`layout_assert::assert_no_outside`] (no cell lies beyond the tab). Area equality alone does
-//! not prove a gap-free cover; pair it with the other two.
+//! [`layout_assert::assert_no_outside`] (no cell lies beyond the tab). Equal
+//! area alone does not prove a gap-free cover, so call all three.
 //!
 //! ## Suppressed panes
 //!
 //! When the terminal shrinks below the fittable threshold the solver clips
 //! trailing panes to a zero-area rect and marks them suppressed. A suppressed
 //! pane occupies no cells, so these helpers treat any empty rect as suppressed.
-//! For the occupancy check that needs no special handling — an empty rect
-//! contributes zero area and cannot overlap anything; for the outside and
-//! minimum-size checks, empty rects are explicitly skipped, because a pane
-//! with no cells is neither placed wrongly nor undersized (its frozen PTY
-//! size lives elsewhere).
+//! An empty rect adds zero area and intersects nothing, so the occupancy and
+//! overlap checks need no special case. The outside and minimum-size checks
+//! skip empty rects.
 //!
-//! ## Live-pane reference checking
+//! ## Live pane references
 //!
 //! Layout normalization also requires that every layout-tree leaf references a
-//! live pane. [`layout_assert::assert_live_pane_refs`] checks this while staying decoupled
-//! from the concrete tree and pane-registry types: it takes already-extracted
-//! leaf pane ids and the set of live pane ids. The layout crate's tests pass
-//! `tree.leaf_panes()` and their live set straight in, and this crate keeps
-//! its dependency direction (it never depends on the layout crate).
+//! live pane. [`layout_assert::assert_live_pane_refs`] takes the extracted leaf
+//! pane ids and the set of live pane ids. The layout crate's tests pass
+//! `tree.leaf_panes()` and their live set straight in.
 
 use std::collections::HashSet;
 
@@ -108,9 +102,9 @@ fn area(rect: Rect) -> u64 {
 
 /// Assert the live panes occupy exactly the tab area, by cell count.
 ///
-/// Suppressed (empty) panes contribute nothing. This is necessary but not
-/// sufficient for a gap-free tiling on its own — see the module docs; combine
-/// with [`assert_no_overlap`] and [`assert_no_outside`].
+/// Suppressed (empty) panes contribute nothing. Equal area alone does not prove
+/// a gap-free tiling, so pair this with [`assert_no_overlap`] and
+/// [`assert_no_outside`].
 ///
 /// # Errors
 ///
@@ -190,8 +184,7 @@ pub fn assert_no_outside(panes: &[PlacedPane], tab_rect: Rect) -> Result<(), Lay
 
 /// Assert every live pane is at least `min` cells in each dimension.
 ///
-/// Empty (suppressed) panes are exempt: their geometry is frozen at the last
-/// valid size and is not subject to the live floor.
+/// Empty (suppressed) panes are exempt.
 ///
 /// # Errors
 ///
@@ -217,9 +210,8 @@ pub fn assert_min_size_respected(
 
 /// Assert every layout leaf references a live pane.
 ///
-/// This helper intentionally accepts the already-extracted leaf pane ids
-/// rather than a concrete tree type, keeping this crate independent of the
-/// layout crate. Callers pass `tree.leaf_panes()` and their live set in.
+/// Takes the extracted leaf pane ids, not a concrete tree type. Callers pass
+/// `tree.leaf_panes()` and their live set in.
 ///
 /// # Errors
 ///

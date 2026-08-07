@@ -1,1 +1,1 @@
-//! Shared types. Placeholder per standard source layout.
+//! Shared types. This module is empty.

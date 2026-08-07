@@ -156,9 +156,8 @@ pub fn parse_sequence(
         ));
     }
 
-    let mut it = chords.into_iter();
-    let first = it.next().expect("chords is not empty");
-    Ok(KeySequence::new(first, it.collect()))
+    let first = chords.remove(0);
+    Ok(KeySequence::new(first, chords))
 }
 
 #[cfg(test)]

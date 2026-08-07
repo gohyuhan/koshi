@@ -343,13 +343,17 @@ impl FrameRow {
     }
 
     /// Expand the runs back into cells, each run's cell repeated `count` times.
-    /// The inverse of [`from_cells`](Self::from_cells).
+    /// The inverse of [`from_cells`](Self::from_cells). The returned vector is
+    /// allocated once, at the runs' total count.
     #[must_use]
     pub fn cells(&self) -> Vec<FrameCell> {
-        self.runs
-            .iter()
-            .flat_map(|run| std::iter::repeat_n(run.cell.clone(), usize::from(run.count)))
-            .collect()
+        let total = self.runs.iter().map(|run| usize::from(run.count)).sum();
+        let mut cells = Vec::with_capacity(total);
+        for run in &self.runs {
+            let count = usize::from(run.count);
+            cells.extend(std::iter::repeat_n(run.cell.clone(), count));
+        }
+        cells
     }
 }
 

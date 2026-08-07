@@ -72,36 +72,23 @@ pub fn repair_focus(
                 .is_some_and(|pane| *pane.lifecycle() != PaneLifecycle::Removed)
     };
 
-    for &pane_id in tab.focus_mru() {
-        if is_eligible(pane_id) {
-            return FocusRepairResult::Focused(pane_id);
-        }
-    }
-
-    if let Some(pane_id) = candidate.spatial_neighbor {
-        if is_eligible(pane_id) {
-            return FocusRepairResult::Focused(pane_id);
-        }
-    }
-
-    if let Some(pane_id) = candidate.absorbed_space {
-        if is_eligible(pane_id) {
-            return FocusRepairResult::Focused(pane_id);
-        }
-    }
-
-    if let Some(&pane_id) = candidate
-        .layout_order
+    // The recovery order in one pass: focus history newest-first, the spatial
+    // neighbor, the pane that absorbed the space, then layout order.
+    let inheritor = tab
+        .focus_mru()
         .iter()
-        .find(|&&pane_id| is_eligible(pane_id))
-    {
-        return FocusRepairResult::Focused(pane_id);
-    }
+        .copied()
+        .chain(candidate.spatial_neighbor)
+        .chain(candidate.absorbed_space)
+        .chain(candidate.layout_order.iter().copied())
+        .find(|&pane_id| is_eligible(pane_id));
 
-    if tab.layout().leaf_panes().is_empty() {
-        FocusRepairResult::EmptyTab(empty_tab_policy)
-    } else {
-        FocusRepairResult::TerminalTooSmall
+    match inheritor {
+        Some(pane_id) => FocusRepairResult::Focused(pane_id),
+        None if tab.layout().leaf_panes().is_empty() => {
+            FocusRepairResult::EmptyTab(empty_tab_policy)
+        }
+        None => FocusRepairResult::TerminalTooSmall,
     }
 }
 

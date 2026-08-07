@@ -112,11 +112,11 @@ pub struct Server {
     /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
     /// they can push [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`].
     pub(crate) inbox_tx: Sender<RuntimeEvent>,
-    /// Set once shutdown begins. The event loop has already exited when it is
-    /// set, so no queued IPC/plugin command dispatches after it; the control
-    /// socket itself is stopped in the next shutdown stage. One-way; no
-    /// command-dispatch path checks it —
-    /// [`is_draining`](Self::is_draining) exposes the raw flag today.
+    /// Set once shutdown begins, and never cleared. The event loop has already
+    /// exited when it is set, so no queued IPC or plugin command dispatches
+    /// after it; the control socket is stopped in the next shutdown stage. No
+    /// command-dispatch path reads it; [`is_draining`](Self::is_draining) is
+    /// its only reader.
     pub(crate) draining: bool,
     /// True when an explicit quit chord requested zero-grace process teardown.
     pub(crate) immediate_shutdown: bool,
@@ -279,10 +279,9 @@ impl Server {
     /// offers a newer one. A subscriber the send removed — its receiver is gone
     /// — takes its `subscriptions` entry with it.
     pub fn push_frames(&mut self) {
-        // Taken and put back rather than cloned: building a frame and queueing
-        // it both need `self`, and this runs on every due frame for every
-        // client, so the clone was an allocation per render tick. Nothing in
-        // the loop touches `subscriptions` itself.
+        // The list is taken out for the walk and put back after it: building a
+        // frame and queueing it both need `self`. Nothing in the loop touches
+        // `subscriptions` itself.
         let subscriptions = std::mem::take(&mut self.subscriptions);
         for &(id, client_id) in &subscriptions {
             if let Some(bytes) = self.host_writes.remove(&client_id) {
@@ -412,8 +411,8 @@ impl Server {
     pub fn inbox_rx(&self) -> &Receiver<RuntimeEvent> {
         &self.inbox_rx
     }
-    /// Whether shutdown has begun. Once command intake exists it will gate new
-    /// commands; today it only records that teardown started.
+    /// Whether shutdown has begun. It records that teardown started; it gates
+    /// no command.
     pub fn is_draining(&self) -> bool {
         self.draining
     }

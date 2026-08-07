@@ -1,17 +1,13 @@
 //! In-memory fake PTY (pseudo-terminal, the virtual terminal a shell process
 //! runs inside) backend.
 //!
-//! Layout, session, and runtime tests need to exercise pane spawning, writing,
-//! resizing, and child-exit handling without launching real shells: real
-//! processes make tests slow, platform-dependent, and non-deterministic.
-//! [`fake_pty::FakePtyBackend`] satisfies the full [`koshi_pty::backend::state::PtyBackend`] surface entirely in
-//! memory, capturing every call so a test can assert on it and driving output
-//! and child-exit on demand.
+//! [`fake_pty::FakePtyBackend`] implements the whole
+//! [`koshi_pty::backend::state::PtyBackend`] trait in memory, without launching
+//! a real shell. It records every spawn, write, resize, and kill.
 //!
-//! It implements the canonical [`koshi_pty`] trait, so a test can drive it
-//! through the same interface the real backend exposes. [`fake_pty::FakePtyBackend`] is
-//! the permanent test double: its capture/drive surface — `push_output`,
-//! `trigger_child_exit`, and the `*s` query methods — is what tests assert on.
+//! A test reads those records back with `spawned_panes`, `spawn_spec`,
+//! `writes`, `resizes`, and `kills`. A test drives child output with
+//! `push_output` and child exit with `trigger_child_exit`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,31 +25,30 @@ struct PaneRecord {
     resizes: Vec<PtySize>,
     writes: Vec<Vec<u8>>,
     kills: Vec<KillPolicy>,
-    /// The output channel's sending end. `None` once [`close_output`](FakePtyBackend::close_output)
-    /// drops it — modelling the child's PTY reaching EOF, after which no further
-    /// output can be pushed.
+    /// The output channel's sending end. [`close_output`](FakePtyBackend::close_output)
+    /// sets it to `None`, which models the child's PTY reaching EOF.
+    /// [`push_output`](FakePtyBackend::push_output) then discards its bytes.
     output_tx: Option<Sender<Vec<u8>>>,
     exit_tx: Sender<ExitStatus>,
 }
 
-/// Backend state behind the [`Mutex`]; the trait takes `&self`, so all mutation
-/// goes through interior mutability.
+/// Backend state behind the [`Mutex`]. The trait methods take `&self`, so every
+/// mutation goes through interior mutability.
 #[derive(Default)]
 struct State {
     panes: HashMap<PaneId, PaneRecord>,
     spawn_order: Vec<PaneId>,
     /// When set, every [`spawn`](FakePtyBackend::spawn) fails with this error
-    /// instead of registering a pane — drives the spawn-failure path.
+    /// instead of registering a pane.
     spawn_error: Option<PtyError>,
     /// When set, [`resize`](FakePtyBackend::resize) fails for this pane with this
-    /// error instead of recording — drives the best-effort partial-failure reflow
-    /// path (one sibling's resize failing must not drop the others').
+    /// error instead of recording.
     resize_error: Option<(PaneId, PtyError)>,
     /// When set, [`write`](FakePtyBackend::write) fails for this pane with this
-    /// error instead of recording — drives the pane-refused-the-bytes path.
+    /// error instead of recording.
     write_error: Option<(PaneId, PtyError)>,
-    /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd); a pane
-    /// with no entry answers `None`, like a platform with no lookup.
+    /// Per-pane answers for [`live_cwd`](FakePtyBackend::live_cwd). A pane with
+    /// no entry answers `None`.
     live_cwds: HashMap<PaneId, PathBuf>,
 }
 
@@ -72,26 +67,25 @@ impl FakePtyBackend {
     }
 
     /// Make every subsequent [`spawn`](Self::spawn) fail with `error` instead of
-    /// registering a pane, so a test can drive the spawn-failure path.
+    /// registering a pane.
     pub fn fail_spawns_with(&self, error: PtyError) {
         self.state.lock().unwrap().spawn_error = Some(error);
     }
 
     /// Make [`resize`](Self::resize) fail for `pane` with `error` instead of
-    /// recording, so a test can drive the best-effort partial-failure reflow path
-    /// (one sibling failing to resize must not drop the others').
+    /// recording. Other panes still record their resizes.
     pub fn fail_resizes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().resize_error = Some((pane, error));
     }
 
     /// Make [`write`](Self::write) fail for `pane` with `error` instead of
-    /// recording, so a test can drive the pane-refused-the-bytes path.
+    /// recording.
     pub fn fail_writes_on(&self, pane: PaneId, error: PtyError) {
         self.state.lock().unwrap().write_error = Some((pane, error));
     }
 
-    /// Make [`live_cwd`](Self::live_cwd) answer `cwd` for `pane`, modelling
-    /// the OS reporting that directory as the child's current one.
+    /// Make [`live_cwd`](Self::live_cwd) answer `cwd` for `pane`, as the OS
+    /// reports the child's current directory.
     pub fn set_live_cwd(&self, pane: PaneId, cwd: impl Into<PathBuf>) {
         self.state
             .lock()
@@ -117,10 +111,12 @@ impl FakePtyBackend {
         Ok(())
     }
 
-    /// Close a pane's output channel, modelling its PTY reaching EOF once the
-    /// child is gone: the handle's output receiver then reports the channel
-    /// closed, and later [`push_output`](Self::push_output) calls are silently
-    /// dropped. Returns [`PtyError::UnknownPane`] if the pane was never spawned.
+    /// Close a pane's output channel, which models its PTY reaching EOF once the
+    /// child is gone.
+    ///
+    /// The handle's output receiver then reports the channel closed. Later
+    /// [`push_output`](Self::push_output) calls discard their bytes. Returns
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn close_output(&self, pane: PaneId) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state
@@ -150,55 +146,50 @@ impl FakePtyBackend {
         self.state.lock().unwrap().spawn_order.clone()
     }
 
-    /// The [`SpawnSpec`] a pane was spawned with.
-    pub fn spawn_spec(&self, pane: PaneId) -> Result<SpawnSpec> {
+    /// Read one part of a pane's record.
+    ///
+    /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
+    fn read_record<T>(&self, pane: PaneId, read: impl FnOnce(&PaneRecord) -> T) -> Result<T> {
         let state = self.state.lock().unwrap();
         state
             .panes
             .get(&pane)
-            .map(|r| r.spec.clone())
+            .map(read)
             .ok_or(PtyError::UnknownPane { pane })
+    }
+
+    /// The [`SpawnSpec`] a pane was spawned with.
+    pub fn spawn_spec(&self, pane: PaneId) -> Result<SpawnSpec> {
+        self.read_record(pane, |record| record.spec.clone())
     }
 
     /// Every write made to a pane, in order.
     pub fn writes(&self, pane: PaneId) -> Result<Vec<Vec<u8>>> {
-        let state = self.state.lock().unwrap();
-        state
-            .panes
-            .get(&pane)
-            .map(|r| r.writes.clone())
-            .ok_or(PtyError::UnknownPane { pane })
+        self.read_record(pane, |record| record.writes.clone())
     }
 
     /// Every resize applied to a pane, in order.
     pub fn resizes(&self, pane: PaneId) -> Result<Vec<PtySize>> {
-        let state = self.state.lock().unwrap();
-        state
-            .panes
-            .get(&pane)
-            .map(|r| r.resizes.clone())
-            .ok_or(PtyError::UnknownPane { pane })
+        self.read_record(pane, |record| record.resizes.clone())
     }
 
     /// Every kill requested for a pane, in order.
     pub fn kills(&self, pane: PaneId) -> Result<Vec<KillPolicy>> {
-        let state = self.state.lock().unwrap();
-        state
-            .panes
-            .get(&pane)
-            .map(|r| r.kills.clone())
-            .ok_or(PtyError::UnknownPane { pane })
+        self.read_record(pane, |record| record.kills.clone())
     }
 }
 
 impl PtyBackend for FakePtyBackend {
     /// Record a pane spawn under the caller's `pane_id` and return a handle.
     ///
-    /// Stores the spawn spec and initial size in the pane's record keyed by
-    /// `pane_id`, and appends that id to the spawn order. The returned handle
-    /// is addressed by the same id and can be used to receive output and exit
-    /// status driven by the test via
+    /// Stores the spawn spec and the initial size in the pane's record, then
+    /// appends `pane_id` to the spawn order. The handle carries the same id. It
+    /// receives the output and exit status a test drives with
     /// [`push_output`](Self::push_output) and [`trigger_child_exit`](Self::trigger_child_exit).
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, if `pane_id` is already live and no spawn error is set.
     fn spawn(&self, pane_id: PaneId, spec: SpawnSpec, size: PtySize) -> Result<PtyHandle> {
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.spawn_error {

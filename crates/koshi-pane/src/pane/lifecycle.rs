@@ -1,16 +1,28 @@
 //! Pane lifecycle state machine: the states a pane moves through from spawn to
 //! teardown.
 //!
-//! A pane is born `Spawning`, becomes `Running` once its process is live, then
-//! ends — its child `Exited` (carrying the exit code, or none on signal-kill,
-//! and when), or a requested `Closing` (carrying since-when, and askable from
-//! any live stage, even before the child runs) — before it is finally
-//! `Removed` from the registry. A dead `Exited` pane may instead respawn (the
-//! `RespawnShell` policy), looping back to `Spawning` in place; only `Removed`
-//! is terminal.
+//! A pane holds one of five states.
 //!
-//! The enum and its `transition` function — which rejects every move outside
-//! the legal set — both live here, driven one step per [`PaneLifecycleEvent`].
+//! - `Spawning` — the pane exists. The child process has not started.
+//! - `Running` — the child process is live.
+//! - `Exited` — the child process ended. The state carries the exit code and
+//!   the time.
+//! - `Closing` — a user or a policy asked the pane to close. The state carries
+//!   the request time.
+//! - `Removed` — the pane is removed from the registry. This state is terminal.
+//!
+//! [`PaneLifecycleEvent`] drives the state one step at a time. Seven steps are
+//! legal.
+//!
+//! - `Spawning` on `ProcessStarted` becomes `Running`.
+//! - `Spawning` on `CloseRequested` becomes `Closing`.
+//! - `Running` on `ProcessExited` becomes `Exited`.
+//! - `Running` on `CloseRequested` becomes `Closing`.
+//! - `Exited` on `CloseRequested` becomes `Closing`.
+//! - `Exited` on `Respawn` becomes `Spawning`.
+//! - `Closing` on `Cleaned` becomes `Removed`.
+//!
+//! [`PaneLifecycle::transition`] rejects every other pair.
 
 use std::time::SystemTime;
 
@@ -20,24 +32,23 @@ use crate::{error::InvalidTransition, pane::state::PaneKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycle {
-    /// The pane is being created; the child process hasn't started yet.
+    /// The pane exists. The child process has not started.
     Spawning,
     /// The child process is running.
     Running,
-    /// The child exited. `code` is `None` when the pane was signal-killed or
-    /// its status was unavailable, mirroring `PaneRecord::exit_code` and the
-    /// `PaneProcessExited` event.
+    /// The child process ended. `code` is `None` when a signal killed the
+    /// child. `code` is also `None` when the exit status was not available.
     Exited { code: Option<i32>, at: SystemTime },
-    /// The pane is shutting down.
+    /// The pane is shutting down. `since` is the time of the close request.
     Closing { since: SystemTime },
-    /// The pane has been removed from the registry.
+    /// The pane is removed from the registry. This state is terminal.
     Removed,
 }
 
 impl PaneLifecycle {
-    /// Advance the pane's lifecycle state by applying `event`. Returns the new
-    /// state, or [`InvalidTransition`] if the event cannot occur from the
-    /// current one. `kind` appears only in that error.
+    /// Applies `event` to this state and returns the next state. Returns
+    /// [`InvalidTransition`] when the pair is not one of the seven legal steps.
+    /// `kind` only fills in that error.
     pub fn transition(
         self,
         event: PaneLifecycleEvent,
@@ -75,22 +86,23 @@ impl PaneLifecycle {
     }
 }
 
-/// What happened to a pane, driving its [`PaneLifecycle`] forward. An event
-/// carries any payload its target state needs — an exit's code and time, a
-/// close's start time — and is otherwise a bare signal.
+/// What happened to a pane. Each event drives [`PaneLifecycle`] one step
+/// forward. An event carries the payload that its next state needs, or no
+/// payload at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycleEvent {
     /// The child process became live.
     ProcessStarted,
-    /// The child process ended. `code` is `None` when it was signal-killed or
-    /// its status was unavailable.
+    /// The child process ended. `code` is `None` when a signal killed the
+    /// child. `code` is also `None` when the exit status was not available.
     ProcessExited { code: Option<i32>, at: SystemTime },
-    /// A user or policy asked the pane to close.
+    /// A user or a policy asked the pane to close. `since` is the time of the
+    /// request.
     CloseRequested { since: SystemTime },
-    /// The close transaction finished its cleanup.
+    /// The close finished its cleanup.
     Cleaned,
-    /// A policy (`RespawnShell`) restarts a dead pane in place, looping it back
-    /// to `Spawning` to recreate the PTY and child.
+    /// The `RespawnShell` policy restarts an exited pane in place. The pane
+    /// returns to `Spawning` and creates a new PTY and child process.
     Respawn,
 }
 

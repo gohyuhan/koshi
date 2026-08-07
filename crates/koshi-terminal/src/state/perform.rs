@@ -87,16 +87,15 @@ impl vte::Perform for TerminalState {
         // or wide (2, e.g. CJK / emoji); `unicode-width` treats ambiguous-width
         // characters as narrow.
         let Some(raw_width) = c.width() else {
-            // A control char with no display width slipped past `execute`; it is
-            // not text, so it ends the run. Drop it but reset, so a following
-            // continuation cannot attach across it.
+            // The reset ends the text run, so a following continuation cannot
+            // attach across the dropped char.
             self.reset_cluster();
             return;
         };
         if raw_width == 0 {
             // A zero-width char that did NOT continue the cluster is a grapheme
-            // boundary (e.g. ZWSP U+200B): it ends the run. Drop it but reset, so
-            // a following combining mark / VS16 cannot attach across the break.
+            // boundary (e.g. ZWSP U+200B). The reset ends the text run, so a
+            // following combining mark / VS16 cannot attach across the break.
             self.reset_cluster();
             return;
         }
@@ -313,21 +312,18 @@ impl vte::Perform for TerminalState {
         // owned by a later task.
         if intermediates == b"?" {
             // Modes in one DECSET/DECRST list are applied left-to-right, each
-            // taking effect immediately (matching xterm/alacritty), so per-screen
-            // state like `?25` visibility lands on whichever screen is active at
-            // that point in the list. Switches are guarded on the **live**
-            // `self.active` (alacritty's whichBuf guard), so a second swap-mode in
-            // the same list is a no-op once the first has flipped buffers — e.g. a
-            // trailing `?1047 l` after `?1049 l` does not re-clear (that would blank
-            // with the wrong pen, since `?1049 l`'s DECRC already restored the
-            // primary's). The one exception is `?1049 h` entry, guarded on the
-            // screen active at the *start* of the list (`screen_at_start`): it must
-            // still save the primary cursor + freshen the alternate when the list
-            // began on the primary, even if an earlier `?47` already swapped
-            // within the same list (this differs from alacritty, which treats
-            // that case as a no-op). Entry re-firing is idempotent (no SGR can
-            // change the pen mid-`?`-list), so it needs no whichBuf guard; exit
-            // re-firing is not, so it does.
+            // taking effect immediately (as in xterm), so per-screen state like
+            // `?25` visibility lands on whichever screen is active at that point
+            // in the list. Switches are guarded on the **live** `self.active`, so a
+            // second swap-mode in the same list is a no-op once the first has
+            // flipped buffers — a trailing `?1047 l` after `?1049 l` does not
+            // re-clear. The one exception is `?1049 h` entry, guarded on the
+            // screen active at the *start* of the list (`screen_at_start`): it
+            // still saves the primary cursor and freshens the alternate when the
+            // list began on the primary, even if an earlier `?47` already
+            // swapped within the same list. Entry re-firing is idempotent (no
+            // SGR can change the pen mid-`?`-list), so it needs no live guard;
+            // exit re-firing is not, so it keeps one.
             let screen_at_start = self.active;
             for param in params.iter() {
                 let mode = param.first().copied().unwrap_or(0);
@@ -439,24 +435,26 @@ impl vte::Perform for TerminalState {
                     // Cursor to end of screen: rest of this row, then every row
                     // below.
                     0 => {
-                        self.active_grid_mut().clear_line(r, c, cols, fill);
+                        let grid = self.active_grid_mut();
+                        grid.clear_line(r, c, cols, fill);
                         for row in r.saturating_add(1)..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols, fill);
+                            grid.clear_line(row, 0, cols, fill);
                         }
                     }
                     // Start of screen to cursor: every row above, then this row
                     // through the cursor column inclusive.
                     1 => {
+                        let grid = self.active_grid_mut();
                         for row in 0..r {
-                            self.active_grid_mut().clear_line(row, 0, cols, fill);
+                            grid.clear_line(row, 0, cols, fill);
                         }
-                        self.active_grid_mut()
-                            .clear_line(r, 0, c.saturating_add(1), fill);
+                        grid.clear_line(r, 0, c.saturating_add(1), fill);
                     }
                     // Whole screen.
                     2 => {
+                        let grid = self.active_grid_mut();
                         for row in 0..rows {
-                            self.active_grid_mut().clear_line(row, 0, cols, fill);
+                            grid.clear_line(row, 0, cols, fill);
                         }
                     }
                     // Erase scrollback only (xterm "erase saved lines"): drop
@@ -712,27 +710,20 @@ impl vte::Perform for TerminalState {
     }
 
     /// Begin a device control string (DCS, `ESC P … ST`): clear any
-    /// in-progress grapheme cluster since a non-printing control sequence ends
-    /// the text run. DCS payload handling is deferred.
+    /// in-progress grapheme cluster, since a non-printing control sequence ends
+    /// the text run. A combining mark or variation selector after the DCS
+    /// therefore does not fold onto the glyph before it. Clearing at DCS entry
+    /// covers the whole string: the body bytes arrive through `put`, which
+    /// never prints. DCS payload handling is deferred.
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
-        // A device control string (DCS, `ESC P … ST`) is a non-printing control
-        // sequence, so it ends a text run: a combining mark or variation selector
-        // that follows must not fold onto the glyph before the DCS. Clearing here,
-        // at DCS entry, covers the whole string — the body bytes arrive via `put`,
-        // which never prints, so they cannot extend a cluster. The DCS payload
-        // itself is owned by a later task.
         self.reset_cluster();
     }
 
     /// End a device control string (DCS) and clear any in-progress grapheme
-    /// cluster. Redundant with `hook` for well-formed strings, but necessary
-    /// for DCS closed by the 8-bit C1 ST (`0x9C`), which calls only this
-    /// method.
+    /// cluster. Redundant with `hook` for a well-formed string. A DCS closed by
+    /// the 8-bit C1 ST (`0x9C`) reaches no other callback — neither
+    /// `esc_dispatch` nor `execute` — so this method clears its cluster.
     fn unhook(&mut self) {
-        // DCS termination. Redundant with `hook` for a well-formed string, but it
-        // also covers a DCS closed by the 8-bit C1 ST (`0x9C`), whose only `Perform`
-        // callback is this one — it does not route through `esc_dispatch`/`execute`,
-        // so without this the cluster would survive such a DCS.
         self.reset_cluster();
     }
 }
@@ -794,10 +785,8 @@ impl TerminalState {
             }
             // DECRST `?1047` — reset the alternate buffer (clear cells +
             // scroll region + cursor), then switch back to the primary.
-            // Guarded on the **live** screen (whichBuf): once an earlier
-            // exit in the same list already left the alternate, this is a
-            // no-op — re-clearing on the primary would blank with the wrong
-            // pen.
+            // Guarded on the **live** screen: once an earlier exit in the
+            // same list already left the alternate, this is a no-op.
             ('l', 1047) => {
                 if self.active == Screen::Alternate {
                     self.reset_alternate_buffer();
@@ -806,7 +795,7 @@ impl TerminalState {
             }
             // DECRST `?1049` — xterm/alacritty define `?1049 l` as `?1047 l`
             // + `?1048 l`: the clear + switch-to-primary apply only while
-            // still on the alternate (live whichBuf guard, so a second
+            // still on the alternate (live screen guard, so a second
             // clearing exit is a no-op), but the DECRC cursor restore (the
             // `?1048 l` part) runs unconditionally.
             ('l', 1049) => {

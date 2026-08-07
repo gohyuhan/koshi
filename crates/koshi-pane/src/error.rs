@@ -11,10 +11,10 @@ use crate::pane::{
     state::PaneKind,
 };
 
-/// Why a pane-registry operation was rejected.
+/// Why the pane registry rejected an operation.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PaneRegistryError {
-    /// A record was inserted under an id the registry already holds.
+    /// An insert used an id that the registry already holds.
     #[error("pane {id} is already registered")]
     DuplicateId { id: PaneId, kind: PaneKind },
 }
@@ -39,7 +39,7 @@ pub struct InvalidTransition {
     pub from: PaneLifecycle,
     /// The event that was rejected.
     pub event: PaneLifecycleEvent,
-    /// The kind of pane, terminal or plugin
+    /// The kind of the pane, terminal or plugin.
     pub kind: PaneKind,
 }
 

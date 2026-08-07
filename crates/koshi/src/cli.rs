@@ -155,10 +155,10 @@ pub enum FormatArg {
 
 /// The `koshi` subcommand tree.
 ///
-/// Lifecycle commands (`new`, `list-sessions`, `kill-session`, `attach`,
-/// `detach`, `doctor`) run outside any session, except a bare `detach`, which
-/// names this pane's own client. Action subcommands carry their typed
-/// arguments and map to core commands via [`CliCommand::to_action`];
+/// Lifecycle commands (`list-sessions`, `kill-session`, `attach`, `detach`,
+/// `doctor`) run outside any session, except a bare `detach`, which names this
+/// pane's own client. Action subcommands carry their typed arguments and map
+/// to core commands via [`CliCommand::to_action`];
 /// execution arrives with the IPC client. The discovery queries (`inspect`,
 /// the `list-*` verbs) carry typed target and `--format` arguments; their
 /// answers are rendered by [`crate::output`]. `actions` introspects the action
@@ -631,10 +631,10 @@ impl CliCommand {
     /// command that reaches the session already names a side.
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
-    /// (`new`, `list-sessions`, `kill-session`, `attach`, `detach`, `doctor`),
-    /// the read-only discovery and local queries (`inspect`, the `list-*`
-    /// verbs, `actions`, `keys`, and `config`), plus `plugin`, whose arguments
-    /// are not built.
+    /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
+    /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
+    /// `actions`, `keys`, and `config`), `update`, the hidden `serve-router`
+    /// and `serve-session`, plus `plugin`, whose arguments are not built.
     #[must_use]
     pub fn to_action(
         &self,

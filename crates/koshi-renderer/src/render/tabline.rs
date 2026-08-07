@@ -70,9 +70,8 @@ pub(crate) const TABLINE_ARROW_WIDTH: u16 = 1;
 /// The tabline's solved geometry for one frame: the two anchored block widths,
 /// the windowed run of visible tabs, and the scroll arrows framing it.
 ///
-/// [`draw_tabline`] paints from it and [`crate::hit_test()`] maps a click to a tab
-/// or arrow with it, so the drawn positions and the hit-tested ones cannot
-/// drift apart — they are the same solve.
+/// [`draw_tabline`] paints from it, and [`crate::hit_test()`] maps a click to a
+/// tab or arrow with it. Both read the same solve.
 pub(crate) struct TablineLayout {
     /// Cells the left session block occupies, measured from `area.x`.
     pub session_width: u16,
@@ -141,8 +140,8 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
         };
     }
 
-    // Scrolled: reserve one arrow cell on each side. A reserved-but-undrawn
-    // cell (no tabs hidden that side) is a harmless one-cell gap.
+    // Scrolled: reserve one arrow cell on each side. A reserved cell that
+    // draws no arrow (nothing hidden that side) stays a one-cell gap.
     let lo = strip_start.saturating_add(TABLINE_ARROW_WIDTH);
     let hi = right_x.saturating_sub(TABLINE_ARROW_WIDTH);
     if lo >= hi {
@@ -213,8 +212,7 @@ fn reveal_active(widths: &[u16], active: usize, lo: u16, hi: u16) -> usize {
 
 /// The cells `text` occupies when drawn. A span's width counts the graphemes
 /// in its text and never looks at its style, so measuring an unstyled span
-/// gives the same answer the drawn one does — which is what lets the solve
-/// below run without any colors.
+/// gives the same answer the drawn one does.
 ///
 /// Text wider than a `u16` saturates rather than wrapping: no terminal is
 /// 65535 cells across, so anything at the cap is already "wider than the row"
@@ -239,11 +237,8 @@ fn right_block(frame: FrameLayout<'_>, theme: &Theme) -> Line<'static> {
 /// own `CARGO_PKG_VERSION` is the running binary's version.
 const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The `[v…] ` badge text the tabline paints, trailing space included.
-///
-/// The one place the badge's shape is written. A test that sizes a row around
-/// the badge measures this rather than rebuilding the string, so the row keeps
-/// the same room whatever the version string is.
+/// The `[v…] ` badge text the tabline paints, trailing space included. The one
+/// place the badge's shape is written.
 pub(crate) fn version_badge() -> String {
     format!("[v{KOSHI_VERSION}] ")
 }
@@ -252,17 +247,17 @@ pub(crate) fn version_badge() -> String {
 /// badge naming the koshi version that is running — ` my-session [v0.1.0] `.
 ///
 /// `room` is the space the block has before the right-anchored mode tag. When
-/// both parts do not fit in it the badge is dropped whole, the way a tab that
-/// does not fit is dropped rather than clipped — a 16-cell row shows ` s `,
-/// never the half-written ` s [v0.1.0`.
+/// both parts do not fit in it, the badge is dropped whole: a 16-cell row shows
+/// ` s `, never the half-written ` s [v0.1.0`.
 fn session_texts(frame: FrameLayout<'_>, room: u16) -> SessionBlock {
     let name = format!(" {} ", frame.session.name);
     let badge = version_badge();
     let name_width = text_width(&name);
     let badge_width = text_width(&badge);
-    if name_width.saturating_add(badge_width) <= room {
+    let both_width = name_width.saturating_add(badge_width);
+    if both_width <= room {
         SessionBlock {
-            width: name_width.saturating_add(badge_width),
+            width: both_width,
             name,
             badge: Some(badge),
         }
@@ -277,10 +272,9 @@ fn session_texts(frame: FrameLayout<'_>, room: u16) -> SessionBlock {
 
 /// The left block's text and the cells it occupies, measured once.
 ///
-/// The solve and the draw both need this, and measuring text means walking it
-/// grapheme by grapheme — so the width the fit decision already computed is
-/// carried out rather than recomputed. `tabline_layout` runs on every pointer
-/// move, so the walks it does are worth counting.
+/// [`session_texts`] measures the text to decide whether the badge fits, and
+/// carries that width out in [`width`](SessionBlock::width), so a caller that
+/// needs the width does not walk the text again.
 struct SessionBlock {
     /// The session name, padded — always drawn.
     name: String,

@@ -106,11 +106,9 @@ pub struct Client {
     /// while the others are hidden. A tab absent from the map (the default) is
     /// tiled for this client.
     ///
-    /// Zoom lives on the client, beside focus, because it is a property of one
-    /// view rather than of the tab: two clients on the same tab zoom
-    /// independently, and one zooming a pane leaves the other's tiled view
-    /// untouched. The tab's layout tree is never rewritten either way — a zoom
-    /// only changes how that tree is solved for this client.
+    /// Zoom is per client. Two clients on the same tab zoom independently, so
+    /// one zooming a pane leaves the other's tiled view as it is. A zoom changes
+    /// how this client solves the tab's tree; the tree itself stays unchanged.
     zoom_by_tab: HashMap<TabId, PaneId>,
 }
 

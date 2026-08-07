@@ -142,9 +142,8 @@ impl Handover {
 ///
 /// One copy serves the whole pane: its reader waits on it and reads it, its
 /// writer writes it, and [`resize`](PortablePtyBackend::resize) retunes it.
-/// They are separate directions of the same terminal, which a descriptor
-/// carries at once, so asking `portable-pty` for a reader and a writer as well
-/// would open two more for no gain.
+/// They are separate directions of the same terminal, which one descriptor
+/// carries at once.
 ///
 /// `None` when the platform exposes no descriptor, which is Windows: `MasterPty`
 /// offers no ConPTY equivalent, so a Windows pane keeps `portable-pty`'s own
@@ -282,11 +281,6 @@ type WakerInner = std::os::fd::OwnedFd;
 
 /// The one descriptor a pane's reader waits on beside its terminal, so another
 /// thread can bring it back from that wait.
-///
-/// A pipe or a socket pair would spend two descriptors on this. The kernel
-/// offers a one-descriptor notification for exactly this shape, and a pane is
-/// the most multiplied thing koshi opens, so the difference is one descriptor
-/// per pane for the whole life of the session.
 ///
 /// Waking latches: nothing drains it, so a reader that only reaches its wait
 /// afterwards still finds it woken. A wake can therefore never be delivered
@@ -1105,10 +1099,8 @@ impl PtyBackend for PortablePtyBackend {
         //    that one descriptor serves the whole pane: its reader waits on it
         //    and reads it, its writer writes it, and `resize` retunes it. The
         //    reader also gets a [`Waker`] — one more descriptor — so the
-        //    watcher can bring it back from a wait that a descendant holding
-        //    the terminal would otherwise never end. Two descriptors per pane
-        //    in total, against the five that asking `portable-pty` for a
-        //    reader, a writer and a master separately would take.
+        //    watcher can bring it back from a wait a descendant holding the
+        //    terminal keeps open. Two descriptors per pane in total.
         //
         //    The copy is taken here, where the master is plainly alive, and
         //    owned from then on, so a pane torn down while its threads still
@@ -1266,11 +1258,7 @@ impl PtyBackend for PortablePtyBackend {
                 }
             }
             // Nothing is written to the terminal on the way out. The writer
-            // only ever stops once the child is gone or the pane is closed, so
-            // there is no child left to tell; anything written then lands in
-            // the terminal of a descendant that outlived the child, where the
-            // line discipline echoes it back as output nobody printed and a
-            // descendant reading its input may act on it.
+            // stops once the child is gone or the pane is closed.
         });
 
         // 10. Watcher thread: block on `child.wait()`, map the OS exit status
@@ -1368,8 +1356,8 @@ impl PtyBackend for PortablePtyBackend {
         entry.terminal.resize(size)
     }
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<(), PtyError> {
-        let mut panes = self.panes.lock().unwrap();
-        let Some(entry) = panes.get_mut(&pane) else {
+        let panes = self.panes.lock().unwrap();
+        let Some(entry) = panes.get(&pane) else {
             return Err(PtyError::UnknownPane { pane });
         };
 

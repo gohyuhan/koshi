@@ -1,1 +1,1 @@
-//! Error types. Placeholder per standard source layout.
+//! Error types. This module is empty.

@@ -528,11 +528,8 @@ impl Walker<'_> {
             for child in children.nodes() {
                 let child_name = child.name().value();
                 if is_structural(child_name) {
-                    let slot = self.structural(child, Context::Directional);
-                    slots.push(slot);
-                } else if self.sizing_config(child, &mut sizing) {
-                    // recorded into `sizing`
-                } else {
+                    slots.push(self.structural(child, Context::Directional));
+                } else if !self.sizing_config(child, &mut sizing) {
                     let key = format!("{name}.{child_name}");
                     self.error(
                         child.span(),
@@ -613,9 +610,7 @@ impl Walker<'_> {
                     // diagnostic; the file is already rejected.
                     members.push(self.structural(child, Context::Directional));
                     member_leaves.push(None);
-                } else if self.sizing_config(child, &mut sizing) {
-                    // recorded into `sizing`
-                } else {
+                } else if !self.sizing_config(child, &mut sizing) {
                     self.error(
                         child.span(),
                         unknown_key(

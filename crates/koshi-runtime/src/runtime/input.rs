@@ -45,20 +45,6 @@ use crate::runtime::snapshot::solve_tab;
 use crate::server::Server;
 
 impl Server {
-    /// Write one unconsumed press to the pane the client is typing into,
-    fn write_press(&mut self, client_id: ClientId, chord: KeyChord) {
-        let Some(pane_id) = self.typed_pane(client_id) else {
-            return;
-        };
-        let app_cursor_keys = self
-            .terminal_engines
-            .get(&pane_id)
-            .is_some_and(|engine| engine.state().app_cursor_keys());
-        let bytes = encode(chord, app_cursor_keys);
-        let _ = self.pty_backend().write(pane_id, &bytes);
-        self.on_input_reached_pane(client_id, pane_id);
-    }
-
     /// React to input reaching `pane_id`'s child from `client_id`: drop the
     /// client's highlight there — input replaces a selection, the way typing
     /// over one does — and follow the client's view back to live output. Every
@@ -180,21 +166,6 @@ impl Server {
         bound: BoundAction,
         new_pane_direction: Direction,
     ) {
-        self.fire_binding(client_id, bound, new_pane_direction);
-    }
-
-    /// Write one key the viewer did not bind to the pane it is typing into,
-    /// encoded for that pane's cursor-key mode at this instant.
-    pub fn handle_key_press(&mut self, client_id: ClientId, chord: KeyChord) {
-        self.write_press(client_id, chord);
-    }
-
-    fn fire_binding(
-        &mut self,
-        client_id: ClientId,
-        bound: BoundAction,
-        new_pane_direction: Direction,
-    ) {
         let Ok(plan) = resolve_action(
             &bound.action,
             &bound.args,
@@ -206,6 +177,21 @@ impl Server {
         self.dispatch_plan(client_id, plan);
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
+    }
+
+    /// Write one key the viewer did not bind to the pane it is typing into,
+    /// encoded for that pane's cursor-key mode at this instant.
+    pub fn handle_key_press(&mut self, client_id: ClientId, chord: KeyChord) {
+        let Some(pane_id) = self.typed_pane(client_id) else {
+            return;
+        };
+        let app_cursor_keys = self
+            .terminal_engines
+            .get(&pane_id)
+            .is_some_and(|engine| engine.state().app_cursor_keys());
+        let bytes = encode(chord, app_cursor_keys);
+        let _ = self.pty_backend().write(pane_id, &bytes);
+        self.on_input_reached_pane(client_id, pane_id);
     }
 
     fn dispatch_plan(&mut self, client_id: ClientId, plan: DispatchPlan) {

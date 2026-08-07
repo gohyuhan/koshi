@@ -68,14 +68,23 @@ fn kill_session_in(
     runtime_dir: &Path,
     session: Option<&SessionRef>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = match session {
-        Some(SessionRef::Id(id)) => *id,
-        Some(SessionRef::Name(name)) => {
-            select_kill_session(&discovery::fetch_all(runtime_dir), Some(name.as_str()))?
-        }
-        None => select_kill_session(&discovery::fetch_all(runtime_dir), None)?,
-    };
+    let session_id = resolve_session(runtime_dir, session)?;
     ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, Command::Quit)
+}
+
+/// The session a `kill-session` or `detach --all` argument names: an id is
+/// taken as it stands, and a name or an absent argument is resolved against
+/// every running session by [`select_kill_session`].
+fn resolve_session(
+    runtime_dir: &Path,
+    session: Option<&SessionRef>,
+) -> Result<SessionId, CliError> {
+    let name = match session {
+        Some(SessionRef::Id(id)) => return Ok(*id),
+        Some(SessionRef::Name(name)) => Some(name.as_str()),
+        None => None,
+    };
+    select_kill_session(&discovery::fetch_all(runtime_dir), name)
 }
 
 /// Pick the named session, or apply the sole-running-session rule.
@@ -218,13 +227,7 @@ fn detach_all_session_in(
     runtime_dir: &Path,
     session: Option<&SessionRef>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = match session {
-        Some(SessionRef::Id(id)) => *id,
-        Some(SessionRef::Name(name)) => {
-            select_kill_session(&discovery::fetch_all(runtime_dir), Some(name.as_str()))?
-        }
-        None => select_kill_session(&discovery::fetch_all(runtime_dir), None)?,
-    };
+    let session_id = resolve_session(runtime_dir, session)?;
     ipc_client::submit_external_via_runtime_dir(runtime_dir, session_id, Command::DetachAll)
 }
 

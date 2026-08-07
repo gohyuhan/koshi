@@ -109,10 +109,6 @@ pub fn resize_min_size_diagnostic(
 /// Build a user-facing [`miette::Report`] for a rejected command when no
 /// specific action name is known; the action is reported generically as
 /// `"complete command"`.
-///
-/// A free function, not a `From` impl: `RejectReason` and `miette::Report` are
-/// both foreign to this crate, so the orphan rule forbids one here, and
-/// `koshi-core` must not depend on miette.
 pub fn reject_report(reason: RejectReason) -> miette::Report {
     command_reject_diagnostic(reason, "complete command").into()
 }
