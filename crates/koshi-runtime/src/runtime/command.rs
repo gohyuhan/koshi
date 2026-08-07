@@ -12,8 +12,8 @@
 //! arm here, and each handler replaces its arm in place as it ships.
 //!
 //! This file holds the dispatch table, target resolution types, the helpers
-//! every handler shares, and the handlers for the commands that act on a
-//! session as a whole — quit, detach, detach-all, and the switch that moves one
+//! every handler shares, and the handlers for the commands that end a session
+//! or leave one — quit, detach, detach-all, and the switch that moves one
 //! client to another session. The rest live in submodules by what they act on:
 //! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
 
@@ -243,7 +243,7 @@ impl Server {
             }
             Command::Visual(command) => self.handle_visual(command_id, &envelope.source, &command),
             Command::Plugin(_) => Ok(self.reject(command_id, "plugin")),
-            Command::Quit => Ok(self.handle_quit(command_id)),
+            Command::Quit => Ok(self.handle_quit(command_id, &envelope.source)),
             Command::Detach(args) => self.handle_detach(command_id, &envelope.source, &args),
             Command::DetachAll => self.handle_detach_all(command_id, &envelope.source),
             Command::TogglePaneFullscreen => {
@@ -452,13 +452,34 @@ impl Server {
         self.quit_requested = true;
     }
 
-    /// Handle [`Command::Quit`]: mark the process for immediate teardown.
-    fn handle_quit(&mut self, command_id: CommandId) -> CommandResult {
-        self.request_quit();
-        CommandResult::Ok {
-            command_id,
-            emitted_events: Vec::new(),
+    /// Handle [`Command::Quit`]: a source that names a client leaves the
+    /// session; a source that names none ends the process.
+    ///
+    /// A keybinding or a mouse action names the client that issued it, so quit
+    /// removes that client alone, through the same detach [`Command::Detach`]
+    /// runs ([`Server::handle_client_detach`]). `auto-close-session` then
+    /// decides what happens to the session left behind: with the setting on and
+    /// no other client attached the session ends, keeping the graceful window;
+    /// with the setting off, or with another client still attached, the session
+    /// and its panes keep running.
+    ///
+    /// A source that names no client — `kill-session` over the external CLI,
+    /// the plugin host, the runtime itself — takes [`Self::request_quit`]
+    /// instead.
+    fn handle_quit(&mut self, command_id: CommandId, source: &CommandSource) -> CommandResult {
+        let Some(client_id) = source.client_id() else {
+            self.request_quit();
+            return CommandResult::Ok {
+                command_id,
+                emitted_events: Vec::new(),
+            };
+        };
+
+        let mut scope = TransactionScope::new();
+        for event in self.handle_client_detach(client_id) {
+            scope.emit(event);
         }
+        scope.commit(command_id, &mut self.event_bus)
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session

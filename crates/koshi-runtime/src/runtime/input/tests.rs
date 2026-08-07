@@ -101,6 +101,18 @@ fn only_pane(runtime: &Server) -> koshi_core::ids::PaneId {
     *runtime.pty_handles.keys().next().expect("one pane")
 }
 
+/// Whether the session still holds `client`.
+fn attached(runtime: &Server, client: ClientId) -> bool {
+    runtime
+        .sessions()
+        .values()
+        .next()
+        .expect("one session")
+        .clients
+        .get(client)
+        .is_some()
+}
+
 /// The client's scroll offset for the pane — `0` means the view follows live output.
 fn scroll_offset(runtime: &Server, client: ClientId, pane: koshi_core::ids::PaneId) -> usize {
     runtime
@@ -328,8 +340,8 @@ fn the_lock_chord_flips_the_client_both_ways_without_pty_bytes() {
 }
 
 #[test]
-fn quit_binding_fires_in_normal_mode() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
+fn quit_binding_detaches_the_client_in_normal_mode() {
+    let (mut runtime, fake, client, mut viewer) = runtime();
     let pane = only_pane(&runtime);
     press(
         &mut runtime,
@@ -337,18 +349,41 @@ fn quit_binding_fires_in_normal_mode() {
         chord(ModFlags::CTRL, 'q'),
         Instant::now(),
     );
-    assert!(runtime.quit_requested());
+    // `auto-close-session` defaults off, so the client leaves and the session
+    // keeps running.
+    assert!(!attached(&runtime, client));
+    assert!(!runtime.quit_requested());
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
 #[test]
-fn quit_binding_fires_in_locked_mode_too() {
-    let (mut runtime, fake, _client, mut viewer) = runtime();
+fn quit_binding_detaches_the_client_in_locked_mode_too() {
+    let (mut runtime, fake, client, mut viewer) = runtime();
     let pane = only_pane(&runtime);
     let now = Instant::now();
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'l'), now);
     press(&mut runtime, &mut viewer, chord(ModFlags::CTRL, 'q'), now);
+    assert!(!attached(&runtime, client));
+    assert!(!runtime.quit_requested());
+    assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn quit_binding_ends_the_session_when_auto_close_is_on() {
+    let (mut runtime, fake, client, mut viewer) = runtime();
+    let pane = only_pane(&runtime);
+    runtime.config.auto_close_session = true;
+    press(
+        &mut runtime,
+        &mut viewer,
+        chord(ModFlags::CTRL, 'q'),
+        Instant::now(),
+    );
+    // The sole client leaves, so the setting ends the session; teardown keeps
+    // the graceful window.
+    assert!(!attached(&runtime, client));
     assert!(runtime.quit_requested());
+    assert!(!runtime.immediate_shutdown);
     assert_eq!(fake.writes(pane).expect("writes"), Vec::<Vec<u8>>::new());
 }
 
