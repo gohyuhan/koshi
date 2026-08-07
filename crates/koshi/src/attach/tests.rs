@@ -4,11 +4,15 @@
 //! it does not, how it ended, and the mouse path — what the pile folds to, what
 //! one round writes, that a write never waits for an answer or for the socket,
 //! and what an answer applies when it does come back. It also covers what a
-//! paste sends, what it ends, what a paste too big for one frame costs, and the
-//! picker that chooses how long the loop may sleep.
+//! paste sends, what it ends, what a paste too big for one frame costs, the
+//! picker that chooses how long the loop may sleep, and what one frame draws:
+//! the mode it moves the viewer to, the hint bar it lists that mode's bindings
+//! in, and what a pass must move before the loop draws again on its own.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use ratatui::backend::TestBackend;
 
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, GridPos, Selection, SelectionKind, SetSelectionArgs,
@@ -16,7 +20,7 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_core::key::ModFlags;
+use koshi_core::key::{KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
@@ -32,9 +36,15 @@ use tempfile::TempDir;
 
 use super::*;
 
-/// The smallest frame a session can paint: one empty tab, no panes.
-/// [`classify`] reads the frame's variant and nothing inside it.
+/// The smallest frame a session can paint: one empty tab, no panes, the client
+/// unlocked. [`classify`] reads the frame's variant and nothing inside it.
 fn painted_frame() -> PaintedFrame {
+    painted_frame_in(LockMode::Normal)
+}
+
+/// The same frame, reporting the client in `lock_mode`. Each call mints a new
+/// session id and a new tab id.
+fn painted_frame_in(lock_mode: LockMode) -> PaintedFrame {
     let tab = TabId::new();
     PaintedFrame {
         session: FrameSession {
@@ -57,7 +67,7 @@ fn painted_frame() -> PaintedFrame {
             viewport: Size { cols: 80, rows: 24 },
             active_tab: tab,
             focused_pane: None,
-            lock_mode: LockMode::Normal,
+            lock_mode,
             mouse_select: false,
         },
     }
@@ -2091,4 +2101,222 @@ fn earliest_falls_back_to_whichever_single_side_is_present() {
 #[test]
 fn earliest_of_two_absent_durations_is_none() {
     assert_eq!(earliest(None, None), None);
+}
+
+/// A screen drawing into memory at [`MOUSE_VIEWPORT`], 80 by 24 cells.
+fn test_screen() -> Screen<TestBackend> {
+    Screen::new(
+        Terminal::new(TestBackend::new(MOUSE_VIEWPORT.cols, MOUSE_VIEWPORT.rows))
+            .expect("build an in-memory terminal"),
+    )
+}
+
+/// The hint bar of what the screen last drew: the bottom row, trailing blanks
+/// removed.
+fn hint_row(screen: &Screen<TestBackend>) -> String {
+    let buffer = screen.terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    buffer
+        .content()
+        .chunks(width)
+        .last()
+        .expect("a drawn frame has at least one row")
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The first chord of a multi-chord binding the built-in normal mode carries:
+/// one press that opens a sequence and sends nothing.
+fn sequence_opener(client: &Client) -> KeyChord {
+    client
+        .keymap_hints()
+        .entries
+        .iter()
+        .find(|entry| entry.sequence.chords().len() > 1)
+        .expect("the built-in normal mode binds at least one multi-chord sequence")
+        .sequence
+        .chords()[0]
+}
+
+/// The pointer moved to `at` with no button held.
+fn moved(at: Point) -> MouseInput {
+    MouseInput {
+        kind: MouseKind::Motion,
+        at,
+        mods: ModFlags::NONE,
+    }
+}
+
+#[test]
+fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
+    // The first draw leaves the viewer in normal mode. The second is the frame
+    // that locks it, and its own paint lists the locked bindings.
+    let mut client = viewer();
+    let mut screen = test_screen();
+
+    screen.draw(&mut client, Box::new(painted_frame_in(LockMode::Normal)));
+    let normal = hint_row(&screen);
+
+    screen.draw(&mut client, Box::new(painted_frame_in(LockMode::Locked)));
+    let locked = hint_row(&screen);
+
+    assert_eq!(locked, " Ctrl +  l  Unlock  g  Mouse Select  q  Quit");
+    assert_ne!(normal, locked);
+}
+
+#[test]
+fn a_frame_moves_the_viewer_to_the_mode_it_reports() {
+    let mut client = viewer();
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+
+    adopt_frame(
+        &mut client,
+        &to_snapshot(&painted_frame_in(LockMode::Locked)),
+    );
+
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+}
+
+#[test]
+fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
+    // One drained batch can carry a frame and a keypress together. The frame is
+    // drawn first, and the key opens a sequence after it, so the end of the pass
+    // has to draw again.
+    let mut client = viewer();
+    let mut screen = test_screen();
+    let frame = painted_frame_in(LockMode::Normal);
+    let tab = frame.client.active_tab;
+
+    screen.draw(&mut client, Box::new(frame));
+    let drawn = hint_row(&screen);
+
+    let opener = sequence_opener(&client);
+    assert_eq!(
+        client.resolve_key(opener, Instant::now()),
+        KeyOutcome::Pending
+    );
+    screen.refresh(&client, Some(tab));
+
+    // The breadcrumb view opens with the chord that was pressed and ends with
+    // the arrow that separates it from the chords continuing it.
+    let breadcrumb = hint_row(&screen);
+    assert_ne!(breadcrumb, drawn);
+    assert!(
+        breadcrumb.contains(" ▶ "),
+        "the bar draws the open sequence: {breadcrumb}"
+    );
+}
+
+#[test]
+fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
+    // The same batch order with a mouse move: the pane under the pointer is the
+    // viewer's own, and the frame drawn before the move does not carry it.
+    let mut client = viewer();
+    let mut screen = test_screen();
+    let painted = painted_frame_in(LockMode::Normal);
+    let tab = painted.client.active_tab;
+    let first = PaneId::new();
+    let second = PaneId::new();
+    let mouse = mouse_frame(&[plain_pane(first), plain_pane(second)]);
+    let mut pending = Vec::new();
+
+    screen.draw(&mut client, Box::new(painted));
+    let hovered_before = ViewerPaint::read(&client, tab).chrome.hovered_pane;
+
+    handle_mouse_event(
+        &mut client,
+        &mouse,
+        moved(content_cell(&mouse, 1)),
+        &mut pending,
+    );
+    let hovered_after = ViewerPaint::read(&client, tab).chrome.hovered_pane;
+    screen.refresh(&client, Some(tab));
+
+    assert_eq!(hovered_before, None);
+    assert_eq!(hovered_after, Some(second));
+    assert_eq!(
+        screen.shown.as_ref().map(|shown| shown.chrome.hovered_pane),
+        Some(Some(second)),
+        "the screen records the hover it just drew"
+    );
+}
+
+#[test]
+fn a_pass_that_moved_nothing_draws_nothing() {
+    let mut client = viewer();
+    let mut screen = test_screen();
+    let frame = painted_frame_in(LockMode::Normal);
+    let tab = frame.client.active_tab;
+
+    screen.draw(&mut client, Box::new(frame));
+    let drawn = screen.terminal.backend().buffer().clone();
+    let shown = screen.shown.clone();
+
+    screen.refresh(&client, Some(tab));
+
+    assert_eq!(*screen.terminal.backend().buffer(), drawn);
+    assert_eq!(screen.shown, shown);
+}
+
+#[test]
+fn a_screen_with_no_frame_yet_draws_nothing() {
+    let client = viewer();
+    let mut screen = test_screen();
+
+    screen.refresh(&client, None);
+    screen.refresh(&client, Some(TabId::new()));
+
+    assert_eq!(screen.shown, None);
+    assert_eq!(screen.last_painted, None);
+}
+
+#[test]
+fn locking_the_client_moves_what_the_viewer_paints() {
+    let mut client = viewer();
+    let frame = painted_frame_in(LockMode::Locked);
+    let tab = frame.client.active_tab;
+    let before = ViewerPaint::read(&client, tab);
+
+    adopt_frame(&mut client, &to_snapshot(&frame));
+
+    let after = ViewerPaint::read(&client, tab);
+    assert_eq!(before.mode, LockMode::Normal);
+    assert_eq!(after.mode, LockMode::Locked);
+    assert_ne!(after, before);
+}
+
+#[test]
+fn opening_a_key_sequence_moves_what_the_viewer_paints() {
+    // An opened sequence reaches no session, so no frame comes back. The hint
+    // bar draws it as a breadcrumb, so `ViewerPaint` carries it.
+    let mut client = viewer();
+    let tab = TabId::new();
+    let opener = sequence_opener(&client);
+    let before = ViewerPaint::read(&client, tab);
+
+    assert_eq!(
+        client.resolve_key(opener, Instant::now()),
+        KeyOutcome::Pending
+    );
+
+    let after = ViewerPaint::read(&client, tab);
+    assert_eq!(before.pending, None);
+    assert_eq!(after.pending, Some(KeySequence::from(opener)));
+    assert_ne!(after, before);
+}
+
+#[test]
+fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
+    // The repaint fires on a difference, so two reads of one unchanged viewer
+    // are equal.
+    let client = viewer();
+    let tab = TabId::new();
+
+    assert_eq!(
+        ViewerPaint::read(&client, tab),
+        ViewerPaint::read(&client, tab)
+    );
 }
