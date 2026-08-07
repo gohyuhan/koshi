@@ -232,12 +232,12 @@ impl Server {
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
     ///
-    /// Runs for both detach triggers: a connection drop (either half of an
-    /// attached client's connection ending) and the [`Command::Detach`] /
-    /// [`Command::DetachAll`] execution arms. Target resolution happens at
-    /// command resolution before this is reached. With `auto-close-session` on,
-    /// a detach that leaves the session with no client requests the same quit
-    /// [`Command::Quit`] does.
+    /// Runs for every detach trigger: a connection drop (either half of an
+    /// attached client's connection ending), the [`Command::Detach`] /
+    /// [`Command::DetachAll`] execution arms, and a [`Command::Quit`] whose
+    /// source names a client. Target resolution happens at command resolution
+    /// before this is reached. With `auto-close-session` on, a detach that
+    /// leaves the session with no client requests a graceful quit.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.

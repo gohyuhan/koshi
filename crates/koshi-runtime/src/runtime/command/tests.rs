@@ -2042,9 +2042,11 @@ fn focus_pane_by_direction_with_no_neighbor_is_target_not_found() {
 }
 
 #[test]
-fn quit_marks_immediate_teardown_and_the_loop_flag() {
+fn quit_from_a_source_with_no_client_marks_immediate_teardown() {
     let (mut rt, _tx) = new_runtime();
 
+    // An internal source names no client, so quit ends the process instead of
+    // detaching one.
     let env = envelope(Command::Quit);
     let command_id = env.id;
     assert_eq!(
@@ -3059,12 +3061,14 @@ fn quit_cannot_be_issued_from_inside_a_pane() {
 
 #[test]
 fn quit_from_an_external_cli_is_accepted() {
-    // `kill-session` sends `Quit` from outside the session.
+    // `kill-session` sends `Quit` from outside the session. It names no client,
+    // so it ends the process whatever `auto-close-session` says.
     let (mut rt, _tx) = new_runtime();
     let source = CommandSource::external_cli(None);
     let env = envelope_from(source, Command::Quit);
     assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
     assert!(rt.quit_requested());
+    assert!(rt.immediate_shutdown);
 }
 
 #[test]
@@ -9590,6 +9594,108 @@ fn a_detach_command_ends_the_session_under_auto_close() {
         }
     );
     assert!(rt.quit_requested());
+}
+
+#[test]
+fn quit_from_a_client_detaches_it_and_leaves_the_session_running() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, pane) = only_slot(&rt);
+
+    // `auto-close-session` is off, so quit removes the client and nothing else:
+    // the session and its pane keep running.
+    let env = envelope_from(CommandSource::key_binding(client), Command::Quit);
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.submit_command(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(!rt.quit_requested());
+    assert!(rt.sessions[&sid].panes.get(pane).is_some());
+}
+
+#[test]
+fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    let first = rt
+        .bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+    let second = ClientId::new();
+    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now());
+
+    // One of two clients quits: the other is still attached, so nothing quits.
+    let env = envelope_from(CommandSource::key_binding(first), Command::Quit);
+    assert!(matches!(rt.submit_command(env), CommandResult::Ok { .. }));
+
+    assert!(rt.sessions[&sid].clients.get(first).is_none());
+    assert!(rt.sessions[&sid].clients.get(second).is_some());
+    assert!(!rt.quit_requested());
+}
+
+#[test]
+fn quit_from_the_last_client_ends_the_session_under_auto_close() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab_id, _pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+
+    let env = envelope_from(CommandSource::key_binding(client), Command::Quit);
+    assert!(matches!(rt.submit_command(env), CommandResult::Ok { .. }));
+
+    assert_eq!(rt.sessions[&sid].clients.len(), 0);
+    assert!(rt.quit_requested());
+    // The departure is an ordinary detach, so teardown keeps the graceful
+    // window the way every other auto-close departure does.
+    assert!(!rt.immediate_shutdown);
+}
+
+#[test]
+fn quit_from_a_client_that_already_left_is_refused() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    rt.bootstrap_local(
+        SessionId::new(),
+        Size { cols: 80, rows: 24 },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (sid, _tab_id, _pane) = only_slot(&rt);
+    rt.config.auto_close_session = true;
+
+    // A keypress from a client this runtime no longer holds locates no session,
+    // so it cannot end one.
+    let env = envelope_from(CommandSource::key_binding(ClientId::new()), Command::Quit);
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.submit_command(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        }
+    );
+    assert_eq!(rt.sessions[&sid].clients.len(), 1);
+    assert!(!rt.quit_requested());
 }
 
 #[test]

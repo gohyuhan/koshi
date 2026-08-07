@@ -674,7 +674,7 @@ fn explain_quit_reports_its_client_scope_and_both_target_kinds() {
     let expected = "\
 action: core:quit
 display_name: Quit
-description: Quit koshi, ending every pane's process immediately
+description: Leave the session, ending it when auto-close-session is on and no other client stays
 scope: client
 targets: client, session
 command: Quit

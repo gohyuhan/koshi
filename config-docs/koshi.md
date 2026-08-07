@@ -167,9 +167,15 @@ The session reads this, not each terminal: the session server takes the answer
 from the `koshi.kdl` it read when the session started, so a terminal that
 attaches later cannot change it from its own file.
 
-Every way of leaving counts: `koshi detach`, closing the terminal, and moving
-the terminal to another session with `koshi attach <session>` from inside a
-pane. A terminal that moves away has left, so a session it leaves empty ends.
+Every way of leaving counts: the quit keybinding (`<leader>q` by default),
+`koshi detach`, closing the terminal, and moving the terminal to another
+session with `koshi attach <session>` from inside a pane. A terminal that moves
+away has left, so a session it leaves empty ends.
+
+Quit leaves the session; it never ends one on its own. With this setting off,
+`<leader>q` detaches your terminal and the session keeps running. With it on,
+`<leader>q` ends the session only when no other terminal is attached. To end a
+session whatever this setting says, run `koshi kill-session`.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

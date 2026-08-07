@@ -688,7 +688,7 @@ pub fn core_action_seeds() -> Vec<(ActionRef, ActionMetadata)> {
         core_seed(
             "quit",
             "Quit",
-            "Quit koshi, ending every pane's process immediately",
+            "Leave the session, ending it when auto-close-session is on and no other client stays",
             Client,
             vec![ClientTarget, Session],
             CoreCommand(CommandKind::Quit),
