@@ -43,11 +43,10 @@ pub(crate) fn value_bool(node: &KdlNode) -> Result<bool, String> {
         .ok_or_else(|| "expected a boolean (#true or #false)".to_string())
 }
 
-/// Reads the node's single value as a string.
-pub(crate) fn value_string(node: &KdlNode) -> Result<String, String> {
+/// Reads the node's single value as a string, borrowed from the node.
+pub(crate) fn value_string(node: &KdlNode) -> Result<&str, String> {
     single_value(node)?
         .as_string()
-        .map(str::to_string)
         .ok_or_else(|| "expected a string".to_string())
 }
 
@@ -63,8 +62,7 @@ pub(crate) fn value_string(node: &KdlNode) -> Result<String, String> {
 /// A blank value is still rejected outright (an empty `TERM` disables
 /// terminfo, an empty shell path spawns nothing).
 pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
-    let value = value_string(node)?;
-    let trimmed = value.trim();
+    let trimmed = value_string(node)?.trim();
     if trimmed.is_empty() {
         Err("must not be empty".to_string())
     } else {

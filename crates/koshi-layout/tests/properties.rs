@@ -204,8 +204,7 @@ fn assert_invariants(tree: &LayoutNode, tab: Rect, live: &HashSet<PaneId>) {
 /// false: normalize's same-direction merge can change which panes a
 /// too-small tab suppresses, by flattening a nested split's children into
 /// direct siblings of a pane that previously sat outside the nested
-/// split's own (failing) trailing-suppression run. See the suspected-defect
-/// writeup for a minimal repro.
+/// split's own (failing) trailing-suppression run.
 #[test]
 fn normalizing_after_any_random_edit_sequence_is_idempotent() {
     let config = Config {

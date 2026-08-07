@@ -1,8 +1,9 @@
-//! `koshi-test-support` — testing utilities shared across the workspace: an
-//! event-sequence recorder, an in-memory fake PTY (pseudo-terminal, the
-//! virtual terminal a shell process runs inside) backend, and layout
-//! invariant assertions. [`fixtures`] is a placeholder module reserved for
-//! future shared test fixtures.
+//! `koshi-test-support` — testing utilities shared across the workspace.
+//!
+//! The crate holds an event-sequence recorder, an in-memory fake PTY
+//! (pseudo-terminal, the virtual terminal a shell process runs inside)
+//! backend, and layout invariant assertions. [`fixtures`] is a placeholder
+//! module reserved for future shared test fixtures.
 
 /// Deterministic event-sequence recorder for command-transaction tests.
 ///

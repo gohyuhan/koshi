@@ -258,8 +258,8 @@ impl<'a> TextView<'a> {
     /// the row above, or `None` at the very start of the text.
     ///
     /// Width-0 cells are skipped: they are the blank right halves of wide
-    /// (CJK/emoji) glyphs, and the glyph's text lives entirely in its left half,
-    /// so stopping on one would split the glyph.
+    /// (CJK/emoji) glyphs, and the glyph's text lives entirely in its left
+    /// half, so one step crosses the whole pair.
     fn prev_cell(&self, row: u64, col: u16) -> Option<(u64, u16)> {
         let (mut row, mut col) = (row, col);
         loop {
@@ -399,8 +399,7 @@ pub fn selection_text(
     let mut out = String::new();
     let mut any_row_written = false;
     // Clamped to the rows the view holds: a selection can name any row number,
-    // and walking the ones outside would read nothing while taking as long as
-    // the numbers are far apart.
+    // and only `first_row..=last_row` has text to read.
     for row in start.row.max(view.first_row())..=end.row.min(view.last_row()) {
         let Some((cells, row_end)) = view.row(row) else {
             continue;

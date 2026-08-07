@@ -67,10 +67,9 @@ pub fn resize_for_layout_change(
     backend: &dyn PtyBackend,
     pane_items: impl IntoIterator<Item = (PaneId, Option<Rect>)>,
 ) -> Vec<ResizeResult> {
-    let mut results = Vec::new();
-
-    for (pane_id, content) in pane_items {
-        let result = match content {
+    pane_items
+        .into_iter()
+        .map(|(pane_id, content)| match content {
             None => ResizeResult {
                 pane_id,
                 applied: None,
@@ -78,24 +77,14 @@ pub fn resize_for_layout_change(
             },
             Some(rect) => {
                 let computed = compute_pty_size(rect);
-                match backend.resize(pane_id, computed) {
-                    Ok(()) => ResizeResult {
-                        pane_id,
-                        applied: Some(computed),
-                        kept_last_valid: false,
-                    },
-                    Err(_) => ResizeResult {
-                        pane_id,
-                        applied: None,
-                        kept_last_valid: false,
-                    },
+                ResizeResult {
+                    pane_id,
+                    applied: backend.resize(pane_id, computed).ok().map(|()| computed),
+                    kept_last_valid: false,
                 }
             }
-        };
-        results.push(result);
-    }
-
-    results
+        })
+        .collect()
 }
 
 #[cfg(test)]

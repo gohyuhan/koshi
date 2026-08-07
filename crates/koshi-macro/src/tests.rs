@@ -1,9 +1,8 @@
 //! Tests for the attribute's argument parser and its unit-return branch.
 //!
-//! The attribute itself can only be run by the compiler, so what a gated
-//! function does is proven in `koshi-beta`'s tests. What is proven here is the
-//! part a caller gets wrong: the shape of the argument, and which fallback
-//! expression counts as returning nothing.
+//! Only the compiler runs the attribute itself. `koshi-beta`'s tests prove what
+//! a gated function does. These tests prove the shape of the argument, and
+//! which fallback expression counts as returning nothing.
 
 use syn::parse_str;
 
@@ -23,8 +22,8 @@ fn an_otherwise_expression_is_kept_whole() {
     assert_eq!(parse("otherwise = Ok(())"), Ok("Ok (())".to_string()));
 }
 
-/// The expression is parsed as one expression, so its own commas are its own.
-/// `Err(E::new(1, 2))` must not read as two arguments.
+/// The parser reads one whole expression, so a comma inside it stays inside it.
+/// `Err(E::new(1, 2))` is one argument, not two.
 #[test]
 fn commas_inside_the_expression_do_not_end_it() {
     assert_eq!(
@@ -63,8 +62,8 @@ fn a_missing_name_or_value_is_rejected() {
     );
 }
 
-/// Only the literal `()` gives up with a bare `return;`. Anything else keeps
-/// its expression, including a call that happens to evaluate to nothing.
+/// Only the literal `()` gives up with a bare `return;`. Every other expression
+/// is kept, including a call that evaluates to nothing.
 #[test]
 fn only_the_literal_unit_returns_without_an_expression() {
     let unit = parse_str::<Expr>("()").unwrap();

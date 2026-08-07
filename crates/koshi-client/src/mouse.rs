@@ -265,11 +265,9 @@ impl Client {
     /// away a tab-strip peek made on any other tab.
     ///
     /// The peek is the viewer's own: nothing on the session tells it a switch
-    /// happened, so it learns from the frames it sees. Throwing the peek away
-    /// rather than ignoring it is what makes a switch back start fresh — peek
-    /// from tab 3 while tab 0 is active, switch to tab 1, switch back to tab 0,
-    /// and the strip starts at tab 0 rather than returning to tab 3 with the
-    /// active tab off the end of it.
+    /// happened, so it learns from the frames it sees. A switch back starts
+    /// fresh — peek from tab 3 while tab 0 is active, switch to tab 1, switch
+    /// back to tab 0, and the strip starts at tab 0.
     pub fn note_active_tab(&mut self, active_tab: TabId) {
         self.tabline_peek = self.tabline_peek.filter(|&(tab, _)| tab == active_tab);
     }
@@ -930,8 +928,7 @@ impl Client {
     ///
     /// A selection drag also ends when its pane swapped between the primary and
     /// the alternate screen. Its anchor names a line of the screen the press
-    /// landed on, and the other screen's rows are different text, so extending
-    /// from that anchor would highlight cells the user never pointed at.
+    /// landed on, and the other screen's rows are different text.
     fn drop_gestures_the_frame_ended(&mut self, frame: &MouseFrame) {
         let drawn = |pane: PaneId| drawn_slot(frame, pane).is_some();
         self.selection_drag = self.selection_drag.filter(|drag| {

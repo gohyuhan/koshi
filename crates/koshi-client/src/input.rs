@@ -1,11 +1,9 @@
 //! What a keypress means, decided by the viewer that received it.
 //!
 //! A viewer holds its own keymap, its own input mode, and its own open
-//! sequence, so it can answer "is this key mine?" without asking the session.
-//! That matters for two reasons: two viewers of one session read different
-//! `keybinding.kdl` files and must each get their own answer, and over a
-//! network a multi-chord binding would otherwise cost one round trip per
-//! chord, with the disambiguation clock running on the far end of the link.
+//! sequence. It answers "is this key mine?" without asking the session. Two
+//! viewers of one session read different `keybinding.kdl` files, and each one
+//! gets its own answer.
 //!
 //! What the viewer does **not** decide is what a bound action *does*. It
 //! resolves a chord to a [`BoundAction`] — a name plus its arguments — and
@@ -16,11 +14,10 @@
 //! multi-chord binding, every key belongs to koshi until the sequence
 //! resolves: a key that continues it fires the binding, and a key that
 //! continues nothing is discarded while the sequence stands. Nothing typed
-//! into an open sequence reaches the pane, so a mistyped continuation cannot
-//! make the program underneath act on a key aimed at koshi. Three keys leave
-//! the context — a continuation that completes a binding, `Esc`, and the
-//! reserved unlock chord — and one thing that is not a key: a sequence that is
-//! both a complete binding and a longer one's prefix closes on its ambiguity
+//! into an open sequence reaches the pane. Three keys leave the context: a
+//! continuation that completes a binding, `Esc`, and the reserved unlock
+//! chord. One thing that is not a key leaves it too — a sequence that is both
+//! a complete binding and a longer one's prefix closes on its ambiguity
 //! deadline, firing the complete binding.
 
 use std::time::{Duration, Instant};
@@ -73,9 +70,8 @@ impl Client {
     ///
     /// Called both when this viewer's own `core:lock` fires and when the
     /// session reports a mode change aimed at this viewer (`koshi lock
-    /// --client`). Held chords were typed at koshi, and a mode change is not a
-    /// request to type them at the pane, so they are dropped rather than
-    /// flushed.
+    /// --client`). Held chords were typed at koshi, so a mode change drops
+    /// them and no pane ever sees them.
     pub fn set_lock_mode(&mut self, mode: LockMode) {
         if self.lock_mode != mode {
             self.lock_mode = mode;
@@ -112,12 +108,19 @@ impl Client {
             return KeyOutcome::Fire(unlock());
         }
 
-        let mut chords = pending
-            .as_ref()
-            .map(|pending| pending.sequence.chords().to_vec())
-            .unwrap_or_default();
-        chords.push(chord);
-        let sequence = sequence(chords);
+        // The open sequence's chords with this one after them, or this one on
+        // its own. One keypress allocates the chord list once and the sequence
+        // once.
+        let sequence = match pending.as_ref() {
+            Some(open) => {
+                let held = open.sequence.chords();
+                let mut rest = Vec::with_capacity(held.len());
+                rest.extend_from_slice(&held[1..]);
+                rest.push(chord);
+                KeySequence::new(held[0], rest)
+            }
+            None => KeySequence::from(chord),
+        };
 
         let matched = self.keymap.match_sequence(mode, &sequence);
         match (matched.exact, matched.prefix) {
@@ -212,19 +215,8 @@ impl Client {
     }
 }
 
-/// One sequence from the chords pressed into it, in press order.
-fn sequence(chords: Vec<KeyChord>) -> KeySequence {
-    let mut chords = chords.into_iter();
-    let first = chords
-        .next()
-        .expect("key input always contributes one chord");
-    KeySequence::new(first, chords.collect())
-}
-
-/// The binding the unlock chord fires. Built rather than read from the keymap:
-/// the escape from locked mode is the one binding that must hold whatever any
-/// layer above it says, so it does not depend on a lookup that a layer could
-/// answer differently.
+/// The binding the unlock chord fires, built here and never looked up in the
+/// keymap. The escape from locked mode holds whatever any config layer says.
 fn unlock() -> BoundAction {
     BoundAction {
         action: ActionRef::core("unlock")

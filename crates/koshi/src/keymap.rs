@@ -86,24 +86,27 @@ pub fn view_from_partial(
 
     // Fold the user fields onto the defaults to get the candidate settings.
     let mut config = defaults.clone();
-    let user_modes = partial.as_ref().and_then(|partial| partial.modes.clone());
-    if let Some(partial) = partial {
-        if let Some(value) = partial.chord_timeout_ms {
-            config.chord_timeout_ms = value;
+    let user_modes = match partial {
+        Some(partial) => {
+            if let Some(value) = partial.chord_timeout_ms {
+                config.chord_timeout_ms = value;
+            }
+            if let Some(value) = partial.which_key_delay_ms {
+                config.which_key_delay_ms = value;
+            }
+            if let Some(value) = partial.max_chord_depth {
+                config.max_chord_depth = value;
+            }
+            if let Some(value) = partial.leader {
+                config.leader = value;
+            }
+            if let Some(value) = partial.unlock_alternative {
+                config.unlock_alternative = value;
+            }
+            partial.modes
         }
-        if let Some(value) = partial.which_key_delay_ms {
-            config.which_key_delay_ms = value;
-        }
-        if let Some(value) = partial.max_chord_depth {
-            config.max_chord_depth = value;
-        }
-        if let Some(value) = partial.leader {
-            config.leader = value;
-        }
-        if let Some(value) = partial.unlock_alternative {
-            config.unlock_alternative = value;
-        }
-    }
+        None => None,
+    };
 
     let layers = keymap_layers(user_modes, config.leader);
     let report = detect_conflicts(

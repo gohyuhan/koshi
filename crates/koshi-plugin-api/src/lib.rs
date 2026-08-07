@@ -1,6 +1,10 @@
-//! `koshi-plugin-api` — guest-facing plugin SDK: ABI DTOs, event subscription
-//! types, command request types, and capability definitions. Must NOT depend on
-//! `wasmtime`.
+//! Plugin SDK for koshi. A plugin uses this crate.
+//!
+//! This crate is empty. It will hold the ABI data types, the event
+//! subscription types, the command request types, and the capability
+//! definitions.
+//!
+//! This crate must not depend on `wasmtime`.
 
 /// Error types.
 pub mod error;

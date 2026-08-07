@@ -1,10 +1,10 @@
 //! The viewer half of koshi: one attached terminal's own side of a session.
 //!
 //! A session is authoritative over tabs, panes, and the processes inside them.
-//! A viewer owns what belongs to the terminal in front of the user — its size,
-//! the settings it reads from its own config, the colors it paints koshi's own
-//! chrome with, the keymap it resolves its own keys against, and what every key
-//! and mouse event over its frame means. The two talk only through the session's
+//! A viewer owns the terminal in front of the user: its size, the settings it
+//! reads from its own config, the colors it paints koshi's chrome with, and the
+//! keymap it resolves its own keys against. It also decides what every key and
+//! mouse event over its frame means. The two talk only through the session's
 //! command door and its event feed.
 //!
 //! Colors live with the viewer: the frame a session hands out says *which pane
@@ -79,15 +79,13 @@ pub struct Client {
     /// labels and the `continuous` flag a repeat-capable binding re-arms on.
     /// Dispatch itself happens on the session, against its own table.
     registry: ActionRegistry,
-    /// This viewer's input mode. It owns this because it decides what a key
-    /// means before anything is sent; the session keeps its own copy so
-    /// `koshi lock --client` can reach a viewer and `koshi list-clients` can
-    /// report one.
+    /// This viewer's input mode. It decides what a key means before anything is
+    /// sent. The session keeps its own copy, which `koshi lock --client`
+    /// reaches and `koshi list-clients` reports.
     lock_mode: LockMode,
-    /// Whether this viewer grabs the mouse for text selection. It owns this
-    /// because it decides what a press means before anything is sent; the
-    /// session keeps its own copy, which the frame carries for the mode
-    /// indicator and the hint bar's label.
+    /// Whether this viewer grabs the mouse for text selection. It decides what
+    /// a press means before anything is sent. The session keeps its own copy,
+    /// which the frame carries for the mode indicator and the hint bar's label.
     mouse_select: bool,
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
@@ -112,10 +110,9 @@ pub struct Client {
     tabline_drag: Option<TablineDrag>,
     /// Where this viewer's tab strip is scrolled, and the tab it was scrolled
     /// on: `None` follows the active tab, `Some((tab, i))` peeks from tab index
-    /// `i` while `tab` is the active one. Recording the tab is what makes a tab
-    /// switch reveal the new tab — the peek belongs to the tab it was made on,
-    /// and [`Client::note_active_tab`] throws it away as soon as the viewer sees
-    /// a frame on another tab.
+    /// `i` while `tab` is the active one. The peek belongs to the tab it was
+    /// made on, and [`Client::note_active_tab`] throws it away as soon as the
+    /// viewer sees a frame on another tab.
     tabline_peek: Option<(TabId, usize)>,
     /// The text-selection drag under way, held only between the press on a
     /// pane's content that begins it and the release that ends it. The highlight
@@ -303,15 +300,15 @@ impl Client {
     /// viewer's input mode changed — which happens when `koshi lock --client`
     /// names it, or when its own lock binding fires — and that its mouse-select
     /// mode changed, which happens when its own `core:mouse-select` binding
-    /// fires. Both decide what an input means before anything is sent, so
-    /// applying them here is what keeps the viewer's copies agreeing with the
+    /// fires. Both decide what an input means before anything is sent, and
+    /// applying them here keeps the viewer's copies agreeing with the
     /// session's. An event naming another client is skipped.
     ///
     /// A fresh frame arrives when this subscriber's queue overflowed and the
     /// session dropped events it cannot replay. It carries the session's own
-    /// copies of both, so the viewer takes them from the frame instead of from
-    /// the reports it never received, and logs how many were dropped. The
-    /// frame names this viewer, checked by a debug assertion.
+    /// copies of both. The viewer takes them from the frame and logs how many
+    /// events were dropped. The frame names this viewer, checked by a debug
+    /// assertion.
     ///
     /// A [`Delivery::Frame`] is the picture composed for a client in another
     /// process. It is counted, and nothing is taken from it. So is a
@@ -336,18 +333,13 @@ impl Client {
                     }
                     _ => {}
                 },
-                // The frame composed for a client in another process.
-                Delivery::Frame(_) => {}
-                // The attached viewer reads a round's answers off its own
-                // connection, not off a subscription; the viewer in this
-                // process is sent neither answers nor frames.
-                Delivery::MouseAnswer { .. } => {}
-                // Bytes for a client's own terminal, written by that client off
-                // its own connection.
-                Delivery::HostWrite(_) => {}
-                // The session a client moves to, read by the attached viewer
-                // off its own connection.
-                Delivery::SwitchTo(_) => {}
+                // A frame, a mouse round's answers, terminal bytes, and a
+                // session move all belong to a client in another process, which
+                // reads them off its own connection.
+                Delivery::Frame(_)
+                | Delivery::MouseAnswer { .. }
+                | Delivery::HostWrite(_)
+                | Delivery::SwitchTo(_) => {}
                 Delivery::Snapshot { snapshot, lagged } => {
                     debug_assert_eq!(
                         snapshot.client.id, self.id,

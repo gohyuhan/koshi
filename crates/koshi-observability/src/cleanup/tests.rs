@@ -9,12 +9,12 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-/// Returns a shared lock for serializing panic-hook tests.
+/// Returns a shared lock that serializes the panic-hook tests.
 ///
-/// Both panic-hook tests mutate the process-global panic hook. Rust runs tests in parallel by
-/// default, so multiple tests setting/restoring hooks concurrently would cause one test's
-/// `set_hook` call to land between another test's install and `catch_unwind`, breaking the
-/// isolation. This lock ensures only one panic-hook test runs at a time.
+/// Every test that installs a panic hook mutates the process-global hook slot.
+/// Rust runs tests in parallel, so a second test's `set_hook` can land between
+/// the first test's install and its `catch_unwind`. This lock keeps one such
+/// test running at a time.
 fn panic_hook_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -108,9 +108,9 @@ fn a_panicking_hook_does_not_stop_later_hooks() {
 }
 
 // The hardest case: a cleanup hook panics while cleanup runs *from the panic
-// hook*. Run inline that aborts the process (a panic during panic handling), so
-// reaching the assertions at all proves the hooks ran off the panic path. The
-// hook after the panicking one must still run.
+// hook*. The hooks run on a fresh thread, so reaching the assertions at all
+// proves the hooks ran off the panic path. The hook after the panicking one
+// must still run.
 #[test]
 fn a_panicking_hook_during_panic_handling_does_not_abort() {
     let _serial = panic_hook_test_lock()

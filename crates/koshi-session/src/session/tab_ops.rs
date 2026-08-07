@@ -92,7 +92,11 @@ pub fn commit_new_tab(
     let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
     let _ = session.panes.insert(record);
 
-    let new_tab: Tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
+    let mut new_tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
+    // The tab's own most-recent focus, recorded whether or not a client is here
+    // to hold one. A session created with nothing attached still names the pane
+    // a client landing on this tab starts in.
+    new_tab.record_focus_mru(new_pane_id);
     // The first tab transitions the session from Starting to Running; subsequent
     // tabs are a no-op at this layer. The runtime pre-checks admission
     // (`session.lifecycle()`) before routing commands here, so this layer handles
@@ -111,12 +115,6 @@ pub fn commit_new_tab(
     // Switch the focused client onto the new tab and focus its root pane,
     // remembering the tab it left for the caller to reflow.
     let mut previous_tab = None;
-    // The tab's own most-recent focus, recorded whether or not a client is here
-    // to hold one. A session created with nothing attached still names the pane
-    // a client landing on this tab starts in.
-    if let Some(tab) = session.tabs.get_mut(&new_tab_id) {
-        tab.record_focus_mru(new_pane_id);
-    }
 
     if let Some(client_id) = focus {
         // `focus` was already filtered to attached clients above, so this
@@ -200,16 +198,14 @@ pub fn commit_profile_tab(
     }
 
     let root_pane = pane_ids[0];
-    let new_tab = Tab::new(tab_id, name, session.tabs.len(), root_pane);
+    let mut new_tab = Tab::new(tab_id, name, session.tabs.len(), root_pane);
+    // Swap the single-root layout for the profile's full tree.
+    new_tab.update_layout(layout);
     // The first tab transitions the session from Starting to Running.
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
     }
     session.tabs.insert(tab_id, new_tab);
-    // Swap the single-root layout for the profile's full tree.
-    if let Some(tab) = session.tabs.get_mut(&tab_id) {
-        tab.update_layout(layout);
-    }
 
     events.push(Event::TabCreated(TabCreated { tab_id }));
     for pane_id in &pane_ids {
@@ -383,25 +379,17 @@ pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<E
         .collect();
     others.sort_by_key(|&(index, _)| index);
 
-    // 2. Renumber others densely 0..len-2 (closes the gap the target leaves).
+    // 2. Renumber others densely, leaving the target's slot free: the first
+    //    `new_index` of them keep their position, the rest shift up by one.
     for (position, &(_, id)) in others.iter().enumerate() {
         if let Some(tab) = session.tabs.get_mut(&id) {
-            tab.update_index(position);
+            tab.update_index(position + usize::from(position >= new_index));
         }
     }
 
     // 3. Drop the target into its new slot.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.update_index(new_index);
-    }
-
-    // 4. Shift everyone at/after the new slot up by one to make room.
-    for &(_, id) in &others {
-        if let Some(tab) = session.tabs.get_mut(&id) {
-            if tab.index() >= new_index {
-                tab.update_index(tab.index() + 1);
-            }
-        }
     }
 
     vec![Event::TabMoved(TabMoved {
@@ -432,23 +420,16 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
     // the gone tab, and if it was viewing that tab, send it to the
     // nearest surviving tab.
     let next_tab = closed_index.and_then(|index| nearest_surviving_tab(session, index));
-    let client_ids: Vec<ClientId> = session
-        .clients
-        .list_attached()
-        .map(|client| client.id())
-        .collect();
-    for client_id in client_ids {
-        if let Some(client) = session.clients.get_mut(client_id) {
-            client.remove_focused_pane(tab_id);
-            if client.active_tab() == tab_id {
-                if let Some(next) = next_tab {
-                    client.update_active_tab(next);
-                    events.push(Event::TabFocused(TabFocused {
-                        client_id,
-                        tab_id: next,
-                        prior_tab: tab_id,
-                    }));
-                }
+    for client in session.clients.list_attached_mut() {
+        client.remove_focused_pane(tab_id);
+        if client.active_tab() == tab_id {
+            if let Some(next) = next_tab {
+                client.update_active_tab(next);
+                events.push(Event::TabFocused(TabFocused {
+                    client_id: client.id(),
+                    tab_id: next,
+                    prior_tab: tab_id,
+                }));
             }
         }
     }

@@ -5,7 +5,7 @@
 //! reaches the dispatcher exactly like every other event.
 //!
 //! [`InboxSink`] is the route the running binary takes: the PTY backend calls
-//! it from the pane's own reader thread, so nothing extra runs per pane.
+//! it from the pane's own reader thread, and no other thread is started.
 //!
 //! The other route is for a backend that hands back a [`PtyHandle`] carrying
 //! channels instead — the fake backend the tests drive, for one. Those
@@ -28,9 +28,8 @@ use crate::server::Server;
 /// A [`PtySink`] that drops every pane's child output and exit straight into
 /// the runtime inbox.
 ///
-/// Handing this to the PTY backend is what removes the per-pane forwarder
-/// thread: the pane's reader thread, which has to exist anyway to drain the
-/// PTY, builds the event and sends it itself.
+/// A backend holding this sink starts no per-pane forwarder thread: the
+/// pane's reader thread builds the event and sends it itself.
 pub struct InboxSink {
     /// The inbox every event is sent on. Cloned from the server's own sender,
     /// so these events queue with all the others in arrival order.

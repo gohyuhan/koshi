@@ -1,9 +1,5 @@
 //! `koshi-error` — [`KoshiError`] wraps any crate's domain error into one
-//! type, keeping its category and severity.
-//!
-//! It is its own crate because wrapping the concrete per-crate errors means
-//! depending on those crates, and `koshi-core` — which every crate depends on —
-//! cannot take those dependencies without a cycle.
+//! type. It keeps the category and the severity of the wrapped error.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;

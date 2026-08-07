@@ -259,13 +259,14 @@ impl Grid {
     /// Blank columns `from..to` (half-open, `to` exclusive) in `row`, resetting
     /// each to a blank space in `fill`. An erase that reaches the row's last
     /// column breaks the row's continuation into the next row, so its end
-    /// resets to [`RowEnd::Hard`]. Coordinates outside the grid are skipped via
-    /// [`cell_mut`](Grid::cell_mut), so an oversized span, an inverted range
-    /// (`from >= to`), or an empty grid never panics — it is simply a no-op.
+    /// resets to [`RowEnd::Hard`]. The span is clipped to the row, so an
+    /// oversized span, an inverted range (`from >= to`), or an empty grid never
+    /// panics — it is simply a no-op.
     pub fn clear_line(&mut self, row: u16, from: u16, to: u16, fill: Style) {
-        for i in from..to {
-            if let Some(cell) = self.cell_mut(row, i) {
-                *cell = Cell::blank_with(fill);
+        if let Some(cells) = self.rows.get_mut(row as usize) {
+            let end = (to as usize).min(cells.len());
+            if let Some(span) = cells.get_mut(from as usize..end) {
+                span.fill(Cell::blank_with(fill));
             }
         }
         let (_, cols) = self.dimensions();
@@ -285,9 +286,11 @@ impl Grid {
         }
 
         let r = &mut self.rows[row as usize];
-        let blanks = vec![Cell::blank_with(fill); n as usize];
 
-        r.splice(col as usize..col as usize, blanks);
+        r.splice(
+            col as usize..col as usize,
+            std::iter::repeat_n(Cell::blank_with(fill), n as usize),
+        );
         r.truncate(cols as usize);
         // The shift replaced the row's tail, so any continuation into the
         // next row is broken.
@@ -306,10 +309,9 @@ impl Grid {
 
         let r = &mut self.rows[row as usize];
         let del = min(cols - col, n);
-        let blanks = vec![Cell::blank_with(fill); del as usize];
 
         r.drain(col as usize..(col + del) as usize);
-        r.extend(blanks);
+        r.resize(cols as usize, Cell::blank_with(fill));
         // The shift replaced the row's tail, so any continuation into the
         // next row is broken.
         self.set_row_end(row, RowEnd::Hard);
@@ -325,19 +327,20 @@ impl Grid {
             return;
         }
 
-        let blank_row = vec![Cell::blank_with(fill); cols as usize];
-
         // Never remove more lines than the band actually holds.
         let remove_count = min(n, last - first + 1);
 
         // Each iteration removes the band's top line — the lines below it slide
-        // up to fill the gap — then re-inserts a blank line at the band's
-        // bottom, so the band keeps its original height after every step. Row
-        // ends travel with their rows, so a soft-wrapped row scrolled off the
-        // top keeps its continuation state.
+        // up to fill the gap — blanks that line to `cols` cells in place, and
+        // re-inserts it at the band's bottom, so the band keeps its original
+        // height after every step and reuses the departing row's cell buffer.
+        // Row ends travel with their rows, so a soft-wrapped row scrolled off
+        // the top keeps its continuation state.
         for _ in 0..remove_count as usize {
-            self.rows.remove(first as usize);
-            self.rows.insert(last as usize, blank_row.clone());
+            let mut recycled = self.rows.remove(first as usize);
+            recycled.clear();
+            recycled.resize(cols as usize, Cell::blank_with(fill));
+            self.rows.insert(last as usize, recycled);
             self.row_ends.remove(first as usize);
             self.row_ends.insert(last as usize, RowEnd::Hard);
         }
@@ -364,20 +367,21 @@ impl Grid {
             return;
         }
 
-        let blank_row = vec![Cell::blank_with(fill); cols as usize];
-
         // Never insert more lines than the band can hold.
         let insert_count = min(n, last - first + 1);
 
-        // Each iteration inserts a blank line at the band's top — the lines
-        // below it slide down — then removes the line pushed just past the
-        // band's bottom, so the band keeps its original height after every
-        // step. Row ends travel with their rows.
+        // Each iteration removes the band's bottom line, blanks it to `cols`
+        // cells in place, and re-inserts it at the band's top — the lines
+        // between slide down — so the band keeps its original height after
+        // every step and reuses the departing row's cell buffer. Row ends
+        // travel with their rows.
         for _ in 0..insert_count as usize {
-            self.rows.insert(first as usize, blank_row.clone());
-            self.rows.remove(last as usize + 1);
+            let mut recycled = self.rows.remove(last as usize);
+            recycled.clear();
+            recycled.resize(cols as usize, Cell::blank_with(fill));
+            self.rows.insert(first as usize, recycled);
+            self.row_ends.remove(last as usize);
             self.row_ends.insert(first as usize, RowEnd::Hard);
-            self.row_ends.remove(last as usize + 1);
         }
         // The inserted blanks broke two continuations: the row above the band
         // now precedes a blank row, and the row that slid into the band's

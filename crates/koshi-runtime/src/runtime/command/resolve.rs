@@ -309,11 +309,10 @@ impl Server {
         }
     }
 
-    /// Resolve the client a command names in its own `client` argument: that
-    /// client when set, else the acting client
-    /// ([`Self::resolve_acting_client`]) — the issuer while it is attached,
-    /// else the session's sole attached client. Several attached with none
-    /// named lists the ids to choose from.
+    /// The client a command names in its own `client` argument, resolved by
+    /// [`Self::resolve_view_client`]. A [`RejectReason::TargetAmbiguous`] hint
+    /// from that call is replaced with one listing every attached client id to
+    /// choose from.
     ///
     /// Shared by [`Command::Detach`], which removes the client it resolves, and
     /// [`Command::SwitchSession`], which moves it to another session. Validation
@@ -323,36 +322,24 @@ impl Server {
         source: &CommandSource,
         session: &Session,
     ) -> Result<ClientId, Rejection> {
-        let client_id = match explicit {
-            Some(client_id) => {
-                if session.clients.get(client_id).is_none() {
-                    return Err(Rejection::new(
-                        RejectReason::TargetNotFound,
-                        "target client not attached to the session",
-                    ));
-                }
-                client_id
+        Self::resolve_view_client(explicit, source, session).map_err(|rejection| {
+            if rejection.reason == RejectReason::TargetAmbiguous {
+                let ids: Vec<String> = session
+                    .clients
+                    .list_attached()
+                    .map(|client| client.id().to_string())
+                    .collect();
+                Rejection::new(
+                    RejectReason::TargetAmbiguous,
+                    &format!(
+                        "several clients are attached; specify the client: {}",
+                        ids.join(", ")
+                    ),
+                )
+            } else {
+                rejection
             }
-            None => Self::resolve_acting_client(source, session).map_err(|rejection| {
-                if rejection.reason == RejectReason::TargetAmbiguous {
-                    let ids: Vec<String> = session
-                        .clients
-                        .list_attached()
-                        .map(|client| client.id().to_string())
-                        .collect();
-                    Rejection::new(
-                        RejectReason::TargetAmbiguous,
-                        &format!(
-                            "several clients are attached; specify the client: {}",
-                            ids.join(", ")
-                        ),
-                    )
-                } else {
-                    rejection
-                }
-            })?,
-        };
-        Ok(client_id)
+        })
     }
 
     /// Resolve a [`Command::NewPane`] to its concrete target: the session and

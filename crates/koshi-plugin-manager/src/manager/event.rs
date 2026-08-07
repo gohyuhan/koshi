@@ -1,1 +1,1 @@
-//! Events. Placeholder per standard source layout.
+//! Events. This module is empty.

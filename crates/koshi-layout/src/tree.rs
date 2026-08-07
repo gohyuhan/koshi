@@ -32,8 +32,8 @@ impl LayoutNode {
     /// All leaf pane ids in layout order: depth-first, children in order.
     ///
     /// This is the one stable order the engine uses whenever position in the
-    /// tree matters — suppression picks trailing panes from it, and focus
-    /// fallback walks it. Iteration must stay deterministic across solves.
+    /// tree matters: suppression picks trailing panes from it, and focus
+    /// fallback walks it. The order is the same on every solve.
     #[must_use]
     pub fn leaf_panes(&self) -> Vec<PaneId> {
         let mut panes = Vec::new();
@@ -50,6 +50,18 @@ impl LayoutNode {
                     child.node.collect_leaf_panes(out);
                 }
             }
+        }
+    }
+
+    /// The first leaf pane in layout order, or `None` when this subtree
+    /// holds no pane at all.
+    pub(crate) fn first_leaf(&self) -> Option<PaneId> {
+        match self {
+            Self::Pane(id) => Some(*id),
+            Self::Split(split) => split
+                .children
+                .iter()
+                .find_map(|child| child.node.first_leaf()),
         }
     }
 
@@ -207,6 +219,12 @@ impl SplitNode {
             weights,
             active,
         }
+    }
+
+    /// The active child index, clamped to the last child. A deserialized
+    /// split can carry an index past its children; an empty split yields 0.
+    pub(crate) fn active_index(&self) -> usize {
+        self.active.min(self.children.len().saturating_sub(1))
     }
 }
 

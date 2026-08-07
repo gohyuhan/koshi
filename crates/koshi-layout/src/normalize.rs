@@ -128,7 +128,7 @@ struct Entry {
 /// each merged child (1 for the rest) and `P` their product, a kept child's
 /// weight becomes `w·P/m_self`, and an inlined child's `u·w_slot·P/m_slot`.
 /// Every share keeps its exact proportion. If any rescaled weight would
-/// overflow, nothing merges — a nested split is valid, just not canonical.
+/// overflow, nothing merges and the split stays nested.
 fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<Entry> {
     let factors: Vec<u128> = entries
         .iter()
@@ -137,9 +137,7 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     if factors.iter().all(|&factor| factor == 1) {
         return entries;
     }
-    // Overflow occurs only on absurdly deep hostile trees. When it happens,
-    // the merge is skipped and the split stays nested; a nested split still
-    // solves correctly, it just isn't canonical.
+    // On overflow the merge is skipped and the split stays nested.
     let product = factors
         .iter()
         .try_fold(1u128, |acc, &factor| acc.checked_mul(factor));
@@ -152,10 +150,10 @@ fn merge_same_direction(direction: SplitDirection, entries: Vec<Entry>) -> Vec<E
     let mut planned: Vec<Vec<SizeWeight>> = Vec::with_capacity(entries.len());
     for index in 0..entries.len() {
         let scale = product / factors[index];
-        match planned_weights(&entries[index], factors[index], scale) {
-            Some(weights) => planned.push(weights),
-            None => return entries,
-        }
+        let Some(weights) = planned_weights(&entries[index], factors[index], scale) else {
+            return entries;
+        };
+        planned.push(weights);
     }
 
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());

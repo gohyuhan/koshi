@@ -41,11 +41,16 @@ impl TerminalState {
     /// selectors, skin-tone modifiers, and regional-
     /// indicator flags onto a single base. An ambiguous / incomplete result is
     /// treated as a boundary (start fresh) — the safe default.
-    pub(super) fn continues_cluster(&self, c: char) -> bool {
-        let mut probe = self.cluster.clone();
-        probe.push(c);
-        let mut cursor = GraphemeCursor::new(self.cluster.len(), probe.len(), true);
-        !cursor.is_boundary(&probe, 0).unwrap_or(true)
+    ///
+    /// The test runs on `cluster` itself: `c` is appended, the boundary is read
+    /// at the join, then `cluster` is truncated back to its original bytes.
+    pub(super) fn continues_cluster(&mut self, c: char) -> bool {
+        let base_len = self.cluster.len();
+        self.cluster.push(c);
+        let mut cursor = GraphemeCursor::new(base_len, self.cluster.len(), true);
+        let joined = !cursor.is_boundary(&self.cluster, 0).unwrap_or(true);
+        self.cluster.truncate(base_len);
+        joined
     }
 
     /// Fold `c` into the current cluster: stack it on the base cell (so the
@@ -231,10 +236,8 @@ impl TerminalState {
         // A wide glyph needs its continuation column in bounds. In a pane too
         // narrow to hold the pair (e.g. a 1-column split, where even col 0 is the
         // last column) there is no room, so the base is stored as a single
-        // narrow cell, keeping the wide-pair invariant intact: a width-2 base
-        // with no continuation would let a later erase / cell op treat the lone
-        // cell as an orphan and blank it, and would let a renderer trusting
-        // widths draw an impossible row.
+        // narrow cell. Every stored width-2 base therefore keeps its width-0
+        // continuation beside it.
         let wide = base.width() == 2 && col + 1 < cols;
         let base = if base.width() == 2 && !wide {
             rebuilt_with_width(&base, 1)

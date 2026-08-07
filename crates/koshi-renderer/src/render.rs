@@ -45,14 +45,23 @@ use crate::theme::Theme;
 
 /// Paint `snapshot` into `buf` over `area` (the client's full viewport).
 ///
-/// Blanks `area` first so a buffer reused across frames shows no stale cells,
-/// then draws the pane borders, each visible pane's terminal cells, and the
-/// collapsed stack-member strips, then the tabline over the top row and the
-/// keybinding hint bar over the bottom row (skipped when the content area is a
-/// single row — the tabline owns it). When the active tab has no room for any
-/// pane (`all_suppressed`), draws only a centered too-small overlay and
-/// returns, skipping the panes and both chrome rows. Does nothing for a
-/// zero-size area.
+/// Does nothing for a zero-size area. When the active tab has no room for any
+/// pane (`all_suppressed`), blanks `area`, draws a centered too-small overlay,
+/// and returns, skipping the panes and both chrome rows.
+///
+/// Otherwise paints in this order:
+///
+/// 1. Blanks every cell of `area`, so a buffer reused across frames shows no
+///    stale cells.
+/// 2. Draws one bordered box per visible pane, its title in the top border and
+///    its scroll position in the bottom border when it is scrolled back.
+/// 3. Draws each visible terminal pane's cells into its content rect.
+/// 4. Draws the one-row title strip for every collapsed stack member.
+/// 5. Fills the letterbox margin around the centered layout. Nothing to fill
+///    when the layout covers `area`.
+/// 6. Draws the tabline over the top row.
+/// 7. Draws the keybinding hint bar over the bottom row. Skipped when `area`
+///    is one row tall.
 ///
 /// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
 /// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
@@ -103,8 +112,7 @@ pub fn render_frame(
     draw_pane_contents(snapshot, offset, buf);
     draw_stack_headers(snapshot, theme, offset, buf);
 
-    // Fill multi-client margins before chrome; the tabline and hint bar own
-    // the outer rows and must remain visible over the letterbox.
+    // The margin fills first; the tabline and hint bar paint over it.
     draw_letterbox(area, content, theme, buf);
 
     let tabline = RatatuiRect {
@@ -160,8 +168,7 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
     let pane = find_pane(snapshot, focused)?;
     // A plugin pane (no grid) gets a cursor only when the plugin asks for one.
     let view = pane.grid_view.as_ref()?;
-    // A view scrolled back into history shows no hardware cursor: the cursor
-    // belongs to the live tail the view has scrolled away from.
+    // A view scrolled back into history shows no hardware cursor.
     if view.view_offset > 0 {
         return None;
     }
@@ -204,8 +211,7 @@ pub fn cursor_position(snapshot: &RenderSnapshot, area: RatatuiRect) -> Option<P
 /// terminal (crossterm's `SetCursorStyle`), which is what makes vim's
 /// insert-mode bar show as a bar instead of a block.
 ///
-/// Not gated on the cursor being visible or the view being scrolled back: a
-/// cursor that is not drawn has no look to get wrong.
+/// Not gated on the cursor being visible or the view being scrolled back.
 #[must_use]
 pub fn cursor_style(snapshot: &RenderSnapshot) -> Option<CursorStyle> {
     let pane = find_pane(snapshot, snapshot.client.focused_pane?)?;
@@ -243,8 +249,8 @@ fn draw_panes(
         if !slot.visible {
             continue;
         }
-        // Focus keeps its own color; the hover color marks only an unfocused
-        // pane the wheel would scroll, so the focused pane never turns purple.
+        // The focus color wins over the hover color: the hover color marks
+        // only an unfocused pane, the one the wheel scrolls.
         let style = if Some(slot.pane_id) == focused {
             border_focused_style(theme)
         } else if Some(slot.pane_id) == hovered {
@@ -260,8 +266,8 @@ fn draw_panes(
 
         let pane = find_pane(snapshot, slot.pane_id);
 
-        // The pane's title sits in the top border, zellij-style: ` title `
-        // over the line, clipped so the corner glyphs always survive.
+        // The pane's title sits in the top border as ` title `, starting two
+        // cells in and clipped four cells short, so the corner glyphs survive.
         if let Some(title) = pane.and_then(|pane| pane.title.as_deref()) {
             if !title.is_empty() && rect.width > 4 {
                 let line = Line::from(Span::styled(format!(" {title} "), style));
@@ -341,10 +347,9 @@ fn draw_pane_contents(snapshot: &RenderSnapshot, offset: Point, buf: &mut Buffer
 /// reverse for every cell. `area` is clipped to the buffer so an oversized rect
 /// cannot index out of bounds.
 ///
-/// A highlighted cell (`selection`) is drawn in reverse, the way a terminal has
-/// always shown selected text. It combines with the cell's own reverse and with
-/// `reverse_video` by exclusive-or, so highlighting text that is already reverse
-/// swaps it back and the highlight still reads against its surroundings.
+/// A highlighted cell (`selection`) is drawn in reverse. The highlight combines
+/// with the cell's own reverse and with `reverse_video` by exclusive-or, so
+/// highlighting a cell that is already reverse swaps it back to normal.
 fn draw_grid(
     grid: &Grid,
     area: RatatuiRect,
@@ -356,12 +361,14 @@ fn draw_grid(
     let (grid_rows, grid_cols) = grid.dimensions();
     let rows = grid_rows.min(area.height);
     let cols = grid_cols.min(area.width);
-    for row in 0..rows {
+    // Zipping against the grid's row slices resolves each row once, so the
+    // column walk indexes into that row's cells directly.
+    for (row, cells) in (0..rows).zip(grid.rows()) {
         // Once per row, not once per cell: a highlight is a column range on a
         // row, so the row's range is looked up before walking its cells.
         let span = selection.and_then(|spans| spans.row_span(row));
         for col in 0..cols {
-            let Some(cell) = grid.cell(row, col) else {
+            let Some(cell) = cells.get(col as usize) else {
                 continue;
             };
             let width = cell.width();
@@ -476,9 +483,9 @@ fn draw_stack_headers(snapshot: &RenderSnapshot, theme: &Theme, offset: Point, b
 
 /// The title drawn on a stack member's header strip: the pane's terminal title,
 /// or empty when the pane has none.
-fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> String {
+fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> &str {
     find_pane(snapshot, pane)
-        .and_then(|snap| snap.title.clone())
+        .and_then(|snap| snap.title.as_deref())
         .unwrap_or_default()
 }
 
@@ -543,7 +550,7 @@ fn place(rect: Rect, offset: Point) -> RatatuiRect {
 /// vertical bound, so a row past the buffer's height panics. A resize can leave
 /// the buffer shorter than the laid-out frame (its rows solved for a taller
 /// size), which places chrome rows below the buffer; this guards that row.
-fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
+pub(crate) fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, max_width: u16) {
     if y < buf.area.top() || y >= buf.area.bottom() {
         return;
     }
@@ -620,13 +627,10 @@ mod tabline;
 
 use style::*;
 use tabline::draw_tabline;
-// Both koshi-owned rows fill with the same bar background, so the hint bar
-// reads this one from here rather than keeping its own copy.
+// The hint bar fills its row with the same bar background as the tab bar.
 pub(crate) use style::bar_style;
 pub(crate) use tabline::tabline_layout;
-// A test that sizes a row around the version badge measures this rather than
-// rebuilding the badge text. `tabline` calls it directly, so the re-export
-// carries it to the sibling test modules only.
+// The badge text, reachable from the sibling test modules.
 #[cfg(test)]
 pub(crate) use tabline::version_badge;
 

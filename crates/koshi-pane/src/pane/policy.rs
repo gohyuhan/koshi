@@ -1,12 +1,10 @@
-//! Pane close and exit policies: how a pane is asked to shut down, and what
-//! becomes of it when its process ends.
+//! Pane close and exit policies: how a pane shuts down, and what becomes of it
+//! when its process ends.
 //!
-//! [`PaneClosePolicy`] governs a requested close — graceful with a grace
-//! period, forced, or confirm-if-busy. [`PaneExitPolicy`] governs the pane's
-//! fate when its child exits on its own — close it or respawn a shell. Each
-//! carries its production default, and
-//! [`PaneClosePolicy::kill_policy`] maps a requested close onto the process
-//! [`KillPolicy`]. The tab-level empty-tab policy lives with the session model.
+//! [`PaneClosePolicy`] sets how a requested close runs. [`PaneExitPolicy`] sets
+//! what happens when the child process ends on its own. Each policy has a
+//! default. [`PaneClosePolicy::kill_policy`] maps a close onto the process
+//! [`KillPolicy`]. The policy for an empty tab lives with the session model.
 
 use std::time::Duration;
 
@@ -15,14 +13,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
-    /// Close gracefully with a timeout for cleanup.
+    /// Close gracefully. `timeout` is how long the process has to clean up.
     Graceful {
         #[serde(with = "koshi_core::process::duration_secs")]
         timeout: Duration,
     },
     /// Force-kill the process immediately.
     Force,
-    /// Prompt the user if the pane is busy, then close gracefully.
+    /// Prompt the user when the pane is busy, then close gracefully.
     ConfirmIfBusy,
 }
 
@@ -35,9 +33,9 @@ impl Default for PaneClosePolicy {
 }
 
 impl PaneClosePolicy {
-    /// Map this close policy onto the process [`KillPolicy`] the PTY layer
-    /// applies. `ConfirmIfBusy` resolves to a graceful close — the prompt is a
-    /// UI step; once confirmed, the close proceeds gracefully.
+    /// Maps this close policy onto the process [`KillPolicy`] that the PTY
+    /// layer applies. `Graceful` passes its own timeout through. `ConfirmIfBusy`
+    /// maps to a graceful close with the default timeout.
     #[must_use]
     pub fn kill_policy(&self) -> KillPolicy {
         match self {
@@ -52,10 +50,10 @@ impl PaneClosePolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PaneExitPolicy {
-    /// Close the pane when its process exits.
+    /// Close the pane when its child process ends.
     #[default]
     CloseOnExit,
-    /// Respawn a new shell in the pane when the child exits.
+    /// Start a new shell in the pane when the child process ends.
     RespawnShell,
 }
 

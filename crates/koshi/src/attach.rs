@@ -1299,11 +1299,7 @@ fn earliest(
     left: Option<std::time::Duration>,
     right: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
-        (None, None) => None,
-    }
+    [left, right].into_iter().flatten().min()
 }
 
 /// Every command a plan runs, in order. A plugin host call runs none from here:

@@ -22,11 +22,9 @@ use crate::{
 /// One tab: its name, bar position, layout tree, lifecycle, and the panes it
 /// focused, most-recent first.
 ///
-/// A tab holds no layout **mode**. Whether a pane is zoomed is a property of a
-/// client's view, not of the tab — it lives on [`crate::client::Client`]
-/// (`zoom_by_tab`), so two clients on this tab can disagree about it. The tree
-/// here is what every client solves; the mode each client solves it with is
-/// theirs.
+/// A tab holds no layout mode. Zoom is a client property. It lives on
+/// [`crate::client::Client`] as `zoom_by_tab`, so two clients on this tab can
+/// hold different zoom. The tab holds the tree that every client solves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
     id: TabId,

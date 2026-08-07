@@ -1,11 +1,9 @@
 //! `koshi-macro` — koshi's procedural macros.
 //!
-//! A `proc-macro` crate may export nothing but macros, so anything a macro's
-//! generated code calls lives in an ordinary crate elsewhere. This crate runs
-//! inside the compiler and puts no code of its own in the binary.
+//! This crate runs inside the compiler. It puts no code in the binary.
 //!
-//! What lives here: [`beta_feature`], which writes the beta-feature gate. Reach
-//! it through `koshi-beta`, which re-exports it beside the flag the generated
+//! It holds [`beta_feature`], the attribute that writes the beta-feature gate.
+//! `koshi-beta` re-exports the attribute beside the functions the generated
 //! code calls.
 
 use proc_macro::TokenStream;
@@ -36,12 +34,12 @@ impl Parse for Args {
     }
 }
 
-/// Whether `otherwise` is the literal `()`. A blocked call then gives up with a
-/// bare `return;`, because `return ();` is what `clippy::unused_unit` rejects.
+/// Reports whether `otherwise` is the literal `()`. A blocked call then gives
+/// up with a bare `return;`.
 ///
-/// Only the literal counts: `otherwise = ()` is true, while a unit-valued call
-/// such as `otherwise = do_nothing()` is false and returns through `return`
-/// with its expression.
+/// Only the literal counts. `otherwise = ()` is true. A unit-valued call such
+/// as `otherwise = do_nothing()` is false, and the blocked call returns that
+/// expression.
 fn returns_unit(otherwise: &Expr) -> bool {
     matches!(otherwise, Expr::Tuple(tuple) if tuple.elems.is_empty())
 }
@@ -49,22 +47,21 @@ fn returns_unit(otherwise: &Expr) -> bool {
 /// Runs the function's body only when `koshi.kdl`'s top-level
 /// `allow-beta-features` is on.
 ///
-/// When it is off the body never runs, the call gives back the `otherwise`
-/// expression, and a warning naming the function and the knob is logged the
-/// first time that site is reached. Beta-gated entry points do not share a
-/// return type, which is why the fallback is spelled out per site.
+/// If the setting is off, the body does not run. The call gives back the
+/// `otherwise` expression. The first blocked call at that site logs a warning.
+/// The warning names the function and the setting.
 ///
-/// The gate is read where the body would start: at the call for an ordinary
-/// function, at the first poll for an `async fn`. An `async fn` whose future
-/// is built and dropped unpolled reads nothing and logs nothing.
+/// The gate reads the setting where the body would start. An ordinary function
+/// reads it at the call. An `async fn` reads it at the first poll. A future
+/// that nobody polls reads nothing and logs nothing.
 ///
-/// The warning travels `tracing`, so it lands only where a subscriber is
-/// installed — an interactive session running with `logging { enabled #true }`.
-/// A `koshi <verb>` command installs none, so a call blocked there gives back
-/// `otherwise` silently.
+/// The warning travels through `tracing`. It appears only where a subscriber is
+/// installed, such as an interactive session with `logging { enabled #true }`. A
+/// `koshi <verb>` command installs no subscriber, so a call blocked there gives
+/// back `otherwise` silently.
 ///
-/// The generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`,
-/// so the gated function's crate depends on `koshi-beta`.
+/// The generated code calls `koshi_beta::allowed` and `koshi_beta::log_blocked`.
+/// The gated function's crate depends on `koshi-beta`.
 ///
 /// ```ignore
 /// #[beta_feature(otherwise = Ok(()))]
@@ -84,8 +81,8 @@ pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote!(return #otherwise;)
     };
-    // The original statements are spliced in rather than nested as a block, so
-    // the last one stays the function's tail expression.
+    // The original statements go in one by one, so the last one stays the
+    // function's tail expression.
     *function.block = syn::parse_quote!({
         if !::koshi_beta::allowed() {
             static BETA_WARNED: ::std::sync::Once = ::std::sync::Once::new();

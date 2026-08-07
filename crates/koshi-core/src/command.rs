@@ -375,13 +375,12 @@ pub struct SwitchSessionArgs {
 ///
 /// A client is in visual mode while text is highlighted, and it is never
 /// entered by hand: a mouse drag over a pane's content starts a selection, and
-/// a click or any input that reaches the pane's program drops it. These two
-/// variants are the whole lifecycle — a selection appearing is entering visual
-/// mode, it clearing is leaving — so there is no `Enter`/`Exit` variant.
+/// a click or any input that reaches the pane's program drops it. Setting a
+/// selection and clearing it are the whole lifecycle — a selection appearing is
+/// entering visual mode, it clearing is leaving — so there is no `Enter`/`Exit`
+/// variant.
 ///
-/// There is no copy cursor: selecting is the mouse's alone. Growing a highlight
-/// with `Shift`+`Arrow` would need keys that belong to the program in the pane —
-/// `vim`, readline, and `less` all bind them.
+/// There is no copy cursor: selecting is the mouse's alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisualCommand {
     /// Begin or extend a selection in one pane. Issued by the mouse layer as a
@@ -503,7 +502,8 @@ pub enum CopyTarget {
     /// OSC 52 (a terminal escape sequence for setting the clipboard) to the
     /// outer terminal — the default, dependency-free option.
     Osc52,
-    /// The native OS clipboard (behind the `native` feature).
+    /// The native operating-system clipboard. Koshi builds no backend for it,
+    /// so a copy to this target writes nothing.
     Native,
 }
 

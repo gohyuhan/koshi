@@ -1,11 +1,10 @@
-//! Pane domain organization: metadata, policies, lifecycle state machine, and
-//! event/command routing.
+//! Pane domain modules: metadata, policies, and the lifecycle state machine.
 //!
-//! - [`state`]: per-pane runtime metadata (`PaneRecord`) and pane kind (terminal or plugin).
-//! - [`policy`]: how panes close (graceful, forced, confirm) and what happens on exit.
-//! - [`lifecycle`]: state machine for pane spawn, running, exit, close, and removal.
-//! - [`command`]: placeholder module, no items yet.
-//! - [`event`]: placeholder module, no items yet.
+//! - [`state`]: the per-pane runtime record, and the pane kind.
+//! - [`policy`]: how a pane closes, and what happens when its process ends.
+//! - [`lifecycle`]: the state machine from spawn to removal.
+//! - [`command`]: a placeholder module with no items yet.
+//! - [`event`]: a placeholder module with no items yet.
 
 pub mod command;
 pub mod event;

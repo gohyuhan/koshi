@@ -1,9 +1,8 @@
-//! Tests for error display, classification, and severity across all domain error types.
+//! Tests for the display text, the category and the severity of every wrapped
+//! domain error.
 //!
-//! Each domain error (Config, Cli, Ipc, Pty, Terminal, Layout, Plugin, Storage) is verified
-//! to display correctly and be assigned the correct category and severity. The aggregate
-//! `KoshiError` wrapper is also tested to ensure it transparently delegates these operations
-//! without losing information.
+//! The first tests check each domain error on its own. The later tests wrap an
+//! error in `KoshiError` and check that all three still match the inner error.
 
 use super::*;
 use std::error::Error as StdError;
@@ -112,12 +111,9 @@ fn aggregate_delegates_and_is_transparent() {
     assert_eq!(corrupt.severity(), Severity::SessionFatal);
 }
 
-// The tests above exercise `KoshiError` through only 2 of its 8 `#[from]`
-// variants (Pty, Storage). The rest are covered here: every variant's `.into()`
-// must produce the exact same `to_string()`/`category()`/`severity()` as
-// calling those methods on the unwrapped inner error directly — proving the
-// `#[error(transparent)]` + delegating `DomainError` impl actually wires up
-// for that arm, not just compiles.
+// The tests above wrap only 2 of the 8 `#[from]` variants (Pty, Storage). The
+// tests below cover the rest. Each one checks that `.into()` gives the same
+// `to_string()`, `category()` and `severity()` as the unwrapped inner error.
 
 #[test]
 fn aggregate_wraps_and_delegates_config_error() {
@@ -182,11 +178,9 @@ fn aggregate_wraps_and_delegates_plugin_error() {
 
 #[test]
 fn aggregate_wraps_storage_io_variant_as_recoverable() {
-    // `aggregate_delegates_and_is_transparent` above only ever wraps
-    // `StorageError::Corrupt` (SessionFatal). `StorageError`'s severity is NOT
-    // constant per-type like the others above — it varies per variant — so the
-    // `Io` arm must be checked through the aggregate too, or a bug that made
-    // every wrapped `StorageError` report SessionFatal would slip through.
+    // `StorageError::severity()` varies per variant: `Io` is
+    // `Severity::Recoverable` and `Corrupt` is `Severity::SessionFatal`. The
+    // aggregate test above wraps only `Corrupt`, so this test wraps `Io`.
     let inner = StorageError::Io {
         detail: "disk full".into(),
     };
@@ -197,15 +191,11 @@ fn aggregate_wraps_storage_io_variant_as_recoverable() {
     assert_eq!(err.severity(), Severity::Recoverable);
 }
 
-// `CliError::category()` is the one wrapped type whose category is NOT
-// constant per-type: `UnknownCommand`/`UnknownAction`/`InvalidArgs` classify as
-// `DomainCategory::Cli`, but `IpcUnavailable` classifies as `DomainCategory::Ipc`
-// and `Runtime` classifies as `DomainCategory::Session` — despite ALL of them
-// living inside `KoshiError::Cli(..)`. E.g. `KoshiError::from(CliError::IpcUnavailable
-// { detail: "..." })` + `.category()` returns `DomainCategory::Ipc`, NOT
-// `DomainCategory::Cli`, which is wrong to assume from the wrapping variant's
-// name alone. Every arm is checked below so a regression that collapses this
-// back to a constant `DomainCategory::Cli` is caught.
+// `CliError::category()` varies per variant. `UnknownCommand`, `UnknownAction`
+// and `InvalidArgs` report `DomainCategory::Cli`. `IpcUnavailable` reports
+// `DomainCategory::Ipc`, and `Runtime` reports `DomainCategory::Session`. All
+// of them sit inside `KoshiError::Cli(..)`, so the tests below check the
+// category through the wrapper, one test per variant.
 
 #[test]
 fn aggregate_cli_unknown_command_classifies_as_cli() {
@@ -266,14 +256,10 @@ fn aggregate_cli_runtime_classifies_as_session_not_cli() {
 
 #[test]
 fn aggregate_source_is_none_for_a_transparent_variant_with_no_sourced_inner() {
-    // `#[error(transparent)]` forwards `source()` to the WRAPPED error's own
-    // `source()`, not `Some(&wrapped)`. None of `koshi-error`'s wrapped enums
-    // mark any field `#[source]`/`#[from]` inside their own variants, so their
-    // own `.source()` is `None` — e.g. `PtyError::Spawn { .. }.source()` is
-    // `None` because `PtyError` never wraps a further inner error. Therefore
-    // `KoshiError::from(PtyError::Spawn { .. }).source()` must also be `None`,
-    // not `Some(&PtyError::Spawn { .. })` — the two are easy to conflate and
-    // only one is what `#[error(transparent)]` actually does.
+    // `#[error(transparent)]` forwards `source()` to the wrapped error's own
+    // `source()`. No wrapped enum marks a field `#[source]` or `#[from]` inside
+    // its own variants, so `PtyError::Spawn { .. }.source()` is `None`, and
+    // `KoshiError::from(PtyError::Spawn { .. }).source()` is `None` too.
     let err: KoshiError = PtyError::Spawn {
         detail: "no such shell".into(),
     }

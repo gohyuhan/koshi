@@ -346,13 +346,11 @@ impl From<KeyChord> for KeySequence {
 impl fmt::Display for KeySequence {
     /// Writes each chord's canonical text form, space-separated.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut first = true;
-        for chord in &self.0 {
-            if !first {
+        for (index, chord) in self.0.iter().enumerate() {
+            if index > 0 {
                 f.write_str(" ")?;
             }
             write!(f, "{chord}")?;
-            first = false;
         }
         Ok(())
     }

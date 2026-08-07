@@ -69,8 +69,7 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
         "three blocked calls must warn once, got {warnings:?}"
     );
     // The line names the function that did nothing and gives the exact line to
-    // add. Asserted whole: a message that named a block the file has no place
-    // for would send the user to write KDL that does not parse.
+    // add. Asserted whole, down to the KDL the user has to paste.
     assert!(
         warnings[0].contains(
             "`warns_once` is a beta feature and did nothing; \
@@ -78,8 +77,8 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
         ),
         "{warnings:?}"
     );
-    // Warning level, so the line survives the `logging { level "warning" }` a
-    // user can set, and a machine-readable `function` field beside the prose.
+    // Warning level, which survives the `logging { level "warning" }` a user
+    // can set. A machine-readable `function` field sits beside the prose.
     assert!(warnings[0].contains(r#""level":"WARN""#), "{warnings:?}");
     assert!(
         warnings[0].contains(r#""function":"warns_once""#),

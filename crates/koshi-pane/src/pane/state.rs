@@ -1,10 +1,9 @@
-//! Pane metadata model: the per-pane runtime record the registry owns, and the
-//! tag that says what backs a pane.
+//! Pane metadata: the per-pane runtime record the registry owns, and the tag
+//! that says what backs a pane.
 //!
-//! A layout tree holds only a `PaneId` at each leaf; everything else about that
-//! pane — what it is, what it ran, where, its lifecycle and timestamps — lives
-//! in its [`PaneRecord`] here, so the layout stays pure geometry and runtime
-//! state has exactly one owner.
+//! A layout tree holds only a `PaneId` at each leaf. [`PaneRecord`] holds
+//! everything else about that pane: its kind, its command, its working
+//! directory, its lifecycle state and its timestamps.
 
 use std::{collections::BTreeMap, path::PathBuf, time::SystemTime};
 
@@ -21,9 +20,8 @@ use crate::pane::{
     policy::{PaneClosePolicy, PaneExitPolicy},
 };
 
-/// What backs a pane: an emulated terminal over a PTY, or a plugin-rendered
-/// surface. Both are layout leaves with identical split/resize/focus rules; the
-/// kind tells the runtime which path drives the pane.
+/// What backs a pane: an emulated terminal over a PTY, or a surface that a
+/// plugin renders. The kind tells the runtime which path drives the pane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneKind {
     /// A terminal pane backed by a PTY and emulated terminal.
@@ -33,8 +31,8 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
-    /// The diagnostics domain a failure on this pane classifies into: a
-    /// terminal pane is a `Terminal` failure, a plugin pane a `Plugin` failure.
+    /// The diagnostics domain for a failure on this pane. A terminal pane
+    /// reports `Terminal`. A plugin pane reports `Plugin`.
     #[must_use]
     pub fn domain_category(&self) -> DomainCategory {
         match self {
@@ -44,32 +42,31 @@ impl PaneKind {
     }
 }
 
-/// Runtime metadata for a single pane, keyed by `id` in the registry. The
-/// layout holds only the id; this record is the one owner of everything else.
+/// Runtime metadata for a single pane. The registry keys the record by `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneRecord {
-    /// Stable id, matching the layout leaf that references this pane. Read-only:
-    /// the registry keys records by it, so it is fixed for the record's life.
+    /// The stable id, which matches the layout leaf that references this pane.
+    /// The id never changes.
     id: PaneId,
-    /// What backs the pane, terminal or plugin surface. Fixed at creation.
+    /// What backs the pane. The kind is set at creation and never changes.
     kind: PaneKind,
-    /// The process this pane was spawned to run, if any.
+    /// The process that the pane runs, when the pane has one.
     pub command: Option<SpawnSpec>,
-    /// Working directory the pane started in, when known.
+    /// The working directory that the pane starts in, when it is known.
     pub cwd: Option<PathBuf>,
-    /// How a requested close is carried out.
+    /// How the pane carries out a requested close.
     pub close_policy: PaneClosePolicy,
-    /// What happens to the pane when its child exits.
+    /// What happens to the pane when its child process ends.
     pub exit_policy: PaneExitPolicy,
-    /// Environment overrides applied at spawn, sorted for deterministic output.
+    /// The environment overrides that apply at spawn, in name order.
     pub env: BTreeMap<String, String>,
     /// Where the pane sits in its lifecycle.
     lifecycle: PaneLifecycle,
-    /// When the pane was created.
+    /// The time when the pane was created.
     pub created_at: SystemTime,
-    /// When the pane's child exited, once it has.
+    /// The time when the child process ended, once it has ended.
     pub exited_at: Option<SystemTime>,
-    /// The child's exit code, once it has exited.
+    /// The exit code of the child process, once it has ended.
     pub exit_code: Option<i32>,
 }
 
@@ -79,8 +76,8 @@ impl PaneRecord {
         Self::new_with_kind(id, PaneKind::Terminal, created_at)
     }
 
-    /// A fresh `Spawning` record for a pane backed by `kind`. `kind` is set
-    /// here and never changes afterward.
+    /// A fresh `Spawning` record for a pane that `kind` backs. The kind never
+    /// changes afterwards.
     pub fn new_with_kind(id: PaneId, kind: PaneKind, created_at: SystemTime) -> Self {
         Self {
             id,
@@ -97,13 +94,14 @@ impl PaneRecord {
         }
     }
 
-    /// This pane's stable id, matching its layout leaf and registry key.
+    /// The stable id of this pane. It matches the layout leaf and the registry
+    /// key.
     #[must_use]
     pub fn id(&self) -> PaneId {
         self.id
     }
 
-    /// What backs this pane. Fixed at creation.
+    /// What backs this pane. The kind is set at creation and never changes.
     #[must_use]
     pub fn kind(&self) -> &PaneKind {
         &self.kind
@@ -114,9 +112,10 @@ impl PaneRecord {
         &self.lifecycle
     }
 
-    /// Apply a lifecycle `event`, advancing the pane's state, or return
-    /// [`InvalidTransition`] if the move is illegal from the current state. The
-    /// lifecycle field is private, so this is the only way to drive it.
+    /// Applies a lifecycle `event` and advances the pane's state. Returns
+    /// [`InvalidTransition`] when the step is illegal from the current state,
+    /// and leaves the state unchanged. This is the only way to change
+    /// `lifecycle`.
     pub fn update_lifecycle(&mut self, event: PaneLifecycleEvent) -> Result<(), InvalidTransition> {
         self.lifecycle = self.lifecycle.transition(event, self.kind.clone())?;
         Ok(())

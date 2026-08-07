@@ -1,17 +1,15 @@
 //! Focus candidates after a pane disappears.
 //!
-//! Picking the next focused pane is session policy, not layout's job — the
-//! session owns focus history and per-client state. What layout can answer
-//! is the geometric part: given where the removed pane was and where the
-//! survivors now sit, which panes are sensible focus targets? This module
-//! returns those candidates, ranked three ways, and chooses nothing.
+//! This module answers the geometric part only: given where the removed pane
+//! was and where the survivors now sit, which panes are sensible focus
+//! targets? It returns those candidates, ranked three ways, and chooses
+//! nothing. The session owns focus history and per-client state.
 //!
 //! Two kinds of panes are never candidates. Zero-area panes — suppressed
 //! or hidden by a fullscreen overlay — have no visible cells to focus.
-//! Collapsed stack members do have a visible rect (their one-row header
-//! strip), but that strip is Koshi-owned chrome: such a member must not
-//! silently receive focus either. Reaching one of those goes through an
-//! explicit activation, not through focus repair.
+//! Collapsed stack members hold a visible rect, their one-row header strip,
+//! but that strip is Koshi-owned chrome. Reaching one of those goes through
+//! an explicit activation, not through focus repair.
 
 use koshi_core::geometry::{Rect, SplitDirection};
 use koshi_core::ids::PaneId;
@@ -61,7 +59,7 @@ pub fn focus_candidates(
         .map(|&(pane, _)| pane);
 
     // Largest absorbed area wins; on a tie the earlier pane in layout order
-    // keeps it, because only strictly larger areas displace the holder.
+    // keeps it.
     let mut absorbed: Option<(PaneId, u64)> = None;
     for &(pane, rect) in &visible {
         let Some(overlap) = rect.intersection(removed_rect) else {
@@ -146,7 +144,7 @@ pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusC
         .children
         .iter()
         .position(|child| child.node.contains_pane(pane))?;
-    if target == current_active(stack) {
+    if target == stack.active_index() {
         return None;
     }
     Some(set_active(stack, target))
@@ -156,8 +154,8 @@ pub fn stack_activate(stack: &mut SplitNode, pane: PaneId) -> Option<StackFocusC
 /// Returns the first pane in the member that occupies the active slot.
 #[must_use]
 pub fn stack_entry_target(stack: &SplitNode) -> Option<PaneId> {
-    let child = stack.children.get(current_active(stack))?;
-    child.node.leaf_panes().first().copied()
+    let child = stack.children.get(stack.active_index())?;
+    child.node.first_leaf()
 }
 
 /// Walk `step` through the members (wrapping) to the first one that holds a
@@ -167,22 +165,16 @@ fn stack_focus_step(stack: &mut SplitNode, step: i64) -> Option<StackFocusChange
         return None;
     }
     let count = stack.children.len() as i64;
-    let active = current_active(stack) as i64;
+    let active = stack.active_index() as i64;
     // Try each member one step further away (wrapping with rem_euclid),
     // skipping any that hold no pane, and stop at the first real one.
     for offset in 1..count {
         let candidate = (active + step * offset).rem_euclid(count) as usize;
-        if !stack.children[candidate].node.leaf_panes().is_empty() {
+        if stack.children[candidate].node.first_leaf().is_some() {
             return Some(set_active(stack, candidate));
         }
     }
     None
-}
-
-/// The in-bounds active index (constructors clamp it, but a deserialized
-/// stack might not have).
-fn current_active(stack: &SplitNode) -> usize {
-    stack.active.min(stack.children.len().saturating_sub(1))
 }
 
 /// Set the stack's active member to `target`: give it full height, hide the
@@ -190,8 +182,8 @@ fn current_active(stack: &SplitNode) -> usize {
 fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
     let deactivated = stack
         .children
-        .get(current_active(stack))
-        .and_then(|child| child.node.leaf_panes().first().copied());
+        .get(stack.active_index())
+        .and_then(|child| child.node.first_leaf());
     stack.active = target;
     for (index, child) in stack.children.iter_mut().enumerate() {
         child.collapsed = index != target;
@@ -199,9 +191,7 @@ fn set_active(stack: &mut SplitNode, target: usize) -> StackFocusChange {
     StackFocusChange {
         newly_active: stack.children[target]
             .node
-            .leaf_panes()
-            .first()
-            .copied()
+            .first_leaf()
             .expect("callers only activate members that hold a pane"),
         deactivated,
     }

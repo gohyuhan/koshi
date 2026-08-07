@@ -1,1 +1,1 @@
-//! Core types. Placeholder per standard source layout.
+//! Core types. This module is empty.

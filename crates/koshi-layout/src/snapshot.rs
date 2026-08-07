@@ -40,12 +40,12 @@ impl StackSnapshot {
         if stack.direction != SplitDirection::Stacked {
             return None;
         }
-        let source_active = stack.active.min(stack.children.len().saturating_sub(1));
+        let source_active = stack.active_index();
         let mut members = Vec::with_capacity(stack.children.len());
         let mut collapsed_states = Vec::with_capacity(stack.children.len());
         let mut active = None;
         for (index, child) in stack.children.iter().enumerate() {
-            let Some(&pane) = child.node.leaf_panes().first() else {
+            let Some(pane) = child.node.first_leaf() else {
                 continue;
             };
             if index == source_active {

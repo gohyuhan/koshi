@@ -182,10 +182,12 @@ impl TerminalState {
         // bottom, no history on either side.
         let mut rows: Vec<Vec<Cell>> = self.alternate.rows().to_vec();
         crop_columns(&mut rows, size.cols, alternate_fill);
-        while rows.len() > size.rows as usize {
-            rows.remove(0);
-            self.alternate_cursor.row = self.alternate_cursor.row.saturating_sub(1);
-        }
+        let cropped_top = rows.len().saturating_sub(size.rows as usize);
+        rows.drain(..cropped_top);
+        self.alternate_cursor.row = self
+            .alternate_cursor
+            .row
+            .saturating_sub(u16::try_from(cropped_top).unwrap_or(u16::MAX));
         rows.resize(
             size.rows as usize,
             vec![Cell::blank_with(alternate_fill); size.cols as usize],
@@ -261,9 +263,9 @@ impl TerminalState {
     /// alone on the alternate, which keeps no history of its own.
     ///
     /// **The screen decides which.** The scrollback belongs to the primary and
-    /// is still there while the alternate is up, so pairing it with the
-    /// alternate's grid would let a word or line grown from the alternate's top
-    /// row step up into the primary's text.
+    /// is still there while the alternate is up, so the alternate's view holds
+    /// its grid alone: a word or line grown from the alternate's top row stops
+    /// at that row.
     pub fn text_view(&self) -> TextView<'_> {
         match self.active {
             Screen::Primary => TextView::new(&self.scrollback, self.active_grid()),

@@ -18,7 +18,7 @@ use crate::server::Server;
 
 impl Server {
     /// Tear the process down in a fixed staged order:
-    /// 1. enter draining mode (reject new IPC/plugin commands),
+    /// 1. set the draining flag,
     /// 2. stop the control socket and withdraw its endpoint file,
     /// 3. notify plugins of imminent shutdown *(seam — no host yet)*,
     /// 4. group-kill immediately for a quit with no issuing client, otherwise
@@ -28,8 +28,8 @@ impl Server {
     /// Stages 6–7 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
     pub fn shutdown(&mut self) {
-        // Stage 1 — draining: reject any newly-arriving IPC/plugin command so
-        // nothing mutates state mid-teardown.
+        // Stage 1 — record that teardown started. The event loop has already
+        // exited, so no further IPC or plugin command reaches dispatch.
         self.draining = true;
 
         // Stage 2 — stop answering the control socket and remove the socket

@@ -1,1 +1,1 @@
-//! Commands. Placeholder per standard source layout.
+//! Commands. This module is empty.

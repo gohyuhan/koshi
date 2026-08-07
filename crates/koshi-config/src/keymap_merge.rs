@@ -3,11 +3,11 @@
 //!
 //! Bindings arrive in the same layers conflict detection reads — the
 //! built-in defaults, then the user's own surfaces (user file, session,
-//! layout), lowest precedence first. [`merge_keymaps`] folds them per key: a later layer's entry on a
-//! key replaces a lower layer's on the same key, and every other key is
-//! untouched. The result splits each mode into two maps because the two
-//! resolve at different tiers of the key-resolution stack — sticky plugin
-//! layers sit between them:
+//! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
+//! a later layer's entry on a key replaces a lower layer's on the same key,
+//! and every other key is untouched. The result splits each mode into two
+//! maps because the two resolve at different tiers of the key-resolution
+//! stack — sticky plugin layers sit between them:
 //!
 //! - **`user_set`** — the winning user-authored entries, each tagged with
 //!   the layer that authored it.
@@ -15,10 +15,11 @@
 //!   whose key no user surface took or removed.
 //!
 //! Merging honors the same firing model as detection (one shared predicate
-//! inside the conflict module, so the two can never disagree): a binding the resolver
-//! refuses, or one a keypress cannot reach, is transparent — it wins no
-//! key, and the firing binding beneath it shows through. A `remove` in a
-//! higher layer voids lower layers' entries on that key outright.
+//! inside the conflict module, so the two can never disagree): a binding
+//! the resolver refuses, or one a keypress cannot reach, is transparent —
+//! it wins no key, and the firing binding beneath it shows through. A
+//! `remove` in a higher layer voids lower layers' entries on that key
+//! outright.
 //!
 //! Merge runs only on a keymap detection has already verdicted: every
 //! layer on [`KeymapVerdict::Apply`](crate::conflict::KeymapVerdict::Apply),
@@ -154,15 +155,9 @@ pub fn merge_keymaps(
     }
 
     for merged in modes.values_mut() {
-        let stolen: Vec<KeySequence> = merged
-            .defaults
-            .keys()
-            .filter(|key| merged.user_set.contains_key(*key))
-            .cloned()
-            .collect();
-        for key in stolen {
-            if let Some(bound) = merged.defaults.remove(&key) {
-                merged.unbound_defaults.insert(key, bound);
+        for key in merged.user_set.keys() {
+            if let Some(bound) = merged.defaults.remove(key) {
+                merged.unbound_defaults.insert(key.clone(), bound);
             }
         }
     }

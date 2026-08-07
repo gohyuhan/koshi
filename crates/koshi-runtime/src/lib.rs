@@ -3,10 +3,10 @@
 //! cross-crate wiring.
 //!
 //! The [`server::Server`] owns all authoritative session state. One attached
-//! terminal's view side lives in its own crate, `koshi-client`, and the two
-//! talk only through the server's doors — [`server::Server::submit_command`]
-//! and [`server::Server::subscribe`] — so the halves can move to separate
-//! processes without redrawing the ownership boundary.
+//! terminal's view side lives in its own crate, `koshi-client`. The two halves
+//! talk only through the server's doors: [`server::Server::submit_command`]
+//! carries a command in, [`server::Server::subscribe`] carries the emitted
+//! events out.
 
 pub mod error;
 pub mod ipc_server;
