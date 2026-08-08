@@ -294,6 +294,132 @@ fn config_subcommands_parse_without_a_default_command() {
     );
 }
 
+// --- Debug subcommands ---
+
+#[test]
+fn dump_state_defaults_to_the_table_format() {
+    assert_eq!(
+        parse(&["koshi", "debug", "dump-state"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpState {
+                format: FormatArg::Table,
+            },
+        })
+    );
+}
+
+#[test]
+fn dump_state_takes_the_json_format() {
+    assert_eq!(
+        parse(&["koshi", "debug", "dump-state", "--format", "json"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpState {
+                format: FormatArg::Json,
+            },
+        })
+    );
+}
+
+#[test]
+fn dump_layout_defaults_to_every_tab_and_the_table_format() {
+    assert_eq!(
+        parse(&["koshi", "debug", "dump-layout"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpLayout {
+                tab: None,
+                format: FormatArg::Table,
+            },
+        })
+    );
+}
+
+#[test]
+fn dump_layout_takes_a_tab_id() {
+    let tab = format!("tab-{}", fixed_uuid());
+    assert_eq!(
+        parse(&["koshi", "debug", "dump-layout", "--tab", &tab]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpLayout {
+                tab: Some(TabRef::Id(TabId::from_uuid(fixed_uuid()))),
+                format: FormatArg::Table,
+            },
+        })
+    );
+}
+
+#[test]
+fn dump_layout_takes_a_tab_name() {
+    assert_eq!(
+        parse(&["koshi", "debug", "dump-layout", "--tab", "editor"]).command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpLayout {
+                tab: Some(TabRef::Name("editor".to_string())),
+                format: FormatArg::Table,
+            },
+        })
+    );
+}
+
+#[test]
+fn dump_layout_takes_a_tab_and_the_json_format_together() {
+    assert_eq!(
+        parse(&[
+            "koshi",
+            "debug",
+            "dump-layout",
+            "--tab",
+            "editor",
+            "--format",
+            "json",
+        ])
+        .command,
+        Some(CliCommand::Debug {
+            command: DebugCommand::DumpLayout {
+                tab: Some(TabRef::Name("editor".to_string())),
+                format: FormatArg::Json,
+            },
+        })
+    );
+}
+
+#[test]
+fn bare_debug_requires_a_subcommand() {
+    assert_eq!(
+        parse_err(&["koshi", "debug"]).kind(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+}
+
+#[test]
+fn an_unknown_debug_subcommand_is_refused() {
+    assert_eq!(
+        parse_err(&["koshi", "debug", "dump-everything"]).kind(),
+        ErrorKind::InvalidSubcommand
+    );
+}
+
+#[test]
+fn an_unknown_dump_format_is_refused() {
+    assert_eq!(
+        parse_err(&["koshi", "debug", "dump-state", "--format", "yaml"]).kind(),
+        ErrorKind::InvalidValue
+    );
+}
+
+#[test]
+fn the_debug_dumps_are_queries_and_map_to_no_action() {
+    for argv in [
+        vec!["koshi", "debug", "dump-state"],
+        vec!["koshi", "debug", "dump-layout"],
+    ] {
+        assert_eq!(
+            command(&argv).to_action(&ResolvedTargets::default(), Direction::Right),
+            None,
+            "{argv:?} must stay a read-only query",
+        );
+    }
+}
+
 // --- Keys subcommands ---
 
 #[test]
@@ -622,6 +748,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "close-pane",
         "close-tab",
         "config",
+        "debug",
         "detach",
         "doctor",
         "focus-pane",

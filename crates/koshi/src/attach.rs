@@ -435,10 +435,11 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
 
     // The session accepted the client, so the terminal may change mode now.
     // The hooks undo every mode this function sets, and the panic hook shares
-    // them, so an unwinding panic restores the terminal too.
+    // them, so an unwinding panic restores the terminal too and then writes a
+    // crash report into the data directory.
     let cleanup = TerminalCleanupGuard::new();
     app::register_terminal_restore(&cleanup);
-    let _panic_guard = install_panic_hook(&cleanup);
+    let _panic_guard = install_panic_hook(&cleanup, koshi_paths::data_dir());
     // A terminal that refuses any of these modes still streams: the failure is
     // logged and the loop runs on.
     let _ =

@@ -4,9 +4,9 @@
 //! the endpoint file advertising it, and spawns the accept loop. Each
 //! accepted connection gets its own thread holding its own
 //! [`Handshake`] gate: a Hello must open the connection before any other
-//! request is served. A `SubmitCommand`, `Discovery` or `Attach` request
-//! crosses to the dispatcher thread through the runtime inbox with a reply
-//! channel; the dispatcher's answer comes back on it and leaves as the
+//! request is served. A `SubmitCommand`, `Discovery`, `Layout` or `Attach`
+//! request crosses to the dispatcher thread through the runtime inbox with a
+//! reply channel; the dispatcher's answer comes back on it and leaves as the
 //! connection's response frame.
 //!
 //! An `Attach` is the one request that keeps its connection: once the reply
@@ -320,6 +320,19 @@ fn serve_connection(
                         Some(None) | None => return,
                     }
                 }
+                IpcRequestKind::Layout { tab } => {
+                    let answer =
+                        ask_dispatcher(inbox_tx, |reply| RuntimeEvent::IpcLayout { tab, reply });
+                    match answer {
+                        Some(Some(layout)) => IpcResponse {
+                            request_id,
+                            result: IpcResult::Layout(layout),
+                        },
+                        // No running session: the process is past its last
+                        // session, so the socket is as good as gone.
+                        Some(None) | None => return,
+                    }
+                }
             },
         };
         if connection.send(&response).is_err() {
@@ -416,7 +429,8 @@ fn stream_events(
             }
             IpcRequestKind::Hello { .. }
             | IpcRequestKind::Attach { .. }
-            | IpcRequestKind::Discovery => break,
+            | IpcRequestKind::Discovery
+            | IpcRequestKind::Layout { .. } => break,
         };
         if inbox_tx.send(event).is_err() {
             break;

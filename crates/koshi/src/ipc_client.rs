@@ -12,11 +12,14 @@ use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::event::RejectReason;
+use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
+use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use uuid::Uuid;
@@ -148,6 +151,50 @@ pub fn fetch_overview(
     }
 }
 
+/// Ask the running session `session_id` to describe its layout: each tab's
+/// split tree, and the rectangles each viewing client solves it to
+/// ([`SessionLayout`]). `tab` narrows the answer to one tab; absent, every
+/// tab is described.
+///
+/// Naming a `tab` the session no longer holds is a target failure, not an
+/// empty answer: the session describes no tab, and this reports the tab as
+/// missing. It is reachable when the tab closes between the caller resolving
+/// it and the session answering.
+///
+/// A session started by a koshi that predates the layout request calls it
+/// malformed, since its build has no such request to decode into. That
+/// refusal is reported as the version gap it is, naming what to do instead.
+pub fn fetch_layout(
+    runtime_dir: &Path,
+    session_id: SessionId,
+    tab: Option<TabId>,
+) -> Result<SessionLayout, CliError> {
+    let endpoint = read_endpoint(runtime_dir, session_id)?;
+    let request = IpcRequest {
+        request_id: 2,
+        kind: IpcRequestKind::Layout { tab },
+    };
+    match exchange(&endpoint, session_id, request)? {
+        IpcResult::Layout(layout) => match tab {
+            Some(tab_id) if layout.tabs.is_empty() => Err(CliError::CommandRejected {
+                reason: RejectReason::TargetNotFound,
+                help: Some(format!("no running session has tab {tab_id}")),
+            }),
+            _ => Ok(layout),
+        },
+        IpcResult::Error(refusal) if refusal.code == IpcErrorCode::MalformedRequest => {
+            Err(CliError::IpcUnavailable {
+                detail: "this session was started by an older koshi that cannot report its \
+                         layout; restart the session to use `debug dump-layout`, or run \
+                         `koshi debug dump-state`, which this session does answer"
+                    .to_string(),
+            })
+        }
+        IpcResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(unexpected_reply(&other)),
+    }
+}
+
 /// Every session with an endpoint file in `runtime_dir`, in no particular
 /// order. A file is counted by its name alone (`session-<uuid>.json`);
 /// whether anything still listens behind it is the caller's probe to make.
@@ -259,6 +306,7 @@ pub(crate) fn unexpected_reply(result: &IpcResult) -> CliError {
         IpcResult::Attached { .. } => "Attached",
         IpcResult::CommandResult(_) => "CommandResult",
         IpcResult::Overview(_) => "Overview",
+        IpcResult::Layout(_) => "Layout",
         IpcResult::Error(_) => "Error",
     };
     CliError::IpcUnavailable {

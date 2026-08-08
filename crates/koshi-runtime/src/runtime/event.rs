@@ -28,6 +28,7 @@ use koshi_core::{
     process::ExitStatus,
 };
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::WireMouseAction;
 use koshi_renderer::snapshot::Delivery;
 
@@ -176,6 +177,16 @@ pub enum RuntimeEvent {
     IpcDiscovery {
         /// Where the dispatcher sends the overview.
         reply: Sender<Option<SessionOverview>>,
+    },
+    /// A layout request delivered over the IPC socket: the caller asks this
+    /// process to describe how its session arranges panes. Carries the reply
+    /// sender the connection thread waits on; the dispatcher answers with the
+    /// layout built from live state, or `None` when no session is running.
+    IpcLayout {
+        /// The one tab to describe, or every tab when absent.
+        tab: Option<TabId>,
+        /// Where the dispatcher sends the layout.
+        reply: Sender<Option<SessionLayout>>,
     },
     /// A capability-checked command issued by a plugin.
     Plugin(CommandEnvelope),

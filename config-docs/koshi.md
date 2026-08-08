@@ -108,6 +108,22 @@ Disabled logging creates no log file.
 problems. `error` includes failures that stop Koshi. Each level includes higher
 severity. Logs store ids and byte counts, not typed or copied text.
 
+### Crash reports
+
+A crash report is separate from the log file. No setting turns it on or off.
+
+If Koshi panics while you have a session open, it restores your terminal and
+then writes `crash-<seconds-since-1970>.txt` in the data directory —
+`~/.local/share/koshi` on Linux, `~/Library/Application Support/koshi` on
+macOS, `%APPDATA%\koshi\data` on Windows. Attach that file to a bug report.
+
+The file holds the Koshi version, the operating system and processor, the time,
+the panic message, the source line that panicked, and the stack. Koshi reads
+only those from the panic. It never reads pane content, scrollback, or your
+keystrokes into the report.
+
+Example: a panic at 2026-08-08 12:00:00 UTC writes `crash-1786190400.txt`.
+
 ## `update`
 
 Self-update settings. Each installed koshi reads these from its own `koshi.kdl`

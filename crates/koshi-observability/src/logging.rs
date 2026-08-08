@@ -25,7 +25,7 @@
 //! back to its cause: the [canonical IDs](self#canonical-fields) plus an event or
 //! error kind. No payloads, no command arguments, no terminal/PTY output, no
 //! per-frame or per-keystroke activity. Anything high-frequency or content-like
-//! belongs in the in-memory event ring (`koshi debug events`), not the log file.
+//! belongs in the recent-events buffer (`koshi debug events`), not the log file.
 //!
 //! # What each level means
 //!

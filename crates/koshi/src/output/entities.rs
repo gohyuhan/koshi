@@ -1,6 +1,7 @@
 //! Table and JSON renderers for the entity queries: the id-chain listings
-//! (`list-sessions`, `list-tabs`, `list-panes`, `list-clients`) and the full
-//! `inspect` records.
+//! (`list-sessions`, `list-tabs`, `list-panes`, `list-clients`), the full
+//! `inspect` records, and the `debug dump-state` dump of those same records
+//! across every running session.
 
 use super::*;
 
@@ -50,6 +51,50 @@ pub fn render_clients(clients: &[ClientRow], format: FormatArg) -> String {
 #[must_use]
 pub fn render_client(client: &ClientInfo, format: FormatArg) -> String {
     record(client, CLIENT_HEADERS, client_row, format)
+}
+
+/// Render a `debug dump-state` answer: every listed session's own record,
+/// then its tabs, panes, and clients, as one table per section under its
+/// name.
+#[must_use]
+pub fn render_dump_state(overviews: &[SessionOverview], format: FormatArg) -> String {
+    match format {
+        FormatArg::Json => json(&overviews),
+        FormatArg::Table => format!(
+            "sessions\n{}\ntabs\n{}\npanes\n{}\nclients\n{}\n",
+            table(
+                SESSION_HEADERS,
+                overviews
+                    .iter()
+                    .map(|overview| session_row(&overview.session))
+                    .collect(),
+            ),
+            table(
+                TAB_HEADERS,
+                overviews
+                    .iter()
+                    .flat_map(|overview| overview.tabs.iter())
+                    .map(tab_row)
+                    .collect(),
+            ),
+            table(
+                PANE_HEADERS,
+                overviews
+                    .iter()
+                    .flat_map(|overview| overview.panes.iter())
+                    .map(pane_row)
+                    .collect(),
+            ),
+            table(
+                CLIENT_HEADERS,
+                overviews
+                    .iter()
+                    .flat_map(|overview| overview.clients.iter())
+                    .map(client_row)
+                    .collect(),
+            ),
+        ),
+    }
 }
 
 /// A listing answer: a JSON array of `rows`, or a table of one row per item
@@ -215,7 +260,7 @@ fn client_row(client: &ClientInfo) -> Vec<String> {
 }
 
 /// An optional value as a cell: its display form, or `-` when absent.
-fn opt_cell<T: std::fmt::Display>(value: Option<&T>) -> String {
+pub(super) fn opt_cell<T: std::fmt::Display>(value: Option<&T>) -> String {
     match value {
         Some(value) => value.to_string(),
         None => "-".to_string(),
@@ -231,7 +276,7 @@ pub(super) fn time_cell(time: SystemTime) -> String {
 }
 
 /// A size as a cell: `<cols>x<rows>`.
-fn size_cell(size: Size) -> String {
+pub(super) fn size_cell(size: Size) -> String {
     format!("{}x{}", size.cols, size.rows)
 }
 

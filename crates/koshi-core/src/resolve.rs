@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The budget is spent on sequences, not on the actions they name: a chain of
 /// eight macros ending in a real action resolves, and a ninth macro inside it
-/// does not. A macro that names itself, directly or through a ring of other
+/// does not. A macro that names itself, directly or through a cycle of other
 /// macros, exhausts the budget instead of recursing forever.
 pub const MAX_SEQUENCE_DEPTH: usize = 8;
 

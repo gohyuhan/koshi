@@ -481,3 +481,96 @@ fn fetching_one_session_that_is_gone_reports_it_as_not_running() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Hiding pane command arguments ------------------------------------------
+
+#[test]
+fn redacting_pane_commands_keeps_each_program_and_hides_its_arguments() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    overviews[0].panes[0].command = Some(vec![
+        "mysql".to_string(),
+        "-pHUNTER2".to_string(),
+        "--host=db.internal".to_string(),
+    ]);
+
+    redact_pane_commands(&mut overviews);
+
+    assert_eq!(
+        overviews[0].panes[0].command,
+        Some(vec![
+            "mysql".to_string(),
+            "***".to_string(),
+            "***".to_string(),
+        ]),
+    );
+}
+
+#[test]
+fn redacting_pane_commands_leaves_a_pane_with_no_command_absent() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    assert_eq!(overviews[0].panes[0].command, None, "the fixture has none");
+
+    redact_pane_commands(&mut overviews);
+
+    assert_eq!(overviews[0].panes[0].command, None);
+}
+
+#[test]
+fn redacting_pane_commands_reaches_every_pane_of_every_session() {
+    let mut overviews = vec![
+        overview("quiet-lake", &[("editor", 2)]),
+        overview("amber-fox", &[("shell", 1)]),
+    ];
+    overviews[0].panes[0].command = Some(vec!["vim".to_string(), "secret.txt".to_string()]);
+    overviews[0].panes[1].command = Some(vec!["psql".to_string(), "postgres://u:p@db".to_string()]);
+    overviews[1].panes[0].command = Some(vec!["ssh".to_string(), "root@10.0.0.1".to_string()]);
+
+    redact_pane_commands(&mut overviews);
+
+    assert_eq!(
+        overviews[0].panes[0].command,
+        Some(vec!["vim".to_string(), "***".to_string()]),
+    );
+    assert_eq!(
+        overviews[0].panes[1].command,
+        Some(vec!["psql".to_string(), "***".to_string()]),
+    );
+    assert_eq!(
+        overviews[1].panes[0].command,
+        Some(vec!["ssh".to_string(), "***".to_string()]),
+    );
+}
+
+#[test]
+fn redacting_pane_commands_changes_nothing_but_the_command() {
+    let mut overviews = vec![overview("quiet-lake", &[("editor", 1)])];
+    overviews[0].panes[0].cwd = Some(PathBuf::from("/home/user"));
+    overviews[0].panes[0].command = Some(vec!["vim".to_string(), "secret.txt".to_string()]);
+    let before = overviews[0].clone();
+
+    redact_pane_commands(&mut overviews);
+
+    let after = &overviews[0];
+    assert_eq!(after.session, before.session);
+    assert_eq!(after.tabs, before.tabs);
+    assert_eq!(after.clients, before.clients);
+    assert_eq!(after.panes[0].id, before.panes[0].id);
+    assert_eq!(after.panes[0].tab_id, before.panes[0].tab_id);
+    assert_eq!(after.panes[0].session_id, before.panes[0].session_id);
+    assert_eq!(after.panes[0].title, before.panes[0].title);
+    assert_eq!(after.panes[0].cwd, Some(PathBuf::from("/home/user")));
+    assert_eq!(after.panes[0].state, before.panes[0].state);
+    assert_eq!(
+        after.panes[0].focused_by_clients,
+        before.panes[0].focused_by_clients,
+    );
+}
+
+#[test]
+fn redacting_pane_commands_across_no_sessions_is_a_noop() {
+    let mut overviews: Vec<SessionOverview> = Vec::new();
+
+    redact_pane_commands(&mut overviews);
+
+    assert!(overviews.is_empty());
+}

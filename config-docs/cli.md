@@ -136,3 +136,26 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
+
+## Debugging
+
+| Command | Result |
+|---|---|
+| `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
+| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, and per-client focus |
+
+A pane's command arguments print as `***`; the program name stays visible.
+`koshi inspect pane` shows the command in full.
+
+Example: a pane running `mysql -pHUNTER2` prints as `mysql ***`.
+
+Every client viewing one tab shares one set of sizes: the tab solves against
+the smallest viewing terminal on each axis, minus the top tab bar row and the
+bottom hint row. Two clients on one tab, one 80x24 and one 120x40, both print
+`viewport 80x22`. What is per client is the view: one client tiled and one with
+a pane fullscreen give that tab two sets of rectangles. A tab no client is
+viewing prints its tree and no rectangles.
+
+A session that started before you installed this Koshi cannot report its
+layout. `dump-layout` says so and names what to do: restart that session, or
+run `dump-state`, which every session answers.

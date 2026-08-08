@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use koshi::attach;
 use koshi::cli::{
-    parse_session_ref, ActionsCommand, Cli, CliCommand, InspectTarget, KeysCommand,
-    ResolvedTargets, SessionRef,
+    parse_session_ref, ActionsCommand, Cli, CliCommand, DebugCommand, FormatArg, InspectTarget,
+    KeysCommand, ResolvedTargets, SessionRef, TabRef,
 };
 use koshi::config;
 use koshi::config_command;
@@ -123,6 +123,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // locally; they dispatch no command, so they never enter the routing
         // layer the action verbs use.
         return run_discovery(command);
+    }
+
+    if let Some(CliCommand::Debug { command }) = &cli.command {
+        return run_debug(command);
     }
 
     if let Some(CliCommand::KillSession { session }) = &cli.command {
@@ -345,6 +349,64 @@ fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
     match found.incomplete_listing() {
         Some(error) if listing => Err(error),
         _ => Ok(()),
+    }
+}
+
+/// Serve a `koshi debug` dump from live state.
+fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
+    match command {
+        DebugCommand::DumpState { format } => run_dump_state(*format),
+        DebugCommand::DumpLayout { tab, format } => run_dump_layout(tab.as_ref(), *format),
+    }
+}
+
+/// Print every running session's full record, with each pane's command
+/// arguments hidden.
+///
+/// Prints every session it reached, then fails when one could not answer.
+fn run_dump_state(format: FormatArg) -> Result<(), CliError> {
+    let runtime_dir = ipc_client::runtime_dir()?;
+    let mut found = discovery::fetch_all(&runtime_dir);
+    discovery::redact_pane_commands(&mut found.sessions);
+    print!("{}", output::render_dump_state(&found.sessions, format));
+    match found.incomplete_listing() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Serve a `koshi debug dump-layout` from live state: find the sessions in
+/// scope, ask each for its layout, and print them.
+///
+/// `--tab` naming no running tab fails the lookup, and so does a tab that
+/// closes between that lookup and the session's answer. A session that refuses
+/// the layout request fails the command before anything prints; a session that
+/// was listening but could not be probed fails it after everything prints.
+fn run_dump_layout(tab: Option<&TabRef>, format: FormatArg) -> Result<(), CliError> {
+    let runtime_dir = ipc_client::runtime_dir()?;
+    let found = targeting::scope_sessions(&runtime_dir, None)?;
+
+    let layouts = match tab {
+        Some(tab_ref) => {
+            let tab_id = targeting::tab_by_ref(&found, tab_ref)?;
+            let session_id = discovery::find_tab(&found, tab_id)?.session_id;
+            vec![ipc_client::fetch_layout(
+                &runtime_dir,
+                session_id,
+                Some(tab_id),
+            )?]
+        }
+        None => found
+            .sessions
+            .iter()
+            .map(|overview| ipc_client::fetch_layout(&runtime_dir, overview.session.id, None))
+            .collect::<Result<Vec<_>, CliError>>()?,
+    };
+    print!("{}", output::render_layouts(&layouts, format));
+
+    match found.incomplete_listing() {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
