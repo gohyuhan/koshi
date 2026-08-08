@@ -365,6 +365,12 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Print diagnostics for a bug report.
+    Debug {
+        /// Which dump to print.
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
     /// Manage plugins.
     Plugin,
     /// Download and install the latest koshi release.
@@ -482,6 +488,28 @@ pub enum ConfigCommand {
     Check,
     /// Validate then migrate every known config file.
     Migrate,
+}
+
+/// The `koshi debug` subcommands: read-only dumps for a bug report.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum DebugCommand {
+    /// Print every running session's full record — its tabs, panes and
+    /// clients — with each pane's command arguments hidden.
+    DumpState {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Print each tab's split tree, the rectangles it solves to, the panes
+    /// with no room, the stacks, and each client's focus.
+    DumpLayout {
+        /// Narrow the answer to one tab, by id or name.
+        #[arg(long, value_parser = parse_tab_ref, value_name = "TAB")]
+        tab: Option<TabRef>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
 }
 
 /// Which keymap layer authored a binding, as typed on the command line. A
@@ -633,8 +661,9 @@ impl CliCommand {
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
     /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
-    /// `actions`, `keys`, and `config`), `update`, the hidden `serve-router`
-    /// and `serve-session`, plus `plugin`, whose arguments are not built.
+    /// `actions`, `keys`, `config`, and the `debug` dumps), `update`, the
+    /// hidden `serve-router` and `serve-session`, plus `plugin`, whose
+    /// arguments are not built.
     #[must_use]
     pub fn to_action(
         &self,
@@ -806,6 +835,7 @@ impl CliCommand {
             | CliCommand::Detach { .. }
             | CliCommand::Doctor
             | CliCommand::Config { .. }
+            | CliCommand::Debug { .. }
             | CliCommand::Plugin
             | CliCommand::Update
             | CliCommand::Actions { .. }

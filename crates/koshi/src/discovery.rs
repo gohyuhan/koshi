@@ -17,6 +17,7 @@ use std::path::Path;
 use koshi_core::discovery::{ClientInfo, PaneInfo, SessionOverview, TabInfo};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::redact::redact_argv;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::validate::reclaim_stale_socket;
 use serde::Serialize;
@@ -296,6 +297,16 @@ pub fn client_rows(overviews: &[SessionOverview]) -> Vec<ClientRow> {
             })
         })
         .collect()
+}
+
+/// Hide the arguments of every pane's command across `overviews`, leaving
+/// each program name visible.
+pub fn redact_pane_commands(overviews: &mut [SessionOverview]) {
+    for overview in overviews.iter_mut() {
+        for pane in overview.panes.iter_mut() {
+            pane.command = pane.command.as_deref().map(redact_argv);
+        }
+    }
 }
 
 /// The tab `tab_id` names, in full, wherever it is running.

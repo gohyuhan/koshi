@@ -114,6 +114,9 @@ impl Server {
             RuntimeEvent::IpcDiscovery { reply } => {
                 let _ = reply.send(self.build_overview());
             }
+            RuntimeEvent::IpcLayout { tab, reply } => {
+                let _ = reply.send(self.build_session_layout(tab));
+            }
             RuntimeEvent::Plugin(envelope) => {
                 let _ = self.submit_command(envelope);
             }

@@ -12,9 +12,10 @@ use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
+use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
     IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
 };
@@ -148,6 +149,27 @@ pub fn fetch_overview(
     }
 }
 
+/// Ask the running session `session_id` to describe its layout: each tab's
+/// split tree, and the rectangles each viewing client solves it to
+/// ([`SessionLayout`]). `tab` narrows the answer to one tab; absent, every
+/// tab is described.
+pub fn fetch_layout(
+    runtime_dir: &Path,
+    session_id: SessionId,
+    tab: Option<TabId>,
+) -> Result<SessionLayout, CliError> {
+    let endpoint = read_endpoint(runtime_dir, session_id)?;
+    let request = IpcRequest {
+        request_id: 2,
+        kind: IpcRequestKind::Layout { tab },
+    };
+    match exchange(&endpoint, session_id, request)? {
+        IpcResult::Layout(layout) => Ok(layout),
+        IpcResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(unexpected_reply(&other)),
+    }
+}
+
 /// Every session with an endpoint file in `runtime_dir`, in no particular
 /// order. A file is counted by its name alone (`session-<uuid>.json`);
 /// whether anything still listens behind it is the caller's probe to make.
@@ -259,6 +281,7 @@ pub(crate) fn unexpected_reply(result: &IpcResult) -> CliError {
         IpcResult::Attached { .. } => "Attached",
         IpcResult::CommandResult(_) => "CommandResult",
         IpcResult::Overview(_) => "Overview",
+        IpcResult::Layout(_) => "Layout",
         IpcResult::Error(_) => "Error",
     };
     CliError::IpcUnavailable {

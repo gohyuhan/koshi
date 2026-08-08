@@ -9,12 +9,13 @@ use std::time::{Duration, UNIX_EPOCH};
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneKind;
 use serde::de::DeserializeOwned;
@@ -23,6 +24,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 use crate::attach::{PaneStructure, TabStructure};
+use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
 
 use super::*;
 
@@ -84,6 +86,42 @@ fn overview() -> SessionOverview {
         tabs: Vec::new(),
         panes: Vec::new(),
         clients: Vec::new(),
+    }
+}
+
+/// The layout of a session with one tab, holding one pane, that one client
+/// views. The wire form of every field is pinned in `crate::layout::tests`.
+fn layout() -> SessionLayout {
+    let tab_id = TabId::from_uuid(fixed_uuid());
+    let pane_id = PaneId::from_uuid(fixed_uuid());
+    let client_id = ClientId::from_uuid(fixed_uuid());
+
+    SessionLayout {
+        id: SessionId::from_uuid(fixed_uuid()),
+        name: "quiet-lake".to_string(),
+        tabs: vec![TabLayout {
+            id: tab_id,
+            name: "editor".to_string(),
+            index: 0,
+            tree: LayoutNode::Pane(pane_id),
+            solved: vec![SolvedTab {
+                client: client_id,
+                viewport: Size { cols: 80, rows: 22 },
+                mode: LayoutMode::Tiled,
+                panes: vec![SolvedPane {
+                    id: pane_id,
+                    rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 }),
+                }],
+                suppressed: Vec::new(),
+                all_suppressed: false,
+                stack_headers: Vec::new(),
+            }],
+        }],
+        clients: vec![ClientFocus {
+            id: client_id,
+            active_tab: tab_id,
+            focused_pane: Some(pane_id),
+        }],
     }
 }
 
@@ -709,6 +747,80 @@ fn overview_response_round_trips() {
 }
 
 #[test]
+fn a_layout_request_naming_one_tab_round_trips() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Layout {
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+        },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn a_layout_request_naming_no_tab_round_trips() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Layout { tab: None },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn a_layout_request_encodes_to_the_expected_shape() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Layout {
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&request).expect("request encodes"),
+        json!({
+            "request_id": 4,
+            "kind": { "Layout": { "tab": "00000000-0000-0000-0000-000000000001" } }
+        })
+    );
+}
+
+#[test]
+fn a_layout_request_for_every_tab_encodes_a_null_tab() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Layout { tab: None },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&request).expect("request encodes"),
+        json!({ "request_id": 4, "kind": { "Layout": { "tab": null } } })
+    );
+}
+
+#[test]
+fn a_layout_request_carrying_an_unknown_field_is_refused() {
+    let decoded: Result<IpcRequest, _> =
+        serde_json::from_str(r#"{"request_id":4,"kind":{"Layout":{"tab":null,"junk":5}}}"#);
+
+    assert!(
+        decoded.is_err(),
+        "an unknown field decoded instead of failing: {decoded:?}"
+    );
+}
+
+#[test]
+fn layout_response_round_trips() {
+    let response = IpcResponse {
+        request_id: Some(4),
+        result: IpcResult::Layout(layout()),
+    };
+
+    assert_eq!(round_trip(&response), response);
+}
+
+#[test]
 fn error_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(1),
@@ -806,6 +918,10 @@ fn each_request_kind_is_tagged_with_its_own_name() {
         serde_json::to_value(IpcRequestKind::Discovery).unwrap(),
         json!("Discovery")
     );
+    assert_eq!(
+        tag_of(&serde_json::to_value(IpcRequestKind::Layout { tab: None }).unwrap()),
+        "Layout"
+    );
 }
 
 #[test]
@@ -838,6 +954,10 @@ fn each_result_is_tagged_with_its_own_name() {
     assert_eq!(
         tag_of(&serde_json::to_value(IpcResult::Overview(overview())).unwrap()),
         "Overview"
+    );
+    assert_eq!(
+        tag_of(&serde_json::to_value(IpcResult::Layout(layout())).unwrap()),
+        "Layout"
     );
     assert_eq!(
         tag_of(
@@ -970,6 +1090,14 @@ fn every_request_kind_names_itself_without_its_payload() {
         "SubmitCommand"
     );
     assert_eq!(IpcRequestKind::Discovery.name(), "Discovery");
+    assert_eq!(IpcRequestKind::Layout { tab: None }.name(), "Layout");
+    assert_eq!(
+        IpcRequestKind::Layout {
+            tab: Some(TabId::from_uuid(fixed_uuid())),
+        }
+        .name(),
+        "Layout"
+    );
 }
 
 /// Serializing is how the token reaches the endpoint file and the socket, so

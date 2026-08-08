@@ -18,7 +18,7 @@ use std::fmt;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::KeyChord;
 use koshi_core::mouse::MouseInput;
 use koshi_core::redact::REDACTED;
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::attach::AttachedSessionStructureSnapshot;
+use crate::layout::SessionLayout;
 
 /// The protocol version this build speaks. A connection whose
 /// [`IpcRequestKind::Hello`] names a different version is refused with
@@ -205,6 +206,12 @@ pub enum IpcRequestKind {
     /// Ask the session to describe itself in full. The caller narrows the
     /// answer to the query it was asked.
     Discovery,
+    /// Ask the session to describe its layout: each tab's split tree, and the
+    /// rectangles each viewing client solves it to.
+    Layout {
+        /// The one tab to describe, or every tab when absent.
+        tab: Option<TabId>,
+    },
 }
 
 impl IpcRequestKind {
@@ -222,6 +229,7 @@ impl IpcRequestKind {
             IpcRequestKind::Mouse(_) => "Mouse",
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
+            IpcRequestKind::Layout { .. } => "Layout",
         }
     }
 }
@@ -332,6 +340,8 @@ pub enum IpcResult {
     CommandResult(CommandResult),
     /// The session's full description.
     Overview(SessionOverview),
+    /// The session's layout: each tab's split tree and its solved rectangles.
+    Layout(SessionLayout),
     /// The request was refused.
     Error(IpcErrorPayload),
 }

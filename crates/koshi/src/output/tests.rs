@@ -1,6 +1,7 @@
-//! Tests for discovery output rendering: exact JSON schema snapshots (the
-//! stable scripting surface) and exact table/field renderings, all over
-//! fixed fake data.
+//! Tests for CLI output rendering — discovery, action and keymap
+//! introspection, and the `debug` dumps: exact JSON schema snapshots (the
+//! stable scripting surface) and exact table/field renderings, all over fixed
+//! fake data.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -10,11 +11,16 @@ use koshi_core::action::{
     core_action_seeds, ActionHandlerRef, ActionRef, ActionScope, ActionStatus, TargetKind,
 };
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
+use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
+use koshi_layout::mode::LayoutMode;
+use koshi_layout::size::SizeWeight;
+use koshi_layout::solver::StackHeader;
+use koshi_layout::tree::{LayoutChild, LayoutNode, SplitNode};
 use uuid::Uuid;
 
 use super::*;
@@ -1158,4 +1164,575 @@ fn empty_client_list_table_is_just_the_header() {
 fn explain_of_an_empty_or_blank_action_name_is_none() {
     assert_eq!(render_action_explain("", FormatArg::Json), None);
     assert_eq!(render_action_explain("   ", FormatArg::Json), None);
+}
+
+// --- Debug dumps ---
+
+/// A fixed UUID ending in `tail`, so the ids inside one dump stay
+/// distinguishable.
+fn uuid_ending(tail: u8) -> Uuid {
+    Uuid::parse_str(&format!("00000000-0000-0000-0000-0000000000{tail:02}"))
+        .expect("literal UUID parses")
+}
+
+/// One session's whole record: itself, one tab, one pane, and one client.
+fn overview() -> SessionOverview {
+    SessionOverview {
+        session: session_info(),
+        tabs: vec![tab_info()],
+        panes: vec![pane_info()],
+        clients: vec![client_info()],
+    }
+}
+
+/// The session id every layout fixture below carries.
+fn layout_session() -> SessionId {
+    SessionId::from_uuid(uuid_ending(1))
+}
+
+/// The tab id every layout fixture below carries.
+fn layout_tab() -> TabId {
+    TabId::from_uuid(uuid_ending(2))
+}
+
+/// The client id every layout fixture below carries.
+fn layout_client() -> ClientId {
+    ClientId::from_uuid(uuid_ending(3))
+}
+
+/// The first pane of every layout fixture below.
+fn first_pane() -> PaneId {
+    PaneId::from_uuid(uuid_ending(4))
+}
+
+/// The second pane of every layout fixture below.
+fn second_pane() -> PaneId {
+    PaneId::from_uuid(uuid_ending(5))
+}
+
+/// A layout of one session holding one tab with `tree`, solved as `solved`,
+/// viewed by one client focused on `focused`.
+fn layout_of(tree: LayoutNode, solved: Vec<SolvedTab>, focused: Option<PaneId>) -> SessionLayout {
+    SessionLayout {
+        id: layout_session(),
+        name: "quiet-lake".to_string(),
+        tabs: vec![TabLayout {
+            id: layout_tab(),
+            name: "editor".to_string(),
+            index: 0,
+            tree,
+            solved,
+        }],
+        clients: vec![ClientFocus {
+            id: layout_client(),
+            active_tab: layout_tab(),
+            focused_pane: focused,
+        }],
+    }
+}
+
+/// A left-right split of the two fixture panes.
+fn side_by_side() -> LayoutNode {
+    LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(first_pane())),
+            LayoutChild::new(LayoutNode::Pane(second_pane())),
+        ],
+    ))
+}
+
+/// One client's tiled solve of [`side_by_side`] over an 80x22 tab.
+fn tiled_solve() -> SolvedTab {
+    SolvedTab {
+        client: layout_client(),
+        viewport: Size { cols: 80, rows: 22 },
+        mode: LayoutMode::Tiled,
+        panes: vec![
+            SolvedPane {
+                id: first_pane(),
+                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 22 }),
+            },
+            SolvedPane {
+                id: second_pane(),
+                rect: Rect::new(Point { x: 40, y: 0 }, Size { cols: 40, rows: 22 }),
+            },
+        ],
+        suppressed: Vec::new(),
+        all_suppressed: false,
+        stack_headers: Vec::new(),
+    }
+}
+
+#[test]
+fn dump_state_table_prints_one_named_table_per_record_kind() {
+    // Each section is its own table, and a blank line closes it.
+    let expected = "\
+sessions
+id                                            name        created_at  clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234        1        3
+
+tabs
+id                                        session                                       name       index  active_pane                                panes
+tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
+
+panes
+id                                         tab                                       session                                       title  cwd         command      state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+
+clients
+id                                           session                                       attached_at  viewport  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    tab-00000000-0000-0000-0000-000000000001  -             Normal
+
+";
+    assert_eq!(render_dump_state(&[overview()], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_state_table_with_no_sessions_prints_four_empty_tables() {
+    let expected = "\
+sessions
+id  name  created_at  clients  panes
+
+tabs
+id  session  name  index  active_pane  panes
+
+panes
+id  tab  session  title  cwd  command  state  focused_by
+
+clients
+id  session  attached_at  viewport  active_tab  focused_pane  lock
+
+";
+    assert_eq!(render_dump_state(&[], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_state_table_prints_a_hidden_argument_as_it_was_given() {
+    let hidden = SessionOverview {
+        panes: vec![PaneInfo {
+            command: Some(vec!["mysql".to_string(), "***".to_string()]),
+            ..pane_info()
+        }],
+        ..overview()
+    };
+
+    let rendered = render_dump_state(&[hidden], FormatArg::Table);
+
+    assert!(
+        rendered.contains("  mysql ***  running  1\n"),
+        "the command column must print the hidden argv verbatim: {rendered}",
+    );
+}
+
+#[test]
+fn dump_state_table_spans_every_session_given() {
+    let second = SessionOverview {
+        session: SessionInfo {
+            name: "wandering-heron".to_string(),
+            ..session_info()
+        },
+        ..overview()
+    };
+
+    let rendered = render_dump_state(&[overview(), second], FormatArg::Table);
+
+    assert_eq!(rendered.matches("quiet-lake").count(), 1);
+    assert_eq!(rendered.matches("wandering-heron").count(), 1, "{rendered}");
+    assert_eq!(
+        rendered
+            .matches("pane-00000000-0000-0000-0000-000000000001  tab-")
+            .count(),
+        2,
+        "both sessions' panes are listed: {rendered}",
+    );
+}
+
+#[test]
+fn dump_state_json_is_an_array_of_whole_overviews() {
+    let rendered = render_dump_state(&[overview()], FormatArg::Json);
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("the dump is JSON");
+
+    assert_eq!(
+        parsed,
+        serde_json::json!([{
+            "session": {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "name": "quiet-lake",
+                "created_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "attached_clients": ["00000000-0000-0000-0000-000000000001"],
+                "pane_count": 3
+            },
+            "tabs": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "name": "amber-fox",
+                "index": 1,
+                "active_pane": "00000000-0000-0000-0000-000000000001",
+                "pane_count": 2
+            }],
+            "panes": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "tab_id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "title": "htop",
+                "cwd": "/home/user",
+                "command": ["htop", "--tree"],
+                "state": "running",
+                "focused_by_clients": ["00000000-0000-0000-0000-000000000001"]
+            }],
+            "clients": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "attached_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "viewport_size": { "cols": 120, "rows": 40 },
+                "active_tab": "00000000-0000-0000-0000-000000000001",
+                "focused_pane": null,
+                "lock_state": "Normal"
+            }]
+        }])
+    );
+}
+
+#[test]
+fn dump_state_json_with_no_sessions_is_an_empty_array() {
+    assert_eq!(render_dump_state(&[], FormatArg::Json), "[]\n");
+}
+
+#[test]
+fn dump_layout_table_shows_the_tree_the_solve_and_the_focus() {
+    let expected = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split
+        pane pane-00000000-0000-0000-0000-000000000004
+        pane pane-00000000-0000-0000-0000-000000000005
+    client client-00000000-0000-0000-0000-000000000003 tiled viewport 80x22
+      pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 40x22
+      pane pane-00000000-0000-0000-0000-000000000005 rect 40,0 40x22
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000004
+";
+    let layout = layout_of(side_by_side(), vec![tiled_solve()], Some(first_pane()));
+
+    assert_eq!(render_layouts(&[layout], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_layout_table_marks_a_tab_no_client_views() {
+    let expected = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    no client views this tab
+  clients
+";
+    let layout = SessionLayout {
+        clients: Vec::new(),
+        ..layout_of(LayoutNode::Pane(first_pane()), Vec::new(), None)
+    };
+
+    assert_eq!(render_layouts(&[layout], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_layout_table_lists_the_panes_with_no_room() {
+    let solved = SolvedTab {
+        panes: vec![
+            SolvedPane {
+                id: first_pane(),
+                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 6, rows: 4 }),
+            },
+            SolvedPane {
+                id: second_pane(),
+                rect: Rect::zero(),
+            },
+        ],
+        suppressed: vec![second_pane()],
+        viewport: Size { cols: 6, rows: 4 },
+        ..tiled_solve()
+    };
+    let layout = layout_of(side_by_side(), vec![solved], Some(first_pane()));
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(
+        rendered.contains(
+            "      pane pane-00000000-0000-0000-0000-000000000005 rect 0,0 0x0\n      no room: pane-00000000-0000-0000-0000-000000000005\n"
+        ),
+        "{rendered}",
+    );
+    assert!(
+        !rendered.contains("no room for any pane"),
+        "one pane still has room: {rendered}",
+    );
+}
+
+#[test]
+fn dump_layout_table_says_when_no_pane_has_room() {
+    let solved = SolvedTab {
+        panes: vec![SolvedPane {
+            id: first_pane(),
+            rect: Rect::zero(),
+        }],
+        suppressed: vec![first_pane()],
+        all_suppressed: true,
+        viewport: Size { cols: 3, rows: 3 },
+        ..tiled_solve()
+    };
+    let layout = layout_of(
+        LayoutNode::Pane(first_pane()),
+        vec![solved],
+        Some(first_pane()),
+    );
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(
+        rendered.contains(
+            "      no room: pane-00000000-0000-0000-0000-000000000004\n      no room for any pane\n"
+        ),
+        "{rendered}",
+    );
+}
+
+#[test]
+fn dump_layout_table_shows_a_stack_with_its_collapsed_member_and_header() {
+    let expected = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      stacked split, active member 0
+        pane pane-00000000-0000-0000-0000-000000000004
+        pane pane-00000000-0000-0000-0000-000000000005 (collapsed)
+    client client-00000000-0000-0000-0000-000000000003 tiled viewport 80x22
+      pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 80x21
+      pane pane-00000000-0000-0000-0000-000000000005 rect 0,21 80x1
+      stack header pane-00000000-0000-0000-0000-000000000005 rect 0,21 80x1 [2/2]
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000004
+";
+    let solved = SolvedTab {
+        panes: vec![
+            SolvedPane {
+                id: first_pane(),
+                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 21 }),
+            },
+            SolvedPane {
+                id: second_pane(),
+                rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
+            },
+        ],
+        stack_headers: vec![StackHeader {
+            pane: second_pane(),
+            rect: Rect::new(Point { x: 0, y: 21 }, Size { cols: 80, rows: 1 }),
+            position: 1,
+            total: 2,
+        }],
+        ..tiled_solve()
+    };
+    let stack = LayoutNode::Split(SplitNode::stack(vec![first_pane(), second_pane()], 0));
+    let layout = layout_of(stack, vec![solved], Some(first_pane()));
+
+    assert_eq!(render_layouts(&[layout], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_layout_table_marks_an_active_member_that_carries_the_collapsed_flag() {
+    // `active` and the per-child `collapsed` flag are stored apart, so a
+    // stack can name member 0 active while that member is flagged collapsed.
+    let stack = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutChild {
+                node: LayoutNode::Pane(first_pane()),
+                collapsed: true,
+            },
+            LayoutChild {
+                node: LayoutNode::Pane(second_pane()),
+                collapsed: false,
+            },
+        ],
+        weights: vec![SizeWeight::default(), SizeWeight::default()],
+        active: 0,
+    });
+    let layout = layout_of(stack, Vec::new(), None);
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(
+        rendered.contains(
+            "      stacked split, active member 0\n        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)\n        pane pane-00000000-0000-0000-0000-000000000005\n"
+        ),
+        "{rendered}",
+    );
+}
+
+#[test]
+fn dump_layout_table_shows_a_vertical_split_by_name() {
+    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(first_pane())),
+            LayoutChild::new(LayoutNode::Pane(second_pane())),
+        ],
+    ));
+    let layout = layout_of(tree, Vec::new(), None);
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(rendered.contains("      vertical split\n"), "{rendered}");
+}
+
+#[test]
+fn dump_layout_table_shows_a_fullscreen_client_and_its_pane() {
+    let solved = SolvedTab {
+        mode: LayoutMode::Fullscreen {
+            focused: second_pane(),
+        },
+        ..tiled_solve()
+    };
+    let layout = layout_of(side_by_side(), vec![solved], Some(second_pane()));
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(
+        rendered.contains(
+            "    client client-00000000-0000-0000-0000-000000000003 fullscreen pane-00000000-0000-0000-0000-000000000005 viewport 80x22\n"
+        ),
+        "{rendered}",
+    );
+}
+
+#[test]
+fn dump_layout_table_shows_a_dash_for_a_client_that_has_focused_nothing() {
+    let layout = layout_of(LayoutNode::Pane(first_pane()), Vec::new(), None);
+
+    let rendered = render_layouts(&[layout], FormatArg::Table);
+
+    assert!(
+        rendered.contains(
+            "    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -\n"
+        ),
+        "{rendered}",
+    );
+}
+
+#[test]
+fn dump_layout_table_renders_a_split_with_no_children_as_the_split_alone() {
+    let expected = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split
+    no client views this tab
+  clients
+";
+    let empty_split = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: Vec::new(),
+        weights: Vec::new(),
+        active: 0,
+    });
+    let layout = SessionLayout {
+        clients: Vec::new(),
+        ..layout_of(empty_split, Vec::new(), None)
+    };
+
+    assert_eq!(render_layouts(&[layout], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_layout_table_renders_a_session_with_no_tabs_as_its_name_and_no_clients() {
+    let expected = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  clients
+";
+    let layout = SessionLayout {
+        id: layout_session(),
+        name: "quiet-lake".to_string(),
+        tabs: Vec::new(),
+        clients: Vec::new(),
+    };
+
+    assert_eq!(render_layouts(&[layout], FormatArg::Table), expected);
+}
+
+#[test]
+fn dump_layout_table_of_no_sessions_is_empty() {
+    assert_eq!(render_layouts(&[], FormatArg::Table), "");
+}
+
+#[test]
+fn dump_layout_table_renders_every_session_given() {
+    let first = layout_of(LayoutNode::Pane(first_pane()), Vec::new(), None);
+    let second = SessionLayout {
+        name: "amber-fox".to_string(),
+        ..layout_of(LayoutNode::Pane(second_pane()), Vec::new(), None)
+    };
+
+    let rendered = render_layouts(&[first, second], FormatArg::Table);
+
+    assert_eq!(rendered.matches("session session-").count(), 2);
+    assert_eq!(rendered.matches("quiet-lake").count(), 1);
+    assert_eq!(rendered.matches("amber-fox").count(), 1);
+}
+
+#[test]
+fn dump_layout_json_is_an_array_of_whole_layouts() {
+    let layout = layout_of(
+        LayoutNode::Pane(first_pane()),
+        vec![SolvedTab {
+            panes: vec![SolvedPane {
+                id: first_pane(),
+                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 }),
+            }],
+            ..tiled_solve()
+        }],
+        Some(first_pane()),
+    );
+
+    let rendered = render_layouts(&[layout], FormatArg::Json);
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("the dump is JSON");
+
+    assert_eq!(
+        parsed,
+        serde_json::json!([{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "quiet-lake",
+            "tabs": [{
+                "id": "00000000-0000-0000-0000-000000000002",
+                "name": "editor",
+                "index": 0,
+                "tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
+                "solved": [{
+                    "client": "00000000-0000-0000-0000-000000000003",
+                    "viewport": { "cols": 80, "rows": 22 },
+                    "mode": "Tiled",
+                    "panes": [{
+                        "id": "00000000-0000-0000-0000-000000000004",
+                        "rect": {
+                            "origin": { "x": 0, "y": 0 },
+                            "size": { "cols": 80, "rows": 22 }
+                        }
+                    }],
+                    "suppressed": [],
+                    "all_suppressed": false,
+                    "stack_headers": []
+                }]
+            }],
+            "clients": [{
+                "id": "00000000-0000-0000-0000-000000000003",
+                "active_tab": "00000000-0000-0000-0000-000000000002",
+                "focused_pane": "00000000-0000-0000-0000-000000000004"
+            }]
+        }])
+    );
+}
+
+#[test]
+fn dump_layout_json_of_no_sessions_is_an_empty_array() {
+    assert_eq!(render_layouts(&[], FormatArg::Json), "[]\n");
 }

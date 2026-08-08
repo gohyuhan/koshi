@@ -1,18 +1,20 @@
 //! Rendering for CLI answers: created ids from applied commands, discovery
 //! (`list-*`, `inspect`), action introspection (`actions list`, `actions
-//! explain`), and keymap introspection (the `keys` queries). Read-only
-//! queries print as aligned columns (`--format table`, the default) or JSON
-//! (`--format json`).
+//! explain`), keymap introspection (the `keys` queries), and the `debug`
+//! dumps. Read-only queries print as aligned columns (`--format table`, the
+//! default) or JSON (`--format json`).
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
-//! lines. JSON output is the serde form of the rendered structs — the
-//! [`crate::discovery`] listing rows, the [`koshi_core::discovery`] records
-//! an `inspect` reports, and this module's own summary/detail structs — a
-//! JSON array for a list, a JSON object for a single item, and the stable
-//! scripting surface. In table cells an absent value prints as `-`, an id
-//! list prints as its count (full ids are in the JSON form), and a timestamp
-//! prints as whole seconds since the Unix epoch.
+//! lines; `debug dump-state` renders one named table per record kind; `debug
+//! dump-layout` renders an indented tree, two spaces per level. JSON output is
+//! the serde form of the rendered structs — the [`crate::discovery`] listing
+//! rows, the [`koshi_core::discovery`] records an `inspect` reports, and this
+//! module's own summary/detail structs — a JSON array for a list, a JSON
+//! object for a single item, and the stable scripting surface. In table cells
+//! an absent value prints as `-`, an id list prints as its count (full ids are
+//! in the JSON form), and a timestamp prints as whole seconds since the Unix
+//! epoch.
 
 use std::time::SystemTime;
 
@@ -20,7 +22,9 @@ use koshi_core::action::{
     core_action_seeds, ActionHandlerRef, ActionMetadata, ActionRef, ActionScope, ActionStatus,
     TargetKind,
 };
-use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
+use koshi_core::discovery::{
+    ClientInfo, PaneInfo, PaneState, SessionInfo, SessionOverview, TabInfo,
+};
 use koshi_core::geometry::Size;
 use serde::Serialize;
 
@@ -89,11 +93,13 @@ mod actions;
 mod command;
 mod entities;
 mod keys;
+mod layout;
 
 pub use actions::*;
 pub use command::*;
 pub use entities::*;
 pub use keys::*;
+pub use layout::*;
 
 #[cfg(test)]
 mod tests;

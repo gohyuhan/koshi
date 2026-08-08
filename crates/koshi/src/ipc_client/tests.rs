@@ -1,6 +1,7 @@
 //! Tests for the CLI side of the control socket, against a scripted
 //! stand-in session serving a real socket.
 
+use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 
 use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
@@ -268,6 +269,178 @@ fn a_refused_hello_reports_ipc_unavailable() {
 
     server.join().expect("fake session exits");
     let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+// --- Asking a session for its layout ----------------------------------------
+
+/// A stand-in koshi serving one layout exchange at `runtime_dir`: write the
+/// endpoint file, accept one caller, answer the Hello, then answer the layout
+/// request with `answer`. The returned receiver carries the request the caller
+/// actually sent.
+fn fake_layout_session(
+    runtime_dir: &Path,
+    session: SessionId,
+    answer: IpcResult,
+) -> (JoinHandle<()>, Receiver<IpcRequestKind>) {
+    let addr = koshi_ipc::endpoint::socket_addr(runtime_dir, session);
+    let listener = Listener::bind(&addr).expect("bind fake session");
+    EndpointFile {
+        socket: addr,
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(runtime_dir, session))
+    .expect("write endpoint file");
+
+    let (asked_tx, asked_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the CLI");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let query: IpcRequest = connection.recv().expect("read layout request");
+        asked_tx.send(query.kind).expect("report what was asked");
+        send(&mut connection, hello.request_id, IpcResult::Hello);
+        send(&mut connection, query.request_id, answer);
+    });
+    (handle, asked_rx)
+}
+
+/// A layout of one empty session, named so a reply is identifiable.
+fn layout_named(name: &str, session: SessionId) -> SessionLayout {
+    SessionLayout {
+        id: session,
+        name: name.to_string(),
+        tabs: Vec::new(),
+        clients: Vec::new(),
+    }
+}
+
+#[test]
+fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
+    let runtime_dir = test_runtime_dir("layout-one-tab");
+    let session = SessionId::new();
+    let tab = TabId::new();
+    let (server, asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Layout(layout_named("workspace", session)),
+    );
+
+    let layout = fetch_layout(&runtime_dir, session, Some(tab)).expect("the session answers");
+
+    assert_eq!(layout, layout_named("workspace", session));
+    assert_eq!(
+        asked.recv().expect("the session read one request"),
+        IpcRequestKind::Layout { tab: Some(tab) },
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn fetching_the_whole_layout_asks_for_no_tab() {
+    let runtime_dir = test_runtime_dir("layout-every-tab");
+    let session = SessionId::new();
+    let (server, asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Layout(layout_named("workspace", session)),
+    );
+
+    let layout = fetch_layout(&runtime_dir, session, None).expect("the session answers");
+
+    assert_eq!(layout.name, "workspace");
+    assert_eq!(
+        asked.recv().expect("the session read one request"),
+        IpcRequestKind::Layout { tab: None },
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
+    let runtime_dir = test_runtime_dir("layout-no-endpoint");
+    let session = SessionId::new();
+
+    let error = fetch_layout(&runtime_dir, session, None).expect_err("no endpoint file exists");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::SessionNotFound {
+            session: session.to_string(),
+        }
+        .to_string(),
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_refused_layout_request_reports_the_refusal_message() {
+    let runtime_dir = test_runtime_dir("layout-refused");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "the request could not be read".to_string(),
+        }),
+    );
+
+    let error = fetch_layout(&runtime_dir, session, None).expect_err("the request is refused");
+
+    assert!(
+        matches!(
+            &error,
+            CliError::IpcUnavailable { detail } if detail == "the request could not be read"
+        ),
+        "expected IpcUnavailable with the refusal message, got {error:?}",
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
+    let runtime_dir = test_runtime_dir("layout-wrong-kind");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(&runtime_dir, session, IpcResult::Hello);
+
+    let error = fetch_layout(&runtime_dir, session, None)
+        .expect_err("a Hello does not answer a layout request");
+
+    assert!(
+        matches!(
+            &error,
+            CliError::IpcUnavailable { detail }
+                if detail == "the session answered with an unexpected Hello reply"
+        ),
+        "expected IpcUnavailable naming the reply kind, got {error:?}",
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn an_unexpected_layout_answer_is_named_layout() {
+    let error = unexpected_reply(&IpcResult::Layout(layout_named(
+        "workspace",
+        SessionId::new(),
+    )));
+
+    assert!(
+        matches!(
+            &error,
+            CliError::IpcUnavailable { detail }
+                if detail == "the session answered with an unexpected Layout reply"
+        ),
+        "expected IpcUnavailable naming Layout, got {error:?}",
+    );
 }
 
 // --- Send-time working-directory capture ------------------------------------

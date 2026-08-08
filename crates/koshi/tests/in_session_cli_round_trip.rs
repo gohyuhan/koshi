@@ -709,6 +709,156 @@ fn unlock_over_the_socket_returns_the_client_to_normal_input_mode() {
     assert_eq!(lock_state(&session, client.id), LockMode::Normal);
 }
 
+// --- The debug dumps ---
+
+#[test]
+fn dump_layout_over_the_socket_describes_a_tab_no_client_is_viewing() {
+    // The session is seeded headless, so its tab has a tree and nothing to
+    // solve it against.
+    let session = RunningSession::start();
+    let root = session.panes()[0];
+
+    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+        .expect("the session describes its layout");
+
+    assert_eq!(layout.id, session.id);
+    assert_eq!(layout.name, "quiet-lake");
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(layout.tabs[0].index, 0);
+    assert_eq!(
+        layout.tabs[0].tree,
+        koshi_layout::tree::LayoutNode::Pane(root)
+    );
+    assert_eq!(layout.tabs[0].solved, Vec::new());
+    assert_eq!(layout.clients, Vec::new());
+
+    let rendered = koshi::output::render_layouts(&[layout], koshi::cli::FormatArg::Table);
+    assert!(
+        rendered.contains("    no client views this tab\n"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn dump_layout_over_the_socket_shows_the_attached_clients_solved_rectangles() {
+    let session = RunningSession::start();
+    let client = attach(&session);
+    let root = session.panes()[0];
+
+    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+        .expect("the session describes its layout");
+
+    assert_eq!(layout.tabs.len(), 1);
+    let solved = &layout.tabs[0].solved;
+    assert_eq!(solved.len(), 1);
+    assert_eq!(solved[0].client, client.id);
+    // The tab solves against the terminal minus its two chrome rows: an 80x24
+    // client results in an 80x22 viewport.
+    assert_eq!(solved[0].viewport, Size { cols: 80, rows: 22 });
+    assert_eq!(solved[0].mode, koshi_layout::mode::LayoutMode::Tiled);
+    assert_eq!(
+        solved[0].panes,
+        vec![koshi_ipc::layout::SolvedPane {
+            id: root,
+            rect: koshi_core::geometry::Rect::new(
+                koshi_core::geometry::Point { x: 0, y: 0 },
+                Size { cols: 80, rows: 22 },
+            ),
+        }],
+    );
+    assert_eq!(solved[0].suppressed, Vec::new());
+    assert!(!solved[0].all_suppressed);
+    assert_eq!(solved[0].stack_headers, Vec::new());
+    assert_eq!(
+        layout.clients,
+        vec![koshi_ipc::layout::ClientFocus {
+            id: client.id,
+            active_tab: layout.tabs[0].id,
+            focused_pane: Some(root),
+        }],
+    );
+}
+
+#[test]
+fn dump_layout_over_the_socket_narrowed_to_one_tab_describes_that_tab_alone() {
+    let session = RunningSession::start();
+    let client = attach(&session);
+    let root = session.panes()[0];
+    let (_, code) = run_cli(&session, &client, root, &["koshi", "new-tab"]);
+    assert_eq!(code, CliExitCode::Success);
+    let wanted = session.overview().tabs[1].id;
+
+    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(wanted))
+        .expect("the session describes its layout");
+
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(layout.tabs[0].id, wanted);
+    assert_eq!(layout.tabs[0].index, 1);
+}
+
+#[test]
+fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_describes_no_tab() {
+    let session = RunningSession::start();
+
+    let layout =
+        koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(TabId::new()))
+            .expect("the session still answers");
+
+    assert_eq!(layout.id, session.id);
+    assert_eq!(layout.tabs, Vec::new());
+
+    let rendered = koshi::output::render_layouts(&[layout], koshi::cli::FormatArg::Table);
+    assert!(!rendered.contains("  tab "), "{rendered}");
+}
+
+#[test]
+fn dump_layout_against_a_session_that_is_not_running_reports_it_as_not_running() {
+    let runtime_dir = test_runtime_dir();
+    let session = SessionId::new();
+
+    let error = koshi::ipc_client::fetch_layout(runtime_dir.path(), session, None)
+        .expect_err("nothing advertises that session");
+
+    assert!(
+        matches!(&error, CliError::SessionNotFound { session: named } if *named == session.to_string()),
+        "expected SessionNotFound, got {error:?}",
+    );
+}
+
+#[test]
+fn dump_state_over_the_socket_hides_a_pane_commands_arguments() {
+    let session = RunningSession::start();
+    let client = attach(&session);
+    let root = session.panes()[0];
+    let (_, code) = run_cli(
+        &session,
+        &client,
+        root,
+        &["koshi", "run", "--", "mysql", "-pHUNTER2"],
+    );
+    assert_eq!(code, CliExitCode::Success);
+
+    let mut found = vec![session.overview()];
+    koshi::discovery::redact_pane_commands(&mut found);
+
+    let command_pane = found[0]
+        .panes
+        .iter()
+        .find(|pane| pane.id != root)
+        .expect("the command pane is listed");
+    assert_eq!(
+        command_pane.command,
+        Some(vec!["mysql".to_string(), "***".to_string()]),
+    );
+
+    let rendered = koshi::output::render_dump_state(&found, koshi::cli::FormatArg::Table);
+    assert!(rendered.contains("mysql ***"), "{rendered}");
+    assert!(
+        !rendered.contains("HUNTER2"),
+        "the password never reaches the dump: {rendered}"
+    );
+}
+
 #[test]
 fn a_resize_with_no_neighbor_is_refused_and_reports_the_action_exit_code() {
     let session = RunningSession::start();

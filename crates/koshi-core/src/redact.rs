@@ -97,6 +97,24 @@ pub fn redact_env_map(env: &BTreeMap<String, String>) -> BTreeMap<String, Redact
         .collect()
 }
 
+/// Hide a spawned child's arguments: element 0 passes through, every element
+/// after it becomes `***`. Pass an argv whose element 0 is the program name —
+/// every element after it can hold a secret.
+///
+/// `["mysql", "-pHUNTER2"]` results in `["mysql", "***"]`.
+pub fn redact_argv(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if index == 0 {
+                arg.clone()
+            } else {
+                REDACTED.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Replace every occurrence of each marker's literal with `***`. Used to scrub
 /// known secret values out of text before it is logged or dumped.
 pub fn redact_string(input: &str, markers: &[Marker]) -> String {

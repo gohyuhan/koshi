@@ -13,6 +13,8 @@ pub mod event;
 pub mod frame;
 /// Connection handshake checks.
 pub mod handshake;
+/// One session's layout: each tab's split tree and the rectangles it solves to.
+pub mod layout;
 pub mod protocol;
 /// The control-plane protocol: the messages that create, find, list and kill
 /// sessions, the handshake that opens a router connection, and the fixed

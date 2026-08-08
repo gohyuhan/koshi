@@ -12,9 +12,10 @@ use koshi_core::command::{
 };
 use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_core::geometry::Size;
-use koshi_core::ids::{CommandId, PaneId, SessionId};
+use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{EventFilterSpec, WireMouseAction};
 
 use crate::runtime::event::AttachAccepted;
@@ -213,6 +214,55 @@ fn connect_to(runtime_dir: &Path, session: SessionId) -> Connection {
     let endpoint = EndpointFile::read(&EndpointFile::path(runtime_dir, session))
         .expect("endpoint file readable");
     Connection::connect(&endpoint.socket).expect("connect")
+}
+
+/// A stand-in dispatcher answering every layout request with `layout`. The
+/// returned receiver carries the tab each request named, so a test reads what
+/// crossed the boundary. Exits when every inbox sender is gone.
+fn spawn_layout_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    layout: Option<SessionLayout>,
+) -> (JoinHandle<()>, Receiver<Option<TabId>>) {
+    let (asked_tx, asked_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        while let Ok(event) = inbox_rx.recv() {
+            if let RuntimeEvent::IpcLayout { tab, reply } = event {
+                let _ = asked_tx.send(tab);
+                let _ = reply.send(layout.clone());
+            }
+        }
+    });
+    (handle, asked_rx)
+}
+
+/// A served socket whose stand-in dispatcher answers layout requests with
+/// `layout`, plus the tab each request named.
+fn serve_layout(
+    tag: &str,
+    layout: Option<SessionLayout>,
+) -> (
+    IpcServer,
+    SessionId,
+    PathBuf,
+    JoinHandle<()>,
+    Receiver<Option<TabId>>,
+) {
+    let runtime_dir = test_runtime_dir(tag);
+    let session = SessionId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, asked) = spawn_layout_dispatcher(inbox_rx, layout);
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    (server, session, runtime_dir, dispatcher, asked)
+}
+
+/// A tiny layout to answer a layout request with, distinguishable by its name.
+fn layout_named(name: &str) -> SessionLayout {
+    SessionLayout {
+        id: SessionId::new(),
+        name: name.to_string(),
+        tabs: Vec::new(),
+        clients: Vec::new(),
+    }
 }
 
 /// A tiny overview to answer discovery with, distinguishable by its name.
@@ -701,6 +751,130 @@ fn discovery_with_no_running_session_closes_the_connection() {
     assert!(
         connection.recv::<IpcResponse>().is_err(),
         "no reply comes back once no session is running",
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_for() {
+    let (server, session, runtime_dir, dispatcher, asked) =
+        serve_layout("layout-one-tab", Some(layout_named("workspace")));
+    let wanted = TabId::new();
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Layout { tab: Some(wanted) },
+        })
+        .expect("send layout request");
+
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+    let layout_reply: IpcResponse = connection.recv().expect("layout reply");
+    assert_eq!(layout_reply.request_id, Some(2));
+    let IpcResult::Layout(layout) = layout_reply.result else {
+        panic!("expected a layout, got {:?}", layout_reply.result);
+    };
+    assert_eq!(layout.name, "workspace");
+    assert_eq!(
+        asked.recv().expect("the dispatcher was asked"),
+        Some(wanted)
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
+    let (server, session, runtime_dir, dispatcher, asked) =
+        serve_layout("layout-every-tab", Some(layout_named("workspace")));
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Layout { tab: None },
+        })
+        .expect("send layout request");
+
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+    let layout_reply: IpcResponse = connection.recv().expect("layout reply");
+    let IpcResult::Layout(layout) = layout_reply.result else {
+        panic!("expected a layout, got {:?}", layout_reply.result);
+    };
+    assert_eq!(layout.name, "workspace");
+    assert_eq!(asked.recv().expect("the dispatcher was asked"), None);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_layout_request_with_no_running_session_closes_the_connection() {
+    let (server, session, runtime_dir, dispatcher, _asked) = serve_layout("layout-none", None);
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, IpcResult::Hello);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Layout { tab: None },
+        })
+        .expect("send layout request");
+    assert!(
+        connection.recv::<IpcResponse>().is_err(),
+        "no reply comes back once no session is running",
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_layout_request_on_an_attached_connection_ends_that_client_stream() {
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("layout-attached", client);
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::Layout { tab: None },
+        })
+        .expect("send layout request");
+
+    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("goodbye frame"),
+        SessionEvent::Detached,
     );
 
     drop(connection);
