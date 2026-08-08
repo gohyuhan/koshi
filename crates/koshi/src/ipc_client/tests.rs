@@ -7,8 +7,10 @@ use std::thread::JoinHandle;
 use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
+use koshi_ipc::layout::TabLayout;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode};
 use koshi_ipc::transport::Listener;
+use koshi_layout::tree::LayoutNode;
 
 use super::*;
 
@@ -314,20 +316,32 @@ fn layout_named(name: &str, session: SessionId) -> SessionLayout {
     }
 }
 
+/// A layout of one session holding exactly `tab`, which no client views.
+fn layout_holding(name: &str, session: SessionId, tab: TabId) -> SessionLayout {
+    SessionLayout {
+        tabs: vec![TabLayout {
+            id: tab,
+            name: "editor".to_string(),
+            index: 0,
+            tree: LayoutNode::Pane(PaneId::new()),
+            solved: Vec::new(),
+        }],
+        ..layout_named(name, session)
+    }
+}
+
 #[test]
 fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
     let runtime_dir = test_runtime_dir("layout-one-tab");
     let session = SessionId::new();
     let tab = TabId::new();
-    let (server, asked) = fake_layout_session(
-        &runtime_dir,
-        session,
-        IpcResult::Layout(layout_named("workspace", session)),
-    );
+    let answer = layout_holding("workspace", session, tab);
+    let (server, asked) =
+        fake_layout_session(&runtime_dir, session, IpcResult::Layout(answer.clone()));
 
     let layout = fetch_layout(&runtime_dir, session, Some(tab)).expect("the session answers");
 
-    assert_eq!(layout, layout_named("workspace", session));
+    assert_eq!(layout, answer);
     assert_eq!(
         asked.recv().expect("the session read one request"),
         IpcRequestKind::Layout { tab: Some(tab) },
@@ -378,26 +392,85 @@ fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
 }
 
 #[test]
-fn a_refused_layout_request_reports_the_refusal_message() {
-    let runtime_dir = test_runtime_dir("layout-refused");
+fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
+    let runtime_dir = test_runtime_dir("layout-too-old");
     let session = SessionId::new();
     let (server, _asked) = fake_layout_session(
         &runtime_dir,
         session,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::MalformedRequest,
-            message: "the request could not be read".to_string(),
+            message: "the bytes received are not a request this build can read".to_string(),
         }),
     );
 
     let error = fetch_layout(&runtime_dir, session, None).expect_err("the request is refused");
 
-    assert!(
-        matches!(
-            &error,
-            CliError::IpcUnavailable { detail } if detail == "the request could not be read"
-        ),
-        "expected IpcUnavailable with the refusal message, got {error:?}",
+    assert_eq!(
+        error.to_string(),
+        CliError::IpcUnavailable {
+            detail: "this session was started by an older koshi that cannot report its \
+                     layout; restart the session to use `debug dump-layout`, or run \
+                     `koshi debug dump-state`, which this session does answer"
+                .to_string(),
+        }
+        .to_string(),
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
+    let runtime_dir = test_runtime_dir("layout-refused");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let error = fetch_layout(&runtime_dir, session, None).expect_err("the request is refused");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::IpcUnavailable {
+            detail: "the token presented does not match this Koshi's".to_string(),
+        }
+        .to_string(),
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
+    // The tab was resolved from a discovery sweep, then closed before the
+    // session answered, so the answer describes no tab at all.
+    let runtime_dir = test_runtime_dir("layout-tab-gone");
+    let session = SessionId::new();
+    let tab = TabId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Layout(layout_named("workspace", session)),
+    );
+
+    let error =
+        fetch_layout(&runtime_dir, session, Some(tab)).expect_err("the tab is no longer there");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::CommandRejected {
+            reason: RejectReason::TargetNotFound,
+            help: Some(format!("no running session has tab {tab}")),
+        }
+        .to_string(),
     );
 
     server.join().expect("fake session exits");

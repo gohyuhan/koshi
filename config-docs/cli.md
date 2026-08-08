@@ -155,3 +155,7 @@ bottom hint row. Two clients on one tab, one 80x24 and one 120x40, both print
 `viewport 80x22`. What is per client is the view: one client tiled and one with
 a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
+
+A session that started before you installed this Koshi cannot report its
+layout. `dump-layout` says so and names what to do: restart that session, or
+run `dump-state`, which every session answers.

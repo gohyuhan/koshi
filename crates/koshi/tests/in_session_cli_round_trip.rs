@@ -797,18 +797,23 @@ fn dump_layout_over_the_socket_narrowed_to_one_tab_describes_that_tab_alone() {
 }
 
 #[test]
-fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_describes_no_tab() {
+fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_reports_the_tab_missing() {
+    // The session answers; it simply holds no such tab. Naming a tab and
+    // getting an empty answer is a missing target, not a successful dump.
     let session = RunningSession::start();
+    let unknown = TabId::new();
 
-    let layout =
-        koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(TabId::new()))
-            .expect("the session still answers");
+    let error = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(unknown))
+        .expect_err("the session holds no such tab");
 
-    assert_eq!(layout.id, session.id);
-    assert_eq!(layout.tabs, Vec::new());
-
-    let rendered = koshi::output::render_layouts(&[layout], koshi::cli::FormatArg::Table);
-    assert!(!rendered.contains("  tab "), "{rendered}");
+    assert_eq!(
+        error.to_string(),
+        CliError::CommandRejected {
+            reason: RejectReason::TargetNotFound,
+            help: Some(format!("no running session has tab {unknown}")),
+        }
+        .to_string(),
+    );
 }
 
 #[test]

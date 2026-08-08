@@ -378,9 +378,10 @@ fn run_dump_state(format: FormatArg) -> Result<(), CliError> {
 /// Serve a `koshi debug dump-layout` from live state: find the sessions in
 /// scope, ask each for its layout, and print them.
 ///
-/// `--tab` naming no running tab fails the lookup. A session that refuses the
-/// layout request fails the command before anything prints; a session that was
-/// listening but could not be probed fails it after everything prints.
+/// `--tab` naming no running tab fails the lookup, and so does a tab that
+/// closes between that lookup and the session's answer. A session that refuses
+/// the layout request fails the command before anything prints; a session that
+/// was listening but could not be probed fails it after everything prints.
 fn run_dump_layout(tab: Option<&TabRef>, format: FormatArg) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
     let found = targeting::scope_sessions(&runtime_dir, None)?;
