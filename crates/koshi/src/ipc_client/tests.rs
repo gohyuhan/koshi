@@ -8,7 +8,7 @@ use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::layout::TabLayout;
-use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode};
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse};
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 
@@ -91,7 +91,13 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
 
         match script {
             Script::AcceptAndApply => {
-                send(&mut connection, hello.request_id, IpcResult::Hello);
+                send(
+                    &mut connection,
+                    hello.request_id,
+                    IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                );
                 send(
                     &mut connection,
                     submit.request_id,
@@ -121,7 +127,13 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                 );
             }
             Script::RejectCommand => {
-                send(&mut connection, hello.request_id, IpcResult::Hello);
+                send(
+                    &mut connection,
+                    hello.request_id,
+                    IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                );
                 send(
                     &mut connection,
                     submit.request_id,
@@ -300,7 +312,13 @@ fn fake_layout_session(
         let hello: IpcRequest = connection.recv().expect("read hello");
         let query: IpcRequest = connection.recv().expect("read layout request");
         asked_tx.send(query.kind).expect("report what was asked");
-        send(&mut connection, hello.request_id, IpcResult::Hello);
+        send(
+            &mut connection,
+            hello.request_id,
+            IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        );
         send(&mut connection, query.request_id, answer);
     });
     (handle, asked_rx)
@@ -481,7 +499,13 @@ fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
 fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     let runtime_dir = test_runtime_dir("layout-wrong-kind");
     let session = SessionId::new();
-    let (server, _asked) = fake_layout_session(&runtime_dir, session, IpcResult::Hello);
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    );
 
     let error = fetch_layout(&runtime_dir, session, None)
         .expect_err("a Hello does not answer a layout request");
@@ -551,5 +575,49 @@ fn a_command_without_a_directory_field_is_untouched() {
     assert_eq!(
         capture_cwd(Command::ToggleLockMode(ToggleLockModeArgs::default())),
         Command::ToggleLockMode(ToggleLockModeArgs::default())
+    );
+}
+
+#[test]
+fn a_version_inside_the_range_this_build_asked_for_is_accepted() {
+    for version in MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        assert!(
+            settled_version(version).is_ok(),
+            "version {version} is inside this build's range"
+        );
+    }
+}
+
+/// The session picks from the range the Hello named, so anything outside it
+/// answers a Hello this build did not send. Reading the rest of the connection
+/// at a version neither side agreed on is the failure this prevents.
+#[test]
+fn a_version_above_the_range_this_build_asked_for_stops_the_exchange() {
+    let above = PROTOCOL_VERSION + 1;
+    let error = settled_version(above).expect_err("a version above the range is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "the session settled on protocol version {above}, which is outside the \
+             {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION} this koshi asked for"
+        )
+    );
+}
+
+#[test]
+fn a_version_below_the_range_this_build_asked_for_stops_the_exchange() {
+    let below = MIN_PROTOCOL_VERSION.saturating_sub(1);
+    let error = settled_version(below).expect_err("a version below the range is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert!(
+        detail.contains(&format!("settled on protocol version {below}")),
+        "the message names the version the session picked: {detail}"
     );
 }

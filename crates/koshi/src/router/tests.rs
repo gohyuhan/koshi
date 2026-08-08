@@ -432,6 +432,22 @@ fn the_session_server_starts_in_the_directory_the_request_named() {
     assert_eq!(command.get_current_dir(), Some(dir.path()));
 }
 
+/// The router owns no console, so a console child of it would be given a new
+/// console, and Windows 11 draws that in a terminal window. `CREATE_NO_WINDOW`
+/// is what keeps the session server's console off the screen, and a transposed
+/// digit in it is a different flag that brings the window back.
+///
+/// `std::process::Command` reports no creation flags, so the flag reaching the
+/// child is checked by hand on Windows. The value itself is checked here.
+#[cfg(windows)]
+#[test]
+fn the_no_window_flag_carries_the_win32_value() {
+    assert_eq!(
+        CREATE_NO_WINDOW, 0x0800_0000,
+        "CREATE_NO_WINDOW is 134217728; another value is another flag"
+    );
+}
+
 #[test]
 fn a_create_that_names_no_directory_leaves_the_child_where_the_router_is() {
     let runtime_dir = test_runtime_dir();

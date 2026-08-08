@@ -1,7 +1,7 @@
 //! Tests for the layout answer's wire form: a populated layout survives a
 //! round trip, its encoded shape is pinned field by field, the same bytes
-//! decode back into the same values, and a record carrying a field this build
-//! does not know is refused.
+//! decode back into the same values, and a field this build does not know is
+//! ignored.
 
 use koshi_core::geometry::{Point, SplitDirection};
 use koshi_layout::size::SizeWeight;
@@ -300,63 +300,59 @@ fn the_pinned_wire_shape_decodes_back_into_the_same_layout() {
 }
 
 #[test]
-fn a_layout_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<SessionLayout, _> = serde_json::from_str(
+fn a_layout_carrying_an_unknown_field_ignores_it() {
+    let decoded: SessionLayout = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[],"clients":[],"junk":5}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
-    );
+    assert_eq!(decoded.name, "quiet-lake");
+    assert!(decoded.tabs.is_empty());
+    assert!(decoded.clients.is_empty());
 }
 
 #[test]
-fn a_tab_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<TabLayout, _> = serde_json::from_str(
+fn a_tab_carrying_an_unknown_field_ignores_it() {
+    let decoded: TabLayout = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":0,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[],"junk":5}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
-    );
+    assert_eq!(decoded.name, "editor");
+    assert_eq!(decoded.index, 0);
+    assert!(decoded.solved.is_empty());
 }
 
 #[test]
-fn a_solved_tab_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<SolvedTab, _> = serde_json::from_str(
+fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
+    let decoded: SolvedTab = serde_json::from_str(
         r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Tiled","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[],"junk":5}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
-    );
+    assert_eq!(decoded.viewport, Size { cols: 80, rows: 22 });
+    assert_eq!(decoded.mode, LayoutMode::Tiled);
+    assert!(!decoded.all_suppressed);
 }
 
 #[test]
-fn a_solved_pane_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<SolvedPane, _> = serde_json::from_str(
+fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
+    let decoded: SolvedPane = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000004","rect":{"origin":{"x":0,"y":0},"size":{"cols":80,"rows":22}},"junk":5}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
-    );
+    assert_eq!(decoded.rect.size, Size { cols: 80, rows: 22 });
 }
 
 #[test]
-fn a_client_focus_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<ClientFocus, _> = serde_json::from_str(
+fn a_client_focus_carrying_an_unknown_field_ignores_it() {
+    let decoded: ClientFocus = serde_json::from_str(
         r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002","focused_pane":null,"junk":5}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
-    );
+    assert_eq!(decoded.focused_pane, None);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Tests for the client event stream's wire form: every frame survives an
 //! encode/decode round trip with every field intact, the encodings are the ones
-//! this protocol version pins, and a frame carrying a field this build does not
-//! know is refused.
+//! this protocol version pins, a field this build does not know is ignored,
+//! and a frame this build has no name for reads as unknown.
 
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::SessionId;
@@ -262,7 +262,7 @@ fn a_host_write_survives_a_round_trip() {
 }
 
 #[test]
-fn a_painted_frame_carrying_an_unknown_field_is_refused() {
+fn a_painted_frame_carrying_an_unknown_field_ignores_it() {
     let mut encoded = serde_json::to_value(SessionEvent::Painted {
         frame: Box::new(painted_frame()),
     })
@@ -272,11 +272,16 @@ fn a_painted_frame_carrying_an_unknown_field_is_refused() {
         .expect("a pane encodes as an object")
         .insert("zoomed".to_string(), serde_json::Value::Bool(true));
 
-    let decoded: Result<SessionEvent, _> = serde_json::from_value(encoded);
-    let error = decoded.expect_err("an unknown field decoded instead of failing");
-    assert!(
-        error.to_string().contains("unknown field `zoomed`"),
-        "unexpected error: {error}"
+    // Decoded from text, the way the transport does it.
+    let decoded: SessionEvent = serde_json::from_str(&encoded.to_string())
+        .expect("a field this build does not know is ignored");
+
+    assert_eq!(
+        decoded,
+        SessionEvent::Painted {
+            frame: Box::new(painted_frame()),
+        },
+        "the extra field left nothing behind in the decoded event"
     );
 }
 
@@ -347,30 +352,42 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
-fn an_event_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<SessionEvent, _> = serde_json::from_str(
+fn an_event_carrying_an_unknown_field_ignores_it() {
+    let with_pinned: SessionEvent = serde_json::from_str(
         r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":2,"new_index":0,"pinned":true}}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    let error = decoded.expect_err("an unknown field decoded instead of failing");
-    assert!(
-        error.to_string().contains("unknown field `pinned`"),
-        "unexpected error: {error}"
-    );
-
-    // The same frame without that one field decodes, so the refusal above is
-    // the field's doing and not a typo elsewhere in the bytes.
     let without_it: SessionEvent = serde_json::from_str(
         r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":2,"new_index":0}}"#,
     )
     .expect("the same frame without the extra field decodes");
 
+    let expected = SessionEvent::TabMoved {
+        tab_id: TabId::from_uuid(fixed_uuid()),
+        old_index: 2,
+        new_index: 0,
+    };
+
     assert_eq!(
-        without_it,
-        SessionEvent::TabMoved {
-            tab_id: TabId::from_uuid(fixed_uuid()),
-            old_index: 2,
-            new_index: 0,
+        with_pinned, expected,
+        "the extra field left nothing behind in the decoded event"
+    );
+    assert_eq!(without_it, expected);
+}
+
+/// A whole frame this build has no name for is handed back as
+/// [`MaybeKnown::Unknown`], so the client skips it and keeps reading.
+#[test]
+fn an_event_this_build_has_no_name_for_reads_as_unknown() {
+    let decoded: IncomingEvent =
+        serde_json::from_str(r#"{"Floated":{"pane_id":"00000000-0000-0000-0000-000000000001"}}"#)
+            .expect("an unfamiliar frame reads as unknown, it does not fail");
+
+    assert_eq!(
+        decoded,
+        MaybeKnown::Unknown {
+            name: "Floated".to_string()
         }
     );
 }

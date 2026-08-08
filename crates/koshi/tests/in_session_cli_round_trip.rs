@@ -49,7 +49,8 @@ use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
@@ -262,14 +263,15 @@ fn open(endpoint: &EndpointFile) -> Connection {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token.clone(),
         },
     };
     connection.send(&hello).expect("the server reads the Hello");
     let reply: IpcResponse = connection.recv().expect("the server answers the Hello");
     match reply.result {
-        IpcResult::Hello => connection,
+        IpcResult::Hello { .. } => connection,
         other => panic!("the Hello was answered with {other:?}"),
     }
 }

@@ -69,7 +69,13 @@ fn serve_overview(runtime_dir: &Path, overview: SessionOverview) -> std::thread:
         let mut connection = listener.accept().expect("accept the CLI");
         let hello: IpcRequest = connection.recv().expect("read hello");
         let query: IpcRequest = connection.recv().expect("read discovery request");
-        reply(&mut connection, hello.request_id, IpcResult::Hello);
+        reply(
+            &mut connection,
+            hello.request_id,
+            IpcResult::Hello {
+                protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+            },
+        );
         reply(
             &mut connection,
             query.request_id,

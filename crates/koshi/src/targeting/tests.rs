@@ -166,7 +166,13 @@ fn serve_discovery(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<
             } if presented == &token
         ));
         assert!(matches!(request.kind, IpcRequestKind::Discovery));
-        reply(&mut discovery, hello.request_id, IpcResult::Hello);
+        reply(
+            &mut discovery,
+            hello.request_id,
+            IpcResult::Hello {
+                protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+            },
+        );
         reply(
             &mut discovery,
             request.request_id,

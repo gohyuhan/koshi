@@ -15,6 +15,9 @@
 //! carries that client's key presses, resizes, pasted text and commands to the
 //! dispatcher and writes nothing back. The peer going away detaches the client.
 //!
+//! A request kind this build does not have is answered `UnsupportedKind` by
+//! name, and the connection keeps serving.
+//!
 //! A connection fault stays on its connection: a malformed-but-aligned
 //! frame is answered with `MalformedRequest` and the connection keeps
 //! serving, while an oversize frame — whose payload cannot be skipped, so
@@ -38,11 +41,12 @@ use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::handshake::Handshake;
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
     IpcResult,
 };
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
+use koshi_ipc::wire::MaybeKnown;
 use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::wire_event;
@@ -218,7 +222,7 @@ fn serve_connection(
 ) {
     let mut gate = Handshake::new(token);
     loop {
-        let request: IpcRequest = match connection.recv() {
+        let request: IncomingRequest = match connection.recv() {
             Ok(request) => request,
             Err(IpcError::MalformedFrame { .. }) => {
                 // The frame was read whole, so the stream is still aligned;
@@ -244,15 +248,36 @@ fn serve_connection(
         };
 
         let request_id = Some(request.request_id);
-        let response = match gate.check(&request.kind) {
+        // A kind this build does not have comes from a newer koshi. It is
+        // refused by name and the connection keeps serving, so one unfamiliar
+        // request does not cost the caller its other verbs.
+        let kind = match request.kind {
+            MaybeKnown::Known(kind) => kind,
+            MaybeKnown::Unknown { name } => {
+                let refusal = IpcResponse {
+                    request_id,
+                    result: IpcResult::Error(gate.refuse_unknown(&name)),
+                };
+                if connection.send(&refusal).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        let response = match gate.check(&kind) {
             Err(refusal) => IpcResponse {
                 request_id,
                 result: IpcResult::Error(refusal),
             },
-            Ok(()) => match request.kind {
+            Ok(()) => match kind {
                 IpcRequestKind::Hello { .. } => IpcResponse {
                     request_id,
-                    result: IpcResult::Hello,
+                    result: IpcResult::Hello {
+                        protocol_version: gate
+                            .agreed()
+                            .expect("an accepted Hello settles the connection's version"),
+                    },
                 },
                 IpcRequestKind::SubmitCommand(envelope) => {
                     let answer = ask_dispatcher(inbox_tx, |reply| RuntimeEvent::Ipc {
@@ -404,8 +429,18 @@ fn stream_events(
         let _ = writer_inbox.send(RuntimeEvent::ClientDetached { client_id });
     });
 
-    while let Ok(request) = reader.recv::<IpcRequest>() {
-        let event = match request.kind {
+    while let Ok(request) = reader.recv::<IncomingRequest>() {
+        let kind = match request.kind {
+            MaybeKnown::Known(kind) => kind,
+            // A kind this build does not have comes from a newer koshi. This
+            // connection carries the client's typing, so the one request is
+            // dropped and the client keeps its stream.
+            MaybeKnown::Unknown { name } => {
+                tracing::debug!(%client_id, %name, "request kind this build does not have");
+                continue;
+            }
+        };
+        let event = match kind {
             IpcRequestKind::KeyPress { chord } => RuntimeEvent::ClientKeyPress { client_id, chord },
             IpcRequestKind::Resize { viewport } => RuntimeEvent::Resize {
                 client_id,

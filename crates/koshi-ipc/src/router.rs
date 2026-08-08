@@ -11,8 +11,11 @@
 //!
 //! Every connection opens with
 //! [`Hello`](crate::router::RouterRequestKind::Hello), checked by
-//! [`RouterHandshake`](crate::router::RouterHandshake). The version it names
-//! is [`ROUTER_PROTOCOL_VERSION`](crate::router::ROUTER_PROTOCOL_VERSION),
+//! [`RouterHandshake`](crate::router::RouterHandshake). It names the range of
+//! versions the caller speaks, and the two sides settle on the highest they
+//! both have. That range is
+//! [`MIN_ROUTER_PROTOCOL_VERSION`](crate::router::MIN_ROUTER_PROTOCOL_VERSION)
+//! to [`ROUTER_PROTOCOL_VERSION`](crate::router::ROUTER_PROTOCOL_VERSION),
 //! which counts separately from the session protocol's
 //! [`PROTOCOL_VERSION`](crate::protocol::PROTOCOL_VERSION).
 //!
@@ -25,16 +28,27 @@ use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use crate::protocol::{agreed_version, ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use crate::wire::{MaybeKnown, WireName, WireVariants};
 
-/// The control-plane protocol version this build speaks. A connection whose
-/// [`RouterRequestKind::Hello`] names a different version is refused with
-/// [`IpcErrorCode::UnsupportedVersion`].
+/// The highest control-plane protocol version this build speaks, and the one
+/// it uses when the peer speaks it too.
 ///
 /// Bumps once per release cycle, in the commit that first changes a wire shape
 /// after a release — not once per change. This protocol was born in 0.2.0 and
 /// has never shipped, so it stays 1 until 0.2.0 is out.
 pub const ROUTER_PROTOCOL_VERSION: u32 = 1;
+
+/// The lowest control-plane protocol version this build speaks. A peer whose
+/// highest is below this one is refused with
+/// [`IpcErrorCode::UnsupportedVersion`].
+///
+/// The floor is 1, the version 0.2.0 speaks, because the router is born in
+/// 0.2.0 and no earlier build has one.
+///
+/// Raising this floor drops support for every build below it, so it moves
+/// only on a stated decision to end that support.
+pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = 1;
 
 /// Which session a request means: the id, or the generated display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,32 +61,47 @@ pub enum SessionSelector {
 
 /// One message from a caller to the router.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// The envelope's own fields are fixed: decoding rejects any field it does not
+/// know, so a misspelled `request_id` is an error.
+///
+/// `K` is the request kind. A sender uses `RouterRequest`, where `K` is
+/// [`RouterRequestKind`]. The router uses [`IncomingRouterRequest`], where a
+/// kind this build does not have arrives as [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RouterRequest {
+pub struct RouterRequest<K = RouterRequestKind> {
     /// Caller-chosen id, repeated in the response that answers this request.
     /// Unique among the requests in flight on one connection.
     pub request_id: u64,
     /// What is being asked.
-    pub kind: RouterRequestKind,
+    pub kind: K,
 }
 
+/// A control-plane request as the router reads it: the kind may name something
+/// this build does not have.
+pub type IncomingRouterRequest = RouterRequest<MaybeKnown<RouterRequestKind>>;
+
 /// What a control-plane request asks for.
+///
+/// A field this build does not know is ignored, so a peer that adds one still
+/// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RouterRequestKind {
-    /// Opens the connection: names the control-plane protocol version the
+    /// Opens the connection: names the control-plane protocol versions the
     /// caller speaks and presents the token read from the router's endpoint
     /// file. Sent before any other kind.
     ///
+    /// The two versions are a range, lowest and highest. The router answers
+    /// with the one both sides use, or refuses when the ranges do not overlap.
+    ///
     /// Sending it again on an open connection is allowed and changes nothing:
-    /// the version and token are checked again and the same answer comes
+    /// the versions and token are checked again and the same answer comes
     /// back, since checking them alters no state.
     Hello {
-        /// The control-plane protocol version the caller speaks.
-        protocol_version: u32,
+        /// The lowest control-plane protocol version the caller speaks.
+        min_protocol_version: u32,
+        /// The highest control-plane protocol version the caller speaks.
+        max_protocol_version: u32,
         /// The secret read from the router's endpoint file.
         token: ConnectionToken,
     },
@@ -97,6 +126,21 @@ pub enum RouterRequestKind {
 }
 
 impl RouterRequestKind {
+    /// The Hello this build opens a router connection with: the control-plane
+    /// versions it speaks, lowest first, and `token` read from the router's
+    /// endpoint file.
+    ///
+    /// Every caller builds its Hello here, so the two version fields are
+    /// filled in one place.
+    #[must_use]
+    pub fn hello(token: ConnectionToken) -> RouterRequestKind {
+        RouterRequestKind::Hello {
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            token,
+        }
+    }
+
     /// The kind's name, e.g. `"CreateSession"`. Carries no payload, so it is
     /// safe on a log line even though a payload can hold the connection
     /// token.
@@ -113,24 +157,32 @@ impl RouterRequestKind {
 
 /// One message answering a [`RouterRequest`].
 ///
-/// Decoding rejects any field it does not know. An absent `request_id` means
-/// the request could not be read, so a misspelled one is an error.
+/// The envelope's own fields are fixed: decoding rejects any field it does not
+/// know. An absent `request_id` means the request could not be read, so a
+/// misspelled one is an error.
+///
+/// `R` is the answer. The router uses `RouterResponse`, where `R` is
+/// [`RouterResult`]. A caller uses [`IncomingRouterResponse`], where a result
+/// this build does not have arrives as [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RouterResponse {
+pub struct RouterResponse<R = RouterResult> {
     /// The `request_id` of the request being answered, or `None` when the
     /// bytes received were too malformed to read one.
     pub request_id: Option<u64>,
     /// The answer itself.
-    pub result: RouterResult,
+    pub result: R,
 }
+
+/// A control-plane response as a caller reads it: the result may name
+/// something this build does not have.
+pub type IncomingRouterResponse = RouterResponse<MaybeKnown<RouterResult>>;
 
 /// Where one running session can be reached.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored, so a record from a newer
+/// router still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionAddress {
     /// The session's stable id.
     pub id: SessionId,
@@ -145,11 +197,18 @@ pub struct SessionAddress {
 }
 
 /// The answer to a control-plane request.
+///
+/// A field this build does not know is ignored, so a peer that adds one still
+/// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouterResult {
     /// Answers [`RouterRequestKind::Hello`]: the connection is open, because
-    /// the versions agree and the token matched.
-    Hello,
+    /// the ranges overlap and the token matched.
+    Hello {
+        /// The version both sides use on this connection: the highest they
+        /// both speak.
+        protocol_version: u32,
+    },
     /// Answers [`RouterRequestKind::CreateSession`]: where the new session
     /// listens.
     Created(SessionAddress),
@@ -166,10 +225,9 @@ pub enum RouterResult {
 /// The one JSON line a session server prints on standard output once its
 /// control socket is bound and the router may hand callers its address.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// A field this build does not know is ignored, so a line from a newer session
+/// server still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionServerReady {
     /// The control-plane protocol version the session server speaks.
     pub protocol_version: u32,
@@ -179,16 +237,17 @@ pub struct SessionServerReady {
 }
 
 /// One router connection's handshake gate, held by the router for the
-/// connection's lifetime. Starts closed; a [`RouterRequestKind::Hello`]
-/// carrying the right control-plane protocol version and token opens it, and
+/// connection's lifetime. Starts closed; a [`RouterRequestKind::Hello`] whose
+/// version range overlaps this build's and whose token matches opens it, and
 /// every other request kind is served only while it is open.
 #[derive(Debug)]
 pub struct RouterHandshake {
     /// The token the router wrote to its endpoint file; a Hello must present
     /// an equal one.
     expected: ConnectionToken,
-    /// True once a Hello has been accepted on this connection.
-    open: bool,
+    /// The control-plane protocol version settled for this connection, once a
+    /// Hello has been accepted on it.
+    agreed: Option<u32>,
 }
 
 impl RouterHandshake {
@@ -198,51 +257,90 @@ impl RouterHandshake {
     pub fn new(expected: ConnectionToken) -> RouterHandshake {
         RouterHandshake {
             expected,
-            open: false,
+            agreed: None,
+        }
+    }
+
+    /// The control-plane protocol version this connection settled on, or
+    /// `None` while no Hello has been accepted.
+    ///
+    /// The router puts it in [`RouterResult::Hello`], so the caller learns
+    /// which version the two of them use.
+    #[must_use]
+    pub fn agreed(&self) -> Option<u32> {
+        self.agreed
+    }
+
+    /// The refusal for a request kind this build does not have, named `name`.
+    ///
+    /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
+    /// the same as any other kind arriving before a Hello. An open gate
+    /// answers [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it,
+    /// and the connection keeps serving.
+    #[must_use]
+    pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
+        if self.agreed.is_none() {
+            return IpcErrorPayload {
+                code: IpcErrorCode::HelloRequired,
+                message: format!("{name} arrived before a Hello opened the connection"),
+            };
+        }
+        IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: format!("this router has no request kind named {name}"),
         }
     }
 
     /// Check one incoming request kind against the connection's state.
     ///
     /// A [`Hello`](RouterRequestKind::Hello) is checked version first, then
-    /// token: a version other than [`ROUTER_PROTOCOL_VERSION`] is refused as
-    /// [`UnsupportedVersion`](IpcErrorCode::UnsupportedVersion) with both
-    /// versions named, a token that does not equal the router's is refused as
-    /// [`BadToken`](IpcErrorCode::BadToken), and a Hello passing both checks
-    /// opens the gate. Any other kind is accepted while the gate is open and
-    /// refused as [`HelloRequired`](IpcErrorCode::HelloRequired) while it is
-    /// not.
+    /// token: a caller whose version range does not overlap
+    /// [`MIN_ROUTER_PROTOCOL_VERSION`]`..=`[`ROUTER_PROTOCOL_VERSION`] is
+    /// refused as [`UnsupportedVersion`](IpcErrorCode::UnsupportedVersion)
+    /// with both ranges named, a token that does not equal the router's is
+    /// refused as [`BadToken`](IpcErrorCode::BadToken), and a Hello passing
+    /// both checks settles the connection's version and opens the gate. Any
+    /// other kind is accepted while the gate is open and refused as
+    /// [`HelloRequired`](IpcErrorCode::HelloRequired) while it is not.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered
-    /// with [`RouterResult::Hello`]. An `Err` carries the refusal to send
-    /// back, and the gate keeps the state it had.
+    /// with [`RouterResult::Hello`] carrying [`agreed`](Self::agreed). An
+    /// `Err` carries the refusal to send back, and the gate keeps the state it
+    /// had.
     pub fn check(&mut self, kind: &RouterRequestKind) -> Result<(), IpcErrorPayload> {
         match kind {
             RouterRequestKind::Hello {
-                protocol_version,
+                min_protocol_version,
+                max_protocol_version,
                 token,
             } => {
-                if *protocol_version != ROUTER_PROTOCOL_VERSION {
+                let Some(agreed) = agreed_version(
+                    *min_protocol_version,
+                    *max_protocol_version,
+                    MIN_ROUTER_PROTOCOL_VERSION,
+                    ROUTER_PROTOCOL_VERSION,
+                ) else {
                     return Err(IpcErrorPayload {
                         code: IpcErrorCode::UnsupportedVersion,
                         message: format!(
-                            "the caller speaks control-plane protocol version \
-                             {protocol_version}, this router speaks \
+                            "the caller speaks control-plane protocol versions \
+                             {min_protocol_version} to {max_protocol_version}, \
+                             this router speaks {MIN_ROUTER_PROTOCOL_VERSION} to \
                              {ROUTER_PROTOCOL_VERSION}"
                         ),
                     });
-                }
+                };
                 if *token != self.expected {
                     return Err(IpcErrorPayload {
                         code: IpcErrorCode::BadToken,
                         message: "the token presented does not match the router's".to_string(),
                     });
                 }
-                self.open = true;
+                self.agreed = Some(agreed);
                 Ok(())
             }
             other => {
-                if self.open {
+                if self.agreed.is_some() {
                     Ok(())
                 } else {
                     Err(IpcErrorPayload {
@@ -306,6 +404,38 @@ pub fn router_endpoint_path(runtime_dir: &Path) -> PathBuf {
 #[must_use]
 pub fn router_lock_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("router.lock")
+}
+
+impl WireVariants for RouterRequestKind {
+    /// Every control-plane request kind this build has. A kind added to
+    /// [`RouterRequestKind`] is added here and to
+    /// [`RouterRequestKind::name`] in the same change.
+    const VARIANTS: &'static [&'static str] =
+        &["Hello", "CreateSession", "AttachLookup", "ListSessions"];
+}
+
+impl WireName for RouterRequestKind {
+    fn wire_name(&self) -> &'static str {
+        self.name()
+    }
+}
+
+impl WireVariants for RouterResult {
+    /// Every control-plane answer this build has. A variant added to
+    /// [`RouterResult`] is added here in the same change.
+    const VARIANTS: &'static [&'static str] = &["Hello", "Created", "Found", "Sessions", "Error"];
+}
+
+impl WireName for RouterResult {
+    fn wire_name(&self) -> &'static str {
+        match self {
+            RouterResult::Hello { .. } => "Hello",
+            RouterResult::Created(_) => "Created",
+            RouterResult::Found(_) => "Found",
+            RouterResult::Sessions(_) => "Sessions",
+            RouterResult::Error(_) => "Error",
+        }
+    }
 }
 
 #[cfg(test)]

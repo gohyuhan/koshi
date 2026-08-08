@@ -325,17 +325,58 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
 }
 
 #[test]
-fn a_frame_carrying_an_unknown_field_is_refused() {
+fn a_frame_carrying_an_unknown_field_ignores_it() {
     let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
     encoded["panes"][0]
         .as_object_mut()
         .expect("a pane encodes as an object")
         .insert("zoomed".to_string(), serde_json::Value::Bool(true));
 
-    let decoded: Result<PaintedFrame, _> = serde_json::from_value(encoded);
-    let error = decoded.expect_err("an unknown field decoded instead of failing");
-    assert!(
-        error.to_string().contains("unknown field `zoomed`"),
-        "unexpected error: {error}"
+    // Decoded from text, the way the transport does it: the frame arrives as
+    // bytes on a socket, never as an already-built value.
+    let decoded: PaintedFrame = serde_json::from_str(&encoded.to_string())
+        .expect("a field this build does not know is ignored");
+
+    assert_eq!(
+        decoded,
+        frame(),
+        "the extra field left nothing behind in the decoded frame"
+    );
+}
+
+/// A value enum this build has no name for falls back to its plainest value,
+/// so one unfamiliar colour or underline never costs the whole frame.
+#[test]
+fn a_cell_value_this_build_has_no_name_for_falls_back() {
+    let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
+    let style = encoded["panes"][0]["window"]["rows"][0]["runs"][0]["cell"]["style"]
+        .as_object_mut()
+        .expect("a style encodes as an object");
+    style.insert("fg".to_string(), serde_json::json!("Neon"));
+    style["attrs"]
+        .as_object_mut()
+        .expect("attributes encode as an object")
+        .insert("underline".to_string(), serde_json::json!("Dotted2"));
+
+    // Decoded from text, the way the transport does it.
+    let decoded: PaintedFrame = serde_json::from_str(&encoded.to_string())
+        .expect("an unfamiliar value falls back, it does not fail");
+
+    let cell = &decoded.panes[0]
+        .window
+        .as_ref()
+        .expect("the pane has a window")
+        .rows[0]
+        .runs[0]
+        .cell;
+    assert_eq!(
+        cell.style.fg,
+        FrameColor::Default,
+        "a colour with no name here draws as the default colour"
+    );
+    assert_eq!(
+        cell.style.attrs.underline,
+        FrameUnderline::None,
+        "an underline style with no name here draws as no underline"
     );
 }

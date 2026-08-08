@@ -1,7 +1,7 @@
 //! Tests for the wire messages: every request and response variant survives a
-//! round trip and keeps its own tag, a message carrying a field the build does
-//! not know is refused, and the connection token neither prints nor compares
-//! carelessly.
+//! round trip and keeps its own tag, an unknown field is refused on the
+//! envelope and ignored on the payload, and the connection token neither
+//! prints nor compares carelessly.
 
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
@@ -481,7 +481,8 @@ fn hello_request_round_trips() {
     let request = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: token(),
         },
     };
@@ -494,7 +495,8 @@ fn hello_request_encodes_to_the_expected_shape() {
     let request = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: 1,
+            min_protocol_version: 1,
+            max_protocol_version: 2,
             token: token(),
         },
     };
@@ -503,7 +505,13 @@ fn hello_request_encodes_to_the_expected_shape() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 1,
-            "kind": { "Hello": { "protocol_version": 1, "token": "k7QxSecret" } }
+            "kind": {
+                "Hello": {
+                    "min_protocol_version": 1,
+                    "max_protocol_version": 2,
+                    "token": "k7QxSecret"
+                }
+            }
         })
     );
 }
@@ -536,38 +544,37 @@ fn attached_response_round_trips() {
 }
 
 #[test]
-fn an_attach_naming_its_own_authority_is_refused() {
+fn an_attach_naming_its_own_authority_carries_none_of_it() {
     // A caller cannot say what it is allowed to do: the server decides that
-    // from the connection it arrived on. An `Attach` carrying a `tier` is not
-    // this build's shape, so it fails to decode and is answered on the
-    // malformed-request path — the field never reaches code that would have to
-    // remember to ignore it.
-    let with_tier: Result<IpcRequest, _> = serde_json::from_str(
+    // from the connection it arrived on. An `Attach` carrying a `tier` decodes,
+    // because a field this build does not know is ignored — and the decoded
+    // request holds exactly the viewport and filter, so the extra field reaches
+    // no code at all.
+    let with_tier: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","tier":"admin"}}}"#,
-    );
+    )
+    .expect("an attach carrying an extra field still decodes");
 
-    let error = with_tier.expect_err("an authority field decoded instead of failing");
-    assert!(
-        error.to_string().contains("unknown field `tier`"),
-        "unexpected error: {error}"
-    );
-
-    // The same frame without that one field decodes, so the refusal above is
-    // the field's doing and not a typo elsewhere in the bytes.
     let without_tier: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
     )
     .expect("the same attach without the extra field decodes");
 
+    let expected = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+        },
+    };
+
     assert_eq!(
-        without_tier,
-        IpcRequest {
-            request_id: 4,
-            kind: IpcRequestKind::Attach {
-                viewport: Size { cols: 80, rows: 24 },
-                filter: EventFilterSpec::All,
-            },
-        }
+        with_tier, expected,
+        "the authority field left nothing behind in the decoded request"
+    );
+    assert_eq!(
+        without_tier, expected,
+        "the two frames decode to the same request"
     );
 }
 
@@ -634,25 +641,21 @@ fn a_mouse_request_keeps_its_round_in_the_order_it_was_sent() {
 }
 
 #[test]
-fn a_mouse_action_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
+    let with_pixels: IpcRequest = serde_json::from_str(
         r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3,"pixels":9}}]}}"#,
-    );
+    )
+    .expect("a field this build does not know is ignored");
 
-    let error =
-        decoded.expect_err("an unknown field inside a mouse action decoded instead of failing");
-    assert!(
-        error.to_string().contains("unknown field `pixels`"),
-        "unexpected error: {error}"
-    );
-
-    // The same round without that one field decodes, so the refusal above is
-    // the field's doing and not a typo elsewhere in the bytes.
     let without_it: IpcRequest = serde_json::from_str(
         r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3}}]}}"#,
     )
     .expect("the same round without the extra field decodes");
 
+    assert_eq!(
+        with_pixels, without_it,
+        "the extra field left nothing behind in the decoded round"
+    );
     assert_eq!(
         without_it,
         IpcRequest {
@@ -703,7 +706,9 @@ fn discovery_request_encodes_to_the_expected_shape() {
 fn hello_response_round_trips() {
     let response = IpcResponse {
         request_id: Some(1),
-        result: IpcResult::Hello,
+        result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
     };
 
     assert_eq!(round_trip(&response), response);
@@ -800,13 +805,31 @@ fn a_layout_request_for_every_tab_encodes_a_null_tab() {
 }
 
 #[test]
-fn a_layout_request_carrying_an_unknown_field_is_refused() {
-    let decoded: Result<IpcRequest, _> =
-        serde_json::from_str(r#"{"request_id":4,"kind":{"Layout":{"tab":null,"junk":5}}}"#);
+fn a_layout_request_carrying_an_unknown_field_ignores_it() {
+    let decoded: IpcRequest =
+        serde_json::from_str(r#"{"request_id":4,"kind":{"Layout":{"tab":null,"junk":5}}}"#)
+            .expect("a field this build does not know is ignored");
 
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Layout { tab: None },
+        }
+    );
+}
+
+#[test]
+fn a_request_envelope_carrying_an_unknown_field_is_still_refused() {
+    // The envelope never grows, so a misspelled `request_id` stays an error
+    // rather than decoding as a request that answers nothing.
+    let decoded: Result<IpcRequest, _> =
+        serde_json::from_str(r#"{"request_id":4,"requst_id":9,"kind":"Discovery"}"#);
+
+    let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
+        error.to_string().contains("unknown field `requst_id`"),
+        "unexpected error: {error}"
     );
 }
 
@@ -864,15 +887,19 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
     let wire_name = |code: IpcErrorCode| match code {
         IpcErrorCode::BadToken => "bad_token",
         IpcErrorCode::UnsupportedVersion => "unsupported_version",
+        IpcErrorCode::UnsupportedKind => "unsupported_kind",
         IpcErrorCode::MalformedRequest => "malformed_request",
         IpcErrorCode::HelloRequired => "hello_required",
+        IpcErrorCode::Unknown => "unknown",
     };
 
     for code in [
         IpcErrorCode::BadToken,
         IpcErrorCode::UnsupportedVersion,
+        IpcErrorCode::UnsupportedKind,
         IpcErrorCode::MalformedRequest,
         IpcErrorCode::HelloRequired,
+        IpcErrorCode::Unknown,
     ] {
         assert_eq!(
             serde_json::to_value(code).expect("code encodes"),
@@ -927,8 +954,13 @@ fn each_request_kind_is_tagged_with_its_own_name() {
 #[test]
 fn each_result_is_tagged_with_its_own_name() {
     assert_eq!(
-        serde_json::to_value(IpcResult::Hello).unwrap(),
-        json!("Hello")
+        tag_of(
+            &serde_json::to_value(IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .unwrap()
+        ),
+        "Hello"
     );
     assert_eq!(
         tag_of(
@@ -971,14 +1003,38 @@ fn each_result_is_tagged_with_its_own_name() {
     );
 }
 
+/// The response envelope never grows, so a misspelled `request_id` stays an
+/// error. Absent MEANS "your request could not be read", so a typo that
+/// decoded would make the CLI report a failure for a command that ran.
 #[test]
 fn a_response_with_a_misspelled_request_id_is_refused() {
-    let decoded: Result<IpcResponse, _> =
-        serde_json::from_str(r#"{"requst_id":7,"result":"Hello"}"#);
+    // The result is a shape this build reads, so the only fault in these bytes
+    // is the misspelled envelope field.
+    let decoded: Result<IpcResponse, _> = serde_json::from_str(
+        r#"{"requst_id":7,"result":{"Hello":{"protocol_version":2}},"request_id":7}"#,
+    );
 
+    let error = decoded.expect_err("a misspelled envelope field decoded instead of failing");
     assert!(
-        decoded.is_err(),
-        "a misspelled field decoded instead of failing: {decoded:?}"
+        error.to_string().contains("unknown field `requst_id`"),
+        "the error names the misspelled field, got: {error}"
+    );
+}
+
+#[test]
+fn a_response_envelope_this_build_reads_decodes() {
+    let decoded: IpcResponse =
+        serde_json::from_str(r#"{"request_id":7,"result":{"Hello":{"protocol_version":2}}}"#)
+            .expect("the same bytes without the misspelling decode");
+
+    assert_eq!(
+        decoded,
+        IpcResponse {
+            request_id: Some(7),
+            result: IpcResult::Hello {
+                protocol_version: 2
+            },
+        }
     );
 }
 
@@ -987,22 +1043,70 @@ fn a_request_carrying_an_unknown_field_is_refused() {
     let decoded: Result<IpcRequest, _> =
         serde_json::from_str(r#"{"request_id":1,"kind":"Discovery","junk":5}"#);
 
+    let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert!(
-        decoded.is_err(),
-        "an unknown field decoded instead of failing: {decoded:?}"
+        error.to_string().contains("unknown field `junk`"),
+        "the error names the unknown field, got: {error}"
     );
 }
 
+/// The Hello payload evolves, so a field this build does not know is ignored
+/// there — unlike the envelope around it.
 #[test]
-fn a_hello_carrying_an_unknown_field_is_refused() {
+fn a_hello_carrying_an_unknown_field_ignores_it() {
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"token":"k7QxSecret","junk":5}}}"#,
+    )
+    .expect("a field this build does not know is ignored");
+
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Hello {
+                min_protocol_version: 2,
+                max_protocol_version: 2,
+                token: token(),
+            },
+        }
+    );
+}
+
+/// A Hello missing a version field is still an error: the two versions carry
+/// no `#[serde(default)]`, so a peer cannot omit one and have it filled in.
+#[test]
+fn a_hello_missing_a_version_is_refused() {
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Hello":{"protocol_version":1,"token":"k7QxSecret","junk":5}}}"#,
+        r#"{"request_id":1,"kind":{"Hello":{"max_protocol_version":2,"token":"k7QxSecret"}}}"#,
     );
 
+    let error = decoded.expect_err("a Hello missing a version decoded instead of failing");
     assert!(
-        decoded.is_err(),
-        "an unknown field inside Hello decoded instead of failing: {decoded:?}"
+        error.to_string().contains("missing field"),
+        "the error names the missing field, got: {error}"
     );
+}
+
+/// Every caller builds its Hello through one constructor, so the two version
+/// fields are filled in one place and cannot drift apart between callers.
+#[test]
+fn the_hello_this_build_sends_carries_the_range_it_speaks() {
+    let IpcRequestKind::Hello {
+        min_protocol_version,
+        max_protocol_version,
+        token: carried,
+    } = IpcRequestKind::hello(token())
+    else {
+        panic!("the constructor builds a Hello");
+    };
+
+    assert_eq!(min_protocol_version, MIN_PROTOCOL_VERSION);
+    assert_eq!(max_protocol_version, PROTOCOL_VERSION);
+    assert!(
+        min_protocol_version <= max_protocol_version,
+        "the lowest version this build speaks is not above its highest"
+    );
+    assert_eq!(carried, token(), "the endpoint's token is carried through");
 }
 
 #[test]
@@ -1028,7 +1132,8 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
     let request = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: 1,
+            min_protocol_version: 1,
+            max_protocol_version: 1,
             token: token(),
         },
     };
@@ -1046,7 +1151,8 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
 fn every_request_kind_names_itself_without_its_payload() {
     assert_eq!(
         IpcRequestKind::Hello {
-            protocol_version: 1,
+            min_protocol_version: 1,
+            max_protocol_version: 1,
             token: token(),
         }
         .name(),
@@ -1107,7 +1213,8 @@ fn serializing_a_hello_writes_the_real_secret() {
     let request = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: 1,
+            min_protocol_version: 1,
+            max_protocol_version: 1,
             token: token(),
         },
     };
