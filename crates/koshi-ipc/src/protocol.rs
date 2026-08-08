@@ -27,10 +27,10 @@ use subtle::ConstantTimeEq;
 
 use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
+use crate::wire::{MaybeKnown, WireName, WireVariants};
 
-/// The protocol version this build speaks. A connection whose
-/// [`IpcRequestKind::Hello`] names a different version is refused with
-/// [`IpcErrorCode::UnsupportedVersion`].
+/// The highest protocol version this build speaks, and the one it uses when
+/// the peer speaks it too.
 ///
 /// Bumps when an existing wire field changes its type or its meaning, in the
 /// same commit as that change: the first such change after a release sets
@@ -43,6 +43,35 @@ use crate::layout::SessionLayout;
 /// released value — v0.1.0 is the only released build and speaks 1 — so 0.2.0
 /// speaks 2.
 pub const PROTOCOL_VERSION: u32 = 2;
+
+/// The lowest protocol version this build speaks. A peer whose highest is
+/// below this one is refused with
+/// [`IpcErrorCode::UnsupportedVersion`].
+///
+/// The floor is 2, the version 0.2.0 speaks. Version 1 is v0.1.0, which has
+/// no attach and puts nothing user-visible on the socket, so no version-1
+/// peer has anything to ask a session server for.
+///
+/// Raising this floor drops support for every build below it, so it moves
+/// only on a stated decision to end that support.
+pub const MIN_PROTOCOL_VERSION: u32 = 2;
+
+/// The version two peers use, given the range each speaks: the highest both
+/// have. `None` when the ranges do not overlap.
+///
+/// Example — a caller speaking 2 to 4 and a build speaking 2 to 2 settle on
+/// 2; a caller speaking 5 to 6 and the same build settle on nothing.
+#[must_use]
+pub fn agreed_version(
+    caller_min: u32,
+    caller_max: u32,
+    build_min: u32,
+    build_max: u32,
+) -> Option<u32> {
+    let highest = caller_max.min(build_max);
+    let lowest = caller_min.max(build_min);
+    (lowest <= highest).then_some(highest)
+}
 
 /// The secret a connection presents to prove it belongs to the user who
 /// started this Koshi.
@@ -126,17 +155,25 @@ impl fmt::Display for ConnectionToken {
 
 /// One message from a caller to a running Koshi.
 ///
-/// Decoding rejects any field it does not know, so a misspelled name is an
-/// error.
+/// The envelope's own fields are fixed: decoding rejects any field it does not
+/// know, so a misspelled `request_id` is an error.
+///
+/// `K` is the request kind. A sender uses `IpcRequest`, where `K` is
+/// [`IpcRequestKind`]. A server uses [`IncomingRequest`], where a kind this
+/// build does not have arrives as [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IpcRequest {
+pub struct IpcRequest<K = IpcRequestKind> {
     /// Caller-chosen id, repeated in the response that answers this request.
     /// Unique among the requests in flight on one connection.
     pub request_id: u64,
     /// What is being asked.
-    pub kind: IpcRequestKind,
+    pub kind: K,
 }
+
+/// A request as a server reads it: the kind may name something this build does
+/// not have.
+pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 
 /// What a request asks for.
 ///
@@ -150,18 +187,24 @@ pub struct IpcRequest {
 /// carrying that request's `request_id`, always — including when the round
 /// produced nothing to report, where the answer's list is empty. That answer
 /// is what moves the viewer's drag anchor over the cells the session took.
+/// A field this build does not know is ignored, so a peer that adds one still
+/// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum IpcRequestKind {
-    /// Opens the connection: names the protocol version the caller speaks and
+    /// Opens the connection: names the protocol versions the caller speaks and
     /// presents the token. Sent before any other kind.
     ///
+    /// The two versions are a range, lowest and highest. The server answers
+    /// with the one both sides use, or refuses when the ranges do not overlap.
+    ///
     /// Sending it again on an open connection is allowed and changes nothing:
-    /// the version and token are checked again and the same answer comes back,
-    /// since checking them alters no state.
+    /// the versions and token are checked again and the same answer comes
+    /// back, since checking them alters no state.
     Hello {
-        /// The protocol version the caller speaks.
-        protocol_version: u32,
+        /// The lowest protocol version the caller speaks.
+        min_protocol_version: u32,
+        /// The highest protocol version the caller speaks.
+        max_protocol_version: u32,
         /// The secret read from the endpoint file.
         token: ConnectionToken,
     },
@@ -215,6 +258,20 @@ pub enum IpcRequestKind {
 }
 
 impl IpcRequestKind {
+    /// The Hello this build opens a connection with: the versions it speaks,
+    /// lowest first, and `token` read from the endpoint file.
+    ///
+    /// Every caller builds its Hello here, so the two version fields are
+    /// filled in one place.
+    #[must_use]
+    pub fn hello(token: ConnectionToken) -> IpcRequestKind {
+        IpcRequestKind::Hello {
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
+            token,
+        }
+    }
+
     /// The kind's name, e.g. `"SubmitCommand"`. Carries no payload, so it is
     /// safe on a log line even though a payload can hold the connection token
     /// or text the user typed.
@@ -243,8 +300,9 @@ impl IpcRequestKind {
 /// [`Command`](Self::Command) is here rather than on
 /// [`IpcRequestKind::SubmitCommand`] so a command the mouse issued arrives
 /// inside its round, in its place among the other actions.
+/// A field this build does not know is ignored, so a peer that adds one still
+/// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum WireMouseAction {
     /// Move this client's scrollback view of `pane` by `lines`, up into
     /// history or back down toward live output.
@@ -296,7 +354,6 @@ pub enum WireMouseAction {
 /// This is the wire spelling only. The server maps it to the filter its event
 /// hub works in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum EventFilterSpec {
     /// Every event the session publishes.
     All,
@@ -304,26 +361,42 @@ pub enum EventFilterSpec {
 
 /// One message answering an [`IpcRequest`].
 ///
-/// Decoding rejects any field it does not know. An absent `request_id` means
-/// the request could not be read, so a misspelled one is an error.
+/// The envelope's own fields are fixed: decoding rejects any field it does not
+/// know. An absent `request_id` means the request could not be read, so a
+/// misspelled one is an error.
+///
+/// `R` is the answer. A server uses `IpcResponse`, where `R` is
+/// [`IpcResult`]. A caller uses [`IncomingResponse`], where a result this
+/// build does not have arrives as [`MaybeKnown::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IpcResponse {
+pub struct IpcResponse<R = IpcResult> {
     /// The `request_id` of the request being answered, or `None` when the
     /// bytes received were too malformed to read one — a caller that sent
     /// request 7 and reads `None` knows the answer belongs to no request of
     /// its own.
     pub request_id: Option<u64>,
     /// The answer itself.
-    pub result: IpcResult,
+    pub result: R,
 }
 
+/// A response as a caller reads it: the result may name something this build
+/// does not have.
+pub type IncomingResponse = IpcResponse<MaybeKnown<IpcResult>>;
+
 /// The answer to a request.
+///
+/// A field this build does not know is ignored, so a peer that adds one still
+/// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcResult {
     /// Answers [`IpcRequestKind::Hello`]: the connection is open, because the
-    /// versions agree and the token matched.
-    Hello,
+    /// ranges overlap and the token matched.
+    Hello {
+        /// The version both sides use on this connection: the highest they
+        /// both speak.
+        protocol_version: u32,
+    },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
     /// this frame is the last one written before the event stream starts.
@@ -347,29 +420,95 @@ pub enum IpcResult {
 }
 
 /// Why a request was refused.
+///
+/// A field this build does not know is ignored, and so is a
+/// [`code`](Self::code) it has no name for. A refusal is the one message a
+/// newer koshi is most likely to have added to, and it always carries a
+/// [`message`](Self::message) a person can read.
+///
+/// Example — a build with no `rate_limited` code reads
+/// `{"code":"rate_limited","message":"too many attach requests"}` as
+/// [`IpcErrorCode::Unknown`] and still shows the sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct IpcErrorPayload {
-    /// The refusal, as a value a caller can branch on.
+    /// The refusal, as a value a caller can branch on. A code this build has
+    /// no name for reads as [`IpcErrorCode::Unknown`].
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub code: IpcErrorCode,
     /// A human-facing sentence naming what was wrong.
     pub message: String,
 }
 
 /// The kinds of refusal a request can meet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
     /// The token presented does not match the session's.
     BadToken,
-    /// The caller speaks a protocol version this build does not. The message
-    /// names both versions.
+    /// The caller and this build share no protocol version. The message names
+    /// both ranges.
     UnsupportedVersion,
+    /// The caller named a request kind this build does not have. The message
+    /// names it. The connection stays open.
+    UnsupportedKind,
     /// The bytes received are not a request this build can read.
     MalformedRequest,
     /// A request arrived before [`IpcRequestKind::Hello`] opened the
     /// connection.
     HelloRequired,
+    /// A refusal this build has no name for, from a newer koshi. The
+    /// [`message`](IpcErrorPayload::message) beside it still reads.
+    #[default]
+    Unknown,
+}
+
+impl WireVariants for IpcRequestKind {
+    /// Every request kind this build has. A kind added to
+    /// [`IpcRequestKind`] is added here and to
+    /// [`IpcRequestKind::name`] in the same change.
+    const VARIANTS: &'static [&'static str] = &[
+        "Hello",
+        "Attach",
+        "KeyPress",
+        "Resize",
+        "Paste",
+        "Mouse",
+        "SubmitCommand",
+        "Discovery",
+        "Layout",
+    ];
+}
+
+impl WireName for IpcRequestKind {
+    fn wire_name(&self) -> &'static str {
+        self.name()
+    }
+}
+
+impl WireVariants for IpcResult {
+    /// Every answer this build has. A variant added to [`IpcResult`] is added
+    /// here in the same change.
+    const VARIANTS: &'static [&'static str] = &[
+        "Hello",
+        "Attached",
+        "CommandResult",
+        "Overview",
+        "Layout",
+        "Error",
+    ];
+}
+
+impl WireName for IpcResult {
+    fn wire_name(&self) -> &'static str {
+        match self {
+            IpcResult::Hello { .. } => "Hello",
+            IpcResult::Attached { .. } => "Attached",
+            IpcResult::CommandResult(_) => "CommandResult",
+            IpcResult::Overview(_) => "Overview",
+            IpcResult::Layout(_) => "Layout",
+            IpcResult::Error(_) => "Error",
+        }
+    }
 }
 
 #[cfg(test)]

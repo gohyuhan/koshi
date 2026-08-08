@@ -30,13 +30,19 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::PaintedFrame;
+use crate::wire::{MaybeKnown, WireName, WireVariants};
+
+/// An event as a client reads it: it may name a frame this build does not
+/// have.
+pub type IncomingEvent = MaybeKnown<SessionEvent>;
 
 /// One frame on an attached client's event stream.
 ///
-/// Decoding rejects any field the build does not know, so a misspelled name is
-/// an error.
+/// A field this build does not know is ignored, so a frame from a newer koshi
+/// still reads. A whole frame this build has no name for arrives as
+/// [`MaybeKnown::Unknown`] through
+/// [`IncomingEvent`], and the client skips it and keeps reading.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum SessionEvent {
     /// The picture the session composed for this client, drawn whole.
     Painted {
@@ -151,6 +157,64 @@ pub enum SessionEvent {
         /// and connection token from the endpoint file keyed by this id.
         session_id: SessionId,
     },
+}
+
+impl SessionEvent {
+    /// The frame's name, e.g. `"Painted"`. Carries no payload, so it is safe
+    /// on a log line even though a payload can hold pane content or bytes a
+    /// pane wrote.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            SessionEvent::Painted { .. } => "Painted",
+            SessionEvent::PaneCreated { .. } => "PaneCreated",
+            SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
+            SessionEvent::PaneClosing { .. } => "PaneClosing",
+            SessionEvent::PaneRemoved { .. } => "PaneRemoved",
+            SessionEvent::PaneFocused { .. } => "PaneFocused",
+            SessionEvent::LayoutChanged { .. } => "LayoutChanged",
+            SessionEvent::TabCreated { .. } => "TabCreated",
+            SessionEvent::TabClosed { .. } => "TabClosed",
+            SessionEvent::TabFocused { .. } => "TabFocused",
+            SessionEvent::TabMoved { .. } => "TabMoved",
+            SessionEvent::Quit => "Quit",
+            SessionEvent::Detached => "Detached",
+            SessionEvent::Resync { .. } => "Resync",
+            SessionEvent::MouseAnswer { .. } => "MouseAnswer",
+            SessionEvent::HostWrite { .. } => "HostWrite",
+            SessionEvent::SwitchTo { .. } => "SwitchTo",
+        }
+    }
+}
+
+impl WireVariants for SessionEvent {
+    /// Every frame this build has. A variant added to [`SessionEvent`] is
+    /// added here and to [`SessionEvent::name`] in the same change.
+    const VARIANTS: &'static [&'static str] = &[
+        "Painted",
+        "PaneCreated",
+        "PaneProcessExited",
+        "PaneClosing",
+        "PaneRemoved",
+        "PaneFocused",
+        "LayoutChanged",
+        "TabCreated",
+        "TabClosed",
+        "TabFocused",
+        "TabMoved",
+        "Quit",
+        "Detached",
+        "Resync",
+        "MouseAnswer",
+        "HostWrite",
+        "SwitchTo",
+    ];
+}
+
+impl WireName for SessionEvent {
+    fn wire_name(&self) -> &'static str {
+        self.name()
+    }
 }
 
 #[cfg(test)]

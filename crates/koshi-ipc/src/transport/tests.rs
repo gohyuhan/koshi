@@ -6,7 +6,8 @@ use std::thread;
 
 use super::*;
 use crate::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 
 /// A socket address unique to this test: a temp-dir file path on Unix, a pipe
@@ -31,7 +32,8 @@ fn hello_request(request_id: u64) -> IpcRequest {
     IpcRequest {
         request_id,
         kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: ConnectionToken::new("test-secret"),
         },
     }
@@ -192,7 +194,9 @@ fn request_and_response_cross_a_real_socket() {
         let request: IpcRequest = conn.recv().expect("server recv");
         conn.send(&IpcResponse {
             request_id: Some(request.request_id),
-            result: IpcResult::Hello,
+            result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
         })
         .expect("server send");
         request
@@ -207,7 +211,9 @@ fn request_and_response_cross_a_real_socket() {
         response,
         IpcResponse {
             request_id: Some(7),
-            result: IpcResult::Hello,
+            result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
         }
     );
     assert_eq!(server.join().expect("server thread"), sent);
@@ -255,7 +261,9 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
             writer
                 .send(&IpcResponse {
                     request_id: Some(id),
-                    result: IpcResult::Hello,
+                    result: IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
                 })
                 .expect("server send");
         }

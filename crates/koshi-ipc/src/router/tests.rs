@@ -1,7 +1,7 @@
 //! Tests for the control-plane protocol: every request and answer keeps the
-//! exact bytes this version pins, the handshake gate opens only for a Hello
-//! naming the right version and token, and the router's socket, endpoint and
-//! lock names sit where the trust checks accept them.
+//! exact bytes this version pins, the gate opens for a Hello whose version
+//! range overlaps the router's and whose token matches, and the router's
+//! socket, endpoint and lock names sit where the trust checks accept them.
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -62,11 +62,12 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         encode(&RouterRequest {
             request_id: 1,
             kind: RouterRequestKind::Hello {
-                protocol_version: 1,
+                min_protocol_version: 1,
+                max_protocol_version: 1,
                 token: token(),
             },
         }),
-        r#"{"request_id":1,"kind":{"Hello":{"protocol_version":1,"token":"k7QxSecret"}}}"#
+        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":1,"max_protocol_version":1,"token":"k7QxSecret"}}}"#
     );
     assert_eq!(
         encode(&RouterRequest {
@@ -118,9 +119,11 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     assert_eq!(
         encode(&RouterResponse {
             request_id: Some(1),
-            result: RouterResult::Hello,
+            result: RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+            },
         }),
-        r#"{"request_id":1,"result":"Hello"}"#
+        r#"{"request_id":1,"result":{"Hello":{"protocol_version":1}}}"#
     );
     assert_eq!(
         encode(&RouterResponse {
@@ -174,7 +177,8 @@ fn the_control_plane_version_this_build_speaks_is_one() {
 fn every_request_kind_names_itself_without_its_payload() {
     assert_eq!(
         RouterRequestKind::Hello {
-            protocol_version: 1,
+            min_protocol_version: 1,
+            max_protocol_version: 1,
             token: token(),
         }
         .name(),
@@ -234,7 +238,8 @@ fn a_hello_with_the_right_version_and_token_is_accepted() {
 
     assert_eq!(
         gate.check(&RouterRequestKind::Hello {
-            protocol_version: ROUTER_PROTOCOL_VERSION,
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
             token: token(),
         }),
         Ok(())
@@ -246,7 +251,8 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
     let mut gate = RouterHandshake::new(token());
 
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: token(),
     })
     .expect("the Hello is accepted");
@@ -262,40 +268,85 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
 }
 
 #[test]
-fn a_hello_with_a_wrong_version_is_refused_naming_both_versions() {
+fn a_caller_speaking_only_above_this_router_is_refused_naming_both_ranges() {
     let mut gate = RouterHandshake::new(token());
-    let other_version = ROUTER_PROTOCOL_VERSION + 1;
+    let above = ROUTER_PROTOCOL_VERSION + 1;
 
     assert_eq!(
         gate.check(&RouterRequestKind::Hello {
-            protocol_version: other_version,
+            min_protocol_version: above,
+            max_protocol_version: above,
             token: token(),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
             message: format!(
-                "the caller speaks control-plane protocol version {other_version}, \
-                 this router speaks {ROUTER_PROTOCOL_VERSION}"
+                "the caller speaks control-plane protocol versions {above} to {above}, \
+                 this router speaks {MIN_ROUTER_PROTOCOL_VERSION} to {ROUTER_PROTOCOL_VERSION}"
             ),
         })
+    );
+    assert_eq!(gate.agreed(), None, "a refused Hello settles nothing");
+}
+
+#[test]
+fn a_caller_reaching_above_this_router_settles_on_the_routers_highest() {
+    let mut gate = RouterHandshake::new(token());
+
+    gate.check(&RouterRequestKind::Hello {
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION + 3,
+        token: token(),
+    })
+    .expect("a range covering this router's is accepted");
+
+    assert_eq!(gate.agreed(), Some(ROUTER_PROTOCOL_VERSION));
+}
+
+#[test]
+fn an_unknown_kind_is_refused_by_name_once_the_gate_is_open() {
+    let mut gate = RouterHandshake::new(token());
+
+    assert_eq!(
+        gate.refuse_unknown("Rehome"),
+        IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Rehome arrived before a Hello opened the connection".to_string(),
+        }
+    );
+
+    gate.check(&RouterRequestKind::Hello {
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
+        token: token(),
+    })
+    .expect("the Hello is accepted");
+
+    assert_eq!(
+        gate.refuse_unknown("Rehome"),
+        IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this router has no request kind named Rehome".to_string(),
+        }
     );
 }
 
 #[test]
-fn a_hello_with_a_wrong_version_and_a_wrong_token_is_refused_for_the_version() {
+fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
     let mut gate = RouterHandshake::new(token());
-    let other_version = ROUTER_PROTOCOL_VERSION + 1;
+    let above = ROUTER_PROTOCOL_VERSION + 1;
 
     assert_eq!(
         gate.check(&RouterRequestKind::Hello {
-            protocol_version: other_version,
+            min_protocol_version: above,
+            max_protocol_version: above,
             token: ConnectionToken::new("wrongToken"),
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::UnsupportedVersion,
             message: format!(
-                "the caller speaks control-plane protocol version {other_version}, \
-                 this router speaks {ROUTER_PROTOCOL_VERSION}"
+                "the caller speaks control-plane protocol versions {above} to {above}, \
+                 this router speaks {MIN_ROUTER_PROTOCOL_VERSION} to {ROUTER_PROTOCOL_VERSION}"
             ),
         })
     );
@@ -307,7 +358,8 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
 
     assert_eq!(
         gate.check(&RouterRequestKind::Hello {
-            protocol_version: ROUTER_PROTOCOL_VERSION,
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
             token: ConnectionToken::new("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -353,7 +405,8 @@ fn a_refused_hello_leaves_the_gate_closed() {
     let mut gate = RouterHandshake::new(token());
 
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: ConnectionToken::new("wrongToken"),
     })
     .expect_err("the Hello is refused");
@@ -372,12 +425,14 @@ fn a_good_hello_after_a_refusal_opens_the_gate() {
     let mut gate = RouterHandshake::new(token());
 
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: ConnectionToken::new("wrongToken"),
     })
     .expect_err("the Hello is refused");
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: token(),
     })
     .expect("the Hello is accepted");
@@ -396,12 +451,14 @@ fn a_refused_hello_on_an_open_gate_leaves_it_open() {
     let mut gate = RouterHandshake::new(token());
 
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: token(),
     })
     .expect("the Hello is accepted");
     gate.check(&RouterRequestKind::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
         token: ConnectionToken::new("wrongToken"),
     })
     .expect_err("the Hello is refused");

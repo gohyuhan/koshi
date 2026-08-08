@@ -18,10 +18,11 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
-    PROTOCOL_VERSION,
+    IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResult,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
+use koshi_ipc::wire::{MaybeKnown, WireName};
 use uuid::Uuid;
 
 use crate::error::CliError;
@@ -161,9 +162,12 @@ pub fn fetch_overview(
 /// missing. It is reachable when the tab closes between the caller resolving
 /// it and the session answering.
 ///
-/// A session started by a koshi that predates the layout request calls it
-/// malformed, since its build has no such request to decode into. That
-/// refusal is reported as the version gap it is, naming what to do instead.
+/// A session whose build has no layout request refuses it two ways, and both
+/// are reported as the version gap they are, naming what to do instead. A
+/// session from this build or later names the kind it lacks
+/// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)); one older than the
+/// tolerant wire cannot read the request at all
+/// ([`MalformedRequest`](IpcErrorCode::MalformedRequest)).
 pub fn fetch_layout(
     runtime_dir: &Path,
     session_id: SessionId,
@@ -182,7 +186,12 @@ pub fn fetch_layout(
             }),
             _ => Ok(layout),
         },
-        IpcResult::Error(refusal) if refusal.code == IpcErrorCode::MalformedRequest => {
+        IpcResult::Error(refusal)
+            if matches!(
+                refusal.code,
+                IpcErrorCode::UnsupportedKind | IpcErrorCode::MalformedRequest
+            ) =>
+        {
             Err(CliError::IpcUnavailable {
                 detail: "this session was started by an older koshi that cannot report its \
                          layout; restart the session to use `debug dump-layout`, or run \
@@ -229,23 +238,51 @@ fn exchange(
     let mut connection = connect(endpoint, session_id)?;
     let hello = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            token: endpoint.token.clone(),
-        },
+        kind: IpcRequestKind::hello(endpoint.token.clone()),
     };
     connection.send(&hello).map_err(talk_failed)?;
     connection.send(&request).map_err(talk_failed)?;
 
-    let hello_reply: IpcResponse = connection.recv().map_err(talk_failed)?;
-    match hello_reply.result {
-        IpcResult::Hello => {}
+    let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+    match take_result(hello_reply)? {
+        IpcResult::Hello { protocol_version } => settled_version(protocol_version)?,
         IpcResult::Error(refusal) => return Err(refused(&refusal)),
         other => return Err(unexpected_reply(&other)),
     }
 
-    let reply: IpcResponse = connection.recv().map_err(talk_failed)?;
-    Ok(reply.result)
+    let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+    take_result(reply)
+}
+
+/// Check the version the session settled on against the range this build sent.
+///
+/// The session picks from the range the Hello named. A version outside that
+/// range is not one this koshi offered, so the exchange stops here.
+///
+/// Example — this build asks for 2 to 2 and the reply names 3, so the verb
+/// fails naming both.
+pub(crate) fn settled_version(protocol_version: u32) -> Result<(), CliError> {
+    if (MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&protocol_version) {
+        return Ok(());
+    }
+    Err(CliError::IpcUnavailable {
+        detail: format!(
+            "the session settled on protocol version {protocol_version}, \
+             which is outside the {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION} this koshi asked for"
+        ),
+    })
+}
+
+/// The answer inside a response, or an error when the session named a result
+/// this build does not have.
+///
+/// A result kind this build has no name for is a protocol violation, so the
+/// command fails.
+pub(crate) fn take_result(response: IncomingResponse) -> Result<IpcResult, CliError> {
+    match response.result {
+        MaybeKnown::Known(result) => Ok(result),
+        MaybeKnown::Unknown { name } => Err(unexpected_name(&name)),
+    }
 }
 
 /// Read the endpoint file for `session_id`. A missing file means no running
@@ -301,16 +338,14 @@ pub(crate) fn refused(refusal: &IpcErrorPayload) -> CliError {
 /// The server answered with a result kind the request cannot produce —
 /// a protocol violation, not a command outcome.
 pub(crate) fn unexpected_reply(result: &IpcResult) -> CliError {
-    let kind = match result {
-        IpcResult::Hello => "Hello",
-        IpcResult::Attached { .. } => "Attached",
-        IpcResult::CommandResult(_) => "CommandResult",
-        IpcResult::Overview(_) => "Overview",
-        IpcResult::Layout(_) => "Layout",
-        IpcResult::Error(_) => "Error",
-    };
+    unexpected_name(result.wire_name())
+}
+
+/// The same failure, named by the reply's wire name alone — for a reply this
+/// build has no variant for.
+pub(crate) fn unexpected_name(name: &str) -> CliError {
     CliError::IpcUnavailable {
-        detail: format!("the session answered with an unexpected {kind} reply"),
+        detail: format!("the session answered with an unexpected {name} reply"),
     }
 }
 

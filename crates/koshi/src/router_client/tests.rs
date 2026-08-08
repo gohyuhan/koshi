@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::protocol::ConnectionToken;
-use koshi_ipc::router::{router_socket_addr, RouterHandshake};
+use koshi_ipc::router::{router_socket_addr, RouterHandshake, RouterResponse};
 use koshi_ipc::transport::Listener;
 use tempfile::TempDir;
 
@@ -67,7 +67,9 @@ fn fake_router(runtime_dir: &Path, script: Script) -> JoinHandle<()> {
         let request: RouterRequest = connection.recv().expect("read the request");
 
         let hello_answer = match gate.check(&hello.kind) {
-            Ok(()) => RouterResult::Hello,
+            Ok(()) => RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+            },
             Err(refusal) => RouterResult::Error(refusal),
         };
         connection

@@ -19,7 +19,7 @@ use koshi_ipc::endpoint::{socket_addr, EndpointFile};
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
     router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
-    SessionAddress, SessionSelector, ROUTER_PROTOCOL_VERSION,
+    SessionAddress, SessionSelector, MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
@@ -145,14 +145,15 @@ fn try_router_connect(runtime_dir: &Path) -> Option<Connection> {
     let hello = RouterRequest {
         request_id: 1,
         kind: RouterRequestKind::Hello {
-            protocol_version: ROUTER_PROTOCOL_VERSION,
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
             token: endpoint.token,
         },
     };
     connection.send(&hello).ok()?;
     let reply: RouterResponse = connection.recv().ok()?;
     match reply.result {
-        RouterResult::Hello => Some(connection),
+        RouterResult::Hello { .. } => Some(connection),
         RouterResult::Error(_) => None,
         other => panic!("the Hello was answered with {other:?}"),
     }

@@ -35,7 +35,7 @@ use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::{FrameSlot, PaintedFrame};
 use koshi_ipc::protocol::{
     EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
-    PROTOCOL_VERSION,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pane::pane::state::PaneKind;
@@ -195,13 +195,19 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
         .send(&IpcRequest {
             request_id: 1,
             kind: IpcRequestKind::Hello {
-                protocol_version: PROTOCOL_VERSION,
+                min_protocol_version: MIN_PROTOCOL_VERSION,
+                max_protocol_version: PROTOCOL_VERSION,
                 token: endpoint.token,
             },
         })
         .expect("send hello");
     let reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(reply.result, IpcResult::Hello);
+    assert_eq!(
+        reply.result,
+        IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        }
+    );
     connection
 }
 

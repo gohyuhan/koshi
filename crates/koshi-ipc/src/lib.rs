@@ -26,3 +26,5 @@ pub mod transport;
 pub mod types;
 /// Socket-address trust checks and stale-socket reclaim.
 pub mod validate;
+/// Reading a message whose variant this build may not have.
+pub mod wire;

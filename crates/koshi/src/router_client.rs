@@ -18,10 +18,11 @@ use std::time::{Duration, Instant};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{
-    router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
-    ROUTER_PROTOCOL_VERSION,
+    router_endpoint_path, IncomingRouterResponse, RouterRequest, RouterRequestKind, RouterResult,
+    MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
+use koshi_ipc::wire::{MaybeKnown, WireName};
 
 use crate::error::CliError;
 
@@ -110,10 +111,7 @@ fn exchange(
 
     let hello = RouterRequest {
         request_id: 1,
-        kind: RouterRequestKind::Hello {
-            protocol_version: ROUTER_PROTOCOL_VERSION,
-            token: endpoint.token,
-        },
+        kind: RouterRequestKind::hello(endpoint.token),
     };
     let request = RouterRequest {
         request_id: 2,
@@ -122,9 +120,9 @@ fn exchange(
     connection.send(&hello).map_err(talk_failed)?;
     connection.send(&request).map_err(talk_failed)?;
 
-    let hello_reply: RouterResponse = connection.recv().map_err(talk_failed)?;
-    match hello_reply.result {
-        RouterResult::Hello => {}
+    let hello_reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
+    match take_result(hello_reply)? {
+        RouterResult::Hello { protocol_version } => settled_version(protocol_version)?,
         RouterResult::Error(refusal) => {
             return Err(CliError::IpcUnavailable {
                 detail: refusal.message,
@@ -133,8 +131,34 @@ fn exchange(
         other => return Err(unexpected_reply(&other)),
     }
 
-    let reply: RouterResponse = connection.recv().map_err(talk_failed)?;
-    Ok(Some(reply.result))
+    let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
+    take_result(reply).map(Some)
+}
+
+/// Check the version the router settled on against the range this build sent.
+///
+/// The router picks from the range the Hello named. A version outside that
+/// range is not one this koshi offered, so the exchange stops here.
+fn settled_version(protocol_version: u32) -> Result<(), CliError> {
+    if (MIN_ROUTER_PROTOCOL_VERSION..=ROUTER_PROTOCOL_VERSION).contains(&protocol_version) {
+        return Ok(());
+    }
+    Err(CliError::IpcUnavailable {
+        detail: format!(
+            "the router settled on control-plane protocol version {protocol_version}, which is \
+             outside the {MIN_ROUTER_PROTOCOL_VERSION} to {ROUTER_PROTOCOL_VERSION} this koshi \
+             asked for"
+        ),
+    })
+}
+
+/// The answer inside a control-plane response, or an error when the router
+/// named a result this build does not have.
+fn take_result(response: IncomingRouterResponse) -> Result<RouterResult, CliError> {
+    match response.result {
+        MaybeKnown::Known(result) => Ok(result),
+        MaybeKnown::Unknown { name } => Err(unexpected_name(&name)),
+    }
 }
 
 /// Start the router as a detached process serving `runtime_dir`.
@@ -189,14 +213,13 @@ fn talk_failed(error: IpcError) -> CliError {
 /// The router answered with a result kind the request cannot produce —
 /// a protocol violation, not a control-plane outcome.
 fn unexpected_reply(result: &RouterResult) -> CliError {
-    let kind = match result {
-        RouterResult::Hello => "Hello",
-        RouterResult::Created(_) => "Created",
-        RouterResult::Found(_) => "Found",
-        RouterResult::Sessions(_) => "Sessions",
-        RouterResult::Error(_) => "Error",
-    };
+    unexpected_name(result.wire_name())
+}
+
+/// The same failure, named by the reply's wire name alone — for a reply this
+/// build has no variant for.
+fn unexpected_name(name: &str) -> CliError {
     CliError::IpcUnavailable {
-        detail: format!("the router answered with an unexpected {kind} reply"),
+        detail: format!("the router answered with an unexpected {name} reply"),
     }
 }

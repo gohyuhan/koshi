@@ -16,7 +16,9 @@ use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
-use koshi_ipc::protocol::{EventFilterSpec, WireMouseAction};
+use koshi_ipc::protocol::{
+    EventFilterSpec, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
 
 use crate::runtime::event::AttachAccepted;
 
@@ -148,7 +150,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
         .send(&hello_for(runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -203,9 +205,18 @@ fn hello_for(runtime_dir: &Path, session: SessionId) -> IpcRequest {
     IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token,
         },
+    }
+}
+
+/// The answer an accepted Hello earns: both sides speak this build's version,
+/// so they settle on it.
+fn hello_accepted() -> IpcResult {
+    IpcResult::Hello {
+        protocol_version: PROTOCOL_VERSION,
     }
 }
 
@@ -299,7 +310,7 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.request_id, Some(1));
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     let submit_reply: IpcResponse = connection.recv().expect("submit reply");
     assert_eq!(submit_reply.request_id, Some(2));
@@ -308,6 +319,204 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
         IpcResult::CommandResult(CommandResult::Ok {
             command_id: env.id,
             emitted_events: Vec::new(),
+        }),
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// A newer koshi asking for something this build has no name for is refused by
+/// name, and the caller keeps every other verb on the same connection. Killing
+/// the connection instead would cost a caller its whole CLI surface for one
+/// unfamiliar request.
+#[test]
+fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_serving() {
+    let (server, session, runtime_dir, dispatcher) = serve("unknown-kind", None);
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+
+    // A well-framed request naming a kind added by some later koshi.
+    connection
+        .send(&serde_json::json!({
+            "request_id": 2,
+            "kind": { "Floating": { "pane": "00000000-0000-0000-0000-000000000001" } }
+        }))
+        .expect("send a kind this build does not have");
+
+    let refusal: IpcResponse = connection.recv().expect("refusal reply");
+    assert_eq!(refusal.request_id, Some(2));
+    assert_eq!(
+        refusal.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this Koshi has no request kind named Floating".to_string(),
+        }),
+    );
+
+    // The connection is still open and still serving: the next request is
+    // answered normally.
+    let env = envelope();
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::SubmitCommand(Box::new(env.clone())),
+        })
+        .expect("send a command after the refusal");
+    let after: IpcResponse = connection.recv().expect("command reply");
+    assert_eq!(after.request_id, Some(3));
+    assert_eq!(
+        after.result,
+        IpcResult::CommandResult(CommandResult::Ok {
+            command_id: env.id,
+            emitted_events: Vec::new(),
+        }),
+        "the verb after the refusal was served normally"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// An unfamiliar kind arriving before the Hello is answered the same way any
+/// other kind is: the gate is closed, so the caller learns nothing about which
+/// kinds this build has.
+#[test]
+fn a_kind_this_build_lacks_before_hello_is_refused_as_hello_required() {
+    let (server, session, runtime_dir, dispatcher) = serve("unknown-kind-early", None);
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&serde_json::json!({
+            "request_id": 9,
+            "kind": { "Floating": { "pane": "00000000-0000-0000-0000-000000000001" } }
+        }))
+        .expect("send a kind this build does not have, before the hello");
+
+    let refusal: IpcResponse = connection.recv().expect("refusal reply");
+    assert_eq!(refusal.request_id, Some(9));
+    assert_eq!(
+        refusal.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Floating arrived before a Hello opened the connection".to_string(),
+        }),
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// A caller reaching higher than this build settles on this build's highest,
+/// and the connection serves from there.
+#[test]
+fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
+    let (server, session, runtime_dir, dispatcher) = serve("wider-range", None);
+    let mut connection = connect_to(&runtime_dir, session);
+    let endpoint = EndpointFile::read(&EndpointFile::path(&runtime_dir, session))
+        .expect("endpoint file readable");
+
+    connection
+        .send(&IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Hello {
+                min_protocol_version: MIN_PROTOCOL_VERSION,
+                max_protocol_version: PROTOCOL_VERSION + 5,
+                token: endpoint.token,
+            },
+        })
+        .expect("send a hello reaching above this build");
+
+    let reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(
+        reply.result,
+        IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+        "the answer names the highest version both sides speak"
+    );
+
+    let env = envelope();
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::SubmitCommand(Box::new(env.clone())),
+        })
+        .expect("send a command");
+    let after: IpcResponse = connection.recv().expect("command reply");
+    assert_eq!(
+        after.result,
+        IpcResult::CommandResult(CommandResult::Ok {
+            command_id: env.id,
+            emitted_events: Vec::new(),
+        }),
+        "the gate opened and the connection serves at the settled version"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// A caller whose whole range sits above this build shares no version with it,
+/// so the connection is refused naming both ranges and no verb is served.
+#[test]
+fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
+    let (server, session, runtime_dir, dispatcher) = serve("no-shared-version", None);
+    let mut connection = connect_to(&runtime_dir, session);
+    let endpoint = EndpointFile::read(&EndpointFile::path(&runtime_dir, session))
+        .expect("endpoint file readable");
+    let above = PROTOCOL_VERSION + 1;
+
+    connection
+        .send(&IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Hello {
+                min_protocol_version: above,
+                max_protocol_version: above + 2,
+                token: endpoint.token,
+            },
+        })
+        .expect("send a hello sharing no version");
+
+    let reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(
+        reply.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: format!(
+                "the caller speaks protocol versions {above} to {}, \
+                 this Koshi speaks {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}",
+                above + 2
+            ),
+        }),
+    );
+
+    // The refusal left the gate closed, so the session is untouched.
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Discovery,
+        })
+        .expect("send discovery after the refusal");
+    let after: IpcResponse = connection.recv().expect("second reply");
+    assert_eq!(
+        after.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Discovery arrived before a Hello opened the connection".to_string(),
         }),
     );
 
@@ -343,7 +552,7 @@ fn a_request_before_hello_is_refused_and_the_connection_keeps_serving() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     drop(connection);
     server.shutdown();
@@ -360,7 +569,8 @@ fn a_wrong_token_is_refused_as_bad_token() {
         .send(&IpcRequest {
             request_id: 1,
             kind: IpcRequestKind::Hello {
-                protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+                min_protocol_version: MIN_PROTOCOL_VERSION,
+                max_protocol_version: PROTOCOL_VERSION,
                 token: ConnectionToken::new("not-the-secret"),
             },
         })
@@ -401,7 +611,8 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
     old.send(&IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: first.token,
         },
     })
@@ -420,7 +631,7 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello with the new secret");
     let accepted: IpcResponse = fresh.recv().expect("hello reply");
-    assert_eq!(accepted.result, IpcResult::Hello);
+    assert_eq!(accepted.result, hello_accepted());
 
     drop(old);
     drop(fresh);
@@ -454,7 +665,7 @@ fn a_detach_leaves_the_sessions_token_unchanged() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello with the secret from before the detach");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     drop(connection);
     server.shutdown();
@@ -484,7 +695,7 @@ fn a_malformed_frame_is_answered_and_the_connection_keeps_serving() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     drop(connection);
     server.shutdown();
@@ -678,7 +889,7 @@ fn a_mouse_round_before_an_attach_closes_the_connection() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -718,7 +929,7 @@ fn discovery_answers_with_the_dispatchers_overview() {
         .expect("send discovery");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
     let discovery_reply: IpcResponse = connection.recv().expect("discovery reply");
     let IpcResult::Overview(overview) = discovery_reply.result else {
         panic!("expected an overview, got {:?}", discovery_reply.result);
@@ -740,7 +951,7 @@ fn discovery_with_no_running_session_closes_the_connection() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -777,7 +988,7 @@ fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_
         .expect("send layout request");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
     let layout_reply: IpcResponse = connection.recv().expect("layout reply");
     assert_eq!(layout_reply.request_id, Some(2));
     let IpcResult::Layout(layout) = layout_reply.result else {
@@ -812,7 +1023,7 @@ fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
         .expect("send layout request");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
     let layout_reply: IpcResponse = connection.recv().expect("layout reply");
     let IpcResult::Layout(layout) = layout_reply.result else {
         panic!("expected a layout, got {:?}", layout_reply.result);
@@ -835,7 +1046,7 @@ fn a_layout_request_with_no_running_session_closes_the_connection() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -896,7 +1107,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
         .send(&hello_for(&runtime_dir, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.result, IpcResult::Hello);
+    assert_eq!(hello_reply.result, hello_accepted());
 
     connection
         .send(&IpcRequest {

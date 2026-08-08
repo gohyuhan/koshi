@@ -76,14 +76,15 @@ use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_ipc::error::IpcError;
-use koshi_ipc::event::SessionEvent;
+use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    ConnectionToken, EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
-    WireMouseAction, PROTOCOL_VERSION,
+    ConnectionToken, EventFilterSpec, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, SessionSelector};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
+use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_renderer::snapshot::{CursorStyle, MouseFrame, RenderSnapshot, ViewerChrome};
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -746,7 +747,10 @@ fn lookup(runtime_dir: &Path, selector: &str) -> Result<SessionAddress, CliError
             detail: refusal.message,
         }),
         other => Err(CliError::IpcUnavailable {
-            detail: format!("the router answered an attach lookup with {other:?}"),
+            detail: format!(
+                "the router answered an attach lookup with {}",
+                other.wire_name()
+            ),
         }),
     }
 }
@@ -763,10 +767,7 @@ fn join(
 ) -> Result<(ClientId, SessionId), CliError> {
     let hello = IpcRequest {
         request_id: 1,
-        kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            token: token.clone(),
-        },
+        kind: IpcRequestKind::hello(token.clone()),
     };
     let attach = IpcRequest {
         request_id: 2,
@@ -778,15 +779,15 @@ fn join(
     connection.send(&hello).map_err(ipc_client::talk_failed)?;
     connection.send(&attach).map_err(ipc_client::talk_failed)?;
 
-    let hello_reply: IpcResponse = connection.recv().map_err(ipc_client::talk_failed)?;
-    match hello_reply.result {
-        IpcResult::Hello => {}
+    let hello_reply: IncomingResponse = connection.recv().map_err(ipc_client::talk_failed)?;
+    match ipc_client::take_result(hello_reply)? {
+        IpcResult::Hello { protocol_version } => ipc_client::settled_version(protocol_version)?,
         IpcResult::Error(refusal) => return Err(ipc_client::refused(&refusal)),
         other => return Err(ipc_client::unexpected_reply(&other)),
     }
 
-    let attach_reply: IpcResponse = connection.recv().map_err(ipc_client::talk_failed)?;
-    match attach_reply.result {
+    let attach_reply: IncomingResponse = connection.recv().map_err(ipc_client::talk_failed)?;
+    match ipc_client::take_result(attach_reply)? {
         IpcResult::Attached {
             client_id,
             session_id,
@@ -812,11 +813,22 @@ fn viewport() -> Size {
 /// Read the session's frames on their own thread and put each on the loop's
 /// channel. A failed read is put there too and ends the thread: it is the
 /// frame the loop classifies as a death.
+///
+/// A frame this build has no variant for is dropped here and never reaches the
+/// loop. It comes from a newer session server, and the frames around it still
+/// draw.
 fn spawn_frame_reader(mut reader: FrameReader, incoming_tx: mpsc::Sender<Incoming>) {
     let _ = thread::Builder::new()
         .name("koshi-attach-reader".to_string())
         .spawn(move || loop {
-            let frame = reader.recv::<SessionEvent>();
+            let frame = match reader.recv::<IncomingEvent>() {
+                Ok(MaybeKnown::Known(event)) => Ok(event),
+                Ok(MaybeKnown::Unknown { name }) => {
+                    tracing::debug!(%name, "session frame this build does not have");
+                    continue;
+                }
+                Err(error) => Err(error),
+            };
             let broken = frame.is_err();
             if incoming_tx.send(Incoming::Frame(frame)).is_err() || broken {
                 break;

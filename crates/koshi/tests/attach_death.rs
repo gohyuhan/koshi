@@ -37,7 +37,8 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 #[cfg(unix)]
 use koshi_ipc::router::router_endpoint_path;
@@ -135,14 +136,15 @@ fn try_open(runtime_dir: &Path, session_id: SessionId) -> Option<Connection> {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token,
         },
     };
     connection.send(&hello).ok()?;
     let reply: IpcResponse = connection.recv().ok()?;
     match reply.result {
-        IpcResult::Hello => Some(connection),
+        IpcResult::Hello { .. } => Some(connection),
         other => panic!("the Hello was answered with {other:?}"),
     }
 }

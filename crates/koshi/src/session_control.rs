@@ -7,6 +7,7 @@ use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
+use koshi_ipc::wire::WireName;
 
 use crate::cli::{parse_prefixed_uuid, SessionRef};
 use crate::discovery::{self, Discovered};
@@ -46,7 +47,10 @@ pub(crate) fn request_new_session(
             detail: refusal.message,
         }),
         other => Err(CliError::IpcUnavailable {
-            detail: format!("the router answered a create session with {other:?}"),
+            detail: format!(
+                "the router answered a create session with {}",
+                other.wire_name()
+            ),
         }),
     }
 }

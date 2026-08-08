@@ -11,16 +11,30 @@ use koshi_core::event::Event;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult,
+    IpcResult, PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{
     router_endpoint_path, router_socket_addr, RouterHandshake, RouterRequest, RouterResponse,
-    SessionAddress,
+    SessionAddress, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
 
 use super::*;
+
+/// The answer an accepted session Hello earns.
+fn hello_accepted() -> IpcResult {
+    IpcResult::Hello {
+        protocol_version: PROTOCOL_VERSION,
+    }
+}
+
+/// The answer an accepted router Hello earns.
+fn router_hello_accepted() -> RouterResult {
+    RouterResult::Hello {
+        protocol_version: ROUTER_PROTOCOL_VERSION,
+    }
+}
 
 fn overview(name: &str) -> SessionOverview {
     named(SessionId::new(), name)
@@ -100,7 +114,7 @@ fn serve_kill(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<()> {
             } if presented == &token
         ));
         assert!(matches!(request.kind, IpcRequestKind::Discovery));
-        reply(&mut discovery, hello.request_id, IpcResult::Hello);
+        reply(&mut discovery, hello.request_id, hello_accepted());
         reply(
             &mut discovery,
             request.request_id,
@@ -115,7 +129,7 @@ fn serve_kill(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<()> {
             panic!("expected a submitted command");
         };
         assert_eq!(envelope.command, Command::Quit);
-        reply(&mut kill, hello.request_id, IpcResult::Hello);
+        reply(&mut kill, hello.request_id, hello_accepted());
         reply(
             &mut kill,
             request.request_id,
@@ -157,7 +171,7 @@ fn serve_kill_only(runtime_dir: &Path, session_id: SessionId) -> JoinHandle<()> 
             panic!("expected a submitted command as the first request");
         };
         assert_eq!(envelope.command, Command::Quit);
-        reply(&mut kill, hello.request_id, IpcResult::Hello);
+        reply(&mut kill, hello.request_id, hello_accepted());
         reply(
             &mut kill,
             request.request_id,
@@ -234,7 +248,7 @@ fn serve_router(runtime_dir: &Path, answer: RouterResult) -> Arc<Mutex<RouterLog
 
         let _ = connection.send(&RouterResponse {
             request_id: Some(hello.request_id),
-            result: RouterResult::Hello,
+            result: router_hello_accepted(),
         });
         let _ = connection.send(&RouterResponse {
             request_id: Some(request.request_id),
@@ -340,7 +354,7 @@ fn a_refused_create_reports_the_routers_own_message() {
 #[test]
 fn an_answer_to_another_request_names_what_came_back() {
     let runtime_dir = test_runtime_dir("headless-wrong-answer");
-    let router = serve_router(&runtime_dir, RouterResult::Hello);
+    let router = serve_router(&runtime_dir, router_hello_accepted());
 
     let error = request_new_session(&runtime_dir, None).expect_err("the answer fits no create");
 

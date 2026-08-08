@@ -23,10 +23,9 @@ use serde::{Deserialize, Serialize};
 /// One session's layout: every tab it holds, and where each attached client
 /// is looking.
 ///
-/// Decoding this and every record under it rejects an unknown field, so a
-/// misspelled name is an error.
+/// A field this build does not know is ignored, in this record and every one
+/// under it, so a layout from a newer koshi still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionLayout {
     /// The session's stable id.
     pub id: SessionId,
@@ -42,7 +41,6 @@ pub struct SessionLayout {
 /// One tab: its split tree, and the rectangles each viewing client solved
 /// that tree to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TabLayout {
     /// The tab's stable id.
     pub id: TabId,
@@ -58,7 +56,6 @@ pub struct TabLayout {
 
 /// One client's solve of one tab's tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SolvedTab {
     /// The client this solve belongs to.
     pub client: ClientId,
@@ -81,7 +78,6 @@ pub struct SolvedTab {
 
 /// One pane's place in a solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SolvedPane {
     /// The pane this rectangle places.
     pub id: PaneId,
@@ -91,7 +87,6 @@ pub struct SolvedPane {
 
 /// One attached client's focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ClientFocus {
     /// The client's stable id.
     pub id: ClientId,

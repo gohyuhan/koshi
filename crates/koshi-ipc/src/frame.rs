@@ -23,8 +23,15 @@
 //! [`FrameRow::cells`](crate::frame::FrameRow::cells) expands the runs back
 //! into the same 80 cells.
 //!
-//! Decoding this and every record under it rejects any field the build does not
-//! know, so a misspelled name is an error.
+//! A field this build does not know is ignored, in this record and every one
+//! under it, so a frame from a newer koshi still draws. The four value enums —
+//! [`FrameCursorShape`](crate::frame::FrameCursorShape),
+//! [`FrameRowEnd`](crate::frame::FrameRowEnd),
+//! [`FrameColor`](crate::frame::FrameColor) and
+//! [`FrameUnderline`](crate::frame::FrameUnderline) — fall back to their
+//! plainest value when this build has no name for what arrives. A cell whose
+//! underline arrives as `"Dotted2"` draws with no underline; every other cell
+//! in the frame is unaffected.
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -42,7 +49,6 @@ use serde::{Deserialize, Serialize};
 /// [`session`](Self::session)'s active tab by [`PaneId`]: a slot says *where* a
 /// pane sits, its [`FramePane`] says *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PaintedFrame {
     /// The session being viewed: its identity, its solved active tab, and its
     /// tab list.
@@ -57,7 +63,6 @@ pub struct PaintedFrame {
 /// The session-scoped part of a frame: identity, the solved active tab, and the
 /// entries the tab bar is drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameSession {
     /// The session's stable id.
     pub id: SessionId,
@@ -71,7 +76,6 @@ pub struct FrameSession {
 
 /// The active tab, with its layout already solved into placed pane slots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameTab {
     /// The tab's stable id.
     pub id: TabId,
@@ -101,7 +105,6 @@ pub struct FrameTab {
 /// One tab's entry in the tab bar: enough to draw the tab list without its
 /// layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameTabMeta {
     /// The tab's stable id.
     pub id: TabId,
@@ -125,7 +128,6 @@ pub struct FrameTabMeta {
 /// hidden, or a collapsed stack member — and [`suppressed`](Self::suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameSlot {
     /// The pane this slot places.
     pub pane_id: PaneId,
@@ -147,7 +149,6 @@ pub struct FrameSlot {
 
 /// The viewing client's own state: what this client sees and how it is moded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameClient {
     /// The client's stable id.
     pub id: ClientId,
@@ -170,7 +171,6 @@ pub struct FrameClient {
 /// One pane's content: the cells drawn inside the matching [`FrameSlot`]'s
 /// content rect, plus what a mouse event over this pane is answered from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FramePane {
     /// The pane this content belongs to, matched to a [`FrameSlot`] by id.
     pub id: PaneId,
@@ -215,7 +215,6 @@ pub struct FramePane {
 
 /// The cursor's position within the content area, and how it is drawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameCursor {
     /// The cursor's row within the content area, starting at 0.
     pub row: u16,
@@ -227,14 +226,14 @@ pub struct FrameCursor {
     pub blink: bool,
     /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane
     /// has asked for no shape at all, which leaves the user's own configured
-    /// cursor standing.
+    /// cursor standing. A shape this build has no name for reads as `None`.
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub shape: Option<FrameCursorShape>,
 }
 
 /// A cursor shape a pane asked for with DECSCUSR. Mirrors
 /// `koshi_terminal::state::CursorShape`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum FrameCursorShape {
     /// A box filling the whole cell.
     Block,
@@ -251,7 +250,6 @@ pub enum FrameCursorShape {
 /// entry. A highlight running from mid-way along row 4 to mid-way along row 6
 /// of an 80-column pane arrives as `[(4, 12, 79), (5, 0, 79), (6, 0, 33)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameSelection {
     /// One entry per highlighted row: the row, then the first and last
     /// highlighted column on it. Both columns are inclusive.
@@ -260,7 +258,6 @@ pub struct FrameSelection {
 
 /// Scrollback state the scroll-position indicator is drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameScrollback {
     /// Whether the buffer reached its cap and dropped its oldest lines.
     pub truncated: bool,
@@ -270,7 +267,6 @@ pub struct FrameScrollback {
 
 /// The cells a pane shows this frame, run-length encoded row by row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameWindow {
     /// The width every row expands back to.
     pub cols: u16,
@@ -283,12 +279,17 @@ pub struct FrameWindow {
 
 /// One row of cells, as runs of equal neighbouring cells.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameRow {
     /// The runs, left to right. Their counts sum to the row's width.
     pub runs: Vec<FrameRun>,
-    /// Whether the row ends its logical line or continues onto the next.
-    #[serde(default, skip_serializing_if = "FrameRowEnd::is_hard")]
+    /// Whether the row ends its logical line or continues onto the next. An
+    /// ending this build has no name for reads as
+    /// [`Hard`](FrameRowEnd::Hard).
+    #[serde(
+        default,
+        deserialize_with = "crate::wire::or_default",
+        skip_serializing_if = "FrameRowEnd::is_hard"
+    )]
     pub end: FrameRowEnd,
 }
 
@@ -298,7 +299,6 @@ pub struct FrameRow {
 /// A viewer that cannot tell a wrapped line from an ended one breaks the line
 /// when its text is copied out, so this travels with every row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum FrameRowEnd {
     /// The row ends its logical line: the next row starts a new one.
     #[default]
@@ -359,7 +359,6 @@ impl FrameRow {
 
 /// One run: how many times its cell repeats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameRun {
     /// How many cells this run stands for. Never 0.
     pub count: u16,
@@ -370,7 +369,6 @@ pub struct FrameRun {
 /// A single cell: its character, the rest of its grapheme cluster, its display
 /// width, and its style.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameCell {
     /// The base character occupying the cell.
     pub ch: char,
@@ -389,16 +387,22 @@ pub struct FrameCell {
 
 /// A cell's colors and text attributes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameStyle {
-    /// The foreground color.
-    #[serde(default)]
+    /// The foreground color. A color this build has no name for reads as
+    /// [`Default`](FrameColor::Default).
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub fg: FrameColor,
-    /// The background color.
-    #[serde(default)]
+    /// The background color. A color this build has no name for reads as
+    /// [`Default`](FrameColor::Default).
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub bg: FrameColor,
-    /// The underline color (SGR 58); `None` follows the foreground color.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The underline color (SGR 58); `None` follows the foreground color. A
+    /// color this build has no name for reads as `None`.
+    #[serde(
+        default,
+        deserialize_with = "crate::wire::or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub underline_color: Option<FrameColor>,
     /// The boolean text attributes and the underline style.
     pub attrs: FrameAttrs,
@@ -406,7 +410,6 @@ pub struct FrameStyle {
 
 /// The SGR text attributes of one cell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FrameAttrs {
     /// Bold / increased intensity (SGR 1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -432,14 +435,14 @@ pub struct FrameAttrs {
     /// Overline (SGR 53).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overline: bool,
-    /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms).
-    #[serde(default)]
+    /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms). A style this
+    /// build has no name for reads as [`None`](FrameUnderline::None).
+    #[serde(default, deserialize_with = "crate::wire::or_default")]
     pub underline: FrameUnderline,
 }
 
 /// A foreground or background color. Mirrors `koshi_terminal::style::Color`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub enum FrameColor {
     /// The terminal's configured default color.
     #[default]
@@ -454,7 +457,6 @@ pub enum FrameColor {
 /// values, so a cell draws at most one underline. Mirrors
 /// `koshi_terminal::style::UnderlineStyle`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub enum FrameUnderline {
     /// Not underlined (SGR 24 or `4:0`).
     #[default]

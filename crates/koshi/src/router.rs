@@ -38,12 +38,13 @@ use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
-    router_endpoint_path, router_lock_path, router_socket_addr, RouterHandshake, RouterRequest,
-    RouterRequestKind, RouterResponse, RouterResult, SessionAddress, SessionSelector,
-    SessionServerReady, ROUTER_PROTOCOL_VERSION,
+    router_endpoint_path, router_lock_path, router_socket_addr, IncomingRouterRequest,
+    RouterHandshake, RouterRequestKind, RouterResponse, RouterResult, SessionAddress,
+    SessionSelector, SessionServerReady, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
+use koshi_ipc::wire::MaybeKnown;
 
 use crate::ipc_client;
 use crate::router_client::RUNTIME_DIR_FLAG;
@@ -76,6 +77,11 @@ const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
 /// The flag carrying a `--profile` name to the session server the router
 /// starts, so the session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
+
+/// The Win32 `CREATE_NO_WINDOW` creation flag: the started process gets a
+/// console with no window on screen.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The running sessions, keyed by id. Owned by the dispatcher loop alone.
 type Registry = HashMap<SessionId, SessionEntry>;
@@ -235,7 +241,7 @@ fn serve_connection(
 ) {
     let mut gate = RouterHandshake::new(token);
     loop {
-        let request: RouterRequest = match connection.recv() {
+        let request: IncomingRouterRequest = match connection.recv() {
             Ok(request) => request,
             Err(IpcError::MalformedFrame { .. }) => {
                 // The frame was read whole, so the stream is still aligned;
@@ -261,15 +267,35 @@ fn serve_connection(
         };
 
         let request_id = Some(request.request_id);
-        let response = match gate.check(&request.kind) {
+        // A kind this build does not have comes from a newer koshi. It is
+        // refused by name and the connection keeps serving.
+        let kind = match request.kind {
+            MaybeKnown::Known(kind) => kind,
+            MaybeKnown::Unknown { name } => {
+                let refusal = RouterResponse {
+                    request_id,
+                    result: RouterResult::Error(gate.refuse_unknown(&name)),
+                };
+                if connection.send(&refusal).is_err() {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        let response = match gate.check(&kind) {
             Err(refusal) => RouterResponse {
                 request_id,
                 result: RouterResult::Error(refusal),
             },
-            Ok(()) => match request.kind {
+            Ok(()) => match kind {
                 RouterRequestKind::Hello { .. } => RouterResponse {
                     request_id,
-                    result: RouterResult::Hello,
+                    result: RouterResult::Hello {
+                        protocol_version: gate
+                            .agreed()
+                            .expect("an accepted Hello settles the connection's version"),
+                    },
                 },
                 kind => match ask_dispatcher(events_tx, kind) {
                     Some(result) => RouterResponse { request_id, result },
@@ -550,6 +576,9 @@ fn unregister(runtime_dir: &Path, registry: &mut Registry, id: SessionId) {
 /// Build the command that starts one session server: its identity on the
 /// command line, its output piped back for the ready report, and the
 /// directory its first shell opens in.
+///
+/// On Windows the server runs with the `CREATE_NO_WINDOW` creation flag, so
+/// its console carries no window on screen.
 fn session_server_command(
     runtime_dir: &Path,
     id: SessionId,
@@ -574,6 +603,11 @@ fn session_server_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     Ok(command)
 }
 

@@ -33,8 +33,8 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, WireMouseAction, PROTOCOL_VERSION,
+    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
@@ -172,13 +172,19 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
         .send(&IpcRequest {
             request_id: 1,
             kind: IpcRequestKind::Hello {
-                protocol_version: PROTOCOL_VERSION,
+                min_protocol_version: MIN_PROTOCOL_VERSION,
+                max_protocol_version: PROTOCOL_VERSION,
                 token: endpoint.token,
             },
         })
         .expect("send hello");
     let reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(reply.result, IpcResult::Hello);
+    assert_eq!(
+        reply.result,
+        IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        }
+    );
     connection
 }
 
@@ -407,7 +413,9 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
     let (server, _fake, session_id) = served("strict", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
 
-        // A well-framed request naming one field this build does not know.
+        // A well-framed attach naming one field this build does not know. The
+        // field is ignored, so the attach succeeds — and every fact about the
+        // client it mints comes from the server, never from these bytes.
         viewer
             .send(&serde_json::json!({
                 "request_id": 2,
@@ -421,24 +429,38 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
             }))
             .expect("send an attach carrying an extra field");
 
-        let reply: IpcResponse = viewer.recv().expect("refusal reply");
-        assert_eq!(reply.request_id, None);
-        assert_eq!(
-            reply.result,
-            IpcResult::Error(IpcErrorPayload {
-                code: IpcErrorCode::MalformedRequest,
-                message: "the bytes received are not a request this build can read".to_string(),
-            }),
+        let reply: IpcResponse = viewer.recv().expect("attach reply");
+        assert_eq!(reply.request_id, Some(2));
+        assert!(
+            matches!(reply.result, IpcResult::Attached { .. }),
+            "the attach was answered with {:?}",
+            reply.result
         );
-
-        // The stream is still aligned, and the refused request registered
-        // nothing.
-        assert_eq!(attached_client_count(&mut viewer, 3), 0);
         (vec![viewer], session_id)
     });
 
     let session = server.sessions().get(&session_id).expect("session running");
-    assert_eq!(session.clients.len(), 0);
+    assert_eq!(session.clients.len(), 1, "the attach registered one client");
+    let client = session
+        .clients
+        .list_attached()
+        .next()
+        .expect("the one attached client");
+    assert_eq!(
+        client.origin(),
+        ClientOrigin::Local,
+        "the origin comes from the connection, not the request"
+    );
+    assert_eq!(
+        client.tier(),
+        AuthorityTier::Admin,
+        "the authority is the server's own answer for a local client"
+    );
+    assert_eq!(
+        client.viewport(),
+        Size { cols: 80, rows: 24 },
+        "the viewport is the one field of the attach the server does take"
+    );
 }
 
 #[test]

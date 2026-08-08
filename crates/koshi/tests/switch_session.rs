@@ -37,11 +37,12 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{
     router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
-    SessionAddress, ROUTER_PROTOCOL_VERSION,
+    SessionAddress, MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
@@ -153,14 +154,15 @@ fn try_router_connect(runtime_dir: &Path) -> Option<Connection> {
     let hello = RouterRequest {
         request_id: 1,
         kind: RouterRequestKind::Hello {
-            protocol_version: ROUTER_PROTOCOL_VERSION,
+            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            max_protocol_version: ROUTER_PROTOCOL_VERSION,
             token: endpoint.token,
         },
     };
     connection.send(&hello).ok()?;
     let reply: RouterResponse = connection.recv().ok()?;
     match reply.result {
-        RouterResult::Hello => Some(connection),
+        RouterResult::Hello { .. } => Some(connection),
         RouterResult::Error(_) => None,
         other => panic!("the Hello was answered with {other:?}"),
     }
@@ -213,14 +215,15 @@ fn try_open(runtime_dir: &Path, session_id: SessionId) -> Option<Connection> {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token,
         },
     };
     connection.send(&hello).ok()?;
     let reply: IpcResponse = connection.recv().ok()?;
     match reply.result {
-        IpcResult::Hello => Some(connection),
+        IpcResult::Hello { .. } => Some(connection),
         other => panic!("the Hello was answered with {other:?}"),
     }
 }
