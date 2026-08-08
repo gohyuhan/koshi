@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-koshi-config = { version = "0.2.0-pr.1", path = "../koshi-config" }
-koshi-core = { version = "0.2.0-pr.1", path = "../koshi-core" }
-koshi-observability = { version = "0.2.0-pr.1", path = "../koshi-observability" }
-koshi-renderer = { version = "0.2.0-pr.1", path = "../koshi-renderer" }
+koshi-config = { version = "0.2.0-pr.2", path = "../koshi-config" }
+koshi-core = { version = "0.2.0-pr.2", path = "../koshi-core" }
+koshi-observability = { version = "0.2.0-pr.2", path = "../koshi-observability" }
+koshi-renderer = { version = "0.2.0-pr.2", path = "../koshi-renderer" }
 ratatui = { version = "0.30.2", default-features = false }
 tracing = "0.1.44"
 

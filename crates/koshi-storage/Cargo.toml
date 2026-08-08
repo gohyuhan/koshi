@@ -6,5 +6,5 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
-koshi-core = { version = "0.2.0-pr.1", path = "../koshi-core" }
+koshi-core = { version = "0.2.0-pr.2", path = "../koshi-core" }
 tempfile = "3.27.0"
