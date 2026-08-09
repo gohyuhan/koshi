@@ -199,9 +199,12 @@ fn a_syntax_error_renders_as_one_line_that_render_joins_unchanged() {
 
 #[test]
 fn validate_file_reports_parse_failures_and_clean_files() {
-    let dir = std::env::temp_dir();
-    let good = dir.join("koshi-keymap-test-good.kdl");
-    let bad = dir.join("koshi-keymap-test-bad.kdl");
+    // A directory of this run's own: this crate builds a library and a binary
+    // target, so the whole suite runs this test in two processes at once and a
+    // shared file name is written and deleted by both.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let good = dir.path().join("good.kdl");
+    let bad = dir.path().join("bad.kdl");
     std::fs::write(
         &good,
         "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
@@ -227,7 +230,4 @@ fn validate_file_reports_parse_failures_and_clean_files() {
         }
         ValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
     }
-
-    std::fs::remove_file(&good).expect("cleanup");
-    std::fs::remove_file(&bad).expect("cleanup");
 }

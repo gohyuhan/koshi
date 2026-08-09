@@ -125,6 +125,10 @@ fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
 struct Rejection {
     reason: RejectReason,
     help: Option<String>,
+    /// Cells the donating pane can still give, for a resize refused at a pane
+    /// minimum; `None` for every other rejection. A rejection carrying this is
+    /// the one [`Server::rejected`] leaves unlogged.
+    spare: Option<u16>,
 }
 
 impl Rejection {
@@ -133,12 +137,29 @@ impl Rejection {
         Rejection {
             reason,
             help: Some(help.to_string()),
+            spare: None,
         }
     }
 
     /// A rejection with the given reason and no hint.
     fn bare(reason: RejectReason) -> Self {
-        Rejection { reason, help: None }
+        Rejection {
+            reason,
+            help: None,
+            spare: None,
+        }
+    }
+
+    /// A resize refused at a pane minimum, carrying the `spare` cells the
+    /// donating pane can still give in both the hint and the field.
+    fn min_size(spare: u16) -> Self {
+        Rejection {
+            reason: RejectReason::MinSize,
+            help: Some(format!(
+                "the donating pane has only {spare} spare cells to give"
+            )),
+            spare: Some(spare),
+        }
     }
 }
 
@@ -202,9 +223,22 @@ impl Server {
     /// schedules a repaint, so a mutation shows regardless of which entry
     /// point — key binding, IPC, or plugin — delivered it.
     pub(crate) fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
+        self.dispatch_reporting_spare(envelope).0
+    }
+
+    /// [`dispatch`](Self::dispatch), also handing back the cells the donating
+    /// pane can still give when a resize was refused at a pane minimum.
+    ///
+    /// The second half is `Some` only for that refusal; every other outcome,
+    /// including success, gives `None`. The mouse layer reads it to ask again
+    /// for exactly the cells a border still has room to move.
+    pub(crate) fn dispatch_reporting_spare(
+        &mut self,
+        envelope: CommandEnvelope,
+    ) -> (CommandResult, Option<u16>) {
         let command_id = envelope.id;
         if let Err(rejection) = self.validate(&envelope) {
-            return Self::rejected(command_id, rejection);
+            return (Self::rejected(command_id, rejection), None);
         }
         let outcome = match envelope.command {
             Command::NewPane(args) => {
@@ -256,7 +290,13 @@ impl Server {
         };
         self.render_scheduler
             .invalidate(InvalidationReason::StatusChanged);
-        outcome.unwrap_or_else(|rejection| Self::rejected(command_id, rejection))
+        match outcome {
+            Ok(result) => (result, None),
+            Err(rejection) => {
+                let spare = rejection.spare;
+                (Self::rejected(command_id, rejection), spare)
+            }
+        }
     }
 
     /// Build a rejection for a command with no handler wired yet, keyed back to
@@ -307,14 +347,18 @@ impl Server {
     ///
     /// Every rejection a handler or validation produces is built here, and
     /// logged here at `warn`: the command did not apply, state is untouched,
-    /// and the session carries on.
+    /// and the session carries on. A border move refused at a pane minimum —
+    /// the rejection carrying `spare` — is not logged, since a border stopping
+    /// at the neighbor's floor is the layout working as specified.
     fn rejected(command_id: CommandId, rejection: Rejection) -> CommandResult {
-        tracing::warn!(
-            command_id = %command_id,
-            reason = %rejection.reason,
-            help = rejection.help.as_deref(),
-            "command rejected"
-        );
+        if rejection.spare.is_none() {
+            tracing::warn!(
+                command_id = %command_id,
+                reason = %rejection.reason,
+                help = rejection.help.as_deref(),
+                "command rejected"
+            );
+        }
         CommandResult::Rejected {
             command_id,
             reason: rejection.reason,

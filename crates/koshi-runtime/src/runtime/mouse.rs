@@ -44,14 +44,21 @@ use crate::server::Server;
 impl Server {
     /// Envelope and dispatch a command attributed to `client_id`'s mouse,
     /// returning the runtime's result.
-    fn dispatch_mouse_command(&mut self, client_id: ClientId, command: Command) -> CommandResult {
+    /// Envelope and dispatch a command attributed to `client_id`'s mouse,
+    /// returning the runtime's result and the cells a resize refused at a pane
+    /// minimum can still take.
+    fn dispatch_mouse_command(
+        &mut self,
+        client_id: ClientId,
+        command: Command,
+    ) -> (CommandResult, Option<u16>) {
         let envelope = CommandEnvelope::new(
             CommandId::new(),
             CommandSource::mouse(client_id),
             SystemTime::now(),
             command,
         );
-        self.dispatch(envelope)
+        self.dispatch_reporting_spare(envelope)
     }
 
     /// Dispatch a selection command attributed to `client_id`'s mouse. The
@@ -61,14 +68,44 @@ impl Server {
         let _ = self.dispatch_mouse_command(client_id, Command::Visual(command));
     }
 
-    /// Move `pane`'s `side` border `count` cells, `step` at a time, and report
-    /// how many cells were actually taken.
+    /// Ask for `pane`'s `side` border to move `cells` cells in `step`'s
+    /// direction. `Err` carries the cells the donating pane can still give,
+    /// which is `0` when it is already at its minimum size.
+    fn ask_border_move(
+        &mut self,
+        client_id: ClientId,
+        pane: PaneId,
+        side: Direction,
+        step: i16,
+        cells: u16,
+    ) -> Result<(), u16> {
+        // Clamping to ±i16::MAX keeps the edge-flip's `saturating_neg`
+        // symmetric.
+        let size = (i32::from(step) * i32::from(cells))
+            .clamp(-i32::from(i16::MAX), i32::from(i16::MAX)) as i16;
+        let command = Command::ResizePane(ResizePaneArgs {
+            pane: Some(pane),
+            direction: side,
+            size,
+        });
+        match self.dispatch_mouse_command(client_id, command) {
+            (CommandResult::Ok { .. }, _) => Ok(()),
+            (_, spare) => Err(spare.unwrap_or(0)),
+        }
+    }
+
+    /// Move `pane`'s `side` border `count` cells and report how many were
+    /// actually taken.
     ///
-    /// Each cell goes through the same [`Command::ResizePane`] the resize
-    /// keybinding uses, so a fast drag that jumps several cells fills right up
-    /// to a pane's minimum size. The first refused step is the wall: every
-    /// further step that way fails too, so the walk stops there and the count
-    /// names the cells that really moved.
+    /// The whole distance travels in one [`Command::ResizePane`]. A refusal at
+    /// a pane minimum names the cells the donating pane can still give, and the
+    /// next round asks for exactly those, so a drag fills right up to the
+    /// minimum. The layout re-measures that spare from the freshly solved rects
+    /// on every call, so the rounds keep going until one takes the whole
+    /// remainder or the layout offers nothing.
+    ///
+    /// Each round either takes cells or lowers what the next round asks for, so
+    /// the walk ends and `applied` never passes `count`.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     pub fn drag_resize(
@@ -79,20 +116,21 @@ impl Server {
         step: i16,
         count: u16,
     ) -> u16 {
-        let mut applied = 0;
-        for _ in 0..count {
-            let command = Command::ResizePane(ResizePaneArgs {
-                pane: Some(pane),
-                direction: side,
-                size: step,
-            });
-            if !matches!(
-                self.dispatch_mouse_command(client_id, command),
-                CommandResult::Ok { .. }
-            ) {
-                break;
+        let mut applied: u16 = 0;
+        // What this round asks for: the whole remaining distance, or the cells
+        // the last round was told the donating pane can still give.
+        let mut ask = count;
+        while ask > 0 {
+            match self.ask_border_move(client_id, pane, side, step, ask) {
+                Ok(()) => {
+                    applied = applied.saturating_add(ask);
+                    ask = count.saturating_sub(applied);
+                }
+                // `spare` is what the donating pane has left above its minimum
+                // size, always short of what this round asked for.
+                Err(spare) if spare < ask => ask = spare,
+                Err(_) => break,
             }
-            applied += 1;
         }
         applied
     }

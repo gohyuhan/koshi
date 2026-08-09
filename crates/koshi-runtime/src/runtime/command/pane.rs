@@ -565,8 +565,9 @@ impl Server {
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
     /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
     /// neighbor on the requested side is [`RejectReason::InvalidState`], and
-    /// a donor below its floor is [`RejectReason::MinSize`] with the spare
-    /// cell count in the hint.
+    /// a donor below its floor is [`RejectReason::MinSize`] carrying the spare
+    /// cell count in both the hint and the rejection's own field, which the
+    /// mouse layer reads to ask again for exactly those cells.
     fn resize_rejection(error: &ResizeError) -> Rejection {
         match error {
             ResizeError::PaneNotFound { .. } => Rejection::bare(RejectReason::TargetNotFound),
@@ -574,10 +575,7 @@ impl Server {
                 RejectReason::InvalidState,
                 "pane has no border to move on that axis",
             ),
-            ResizeError::MinSize { spare, .. } => Rejection::new(
-                RejectReason::MinSize,
-                &format!("the donating pane has only {spare} spare cells to give"),
-            ),
+            ResizeError::MinSize { spare, .. } => Rejection::min_size(*spare),
         }
     }
 

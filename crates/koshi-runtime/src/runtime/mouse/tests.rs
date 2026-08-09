@@ -163,6 +163,12 @@ fn far_apart() -> Instant {
 }
 
 fn runtime_with_fake() -> (Server, Arc<FakePtyBackend>, ClientId) {
+    runtime_sized(Size { cols: 80, rows: 24 })
+}
+
+/// [`runtime_with_fake`] on a viewport of `viewport`, for a case that needs
+/// room for more panes than the stock 80 by 24 holds.
+fn runtime_sized(viewport: Size) -> (Server, Arc<FakePtyBackend>, ClientId) {
     let fake = Arc::new(FakePtyBackend::new());
     let (tx, rx) = mpsc::channel();
     let mut runtime = Server::new(
@@ -173,13 +179,32 @@ fn runtime_with_fake() -> (Server, Arc<FakePtyBackend>, ClientId) {
         tx,
     );
     let client = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size { cols: 80, rows: 24 },
-            SystemTime::UNIX_EPOCH,
-        )
+        .bootstrap_local(SessionId::new(), viewport, SystemTime::UNIX_EPOCH)
         .expect("bootstrap");
     (runtime, fake, client)
+}
+
+/// The active tab's panes top to bottom, each with the height the layout
+/// solved for it.
+fn stacked_panes(runtime: &Server, client: ClientId) -> Vec<(PaneId, u16)> {
+    let snapshot = runtime.build_snapshot(client).expect("snapshot");
+    let mut stacked: Vec<(u16, PaneId, u16)> = snapshot
+        .session
+        .active_tab
+        .layout_solved
+        .iter()
+        .map(|slot| (slot.rect.origin.y, slot.pane_id, slot.rect.size.rows))
+        .collect();
+    stacked.sort_unstable();
+    stacked
+        .into_iter()
+        .map(|(_, pane, rows)| (pane, rows))
+        .collect()
+}
+
+/// Just the heights out of [`stacked_panes`].
+fn heights(stacked: &[(PaneId, u16)]) -> Vec<u16> {
+    stacked.iter().map(|&(_, rows)| rows).collect()
 }
 
 /// The client's single bootstrap pane.
@@ -2322,4 +2347,33 @@ fn a_client_with_no_subscription_is_answered_nothing() {
         "the round still ran"
     );
     assert_eq!(answers(&queue), Vec::new(), "and nothing was answered");
+}
+
+#[test]
+fn a_two_cell_drag_moves_the_border_as_far_as_two_one_cell_drags_do() {
+    // Five stacked panes on a 40-row viewport, on the stock 1-row pane
+    // minimum. The donating pane's solved height does not change on the first
+    // of the two cells, so the layout still has a cell to give after that
+    // first one and only the second cell moves the border. Asking once and
+    // retrying once for the spare stops a cell short here; asking again for
+    // each fresh spare does not.
+    let (mut runtime, _fake, client) = runtime_sized(Size { cols: 80, rows: 40 });
+    for _ in 0..4 {
+        split_focused_vertical(&mut runtime, client);
+    }
+    let before = stacked_panes(&runtime, client);
+    assert_eq!(
+        heights(&before),
+        vec![19, 9, 4, 3, 3],
+        "the five panes start at the heights this case needs"
+    );
+
+    let applied = runtime.drag_resize(client, before[3].0, Direction::Up, 1, 2);
+
+    assert_eq!(applied, 2, "both cells of the drag were taken");
+    assert_eq!(
+        heights(&stacked_panes(&runtime, client)),
+        vec![19, 9, 3, 3, 4],
+        "the border landed where two one-cell drags put it"
+    );
 }
