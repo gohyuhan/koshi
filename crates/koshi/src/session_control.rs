@@ -16,11 +16,15 @@ use crate::router_client::router_request;
 
 /// The `koshi --headless` entry point: asks for a session with nothing
 /// attached to it. Forwards to `request_new_session`.
+///
+/// `allow_other_users` is the `--allow-other-users` flag typed beside
+/// `--headless`.
 pub fn request_headless_session(
     runtime_dir: &Path,
     profile: Option<&str>,
+    allow_other_users: Option<bool>,
 ) -> Result<SessionId, CliError> {
-    request_new_session(runtime_dir, profile)
+    request_new_session(runtime_dir, profile, allow_other_users)
 }
 
 /// Ask the router to make a new session and hand back its id. Starts a router
@@ -29,13 +33,19 @@ pub fn request_headless_session(
 /// The session's first shell opens in the directory this command was run in.
 /// A directory that cannot be read is sent as `None`, and the session server
 /// keeps the directory it inherited.
+///
+/// `allow_other_users` `Some(true)` lets the other users of this machine reach
+/// the new session whatever its `koshi.kdl` says; `None` leaves that answer to
+/// the file.
 pub(crate) fn request_new_session(
     runtime_dir: &Path,
     profile: Option<&str>,
+    allow_other_users: Option<bool>,
 ) -> Result<SessionId, CliError> {
     let kind = RouterRequestKind::CreateSession {
         profile: profile.map(str::to_string),
         cwd: std::env::current_dir().ok(),
+        allow_other_users,
     };
     match router_request(runtime_dir, kind)? {
         RouterResult::Created(address) => Ok(address.id),

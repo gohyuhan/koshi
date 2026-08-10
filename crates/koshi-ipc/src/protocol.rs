@@ -6,8 +6,8 @@
 //!
 //! Every connection opens with [`IpcRequestKind::Hello`]. It settles the two
 //! facts that hold for the whole connection — the protocol version both sides
-//! speak, and the [`ConnectionToken`] proving the caller is the user who
-//! started this Koshi — so no later request repeats them.
+//! speak, and the [`ConnectionToken`] the caller presents — so no later
+//! request repeats them.
 //!
 //! This module is the vocabulary only: framing and sockets belong to the
 //! transport layer, and the Hello checks to
@@ -259,7 +259,7 @@ pub enum IpcRequestKind {
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
-    /// lowest first, and `token` read from the endpoint file.
+    /// lowest first, and the `token` the caller presents.
     ///
     /// Every caller builds its Hello here, so the two version fields are
     /// filled in one place.
@@ -390,8 +390,8 @@ pub type IncomingResponse = IpcResponse<MaybeKnown<IpcResult>>;
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcResult {
-    /// Answers [`IpcRequestKind::Hello`]: the connection is open, because the
-    /// ranges overlap and the token matched.
+    /// Answers [`IpcRequestKind::Hello`]: the connection is open, the ranges
+    /// overlap, and the caller met the token rule for where it came from.
     Hello {
         /// The version both sides use on this connection: the highest they
         /// both speak.
@@ -456,6 +456,10 @@ pub enum IpcErrorCode {
     /// A request arrived before [`IpcRequestKind::Hello`] opened the
     /// connection.
     HelloRequired,
+    /// The caller is another user of this machine, and this Koshi serves only
+    /// the user who started it. The message names the `koshi.kdl` setting that
+    /// lets other users in.
+    OtherUsersOff,
     /// A refusal this build has no name for, from a newer koshi. The
     /// [`message`](IpcErrorPayload::message) beside it still reads.
     #[default]

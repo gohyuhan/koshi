@@ -369,6 +369,7 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
         RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         },
         RouterRequestKind::AttachLookup {
             selector: crate::router::SessionSelector::Name("quiet-lake".to_string()),

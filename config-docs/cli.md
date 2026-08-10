@@ -10,10 +10,14 @@ flag and accepted value.
 | `koshi` | Open one session, tab, and shell pane |
 | `koshi --profile <NAME>` | Open `profile/<NAME>.kdl` |
 | `koshi --headless` | Open a session with no terminal attached, print its id, and return to the shell |
+| `koshi --headless --allow-other-users` | Open that session so the other users of this machine may reach it |
 | `koshi update` | Check for and install the latest release |
 
 `--headless` prints `[SESSION ID]: session-<uuid>` and exits. Nothing is drawn.
 Attach to it later with `koshi attach session-<uuid>`.
+
+`--allow-other-users` goes only with `--headless`. The session it starts serves
+the other users of this machine for its whole life, whatever `koshi.kdl` says.
 
 ## Configuration
 

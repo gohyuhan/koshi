@@ -114,6 +114,10 @@ pub enum RouterRequestKind {
         /// here; `None` leaves the session server in the directory it
         /// inherited.
         cwd: Option<PathBuf>,
+        /// `Some(true)` lets the other users of this machine reach the new
+        /// session, whatever that session's `koshi.kdl` says. Any other value
+        /// leaves the answer to the file.
+        allow_other_users: Option<bool>,
     },
     /// Look up a running session's control-socket address, so the caller can
     /// connect to that session directly.

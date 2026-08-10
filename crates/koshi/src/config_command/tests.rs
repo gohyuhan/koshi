@@ -38,6 +38,33 @@ fn explain_answers_for_the_top_level_beta_knob() {
     );
 }
 
+/// The other-users knob is top-level like `theme`, and `explain` answers for it
+/// the same way it answers for every other key the parser accepts.
+#[test]
+fn explain_answers_for_the_top_level_other_users_knob() {
+    let output = explain("koshi.allow-other-users").unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.allow-other-users\nfile: koshi.kdl\ndefault: #false\n\
+         Let other users of this machine reach your sessions.\n"
+    );
+}
+
+/// The shared directory knob is top-level like `theme`, and `explain` answers
+/// for it the same way it answers for every other key the parser accepts.
+#[test]
+fn explain_answers_for_the_top_level_shared_sessions_dir_knob() {
+    let output = explain("koshi.shared-sessions-dir").unwrap();
+
+    assert_eq!(
+        output,
+        "koshi.shared-sessions-dir\nfile: koshi.kdl\n\
+         default: \"/tmp/koshi\", %ProgramData%\\koshi on Windows\n\
+         Directory the shared session sockets live in.\n"
+    );
+}
+
 /// The auto-close knob is top-level like `theme`, and `explain` answers for it
 /// the same way it answers for every other key the parser accepts.
 #[test]

@@ -3,6 +3,7 @@
 //! parsed layer onto the session and the viewer separately.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, ModFlags};
@@ -75,6 +76,74 @@ fn a_later_layer_can_turn_beta_features_back_off() {
     };
 
     assert!(!merge_server(ServerConfig::default(), vec![user, session]).allow_beta_features);
+}
+
+#[test]
+fn a_session_is_reachable_by_its_own_user_only_unless_the_file_opens_it() {
+    // The built-in default, so a machine with no `koshi.kdl` keeps every
+    // session to the user who started it.
+    let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert!(!server.allow_other_users);
+    assert_eq!(server.shared_sessions_dir, None);
+}
+
+#[test]
+fn allow_other_users_folds_onto_the_session_side_only() {
+    let layer = PartialKoshiConfig {
+        allow_other_users: Some(true),
+        ..Default::default()
+    };
+
+    // The session owns the knob, so it is the side that changes.
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    assert!(server.allow_other_users);
+    assert_eq!(
+        server,
+        ServerConfig {
+            allow_other_users: true,
+            ..ServerConfig::default()
+        }
+    );
+
+    // A viewer folds the same file and is untouched by it.
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+    assert_eq!(client, ClientConfig::default());
+}
+
+#[test]
+fn a_later_layer_can_shut_other_users_back_out() {
+    let user = PartialKoshiConfig {
+        allow_other_users: Some(true),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        allow_other_users: Some(false),
+        ..Default::default()
+    };
+
+    assert!(!merge_server(ServerConfig::default(), vec![user, session]).allow_other_users);
+}
+
+#[test]
+fn a_later_layer_wins_on_the_shared_sessions_directory() {
+    let user = PartialKoshiConfig {
+        shared_sessions_dir: Some(Some(PathBuf::from("/var/run/koshi"))),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        shared_sessions_dir: Some(Some(PathBuf::from("/tmp/koshi"))),
+        ..Default::default()
+    };
+
+    let server = merge_server(ServerConfig::default(), vec![user.clone(), session]);
+    assert_eq!(
+        server.shared_sessions_dir,
+        Some(PathBuf::from("/tmp/koshi"))
+    );
+
+    // A viewer folds the same file and is untouched by it.
+    let client = merge_client(ClientConfig::default(), vec![user]);
+    assert_eq!(client, ClientConfig::default());
 }
 
 #[test]

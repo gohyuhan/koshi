@@ -1,8 +1,8 @@
 # `koshi.kdl` — app settings
 
 Main settings for theme, panes, scrollback, layout, mouse, terminal values,
-logging, updates, beta features, and session closing. `version` is required.
-Other settings are optional.
+logging, updates, beta features, session closing, and who else on this machine
+may reach your sessions. `version` is required. Other settings are optional.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
@@ -12,8 +12,8 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `koshi config check` and `migrate` reject them. A bad value in `update` rejects
 the whole app file for that launch.
 
-Settings use blocks. `theme`, `allow-beta-features` and `auto-close-session` are
-top-level.
+Settings use blocks. `theme`, `allow-beta-features`, `allow-other-users`,
+`shared-sessions-dir` and `auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -198,10 +198,64 @@ session whatever this setting says, run `koshi kill-session`.
 |---|---|---|---|
 | `auto-close-session` | boolean — end the session when its last terminal leaves | `#false` | ≥ 0.2.0 |
 
+## `allow-other-users`
+
+Your sessions are yours alone unless you say otherwise: no other user of this
+machine can see them or reach them. Turning this on lets every other user
+logged in to the same machine list your sessions, attach to them, and kill
+them.
+
+Both files have to say so. Your `koshi.kdl` is what opens your sessions to
+other users; their own `koshi.kdl` is what makes their `koshi` look for
+sessions that are not theirs. A user who leaves it off sees only their own
+sessions, whatever your file says.
+
+Turn it on for a machine several people share on purpose — a build box, a lab
+machine, a pair-programming host. Leave it off on a laptop.
+
+The programs inside a session keep running as the user who started the session,
+whoever attaches. Attaching never hands anyone your account; it hands them a
+view of, and typing into, panes that still run as you.
+
+The session reads this, and so does every `koshi` command you type. The session
+reads `koshi.kdl` again for every connection and every request another user
+makes, so turning it off shuts those users out without a restart: a new
+connection is refused, and a terminal already attached is dropped the next time
+it types. Each command reads the file again as it runs, so a listing shows what
+your file says at that moment. Turning it on reaches the sessions you start
+after the change: where a session's socket sits is settled when that session
+starts.
+
+A session started with `koshi --headless --allow-other-users` keeps other users
+for its whole life. That session never reads this key.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `allow-other-users` | boolean — let other users of this machine reach your sessions | `#false` | ≥ 0.3.0 |
+
+## `shared-sessions-dir`
+
+Where the session sockets other users reach are kept. Set it to a directory
+every user who shares the machine can enter, such as `/var/run/koshi`. Leave it
+out and koshi uses the machine-wide directory for the platform: `/tmp/koshi` on
+Linux and macOS, `%ProgramData%\koshi` on Windows.
+
+Every user who shares the machine has to name the same directory. A user whose
+file names a different one looks in that one and finds nobody.
+
+This only says where the sockets go. Nobody else reaches them until
+`allow-other-users` is on.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `shared-sessions-dir` | string — directory the shared session sockets live in | `/tmp/koshi`, `%ProgramData%\koshi` on Windows | ≥ 0.3.0 |
+
 ## Full example
 
-This shows every app setting. Fixed values match defaults. `default-shell` is
-commented because its default comes from `$SHELL` or `%COMSPEC%`.
+This shows every app setting. Fixed values match defaults. `default-shell` and
+`shared-sessions-dir` are commented because they have no fixed default:
+`default-shell` comes from `$SHELL` or `%COMSPEC%`, and the shared sessions
+directory is `/tmp/koshi` on Linux and macOS, `%ProgramData%\koshi` on Windows.
 
 ```kdl
 // koshi.kdl — the complete default configuration.
@@ -209,6 +263,8 @@ version 1
 
 theme "default"
 allow-beta-features #false
+allow-other-users #false
+// shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
 
 pane {

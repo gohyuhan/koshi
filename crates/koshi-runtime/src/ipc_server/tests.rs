@@ -43,6 +43,17 @@ fn cleanup(runtime_dir: &Path) {
     let _ = std::fs::remove_dir_all(runtime_dir);
 }
 
+/// A fresh directory to stand in for the machine-wide shared directory, under
+/// a short base so the Unix socket path stays inside the OS path-length cap.
+/// [`IpcServer::start`] creates it and this user's directory inside it.
+fn test_shared_dir(tag: &str) -> PathBuf {
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    base.join(format!("koshi-shared-{}-{tag}", std::process::id()))
+}
+
 /// A stand-in for the dispatcher thread: drains the inbox, answers every
 /// submitted command with `Ok` echoing its id, and every discovery request
 /// with `overview`. Exits when every inbox sender is gone.
@@ -138,7 +149,7 @@ fn serve_attachable(
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
     let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client_id, session);
-    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
     (server, session, runtime_dir, dispatcher, seen)
 }
 
@@ -184,8 +195,33 @@ fn serve(
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
     let dispatcher = spawn_dispatcher(inbox_rx, overview);
-    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
     (server, session, runtime_dir, dispatcher)
+}
+
+/// A served socket the other local users of this machine may reach, in a fresh
+/// shared directory, with a stand-in dispatcher and the `allow-other-users`
+/// setting reading `still_on`.
+fn serve_shared(
+    tag: &str,
+    still_on: bool,
+) -> (IpcServer, SessionId, PathBuf, PathBuf, JoinHandle<()>) {
+    let runtime_dir = test_runtime_dir(tag);
+    let shared_dir = test_shared_dir(tag);
+    let session = SessionId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_rx, None);
+    let server = IpcServer::start(
+        &runtime_dir,
+        session,
+        inbox_tx,
+        Some(OtherUsers {
+            shared_dir: shared_dir.clone(),
+            still_on: Arc::new(move || still_on),
+        }),
+    )
+    .expect("start serving");
+    (server, session, runtime_dir, shared_dir, dispatcher)
 }
 
 /// A deterministic envelope for submissions.
@@ -262,7 +298,7 @@ fn serve_layout(
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
     let (dispatcher, asked) = spawn_layout_dispatcher(inbox_rx, layout);
-    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
     (server, session, runtime_dir, dispatcher, asked)
 }
 
@@ -600,7 +636,8 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
     let restarted_dispatcher = spawn_dispatcher(inbox_rx, None);
-    let restarted = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving again");
+    let restarted =
+        IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving again");
     let second = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
     assert_ne!(
         second.token, first.token,
@@ -1100,7 +1137,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     let session = SessionId::new();
     let (inbox_tx, inbox_rx) = mpsc::channel();
     drop(inbox_rx);
-    let server = IpcServer::start(&runtime_dir, session, inbox_tx).expect("start serving");
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
     let mut connection = connect_to(&runtime_dir, session);
 
     connection
@@ -1213,7 +1250,7 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
     std::fs::write(&addr, b"").expect("plant a leftover file at the socket path");
 
     let (inbox_tx, _inbox_rx) = mpsc::channel();
-    let server = IpcServer::start(&runtime_dir, session, inbox_tx)
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None)
         .expect("start reclaims the leftover and serves");
 
     server.shutdown();
@@ -1227,7 +1264,7 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
     let (inbox_tx, _inbox_rx) = mpsc::channel();
     assert!(
         matches!(
-            IpcServer::start(&runtime_dir, session, inbox_tx),
+            IpcServer::start(&runtime_dir, session, inbox_tx, None),
             Err(IpcError::SocketBusy { .. }),
         ),
         "the live listener must refuse a second bind",
@@ -1236,4 +1273,414 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
     cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_session_only_its_own_user_may_reach_binds_inside_the_runtime_directory() {
+    let (server, session, runtime_dir, dispatcher) = serve("own-user-socket", None);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let endpoint = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+
+    assert_eq!(endpoint.socket, socket_addr(&runtime_dir, session));
+    assert_eq!(endpoint_path.parent(), Some(runtime_dir.as_path()));
+
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_session_other_local_users_may_reach_keeps_its_endpoint_file_private() {
+    let (server, session, runtime_dir, shared_dir, dispatcher) =
+        serve_shared("shared-endpoint", true);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+
+    assert_eq!(endpoint_path.parent(), Some(runtime_dir.as_path()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = std::fs::metadata(&endpoint_path)
+            .expect("stat endpoint file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+    cleanup(&shared_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_socket_of_a_session_other_local_users_may_reach_is_open_to_every_local_user() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let (server, session, runtime_dir, shared_dir, dispatcher) = serve_shared("shared-mode", true);
+    let endpoint = EndpointFile::read(&EndpointFile::path(&runtime_dir, session))
+        .expect("endpoint file readable");
+
+    // The runtime directory was created by this start, so its owner is the
+    // user whose directory under the shared one holds the socket.
+    let uid = std::fs::metadata(&runtime_dir)
+        .expect("stat runtime dir")
+        .uid();
+    assert_eq!(
+        PathBuf::from(&endpoint.socket),
+        shared_dir
+            .join(uid.to_string())
+            .join(format!("{session}.sock")),
+    );
+    let mode = std::fs::metadata(&endpoint.socket)
+        .expect("stat socket file")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o666);
+
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+    cleanup(&shared_dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_marker_naming_a_shared_session_lives_while_serving_and_goes_at_shutdown() {
+    let (server, session, runtime_dir, shared_dir, dispatcher) =
+        serve_shared("shared-marker", true);
+    let marker = advert_path(&shared_dir, session);
+
+    assert!(marker.exists(), "marker present while serving");
+
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+
+    assert!(!marker.exists(), "marker gone after shutdown");
+    cleanup(&runtime_dir);
+    cleanup(&shared_dir);
+}
+
+#[test]
+fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_token() {
+    let runtime_dir = test_runtime_dir("shared-attach");
+    let shared_dir = test_shared_dir("shared-attach");
+    let session = SessionId::new();
+    let client = ClientId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, _seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let server = IpcServer::start(
+        &runtime_dir,
+        session,
+        inbox_tx,
+        Some(OtherUsers {
+            shared_dir: shared_dir.clone(),
+            still_on: Arc::new(|| true),
+        }),
+    )
+    .expect("start serving");
+
+    let connection = attach_to(&runtime_dir, session, client);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+    cleanup(&shared_dir);
+}
+
+// --- Serving one connection from another local user ---
+
+/// A control-socket address unique to this test: a file path under the short
+/// temporary base on Unix, a pipe name on Windows.
+fn test_addr(tag: &str) -> String {
+    let unique = format!("koshi-peer-{}-{tag}", std::process::id());
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp")
+            .join(unique)
+            .with_extension("sock")
+            .display()
+            .to_string()
+    }
+    #[cfg(windows)]
+    {
+        unique
+    }
+}
+
+/// Serve one connection from another local user of this machine, with
+/// `still_on` standing in for the `allow-other-users` setting the serving loop
+/// reads. Hands back the caller's end, the serving thread and the address, so
+/// a test can flip the setting under a live connection.
+///
+/// The user who started a session is served whatever the setting says, so
+/// there is no such connection to cut and only this peer carries the live
+/// read.
+fn serve_other_user(
+    tag: &str,
+    still_on: &Arc<AtomicBool>,
+    inbox_tx: Sender<RuntimeEvent>,
+) -> (Connection, JoinHandle<()>, String) {
+    let addr = test_addr(tag);
+    remove_socket_file(&addr);
+    let listener = Listener::bind(&addr).expect("bind");
+    let setting = Arc::clone(still_on);
+    let serving = std::thread::spawn(move || {
+        let connection = listener.accept().expect("accept");
+        serve_connection(
+            connection,
+            ConnectionToken::generate(),
+            &inbox_tx,
+            Peer::Local {
+                same_user: false,
+                other_users_allowed: true,
+            },
+            Some(Arc::new(move || setting.load(Ordering::SeqCst))),
+        );
+    });
+    let caller = Connection::connect(&addr).expect("connect");
+    (caller, serving, addr)
+}
+
+/// The Hello another local user sends: this build's range and no token, which
+/// is all a user who cannot read the endpoint file has to present.
+fn other_user_hello() -> IpcRequest {
+    IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Hello {
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
+            token: ConnectionToken::new(""),
+        },
+    }
+}
+
+#[test]
+fn another_local_user_keeps_being_served_while_the_setting_stays_on() {
+    let still_on = Arc::new(AtomicBool::new(true));
+    let overview = overview_named("shared-session");
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_rx, Some(overview.clone()));
+    let (mut caller, serving, addr) = serve_other_user("stays-on", &still_on, inbox_tx);
+
+    caller.send(&other_user_hello()).expect("send hello");
+    let reply: IpcResponse = caller.recv().expect("hello reply");
+    assert_eq!(reply.result, hello_accepted());
+
+    for request_id in [2, 3] {
+        caller
+            .send(&IpcRequest {
+                request_id,
+                kind: IpcRequestKind::Discovery,
+            })
+            .expect("send discovery");
+        let reply: IpcResponse = caller.recv().expect("discovery reply");
+        assert_eq!(
+            reply,
+            IpcResponse {
+                request_id: Some(request_id),
+                result: IpcResult::Overview(overview.clone()),
+            }
+        );
+    }
+
+    drop(caller);
+    serving.join().expect("serving thread");
+    dispatcher.join().expect("dispatcher exits");
+    remove_socket_file(&addr);
+}
+
+#[test]
+fn another_local_users_connection_is_cut_when_the_setting_goes_off() {
+    let still_on = Arc::new(AtomicBool::new(true));
+    let overview = overview_named("shared-session");
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_rx, Some(overview.clone()));
+    let (mut caller, serving, addr) = serve_other_user("goes-off", &still_on, inbox_tx);
+
+    caller.send(&other_user_hello()).expect("send hello");
+    let reply: IpcResponse = caller.recv().expect("hello reply");
+    assert_eq!(reply.result, hello_accepted());
+    caller
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Discovery,
+        })
+        .expect("send discovery");
+    let reply: IpcResponse = caller.recv().expect("discovery reply");
+    assert_eq!(
+        reply,
+        IpcResponse {
+            request_id: Some(2),
+            result: IpcResult::Overview(overview),
+        }
+    );
+
+    // The serving loop is blocked reading, so the setting turns off between
+    // one request and the next.
+    still_on.store(false, Ordering::SeqCst);
+    caller
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::Discovery,
+        })
+        .expect("send discovery");
+
+    assert!(
+        matches!(caller.recv::<IpcResponse>(), Err(IpcError::Disconnected)),
+        "the request is answered with a closed connection, not an overview",
+    );
+
+    drop(caller);
+    serving.join().expect("serving thread");
+    dispatcher.join().expect("dispatcher exits");
+    remove_socket_file(&addr);
+}
+
+#[test]
+fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_off() {
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let still_on = Arc::new(AtomicBool::new(true));
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let (mut caller, serving, addr) = serve_other_user("attached-off", &still_on, inbox_tx);
+
+    caller.send(&other_user_hello()).expect("send hello");
+    let reply: IpcResponse = caller.recv().expect("hello reply");
+    assert_eq!(reply.result, hello_accepted());
+    caller
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Attach {
+                viewport: VIEWPORT,
+                filter: EventFilterSpec::All,
+            },
+        })
+        .expect("send attach");
+    let reply: IpcResponse = caller.recv().expect("attach reply");
+    assert_eq!(
+        reply.result,
+        IpcResult::Attached {
+            client_id: client,
+            session_id: session,
+            structure: attached_structure(session),
+        }
+    );
+
+    let pressed = KeyChord::new(ModFlags::NONE, Key::Char('k'));
+    caller
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::KeyPress { chord: pressed },
+        })
+        .expect("send key press");
+    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    else {
+        panic!("expected ClientKeyPress");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(chord, pressed);
+
+    still_on.store(false, Ordering::SeqCst);
+    caller
+        .send(&IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::KeyPress { chord: pressed },
+        })
+        .expect("send key press");
+
+    // The typing that arrived after the setting went off never reached the
+    // session; the client left instead.
+    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(
+        caller.recv::<SessionEvent>().expect("goodbye frame"),
+        SessionEvent::Detached,
+    );
+
+    drop(caller);
+    serving.join().expect("serving thread");
+    dispatcher.join().expect("dispatcher exits");
+    remove_socket_file(&addr);
+}
+
+#[test]
+fn the_directory_other_local_users_reach_holds_only_the_socket() {
+    let (server, session, runtime_dir, shared_dir, dispatcher) = serve_shared("shared-only", true);
+    #[cfg(unix)]
+    let user_dir = {
+        use std::os::unix::fs::MetadataExt;
+
+        let uid = std::fs::metadata(&runtime_dir)
+            .expect("stat runtime dir")
+            .uid();
+        shared_dir.join(uid.to_string())
+    };
+    // Pipe names share one machine-wide namespace, so Windows advertises in
+    // the shared directory itself.
+    #[cfg(windows)]
+    let user_dir = shared_dir.clone();
+
+    let mut entries: Vec<String> = std::fs::read_dir(&user_dir)
+        .expect("read the shared directory")
+        .map(|entry| {
+            entry
+                .expect("read an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    entries.sort();
+
+    // The endpoint file carrying the token is not among them: it stayed in the
+    // private runtime directory the socket left.
+    #[cfg(unix)]
+    assert_eq!(entries, vec![format!("{session}.sock")]);
+    #[cfg(windows)]
+    assert_eq!(entries, vec![session.to_string()]);
+
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+    cleanup(&shared_dir);
+}
+
+#[test]
+fn admit_gates_the_starting_user_always_and_the_other_users_by_the_setting() {
+    assert_eq!(
+        admit(true, false),
+        Peer::Local {
+            same_user: true,
+            other_users_allowed: false,
+        },
+    );
+    assert_eq!(
+        admit(true, true),
+        Peer::Local {
+            same_user: true,
+            other_users_allowed: true,
+        },
+    );
+    assert_eq!(
+        admit(false, false),
+        Peer::Local {
+            same_user: false,
+            other_users_allowed: false,
+        },
+    );
+    assert_eq!(
+        admit(false, true),
+        Peer::Local {
+            same_user: false,
+            other_users_allowed: true,
+        },
+    );
 }

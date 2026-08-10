@@ -25,6 +25,7 @@
 //! of migration, not a per-file override, so it has no partial field here.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use koshi_core::geometry::Direction;
 use koshi_core::key::KeyChord;
@@ -175,6 +176,12 @@ pub struct PartialKoshiConfig {
     pub update: Option<PartialUpdateConfig>,
     /// Beta-feature gate override.
     pub allow_beta_features: Option<bool>,
+    /// Other-users gate override.
+    pub allow_other_users: Option<bool>,
+    /// Shared sessions directory override. The outer `Option` is whether this
+    /// layer sets the field; the inner `Option` is the value (`None` = the
+    /// platform's machine-wide directory).
+    pub shared_sessions_dir: Option<Option<PathBuf>>,
     /// Auto-close override.
     pub auto_close_session: Option<bool>,
 }
@@ -196,6 +203,8 @@ impl PartialKoshiConfig {
             logging.apply(&mut config.logging);
         }
         merge_field(&mut config.allow_beta_features, self.allow_beta_features);
+        merge_field(&mut config.allow_other_users, self.allow_other_users);
+        merge_field(&mut config.shared_sessions_dir, self.shared_sessions_dir);
         merge_field(&mut config.auto_close_session, self.auto_close_session);
     }
 

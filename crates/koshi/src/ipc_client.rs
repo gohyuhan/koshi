@@ -6,6 +6,10 @@
 //! same-user proof the Hello presents. The Hello and the command are written
 //! back to back before either reply is read, so a submission costs one round
 //! trip.
+//!
+//! A session another local user started advertises no endpoint file here. It
+//! is found by name in the machine-wide shared directory instead, and reached
+//! with an empty token, because that session asks another user for none.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -14,12 +18,12 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{CommandId, SessionId, TabId};
-use koshi_ipc::endpoint::EndpointFile;
+use koshi_ipc::endpoint::{shared_socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResult,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    ConnectionToken, IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind,
+    IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_ipc::wire::{MaybeKnown, WireName};
@@ -140,12 +144,29 @@ pub fn fetch_overview(
     runtime_dir: &Path,
     session_id: SessionId,
 ) -> Result<SessionOverview, CliError> {
-    let endpoint = read_endpoint(runtime_dir, session_id)?;
+    overview_of(&read_endpoint(runtime_dir, session_id)?, session_id)
+}
+
+/// Ask the session `session_id` listening at `socket` to describe itself, as
+/// a session another local user started: the address is the one the shared
+/// directory advertised, and the token presented is empty.
+pub fn fetch_foreign_overview(
+    session_id: SessionId,
+    socket: &str,
+) -> Result<SessionOverview, CliError> {
+    overview_of(&foreign_endpoint(socket.to_string()), session_id)
+}
+
+/// One Discovery exchange over `endpoint`, for the session `session_id`.
+fn overview_of(
+    endpoint: &EndpointFile,
+    session_id: SessionId,
+) -> Result<SessionOverview, CliError> {
     let request = IpcRequest {
         request_id: 2,
         kind: IpcRequestKind::Discovery,
     };
-    match exchange(&endpoint, session_id, request)? {
+    match exchange(endpoint, session_id, request)? {
         IpcResult::Overview(overview) => Ok(overview),
         IpcResult::Error(refusal) => Err(refused(&refusal)),
         other => Err(unexpected_reply(&other)),
@@ -214,16 +235,104 @@ pub fn advertised_sessions(runtime_dir: &Path) -> Vec<SessionId> {
     };
     entries
         .filter_map(Result::ok)
+        .filter_map(|entry| session_id_of(entry.file_name().to_str()?, ".json"))
+        .collect()
+}
+
+/// The session a file named `session-<uuid>` plus `suffix` names. Any other
+/// name is `None`.
+fn session_id_of(name: &str, suffix: &str) -> Option<SessionId> {
+    let bare = name.strip_suffix(suffix)?.strip_prefix("session-")?;
+    Some(SessionId::from_uuid(Uuid::parse_str(bare).ok()?))
+}
+
+/// The machine-wide directory holding the sessions other local users started,
+/// or `None` while `allow-other-users` is off in `koshi.kdl` or the machine
+/// reports no such directory.
+///
+/// `koshi.kdl` is read again on each call, so the answer is the one the file
+/// holds at this moment.
+#[must_use]
+pub fn shared_base() -> Option<PathBuf> {
+    let server = crate::config::server_config_now();
+    if !server.allow_other_users {
+        return None;
+    }
+    server
+        .shared_sessions_dir
+        .or_else(koshi_paths::shared_sessions_dir)
+}
+
+/// Every session another local user started that `shared_base` advertises, as
+/// its id and the control-socket address reaching it, in no particular order.
+///
+/// This user's own sessions are left out, so a caller never asks its own
+/// session for the empty token that session refuses. On Unix each user's
+/// sockets sit in a subdirectory named after that user's id, and the one
+/// named after the user owning `runtime_dir` is skipped. On Windows the
+/// markers share one flat directory and name no user, so an id `runtime_dir`
+/// also advertises is this user's own and is dropped.
+///
+/// A session is counted by its file name alone; whether anything still
+/// listens behind it is the caller's probe to make. An unreadable directory
+/// reads as no sessions.
+#[must_use]
+pub fn foreign_sessions(shared_base: &Path, runtime_dir: &Path) -> Vec<(SessionId, String)> {
+    let Ok(entries) = std::fs::read_dir(shared_base) else {
+        return Vec::new();
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let own = std::fs::metadata(runtime_dir)
+            .map(|dir| dir.uid().to_string())
+            .ok();
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| Some(entry.file_name().to_string_lossy().into_owned()) != own)
+            .flat_map(|entry| sockets_in(&entry.path()))
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        let own = advertised_sessions(runtime_dir);
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let id = session_id_of(entry.file_name().to_str()?, "")?;
+                (!own.contains(&id)).then(|| (id, shared_socket_addr(shared_base, id)))
+            })
+            .collect()
+    }
+}
+
+/// The sessions one user's subdirectory of the shared directory advertises,
+/// each as its id and the socket file reaching it. An unreadable
+/// subdirectory reads as no sessions.
+#[cfg(unix)]
+fn sockets_in(user_dir: &Path) -> Vec<(SessionId, String)> {
+    let Ok(entries) = std::fs::read_dir(user_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
         .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            let stem = name.strip_suffix(".json")?;
-            let uuid = stem
-                .strip_prefix("session-")
-                .and_then(|bare| Uuid::parse_str(bare).ok())?;
-            Some(SessionId::from_uuid(uuid))
+            let id = session_id_of(entry.file_name().to_str()?, ".sock")?;
+            Some((id, shared_socket_addr(user_dir, id)))
         })
         .collect()
+}
+
+/// How to reach the session another local user started at `socket`: the
+/// address the shared directory advertised, and the empty token that session
+/// asks another user for. That user's own endpoint file stays unread.
+fn foreign_endpoint(socket: String) -> EndpointFile {
+    EndpointFile {
+        socket,
+        token: ConnectionToken::new(""),
+        pid: 0,
+    }
 }
 
 /// Connect to `endpoint`, pipeline the Hello and `request` back to back, and
@@ -285,21 +394,34 @@ pub(crate) fn take_result(response: IncomingResponse) -> Result<IpcResult, CliEr
     }
 }
 
-/// Read the endpoint file for `session_id`. A missing file means no running
-/// koshi advertises that session.
+/// How to reach `session_id`: the endpoint file in `runtime_dir`, or — for a
+/// session another local user started — what the shared directory advertises
+/// for it.
+///
+/// A session another local user started writes its endpoint file into that
+/// user's own runtime directory, which this user may not read and does not
+/// need: the shared directory names the socket, and the token presented is
+/// empty. An id neither place holds means no running koshi advertises that
+/// session.
 pub(crate) fn read_endpoint(
     runtime_dir: &Path,
     session_id: SessionId,
 ) -> Result<EndpointFile, CliError> {
     let path = EndpointFile::path(runtime_dir, session_id);
-    EndpointFile::read(&path).map_err(|error| match error {
-        IpcError::EndpointFileMissing { .. } => CliError::SessionNotFound {
-            session: session_id.to_string(),
-        },
-        other => CliError::IpcUnavailable {
+    match EndpointFile::read(&path) {
+        Ok(endpoint) => Ok(endpoint),
+        Err(IpcError::EndpointFileMissing { .. }) => shared_base()
+            .into_iter()
+            .flat_map(|base| foreign_sessions(&base, runtime_dir))
+            .find(|(id, _)| *id == session_id)
+            .map(|(_, socket)| foreign_endpoint(socket))
+            .ok_or_else(|| CliError::SessionNotFound {
+                session: session_id.to_string(),
+            }),
+        Err(other) => Err(CliError::IpcUnavailable {
             detail: other.to_string(),
-        },
-    })
+        }),
+    }
 }
 
 /// Connect to the advertised socket. An address nothing listens on is a

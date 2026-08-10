@@ -44,6 +44,11 @@ pub struct Cli {
     #[arg(long)]
     pub headless: bool,
 
+    /// Let the other users of this machine reach the session this command
+    /// creates, whatever `koshi.kdl` says. Only with `--headless`.
+    #[arg(long, requires = "headless")]
+    pub allow_other_users: bool,
+
     /// Launch with a named profile: read `profile/<name>.kdl` from the config
     /// directory and open its tabs and panes instead of a single shell.
     #[arg(long, value_name = "NAME")]
@@ -471,6 +476,10 @@ pub enum CliCommand {
         /// Open this profile's tabs and panes instead of one shell.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Let the other users of this machine reach this session, whatever
+        /// `koshi.kdl` says.
+        #[arg(long)]
+        allow_other_users: bool,
     },
 }
 

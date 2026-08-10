@@ -1,7 +1,7 @@
 //! Tests for the endpoint file: the per-session path shape, the write/read
 //! roundtrip through the atomic writer, redaction in `Debug`, the private
 //! mode of a fresh file, and the missing / unreadable / unwritable failure
-//! cases.
+//! cases. Also the address helpers and the empty advert marker.
 
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -25,6 +25,71 @@ fn the_path_is_session_uuid_json_directly_inside_the_runtime_dir() {
         EndpointFile::path(Path::new("/run/koshi"), session),
         Path::new("/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.json")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shared_socket_addr_is_session_uuid_sock_inside_the_shared_user_dir() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        shared_socket_addr(Path::new("/tmp/koshi/501"), session),
+        "/tmp/koshi/501/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.sock"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_shared_socket_addr_is_the_same_koshi_namespaced_pipe_name() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        shared_socket_addr(Path::new(r"C:\unused"), session),
+        "koshi-session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    );
+    assert_eq!(
+        shared_socket_addr(Path::new(r"C:\unused"), session),
+        socket_addr(Path::new(r"C:\other"), session)
+    );
+}
+
+#[test]
+fn the_advert_path_is_session_uuid_directly_inside_the_shared_dir() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        advert_path(Path::new("/run/koshi"), session),
+        Path::new("/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
+    );
+}
+
+/// The marker only has to exist; carrying no bytes is what keeps a secret
+/// out of a file every local user can read.
+#[test]
+fn a_written_advert_marker_is_an_empty_file() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = advert_path(dir.path(), SessionId::new());
+
+    write_advert(&path).expect("write advert marker");
+
+    assert_eq!(
+        std::fs::metadata(&path).expect("stat advert marker").len(),
+        0
+    );
+}
+
+#[test]
+fn removing_the_advert_marker_takes_it_off_the_disk() {
+    let dir = TempDir::new().expect("create temp dir");
+    let path = advert_path(dir.path(), SessionId::new());
+    write_advert(&path).expect("write advert marker");
+
+    remove_advert(&path);
+
+    assert!(!path.exists());
+    // A path with nothing at it is left alone rather than reported.
+    remove_advert(&path);
+    assert!(!path.exists());
 }
 
 #[test]

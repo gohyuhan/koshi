@@ -75,9 +75,10 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             kind: RouterRequestKind::CreateSession {
                 profile: None,
                 cwd: None,
+                allow_other_users: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null}}}"#
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":null}}}"#
     );
     assert_eq!(
         encode(&RouterRequest {
@@ -85,9 +86,10 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             kind: RouterRequestKind::CreateSession {
                 profile: Some("dev".to_string()),
                 cwd: None,
+                allow_other_users: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":null}}}"#
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":null,"allow_other_users":null}}}"#
     );
     assert_eq!(
         encode(&RouterRequest {
@@ -95,9 +97,21 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             kind: RouterRequestKind::CreateSession {
                 profile: Some("dev".to_string()),
                 cwd: Some(PathBuf::from("/home/dev/api")),
+                allow_other_users: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":"/home/dev/api"}}}"#
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":"/home/dev/api","allow_other_users":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+                allow_other_users: Some(true),
+            },
+        }),
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":true}}}"#
     );
     assert_eq!(
         encode(&RouterRequest {
@@ -188,6 +202,7 @@ fn every_request_kind_names_itself_without_its_payload() {
         RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         }
         .name(),
         "CreateSession"
@@ -212,6 +227,49 @@ fn a_request_carrying_an_unknown_field_is_refused() {
             .expect_err("an unknown field is not this version's shape")
             .to_string(),
         "unknown field `junk`, expected `request_id` or `kind` at line 1 column 44"
+    );
+}
+
+#[test]
+fn a_create_session_carrying_the_other_users_answer_decodes() {
+    let decoded: RouterRequest = serde_json::from_str(
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":true}}}"#,
+    )
+    .expect("a create naming the other-users answer is this version's shape");
+
+    assert_eq!(
+        decoded,
+        RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+                allow_other_users: Some(true),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
+    // What a build that asked for a session before this field existed looks
+    // like here. It reads as "no answer given", which leaves the session's own
+    // `koshi.kdl` to decide, so such a caller keeps the reachability it had.
+    let decoded: RouterRequest = serde_json::from_str(
+        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null}}}"#,
+    )
+    .expect("a create naming no other-users answer still reads");
+
+    assert_eq!(
+        decoded,
+        RouterRequest {
+            request_id: 2,
+            kind: RouterRequestKind::CreateSession {
+                profile: None,
+                cwd: None,
+                allow_other_users: None,
+            },
+        }
     );
 }
 
@@ -261,6 +319,7 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
         gate.check(&RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         }),
         Ok(())
     );
@@ -377,6 +436,7 @@ fn a_request_before_any_hello_is_refused_as_hello_required() {
         gate.check(&RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         }),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
@@ -441,6 +501,7 @@ fn a_good_hello_after_a_refusal_opens_the_gate() {
         gate.check(&RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         }),
         Ok(())
     );
@@ -467,6 +528,7 @@ fn a_refused_hello_on_an_open_gate_leaves_it_open() {
         gate.check(&RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         }),
         Ok(())
     );

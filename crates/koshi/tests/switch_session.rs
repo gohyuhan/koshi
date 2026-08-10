@@ -175,6 +175,7 @@ fn create_session(connection: &mut Connection, request_id: u64) -> SessionAddres
         kind: RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         },
     };
     connection

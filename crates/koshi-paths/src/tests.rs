@@ -1,8 +1,9 @@
 //! Tests for the path resolvers: each resolver routes to its own per-platform
 //! location, the runtime fallback chain, that `KOSHI_*` environment variables
-//! are ignored, and the ensure helpers. Every test that touches the process
-//! environment holds `ENV_LOCK` and restores the prior values on drop, so tests
-//! stay correct under the parallel test runner.
+//! are ignored, the ensure helpers, and the modes the machine-wide shared
+//! directories carry. Every test that touches the process environment holds
+//! `ENV_LOCK` and restores the prior values on drop, so tests stay correct
+//! under the parallel test runner.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -36,7 +37,9 @@ impl EnvGuard {
         std::env::set_var(var, value);
     }
 
-    #[allow(dead_code)] // used only on Linux (XDG), where the runtime test unsets it
+    // Used only where a test clears a variable: Linux (`XDG_RUNTIME_DIR`) and
+    // Windows (`ProgramData`).
+    #[allow(dead_code)]
     fn unset(&mut self, var: &'static str) {
         self.save(var);
         std::env::remove_var(var);
@@ -235,5 +238,230 @@ fn ensure_private_dir_repairs_a_pre_existing_wide_open_directory() {
         mode & 0o777,
         0o700,
         "a pre-existing 0755 dir must be tightened to 0700, not left as-is"
+    );
+}
+
+// --- The machine-wide shared directory ---
+
+/// The permission bits of `path` itself, without following a link and without
+/// the file-type bits. The sticky bit is inside the range this reads.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+/// Create `path` as a directory carrying exactly `mode`, standing in for a
+/// directory an earlier run or another user left behind.
+#[cfg(unix)]
+fn plant_dir(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(path).expect("plant the directory");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("plant the mode");
+}
+
+/// This process's effective user id, which names its directory under the
+/// shared one.
+#[cfg(unix)]
+fn euid() -> u32 {
+    // SAFETY: `geteuid` reads this process's own identity, takes no argument,
+    // and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shared_directory_is_the_machine_wide_tmp_location() {
+    assert_eq!(shared_sessions_dir(), Some(PathBuf::from("/tmp/koshi")));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_shared_directory_is_koshi_under_program_data() {
+    let mut env = EnvGuard::new();
+    env.set("ProgramData", r"C:\TestProgramData");
+
+    assert_eq!(
+        shared_sessions_dir(),
+        Some(PathBuf::from(r"C:\TestProgramData\koshi"))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_machine_reporting_no_program_data_has_no_shared_directory() {
+    let mut env = EnvGuard::new();
+    env.unset("ProgramData");
+
+    assert_eq!(shared_sessions_dir(), None);
+}
+
+#[test]
+fn ensure_shared_base_creates_it_and_accepts_it_again() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+
+    ensure_shared_base(&base).expect("first create");
+    ensure_shared_base(&base).expect("existing dir is success");
+
+    assert!(base.is_dir());
+    // Every local user may create an entry, and the sticky bit leaves each
+    // entry removable only by the user who made it.
+    #[cfg(unix)]
+    assert_eq!(mode_of(&base), 0o1777);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_base_repairs_a_directory_left_without_the_sticky_bit() {
+    // Mode 0777 without the sticky bit lets any local user delete another
+    // user's socket, so the mode is set rather than accepted as it stands.
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    plant_dir(&base, 0o777);
+
+    ensure_shared_base(&base).expect("repair");
+
+    assert_eq!(mode_of(&base), 0o1777);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_base_refuses_a_symbolic_link_planted_in_its_place() {
+    // The link points at a directory that passes every other check, which is
+    // the squat this refuses: the target can be moved afterwards.
+    let root = tempfile::tempdir().expect("tempdir");
+    let target = root.path().join("target");
+    plant_dir(&target, 0o1777);
+    let base = root.path().join("koshi");
+    std::os::unix::fs::symlink(&target, &base).expect("plant the link");
+
+    let error = ensure_shared_base(&base).expect_err("a link is not a directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not a directory", base.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_base_refuses_a_regular_file_planted_in_its_place() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    std::fs::write(&base, b"not a directory").expect("plant the file");
+
+    let error = ensure_shared_base(&base).expect_err("a file is not a directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not a directory", base.display())
+    );
+}
+
+#[test]
+fn ensure_shared_user_dir_hands_back_this_users_own_directory() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    ensure_shared_base(&base).expect("create the base");
+
+    let dir = ensure_shared_user_dir(&base).expect("first create");
+    let again = ensure_shared_user_dir(&base).expect("existing dir is success");
+
+    assert_eq!(dir, again);
+    assert!(dir.is_dir());
+    #[cfg(unix)]
+    {
+        assert_eq!(dir, base.join(euid().to_string()));
+        // Only this user plants a socket here; every local user may reach one.
+        assert_eq!(mode_of(&dir), 0o755);
+    }
+    // Pipe names share one machine-wide namespace, so Windows has no per-user
+    // split and the base itself is the directory.
+    #[cfg(windows)]
+    assert_eq!(dir, base);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_user_dir_opens_a_directory_left_closed_to_other_users() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    ensure_shared_base(&base).expect("create the base");
+    plant_dir(&base.join(euid().to_string()), 0o700);
+
+    let dir = ensure_shared_user_dir(&base).expect("repair");
+
+    assert_eq!(mode_of(&dir), 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_user_dir_closes_a_directory_left_open_to_other_users_writing() {
+    // Mode 0777 would let any local user plant a socket beside this user's
+    // own, so the mode is narrowed rather than accepted as it stands.
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    ensure_shared_base(&base).expect("create the base");
+    plant_dir(&base.join(euid().to_string()), 0o777);
+
+    let dir = ensure_shared_user_dir(&base).expect("repair");
+
+    assert_eq!(mode_of(&dir), 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_user_dir_refuses_a_symbolic_link_planted_in_its_place() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    ensure_shared_base(&base).expect("create the base");
+    let target = root.path().join("target");
+    plant_dir(&target, 0o755);
+    let dir = base.join(euid().to_string());
+    std::os::unix::fs::symlink(&target, &dir).expect("plant the link");
+
+    let error = ensure_shared_user_dir(&base).expect_err("a link is not a directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not a directory", dir.display())
+    );
+}
+
+/// Only root can hand a directory to another user, so this test says why it
+/// was skipped and returns when this process is not root.
+#[cfg(unix)]
+#[test]
+fn ensure_shared_user_dir_refuses_a_directory_another_user_owns() {
+    if euid() != 0 {
+        eprintln!(
+            "skipped `ensure_shared_user_dir_refuses_a_directory_another_user_owns`: \
+             planting a directory owned by another user needs root; re-run under sudo"
+        );
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+    ensure_shared_base(&base).expect("create the base");
+    let dir = base.join(euid().to_string());
+    plant_dir(&dir, 0o755);
+    std::os::unix::fs::chown(&dir, Some(1), None).expect("hand the directory to another user");
+
+    let error = ensure_shared_user_dir(&base).expect_err("another user's directory is refused");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("{} is owned by uid 1, expected {}", dir.display(), euid())
     );
 }

@@ -50,3 +50,6 @@ fs4 = "1.1.0"
 
 [dev-dependencies]
 koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
+
+[target."cfg(unix)".dev-dependencies]
+libc = "0.2.188"

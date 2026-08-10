@@ -9,6 +9,9 @@ use super::*;
 
 use std::time::UNIX_EPOCH;
 
+use koshi_core::discovery::{SessionInfo, SessionOverview};
+use koshi_ipc::endpoint::{advert_path, shared_socket_addr};
+use koshi_ipc::protocol::{IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
 use tempfile::TempDir;
 
 /// A fresh directory to stand in for the runtime dir, under a short base so
@@ -199,7 +202,7 @@ fn removing_a_session_that_is_not_in_the_list_still_clears_its_files() {
 fn the_rebuild_over_an_empty_runtime_directory_finds_no_session() {
     let runtime_dir = test_runtime_dir();
 
-    assert_eq!(sweep(runtime_dir.path()), Registry::new());
+    assert_eq!(sweep(runtime_dir.path(), None), Registry::new());
 }
 
 #[test]
@@ -217,8 +220,130 @@ fn the_rebuild_drops_an_endpoint_nothing_listens_behind() {
     .write(&endpoint_path)
     .expect("the endpoint file is written");
 
-    assert_eq!(sweep(runtime_dir.path()), Registry::new());
+    assert_eq!(sweep(runtime_dir.path(), None), Registry::new());
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
+}
+
+/// Advertise `session` in `shared_base` the way a session another local user
+/// started advertises itself, and hand back the control-socket address that
+/// names. On Unix that is a subdirectory named after another user's id; on
+/// Windows it is a marker file beside the ones this user writes.
+fn advertise_foreign(shared_base: &Path, runtime_dir: &Path, session: SessionId) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let own = std::fs::metadata(runtime_dir)
+            .expect("read the runtime directory")
+            .uid();
+        let user_dir = shared_base.join((own + 1).to_string());
+        std::fs::create_dir_all(&user_dir).expect("create the other user's directory");
+        shared_socket_addr(&user_dir, session)
+    }
+    #[cfg(windows)]
+    {
+        let _ = runtime_dir;
+        std::fs::create_dir_all(shared_base).expect("create the shared directory");
+        std::fs::write(advert_path(shared_base, session), b"").expect("plant the marker");
+        shared_socket_addr(shared_base, session)
+    }
+}
+
+/// A stand-in koshi another local user started, serving one discovery
+/// exchange at `addr`: accept one caller, answer the Hello whatever it
+/// presents, and describe a session named `name` created at `created_at`.
+fn foreign_session_server(
+    addr: &str,
+    session: SessionId,
+    name: &str,
+    created_at: SystemTime,
+) -> JoinHandle<()> {
+    let listener = Listener::bind(addr).expect("bind the other user's session");
+    let overview = SessionOverview {
+        session: SessionInfo {
+            id: session,
+            name: name.to_string(),
+            created_at,
+            attached_clients: Vec::new(),
+            pane_count: 0,
+        },
+        tabs: Vec::new(),
+        panes: Vec::new(),
+        clients: Vec::new(),
+    };
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the router");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let query: IpcRequest = connection.recv().expect("read discovery request");
+        let replies = [
+            IpcResponse {
+                request_id: Some(hello.request_id),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            },
+            IpcResponse {
+                request_id: Some(query.request_id),
+                result: IpcResult::Overview(overview),
+            },
+        ];
+        for reply in replies {
+            connection.send(&reply).expect("send the scripted reply");
+        }
+    })
+}
+
+#[test]
+fn the_rebuild_registers_a_session_another_local_user_started() {
+    // Only visibility crosses users: the router lists that session and hands
+    // out its address, and names no process of its own for it.
+    let runtime_dir = test_runtime_dir();
+    let shared = test_runtime_dir();
+    let session = SessionId::new();
+    let created_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let addr = advertise_foreign(shared.path(), runtime_dir.path(), session);
+    let server = foreign_session_server(&addr, session, "S-quiet-lake", created_at);
+
+    let registry = sweep(runtime_dir.path(), Some(shared.path()));
+
+    assert_eq!(
+        registry,
+        Registry::from([(
+            session,
+            SessionEntry {
+                name: "S-quiet-lake".to_string(),
+                socket: addr,
+                pid: 0,
+                created_at,
+            },
+        )]),
+    );
+
+    server.join().expect("the other user's session exits");
+}
+
+#[test]
+fn the_rebuild_leaves_out_a_shared_advert_nothing_listens_behind() {
+    // The other user's session crashed and left its advert behind. The
+    // rebuild must skip it and remove nothing: those files are that user's.
+    let runtime_dir = test_runtime_dir();
+    let shared = test_runtime_dir();
+    let session = SessionId::new();
+    let addr = advertise_foreign(shared.path(), runtime_dir.path(), session);
+    // On Unix the socket file the session bound outlives it; on Windows the
+    // pipe went with the process, so only the marker is left.
+    let leftover = if cfg!(unix) {
+        std::fs::write(&addr, b"").expect("plant the leftover socket file");
+        PathBuf::from(&addr)
+    } else {
+        advert_path(shared.path(), session)
+    };
+
+    assert_eq!(
+        sweep(runtime_dir.path(), Some(shared.path())),
+        Registry::new()
+    );
+    assert!(leftover.exists(), "the other user's advert is left alone");
 }
 
 /// A short idle window, so an idle-exit test finishes quickly.
@@ -426,10 +551,101 @@ fn the_session_server_starts_in_the_directory_the_request_named() {
         "S-quiet-lake",
         None,
         Some(dir.path()),
+        None,
     )
     .expect("the command is built");
 
     assert_eq!(command.get_current_dir(), Some(dir.path()));
+}
+
+/// The arguments a session server is started with, in order, as plain strings.
+fn args_of(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn a_create_that_asked_for_no_other_users_starts_the_session_without_the_flag() {
+    let runtime_dir = test_runtime_dir();
+    let id = SessionId::new();
+
+    let command = session_server_command(runtime_dir.path(), id, "S-quiet-lake", None, None, None)
+        .expect("the command is built");
+
+    assert_eq!(
+        args_of(&command),
+        vec![
+            "serve-session".to_string(),
+            id.to_string(),
+            "S-quiet-lake".to_string(),
+            "--runtime-dir".to_string(),
+            runtime_dir.path().to_string_lossy().into_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_create_that_asked_for_the_other_users_starts_the_session_under_the_flag() {
+    // The flag is the only thing that carries the answer to the child, so a
+    // create asking for the other users and one leaving it to the file differ
+    // by exactly this argument.
+    let runtime_dir = test_runtime_dir();
+    let id = SessionId::new();
+
+    let command = session_server_command(
+        runtime_dir.path(),
+        id,
+        "S-quiet-lake",
+        Some("dev"),
+        None,
+        Some(true),
+    )
+    .expect("the command is built");
+
+    assert_eq!(
+        args_of(&command),
+        vec![
+            "serve-session".to_string(),
+            id.to_string(),
+            "S-quiet-lake".to_string(),
+            "--runtime-dir".to_string(),
+            runtime_dir.path().to_string_lossy().into_owned(),
+            "--profile".to_string(),
+            "dev".to_string(),
+            "--allow-other-users".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_create_that_refused_the_other_users_starts_the_session_without_the_flag() {
+    // `Some(false)` is not a force, so the session's own `koshi.kdl` answers,
+    // exactly as it does when the create named nothing.
+    let runtime_dir = test_runtime_dir();
+    let id = SessionId::new();
+
+    let command = session_server_command(
+        runtime_dir.path(),
+        id,
+        "S-quiet-lake",
+        None,
+        None,
+        Some(false),
+    )
+    .expect("the command is built");
+
+    assert_eq!(
+        args_of(&command),
+        vec![
+            "serve-session".to_string(),
+            id.to_string(),
+            "S-quiet-lake".to_string(),
+            "--runtime-dir".to_string(),
+            runtime_dir.path().to_string_lossy().into_owned(),
+        ]
+    );
 }
 
 /// The router owns no console, so a console child of it would be given a new
@@ -456,6 +672,7 @@ fn a_create_that_names_no_directory_leaves_the_child_where_the_router_is() {
         runtime_dir.path(),
         SessionId::new(),
         "S-quiet-lake",
+        None,
         None,
         None,
     )

@@ -1,6 +1,6 @@
 //! Tests for the `koshi.kdl` app-config parser.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use koshi_core::geometry::Direction;
 use koshi_core::log::{LogFormat, LogLevel};
@@ -154,6 +154,98 @@ fn a_repeated_allow_beta_features_line_keeps_the_first_and_warns() {
     assert_eq!(
         warnings,
         vec!["ignored duplicate `allow-beta-features` section".to_string()]
+    );
+}
+
+#[test]
+fn allow_other_users_records_what_it_is_set_to() {
+    assert_eq!(
+        parse("allow-other-users #true").allow_other_users,
+        Some(true)
+    );
+    assert_eq!(
+        parse("allow-other-users #false").allow_other_users,
+        Some(false)
+    );
+}
+
+#[test]
+fn an_absent_allow_other_users_sets_no_layer() {
+    // Absent leaves the field unset, so the built-in `false` stands and only
+    // the user who started the session can reach it.
+    assert_eq!(parse("").allow_other_users, None);
+}
+
+#[test]
+fn a_non_boolean_allow_other_users_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("allow-other-users \"yes\"");
+    assert_eq!(layer.allow_other_users, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `allow-other-users`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_allow_other_users_line_keeps_the_first_and_warns() {
+    let (layer, warnings) =
+        parse_with_warnings("allow-other-users #true\nallow-other-users #false");
+    assert_eq!(layer.allow_other_users, Some(true));
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `allow-other-users` section".to_string()]
+    );
+}
+
+#[test]
+fn shared_sessions_dir_records_the_directory_it_names() {
+    assert_eq!(
+        parse("shared-sessions-dir \"/var/run/koshi\"").shared_sessions_dir,
+        Some(Some(PathBuf::from("/var/run/koshi")))
+    );
+}
+
+#[test]
+fn an_absent_shared_sessions_dir_sets_no_layer() {
+    // Absent leaves the field unset, so the sockets stay in this user's own
+    // runtime directory.
+    assert_eq!(parse("").shared_sessions_dir, None);
+}
+
+#[test]
+fn a_non_string_shared_sessions_dir_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("shared-sessions-dir 42");
+    assert_eq!(layer.shared_sessions_dir, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `shared-sessions-dir`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_blank_shared_sessions_dir_is_skipped_with_a_warning() {
+    // An empty name points at no directory at all, so it is skipped and the
+    // platform's machine-wide directory stands.
+    let (layer, warnings) = parse_with_warnings("shared-sessions-dir \"\"");
+    assert_eq!(layer.shared_sessions_dir, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `shared-sessions-dir`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_shared_sessions_dir_line_keeps_the_first_and_warns() {
+    let (layer, warnings) = parse_with_warnings(
+        "shared-sessions-dir \"/var/run/koshi\"\nshared-sessions-dir \"/tmp/koshi\"",
+    );
+    assert_eq!(
+        layer.shared_sessions_dir,
+        Some(Some(PathBuf::from("/var/run/koshi")))
+    );
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `shared-sessions-dir` section".to_string()]
     );
 }
 

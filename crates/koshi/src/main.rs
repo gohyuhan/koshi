@@ -93,6 +93,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         session_name,
         runtime_dir,
         profile,
+        allow_other_users,
     }) = &cli.command
     {
         // This process becomes one session's server: the router started it
@@ -106,6 +107,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             *session_id,
             session_name.clone(),
             profile.as_deref(),
+            allow_other_users.then_some(true),
         )
         .map_err(|err| CliError::Runtime {
             detail: err.to_string(),
@@ -137,8 +139,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // The session is created and left running with nothing attached, so
         // the id it prints is how the shell reaches it again.
         let runtime_dir = ipc_client::runtime_dir()?;
-        let session_id =
-            session_control::request_headless_session(&runtime_dir, cli.profile.as_deref())?;
+        let session_id = session_control::request_headless_session(
+            &runtime_dir,
+            cli.profile.as_deref(),
+            cli.allow_other_users.then_some(true),
+        )?;
         println!("[SESSION ID]: {session_id}");
         return Ok(());
     }

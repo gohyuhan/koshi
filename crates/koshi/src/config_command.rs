@@ -57,6 +57,18 @@ const FIELDS: &[FieldHelp] = &[
         "Run features still marked beta.",
     ),
     field(
+        "koshi.allow-other-users",
+        "koshi.kdl",
+        "#false",
+        "Let other users of this machine reach your sessions.",
+    ),
+    field(
+        "koshi.shared-sessions-dir",
+        "koshi.kdl",
+        "\"/tmp/koshi\", %ProgramData%\\koshi on Windows",
+        "Directory the shared session sockets live in.",
+    ),
+    field(
         "koshi.auto-close-session",
         "koshi.kdl",
         "#false",

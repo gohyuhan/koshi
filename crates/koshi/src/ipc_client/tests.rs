@@ -3,8 +3,10 @@
 
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
+use std::time::UNIX_EPOCH;
 
 use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
+use koshi_core::discovery::SessionInfo;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::layout::TabLayout;
@@ -538,6 +540,244 @@ fn an_unexpected_layout_answer_is_named_layout() {
         ),
         "expected IpcUnavailable naming Layout, got {error:?}",
     );
+}
+
+// --- Sessions other local users started -------------------------------------
+
+/// A session describing itself as `name` and holding nothing.
+fn overview_named(name: &str, session: SessionId) -> SessionOverview {
+    SessionOverview {
+        session: SessionInfo {
+            id: session,
+            name: name.to_string(),
+            created_at: UNIX_EPOCH,
+            attached_clients: Vec::new(),
+            pane_count: 0,
+        },
+        tabs: Vec::new(),
+        panes: Vec::new(),
+        clients: Vec::new(),
+    }
+}
+
+/// A stand-in koshi another local user started, serving one discovery
+/// exchange at `addr`: accept one caller, answer the Hello whatever it
+/// presents, and answer the discovery request with `answer`. No endpoint file
+/// is written, since that user's own runtime directory is theirs alone. The
+/// returned receiver carries the token the caller presented.
+fn fake_foreign_session(
+    addr: &str,
+    answer: SessionOverview,
+) -> (JoinHandle<()>, Receiver<ConnectionToken>) {
+    let listener = Listener::bind(addr).expect("bind the other user's session");
+    let (presented_tx, presented_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the CLI");
+        let hello: IpcRequest = connection.recv().expect("read hello");
+        let query: IpcRequest = connection.recv().expect("read discovery request");
+        let IpcRequestKind::Hello { token, .. } = hello.kind else {
+            panic!("expected a Hello first");
+        };
+        presented_tx
+            .send(token)
+            .expect("report the token presented");
+        send(
+            &mut connection,
+            hello.request_id,
+            IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        );
+        send(
+            &mut connection,
+            query.request_id,
+            IpcResult::Overview(answer),
+        );
+    });
+    (handle, presented_rx)
+}
+
+#[cfg(unix)]
+#[test]
+fn the_shared_listing_holds_other_users_sockets_and_not_this_users() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_dir = test_runtime_dir("shared-unix");
+    let shared = test_runtime_dir("shared-unix-base");
+    let own = std::fs::metadata(&runtime_dir)
+        .expect("read the runtime directory")
+        .uid();
+    let theirs_dir = (own + 1).to_string();
+    let mine = SessionId::new();
+    let theirs = SessionId::new();
+    std::fs::create_dir_all(shared.join(own.to_string())).expect("create this user's directory");
+    std::fs::create_dir_all(shared.join(&theirs_dir)).expect("create the other user's directory");
+    std::fs::write(
+        shared.join(own.to_string()).join(format!("{mine}.sock")),
+        b"",
+    )
+    .expect("plant this user's socket");
+    std::fs::write(shared.join(&theirs_dir).join(format!("{theirs}.sock")), b"")
+        .expect("plant the other user's socket");
+
+    assert_eq!(
+        foreign_sessions(&shared, &runtime_dir),
+        vec![(
+            theirs,
+            shared
+                .join(&theirs_dir)
+                .join(format!("{theirs}.sock"))
+                .display()
+                .to_string(),
+        )],
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_shared_listing_holds_the_markers_this_user_does_not_advertise() {
+    // A marker names no user, so the endpoint files in this user's runtime
+    // directory are the only record of which sessions are this user's own.
+    let runtime_dir = test_runtime_dir("shared-windows");
+    let shared = test_runtime_dir("shared-windows-base");
+    let mine = SessionId::new();
+    let theirs = SessionId::new();
+    std::fs::write(shared.join(mine.to_string()), b"").expect("plant this user's marker");
+    std::fs::write(shared.join(theirs.to_string()), b"").expect("plant the other user's marker");
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, mine),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, mine))
+    .expect("write this user's endpoint file");
+
+    assert_eq!(
+        foreign_sessions(&shared, &runtime_dir),
+        vec![(theirs, format!("koshi-{theirs}"))],
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[test]
+fn a_shared_directory_that_cannot_be_read_holds_no_session() {
+    let runtime_dir = test_runtime_dir("shared-unreadable");
+
+    assert_eq!(
+        foreign_sessions(&runtime_dir.join("absent"), &runtime_dir),
+        Vec::new(),
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn entries_another_user_planted_that_name_no_session_are_passed_over() {
+    // Every local user may create an entry in the shared directory, so the
+    // walk meets whatever any of them names. Only a `session-<uuid>.sock`
+    // inside a user's own subdirectory is a session.
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_dir = test_runtime_dir("shared-planted");
+    let shared = test_runtime_dir("shared-planted-base");
+    let own = std::fs::metadata(&runtime_dir)
+        .expect("read the runtime directory")
+        .uid();
+    let theirs_dir = shared.join((own + 1).to_string());
+    std::fs::create_dir_all(&theirs_dir).expect("create the other user's directory");
+    let theirs = SessionId::new();
+    std::fs::write(theirs_dir.join(format!("{theirs}.sock")), b"").expect("plant their socket");
+    std::fs::write(theirs_dir.join("session-not-a-uuid.sock"), b"").expect("plant a bad uuid");
+    std::fs::write(theirs_dir.join(theirs.to_string()), b"").expect("plant a name with no suffix");
+    std::fs::write(theirs_dir.join("README.sock"), b"").expect("plant a name with no prefix");
+    std::fs::create_dir_all(theirs_dir.join("nested")).expect("plant a subdirectory");
+    std::fs::write(shared.join("loose-file"), b"").expect("plant a file beside the user directory");
+
+    assert_eq!(
+        foreign_sessions(&shared, &runtime_dir),
+        vec![(
+            theirs,
+            theirs_dir
+                .join(format!("{theirs}.sock"))
+                .display()
+                .to_string(),
+        )],
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[cfg(windows)]
+#[test]
+fn markers_another_user_planted_that_name_no_session_are_passed_over() {
+    // Every local user may create an entry in the shared directory, so the
+    // walk meets whatever any of them names. Only a `session-<uuid>` is a
+    // session.
+    let runtime_dir = test_runtime_dir("shared-planted-windows");
+    let shared = test_runtime_dir("shared-planted-windows-base");
+    let theirs = SessionId::new();
+    std::fs::write(shared.join(theirs.to_string()), b"").expect("plant their marker");
+    std::fs::write(shared.join("session-not-a-uuid"), b"").expect("plant a bad uuid");
+    std::fs::write(shared.join("README"), b"").expect("plant a name with no prefix");
+    std::fs::create_dir_all(shared.join("nested")).expect("plant a subdirectory");
+
+    assert_eq!(
+        foreign_sessions(&shared, &runtime_dir),
+        vec![(theirs, format!("koshi-{theirs}"))],
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[test]
+fn a_session_another_user_started_is_asked_with_an_empty_token() {
+    // That user's endpoint file is unreadable here, so the session is asked
+    // over the address the shared directory named and admits by position.
+    let runtime_dir = test_runtime_dir("shared-empty-token");
+    let session = SessionId::new();
+    let addr = koshi_ipc::endpoint::shared_socket_addr(&runtime_dir, session);
+    let answer = overview_named("S-quiet-lake", session);
+    let (server, presented) = fake_foreign_session(&addr, answer.clone());
+
+    let overview = fetch_foreign_overview(session, &addr).expect("the session answers");
+
+    assert_eq!(overview, answer);
+    assert_eq!(
+        presented.recv().expect("the session read one Hello"),
+        ConnectionToken::new(""),
+    );
+
+    server.join().expect("the other user's session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
+    // A crashed session leaves its socket or its marker behind; the listing
+    // must read that as gone, not as a session that could not answer.
+    let runtime_dir = test_runtime_dir("shared-dead");
+    let session = SessionId::new();
+    let addr = koshi_ipc::endpoint::shared_socket_addr(&runtime_dir, session);
+
+    let error = fetch_foreign_overview(session, &addr).expect_err("nothing listens at the address");
+
+    assert_eq!(
+        error.to_string(),
+        CliError::SessionNotFound {
+            session: session.to_string(),
+        }
+        .to_string(),
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
 // --- Send-time working-directory capture ------------------------------------

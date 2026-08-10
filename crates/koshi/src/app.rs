@@ -93,7 +93,9 @@ pub fn run(profile: Option<&str>) -> Result<(), CliError> {
     // Read before a session id exists, so the `logging` section can decide
     // whether a log file is opened at all, and at what level and format.
     let app = crate::config::load_app_layer();
-    let session_id = crate::session_control::request_new_session(&runtime_dir, profile)?;
+    // The interactive launch has no `--allow-other-users` to force, so the new
+    // session's own `koshi.kdl` decides who may reach it.
+    let session_id = crate::session_control::request_new_session(&runtime_dir, profile, None)?;
     let _ = init_tracing(crate::config::logging_params(app.as_ref(), session_id));
     crate::attach::attach_session(&runtime_dir, session_id)
 }
