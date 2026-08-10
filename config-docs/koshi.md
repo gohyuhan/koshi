@@ -149,20 +149,21 @@ A beta feature you have not turned on refuses and says so, naming itself and the
 line to add:
 
 ```text
-koshi: `koshi attach` is a beta feature and did nothing; add a top-level
+koshi: `koshi <command>` is a beta feature and did nothing; add a top-level
 `allow-beta-features #true` line to koshi.kdl to run it
 ```
 
 Nothing crashes and nothing is lost; the command exits non-zero having done
 nothing.
 
-**Until 0.2.0 is released this covers starting and attaching to sessions** —
-`koshi`, `koshi attach` and `koshi --headless`. Without the switch on, all three
-stop with that message. 0.2.0 turns them on for everyone.
+**0.2.0 marks no feature beta.** Every command in this release runs whether this
+setting is on or off. `koshi`, `koshi attach` and `koshi --headless` were beta
+before 0.2.0 and are now on for everyone. The setting stays for the features
+that are marked beta next.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 (coming soon) |
+| `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 |
 
 ## `auto-close-session`
 
@@ -195,7 +196,7 @@ session whatever this setting says, run `koshi kill-session`.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `auto-close-session` | boolean — end the session when its last terminal leaves | `#false` | ≥ 0.2.0 (coming soon) |
+| `auto-close-session` | boolean — end the session when its last terminal leaves | `#false` | ≥ 0.2.0 |
 
 ## Full example
 

@@ -238,14 +238,6 @@ fn config_dir_under(home: &Path) -> PathBuf {
     home.join(".config/koshi")
 }
 
-/// Write the `koshi.kdl` that opens the beta gate under `home`. Attaching is a
-/// beta entry point, so a client started without this returns at once and
-/// attaches to nothing.
-#[cfg(unix)]
-fn allow_beta_features(home: &Path) {
-    write_config(home, "version 1\nallow-beta-features #true\n");
-}
-
 /// Write `body` as the `koshi.kdl` a process started under `home` reads.
 #[cfg(unix)]
 fn write_config(home: &Path, body: &str) {
@@ -312,8 +304,8 @@ fn koshi_under(home: &Path) -> std::process::Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // On Linux `XDG_CONFIG_HOME` beats `$HOME/.config`, so a machine that sets
-    // it would send this child outside the test home for its `koshi.kdl` — and
-    // with it the beta gate that lets attaching run. macOS never reads this.
+    // it would send this child outside the test home for its `koshi.kdl`, past
+    // the one the test wrote. macOS never reads this.
     #[cfg(all(unix, not(target_os = "macos")))]
     command.env("XDG_CONFIG_HOME", home.join(".config"));
     command
@@ -462,7 +454,6 @@ fn a_killed_session_server_ends_the_stream_with_a_read_failure() {
 #[test]
 fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
     let home = test_home();
-    allow_beta_features(home.path());
     let runtime_dir = runtime_dir_under(home.path());
     let session_id = SessionId::new();
     let mut session = start_session_server(&runtime_dir, session_id);
@@ -490,7 +481,6 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
 #[test]
 fn a_detach_ends_the_attaching_client_with_a_success() {
     let home = test_home();
-    allow_beta_features(home.path());
     let runtime_dir = runtime_dir_under(home.path());
     let session_id = SessionId::new();
     let _session = start_session_server(&runtime_dir, session_id);

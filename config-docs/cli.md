@@ -9,7 +9,11 @@ flag and accepted value.
 |---|---|
 | `koshi` | Open one session, tab, and shell pane |
 | `koshi --profile <NAME>` | Open `profile/<NAME>.kdl` |
+| `koshi --headless` | Open a session with no terminal attached, print its id, and return to the shell |
 | `koshi update` | Check for and install the latest release |
+
+`--headless` prints `[SESSION ID]: session-<uuid>` and exits. Nothing is drawn.
+Attach to it later with `koshi attach session-<uuid>`.
 
 ## Configuration
 
@@ -62,6 +66,9 @@ koshi new-pane
 koshi new-tab
 [TAB ID]: tab-<uuid>
 [PANE ID]: pane-<uuid>
+
+koshi --headless
+[SESSION ID]: session-<uuid>
 ```
 
 `koshi run -- htop` prints one pane id. Commands that create nothing print no
@@ -72,6 +79,9 @@ id line.
 | Command | Result |
 |---|---|
 | `koshi list-sessions` | List session ids and names |
+| `koshi attach [NAME_OR_ID]` | Attach this terminal to that session |
+| `koshi detach [CLIENT_OR_SESSION]` | Detach one terminal; the session keeps running |
+| `koshi detach --all [NAME_OR_ID]` | Detach every terminal of that session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
 | `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, and session ids and names |
@@ -88,6 +98,25 @@ Table is the default.
 straight to that session with no lookup. With no argument, it works only when
 exactly one session is running. An unknown name or id exits 3; an unreachable
 control socket exits 4.
+
+`attach` run outside koshi opens that session in this terminal. Run inside a
+koshi pane, it moves this terminal to the named session instead. With no
+argument and several sessions running, it numbers them and reads your answer:
+
+```text
+koshi attach
+1) amber-fox session-3f2a…
+2) quiet-heron session-91c4…
+attach to which session? [1-2]
+```
+
+`detach` leaves the session running with its panes untouched. Bare `koshi
+detach` works only inside a koshi pane and detaches that terminal. Outside one,
+name the target: `koshi detach session-3f2a…` takes a client id, a session id,
+or a session name. `--all` detaches every terminal of one session.
+
+A session left with no terminal keeps running unless `auto-close-session` is on
+in `koshi.kdl`, which ends it once the last terminal leaves.
 
 ## Panes
 

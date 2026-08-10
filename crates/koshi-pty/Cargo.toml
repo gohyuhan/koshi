@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 portable-pty = "0.9.0"
 thiserror = "2.0.18"
-koshi-core = { version = "0.2.0-pr.2", path = "../koshi-core" }
+koshi-core = { version = "0.2.0", path = "../koshi-core" }
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.28", features = ["signal", "hostname", "poll", "event"] }

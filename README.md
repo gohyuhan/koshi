@@ -213,17 +213,6 @@ Remove-Item (Join-Path $env:LOCALAPPDATA "koshi") `
 
 ## Quick start
 
-> **Before 0.2.0 is released**, starting and attaching to sessions is behind the
-> beta switch. Put this in `koshi.kdl` first, or every command below stops with a
-> message telling you to:
->
-> ```kdl
-> version 1
-> allow-beta-features #true
-> ```
->
-> 0.2.0 ships these on for everyone and the switch goes away.
-
 Open one tab with one shell pane:
 
 ```bash
@@ -301,6 +290,7 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 |---|---|
 | `koshi` | Start one session with one tab and shell pane |
 | `koshi --profile <NAME>` | Start with `profile/<NAME>.kdl` |
+| `koshi --headless` | Start a session with nothing attached, print its id, and return to the shell |
 
 ### Sessions and discovery
 
@@ -312,6 +302,8 @@ every matching id listed.
 | Command | Result |
 |---|---|
 | `koshi list-sessions` | List running sessions |
+| `koshi attach [NAME_OR_ID]` | Attach this terminal to that session, or choose from the running ones |
+| `koshi detach [CLIENT_OR_SESSION] [--all]` | Detach one terminal, or with `--all` every terminal of a session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running session |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tabs |
 | `koshi list-panes [--session <NAME_OR_ID>]` | List panes |
@@ -348,7 +340,8 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 | `koshi move-tab --index <INDEX> [--tab <NAME_OR_ID>]` | Move one tab |
 
 Create commands print created ids. `new-pane` and `run` print one pane id.
-`new-tab` prints its tab id and root pane id.
+`new-tab` prints its tab id and root pane id. `koshi --headless` prints its
+session id.
 
 ### Input lock
 

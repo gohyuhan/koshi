@@ -18,7 +18,6 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
-use koshi_beta::beta_feature;
 use koshi_client::Client;
 use koshi_core::geometry::Size;
 use koshi_core::ids::ClientId;
@@ -88,12 +87,6 @@ pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
 ///
 /// `profile` is handed to the router. A profile that will not launch falls
 /// back to one shell inside the session server.
-///
-/// Gated with the same knob `attach` and `--headless` read: every way into a
-/// session goes through the router now, so the launch is beta until they are.
-#[beta_feature(otherwise = Err(CliError::Runtime {
-    detail: koshi_beta::blocked_message("koshi"),
-}))]
 pub fn run(profile: Option<&str>) -> Result<(), CliError> {
     ensure_koshi_dirs();
     let runtime_dir = crate::ipc_client::runtime_dir()?;

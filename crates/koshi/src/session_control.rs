@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use koshi_beta::beta_feature;
 use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
@@ -15,11 +14,8 @@ use crate::error::CliError;
 use crate::ipc_client;
 use crate::router_client::router_request;
 
-/// The gated `koshi --headless` entry point: asks for a session with nothing
+/// The `koshi --headless` entry point: asks for a session with nothing
 /// attached to it. Forwards to `request_new_session`.
-#[beta_feature(otherwise = Err(CliError::Runtime {
-    detail: koshi_beta::blocked_message("koshi --headless"),
-}))]
 pub fn request_headless_session(
     runtime_dir: &Path,
     profile: Option<&str>,

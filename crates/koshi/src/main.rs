@@ -53,10 +53,10 @@ fn main() -> ExitCode {
 /// the only running session. A verb the socket does not serve yet reports
 /// IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
-    // A beta-gated entry point reads a process-wide flag and takes no gate
-    // argument, so the flag is set before any verb dispatches: one
-    // `allow-beta-features` answer covers the CLI verbs and the interactive
-    // launch alike.
+    // An entry point marked `#[beta_feature]` reads a process-wide flag and
+    // takes no gate argument, so the flag is set before any verb dispatches:
+    // one `allow-beta-features` answer covers the CLI verbs and the
+    // interactive launch alike.
     let app = config::load_app_layer();
     config::apply_beta_gate(app.clone());
 
