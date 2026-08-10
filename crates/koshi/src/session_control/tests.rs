@@ -305,27 +305,13 @@ fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
     );
 
     let created =
-        request_new_session(&runtime_dir, Some("work")).expect("the router created a session");
+        request_headless_session(&runtime_dir, Some("work")).expect("the router created a session");
 
     assert_eq!(created, session_id);
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
     assert_eq!(request, Some(expected_create(Some("work"))));
     let _ = std::fs::remove_dir_all(&runtime_dir);
-}
-
-#[test]
-fn creating_a_session_with_the_beta_knob_off_says_so_and_asks_no_router() {
-    // The knob starts off, so no router is started and none is needed: the
-    // refusal happens before the runtime directory is read.
-    let error = request_headless_session(Path::new("/nonexistent"), None)
-        .expect_err("the beta knob is off in this process");
-
-    assert_eq!(
-        error.to_string(),
-        "`koshi --headless` is a beta feature and did nothing; add a top-level \
-         `allow-beta-features #true` line to koshi.kdl to run it"
-    );
 }
 
 #[test]

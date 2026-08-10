@@ -2,6 +2,30 @@
 
 Notable user-facing changes are recorded here.
 
+## v0.2.0
+
+- Sessions run in their own process and keep running after the terminal leaves.
+- `koshi attach` joins a running session; without a name it lists the running ones to pick from.
+- `koshi detach` leaves a session without ending it; `--all` detaches every terminal of one session.
+- `koshi --headless` starts a session with no terminal attached and prints its id.
+- `koshi attach <session>` typed inside a pane moves that terminal to another session.
+- Several terminals can view one session at once, each with its own focus and view.
+- A terminal that missed an event resyncs instead of drawing a stale view.
+- The quit shortcut leaves the session running instead of ending it.
+- `auto-close-session` ends a session once its last terminal leaves.
+- Each terminal reads its own theme, keybindings, and view settings from its own files.
+- Sessions and tabs accept their printed id anywhere their name is accepted, and an id is never re-read as a name.
+- `koshi debug dump-state` and `koshi debug dump-layout` print running state and solved layouts.
+- A panic writes `crash-<timestamp>.txt` to the data directory after restoring the terminal.
+- Terminal reset and custom tab stops.
+- A koshi that cannot speak another koshi's protocol version refuses and names both version ranges.
+- The session server starts with no console window on Windows.
+- Dragging a pane border moves it the whole drag distance in one step instead of one cell at a time.
+- The shortcut hint bar updates without waiting for the next frame.
+- A stop request that fails skips the wait and ends the process at once.
+- `allow-beta-features` runs features still marked beta; this release marks none.
+- Smaller cell storage, cheaper mouse movement, and lower scrollback memory.
+
 ## v0.1.0
 
 - Split, stacked, fullscreen, focus, resize, and close operations for panes.

@@ -60,7 +60,6 @@ use ratatui::crossterm::tty::IsTty;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use koshi_beta::beta_feature;
 use koshi_client::input::KeyOutcome;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client;
@@ -375,9 +374,6 @@ fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<Session
 /// name. `None` picks one from the sessions running for this user instead:
 /// nothing running is a failure, one session is taken straight away, and more
 /// than one is printed as a numbered list to answer on stdin.
-#[beta_feature(otherwise = Err(CliError::Runtime {
-    detail: koshi_beta::blocked_message("koshi attach"),
-}))]
 pub fn run(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
     let address = resolve_session(&runtime_dir, selector)?;
@@ -389,9 +385,6 @@ pub fn run(selector: Option<&str>) -> Result<(), CliError> {
 ///
 /// `selector` names the session to move to, resolved exactly as [`run`]
 /// resolves it. The session moves the client this terminal already holds.
-#[beta_feature(otherwise = Err(CliError::Runtime {
-    detail: koshi_beta::blocked_message("koshi attach"),
-}))]
 pub fn switch_in_session(
     context: &InSessionContext,
     selector: Option<&str>,
