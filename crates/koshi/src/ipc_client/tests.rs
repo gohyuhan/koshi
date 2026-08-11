@@ -636,6 +636,37 @@ fn the_shared_listing_holds_other_users_sockets_and_not_this_users() {
     let _ = std::fs::remove_dir_all(&shared);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_foreign_socket_reusing_a_local_session_id_is_left_out() {
+    // Another local user may name a socket after an id this user already
+    // runs; the walk keeps the local session, never the planted one.
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_dir = test_runtime_dir("shared-collide");
+    let shared = test_runtime_dir("shared-collide-base");
+    let own = std::fs::metadata(&runtime_dir)
+        .expect("read the runtime directory")
+        .uid();
+    let mine = SessionId::new();
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, mine),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, mine))
+    .expect("advertise this user's session");
+    let theirs_dir = shared.join((own + 1).to_string());
+    std::fs::create_dir_all(&theirs_dir).expect("create the other user's directory");
+    std::fs::write(theirs_dir.join(format!("{mine}.sock")), b"")
+        .expect("plant a socket reusing this user's id");
+
+    assert_eq!(foreign_sessions(&shared, &runtime_dir), Vec::new());
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
 #[cfg(windows)]
 #[test]
 fn the_shared_listing_holds_the_markers_this_user_does_not_advertise() {

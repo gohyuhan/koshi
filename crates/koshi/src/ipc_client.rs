@@ -266,12 +266,11 @@ pub fn shared_base() -> Option<PathBuf> {
 /// Every session another local user started that `shared_base` advertises, as
 /// its id and the control-socket address reaching it, in no particular order.
 ///
-/// This user's own sessions are left out, so a caller never asks its own
-/// session for the empty token that session refuses. On Unix each user's
-/// sockets sit in a subdirectory named after that user's id, and the one
-/// named after the user owning `runtime_dir` is skipped. On Windows the
-/// markers share one flat directory and name no user, so an id `runtime_dir`
-/// also advertises is this user's own and is dropped.
+/// An id that `runtime_dir` itself advertises is left out on both platforms:
+/// this user's own session, never a foreign one standing in under the same
+/// id. On Unix each user's sockets sit in a subdirectory named after that
+/// user's id, and the subdirectory named after the user owning `runtime_dir`
+/// is skipped as well. On Windows the markers share one flat directory.
 ///
 /// A session is counted by its file name alone; whether anything still
 /// listens behind it is the caller's probe to make. An unreadable directory
@@ -281,27 +280,28 @@ pub fn foreign_sessions(shared_base: &Path, runtime_dir: &Path) -> Vec<(SessionI
     let Ok(entries) = std::fs::read_dir(shared_base) else {
         return Vec::new();
     };
+    let advertised = advertised_sessions(runtime_dir);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
-        let own = std::fs::metadata(runtime_dir)
+        let own_subdir = std::fs::metadata(runtime_dir)
             .map(|dir| dir.uid().to_string())
             .ok();
         entries
             .filter_map(Result::ok)
-            .filter(|entry| Some(entry.file_name().to_string_lossy().into_owned()) != own)
+            .filter(|entry| Some(entry.file_name().to_string_lossy().into_owned()) != own_subdir)
             .flat_map(|entry| sockets_in(&entry.path()))
+            .filter(|(id, _)| !advertised.contains(id))
             .collect()
     }
     #[cfg(windows)]
     {
-        let own = advertised_sessions(runtime_dir);
         entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let id = session_id_of(entry.file_name().to_str()?, "")?;
-                (!own.contains(&id)).then(|| (id, shared_socket_addr(shared_base, id)))
+                (!advertised.contains(&id)).then(|| (id, shared_socket_addr(shared_base, id)))
             })
             .collect()
     }
