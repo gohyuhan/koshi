@@ -368,6 +368,9 @@ session id.
 |---|---|
 | `koshi update` | Check for and install a newer release |
 
+The background process that tracks sessions restarts into the new release, if
+that process is running. Every session keeps running.
+
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 
 ## Changelog

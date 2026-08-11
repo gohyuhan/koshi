@@ -1,7 +1,96 @@
 //! Tests for the self-update helpers: version comparison, check scheduling,
-//! archive URL construction, and state serialization.
+//! archive URL construction, state serialization, and the restart
+//! confirmation wait.
 
 use super::*;
+
+use std::thread::JoinHandle;
+
+use koshi_ipc::endpoint::EndpointFile;
+use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::router::{
+    router_endpoint_path, router_socket_addr, RouterHandshake, RouterRequest, RouterResponse,
+    RouterResult, ROUTER_PROTOCOL_VERSION,
+};
+use koshi_ipc::transport::Listener;
+use tempfile::TempDir;
+
+/// A fresh directory to stand in for the runtime dir, under a short base so
+/// the Unix socket path stays inside the OS path-length cap.
+fn test_runtime_dir() -> TempDir {
+    #[cfg(unix)]
+    let base = std::path::PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    TempDir::new_in(base).expect("a temporary runtime directory")
+}
+
+/// Serve one Hello-only connection as a router would: bind the router's
+/// address, write the endpoint file advertising it, accept one caller, and
+/// answer its Hello with `version`.
+fn fake_router_reporting(runtime_dir: &Path, version: &str) -> JoinHandle<()> {
+    let held = ConnectionToken::generate();
+    let addr = router_socket_addr(runtime_dir);
+    let listener = Listener::bind(&addr).expect("bind the stand-in router");
+    EndpointFile {
+        socket: addr,
+        token: held.clone(),
+        pid: std::process::id(),
+    }
+    .write(&router_endpoint_path(runtime_dir))
+    .expect("write the router endpoint file");
+
+    let version = version.to_string();
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the caller");
+        let mut gate = RouterHandshake::new(held);
+        let hello: RouterRequest = connection.recv().expect("read the hello");
+        let result = match gate.check(&hello.kind) {
+            Ok(()) => RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                version,
+            },
+            Err(refusal) => RouterResult::Error(refusal),
+        };
+        connection
+            .send(&RouterResponse {
+                request_id: Some(hello.request_id),
+                result,
+            })
+            .expect("send the hello reply");
+    })
+}
+
+#[test]
+fn a_router_reporting_the_installed_version_confirms_the_restart() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router_reporting(runtime_dir.path(), "3.3.3");
+
+    let confirmed = wait_for_router_version(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+
+    assert_eq!(confirmed, Some("3.3.3".to_string()));
+    router.join().expect("the stand-in served its connection");
+}
+
+#[test]
+fn a_router_still_on_another_version_is_reported_after_the_wait() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router_reporting(runtime_dir.path(), "1.0.0");
+
+    let answered = wait_for_router_version(runtime_dir.path(), "2.0.0", Duration::from_millis(250));
+
+    assert_eq!(answered, Some("1.0.0".to_string()));
+    router.join().expect("the stand-in served its connection");
+}
+
+#[test]
+fn no_router_answering_reports_no_version_after_the_wait() {
+    let runtime_dir = test_runtime_dir();
+    assert_eq!(
+        wait_for_router_version(runtime_dir.path(), "2.0.0", Duration::from_millis(50)),
+        None
+    );
+}
 
 #[test]
 fn strip_v_drops_a_leading_v_only() {

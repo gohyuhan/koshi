@@ -12,14 +12,15 @@
 //! `update.json` in the state directory holds the one thing koshi writes — the
 //! last-check time — so koshi never rewrites the user's config file.
 //!
-//! Nothing here is used by the daemon or the running session: it is a
-//! CLI-side, one-shot flow, so it reads the clock and the network directly
-//! rather than through the runtime's injected services.
+//! This is a CLI-side, one-shot flow. No session runs it, so it reads the
+//! clock and the network directly rather than through the runtime's injected
+//! services. After an install it asks the running router to restart into the
+//! binary just installed.
 
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use koshi_config::app_config::parse_app_config;
 use koshi_config::layer::merge_client;
@@ -30,6 +31,8 @@ use tempfile::{Builder, TempPath};
 use ureq::Agent;
 
 use crate::error::CliError;
+use crate::ipc_client;
+use crate::router_client::{restart_running_router, running_router_version};
 
 /// This build's version, from the crate version bumped before each release.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -72,6 +75,7 @@ pub fn run_update_command() -> Result<(), CliError> {
     };
     install_release(&tag).map_err(update_err)?;
     println!("updated to koshi {}", strip_v(&tag));
+    restart_router_after_install(strip_v(&tag));
     Ok(())
 }
 
@@ -109,11 +113,96 @@ pub fn maybe_prompt_startup_update() {
     }
     match install_release(&tag) {
         Ok(()) => {
+            restart_router_after_install(strip_v(&tag));
             println!("updated to koshi {} — relaunch to use it", strip_v(&tag));
             std::process::exit(0);
         }
         Err(err) => eprintln!("koshi: update failed: {err}"),
     }
+}
+
+/// How long a restarted router has to come back answering Hello with the
+/// installed version, matching the lock-handover wait on Windows.
+const RESTART_CONFIRM_WAIT: Duration = Duration::from_secs(10);
+
+/// The pause between two Hello probes while waiting for the confirmation.
+const RESTART_CONFIRM_POLL: Duration = Duration::from_millis(200);
+
+/// The hard time bound on one Hello probe. A named pipe on Windows does not
+/// promise a read error when its peer goes away, so a probe that hits a
+/// half-closed pipe would otherwise never return.
+const RESTART_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ask the running router to restart into the binary just installed, confirm
+/// the router now reports the `installed` version, and say what happened.
+///
+/// Prints nothing when no router is running. Success is printed only after
+/// the router's Hello reports `installed`. A refusal, a router still on the
+/// previous build, or no answer within [`RESTART_CONFIRM_WAIT`] prints a note
+/// on standard error; the install itself stands.
+fn restart_router_after_install(installed: &str) {
+    let dir = match ipc_client::runtime_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("koshi: the running router could not be reached: {err}");
+            return;
+        }
+    };
+    match restart_running_router(&dir) {
+        Ok(false) => {}
+        Ok(true) => match wait_for_router_version(&dir, installed, RESTART_CONFIRM_WAIT) {
+            Some(version) if version == installed => println!(
+                "the running router restarted into the new binary; every session keeps running"
+            ),
+            Some(version) => eprintln!(
+                "koshi: the running router still reports {version} after the restart; it keeps \
+                 serving that build; every session keeps running"
+            ),
+            None => eprintln!(
+                "koshi: the router restart was not confirmed: no router answered within \
+                 {} seconds; every session keeps running",
+                RESTART_CONFIRM_WAIT.as_secs()
+            ),
+        },
+        Err(err) => eprintln!(
+            "koshi: the running router could not be restarted: {err}; it keeps serving the old \
+             build until it exits"
+        ),
+    }
+}
+
+/// Poll the running router until its Hello reports `want`, for up to `wait`.
+///
+/// Returns `Some(want)` on confirmation, the last different version a router
+/// answered with, or `None` when no router answered at all. A connect failure
+/// counts as no answer and the poll continues: the router is mid-restart.
+fn wait_for_router_version(runtime_dir: &Path, want: &str, wait: Duration) -> Option<String> {
+    let deadline = Instant::now() + wait;
+    let mut last_answer = None;
+    loop {
+        match probe_router_version(runtime_dir) {
+            Some(version) if version == want => return Some(version),
+            Some(version) => last_answer = Some(version),
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            return last_answer;
+        }
+        std::thread::sleep(RESTART_CONFIRM_POLL);
+    }
+}
+
+/// One version probe, bounded by [`RESTART_PROBE_TIMEOUT`].
+///
+/// The exchange runs on its own thread. A probe that runs out the bound
+/// reads as no answer; its thread is left behind and ends with this process.
+fn probe_router_version(runtime_dir: &Path) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = runtime_dir.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(running_router_version(&dir).ok().flatten());
+    });
+    rx.recv_timeout(RESTART_PROBE_TIMEOUT).unwrap_or(None)
 }
 
 // ---------------------------------------------------------------------------

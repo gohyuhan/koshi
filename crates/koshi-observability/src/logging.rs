@@ -280,7 +280,12 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
 /// The returned guard scopes the subscriber to the calling thread, so tests stay
 /// isolated from one another and from any global subscriber. Drop the guard to
 /// restore the previous subscriber; read the [`CapturedLogs`] to assert on output.
+///
+/// The first call registers a process-wide anchor dispatcher
+/// (`register_interest_anchor`) that keeps captures visible to call sites
+/// first fired on threads with no subscriber.
 pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
+    register_interest_anchor();
     let logs = CapturedLogs::default();
     let subscriber = fmt()
         .with_max_level(Level::TRACE)
@@ -289,6 +294,24 @@ pub fn with_test_writer() -> (tracing::subscriber::DefaultGuard, CapturedLogs) {
         .finish();
     let guard = tracing::subscriber::set_default(subscriber);
     (guard, logs)
+}
+
+/// Register one TRACE-level dispatcher in tracing's dispatcher registry for
+/// the life of the process, without making it a thread or global default.
+///
+/// With it registered, tracing computes every call site's cached interest
+/// across the registry, so an event reaches a [`with_test_writer`] capture
+/// even when its call site first fires on a thread with no subscriber. The
+/// anchor never formats an event; its writer is unused.
+fn register_interest_anchor() {
+    static ANCHOR: std::sync::Once = std::sync::Once::new();
+    ANCHOR.call_once(|| {
+        let anchor = fmt()
+            .with_max_level(Level::TRACE)
+            .with_writer(io::sink as fn() -> io::Sink)
+            .finish();
+        std::mem::forget(tracing::Dispatch::new(anchor));
+    });
 }
 
 /// Redact an environment map and render it as a single log-safe field value of

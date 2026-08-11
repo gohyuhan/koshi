@@ -241,3 +241,26 @@ fn tracing_error_display_names_the_already_initialized_cause() {
         "tracing is already initialized for this process"
     );
 }
+
+/// A warning both threads in the test below fire through one shared call site.
+fn probe_warning() {
+    tracing::warn!("probe fired");
+}
+
+// tracing caches per-call-site interest process-wide. A capture must still see
+// an event whose call site was first executed by a thread with no subscriber.
+#[test]
+fn a_capture_sees_a_call_site_first_fired_from_an_uncaptured_thread() {
+    let (_guard, logs) = with_test_writer();
+
+    // First execution of the call site happens on a thread with no subscriber.
+    std::thread::spawn(probe_warning)
+        .join()
+        .expect("probe thread runs to completion");
+
+    // Same call site, now on the thread that holds the capture.
+    probe_warning();
+
+    let out = logs.contents();
+    assert!(out.contains("probe fired"), "capture is empty: {out:?}");
+}

@@ -33,6 +33,7 @@ fn hello_accepted() -> IpcResult {
 fn router_hello_accepted() -> RouterResult {
     RouterResult::Hello {
         protocol_version: ROUTER_PROTOCOL_VERSION,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 

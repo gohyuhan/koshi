@@ -460,6 +460,11 @@ pub enum CliCommand {
         /// Runtime directory to serve; defaults to this user's own.
         #[arg(long, value_name = "DIR")]
         runtime_dir: Option<PathBuf>,
+        /// Wait for the router lock instead of yielding to the router that
+        /// holds it. A router restarting into a newly installed binary passes
+        /// this.
+        #[arg(long)]
+        wait_for_lock: bool,
     },
     /// Run one session's server process.
     #[command(hide = true)]
