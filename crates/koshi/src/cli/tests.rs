@@ -51,6 +51,7 @@ fn bare_koshi_is_the_interactive_launch() {
         cli,
         Cli {
             headless: false,
+            allow_other_users: false,
             profile: None,
             command: None,
         }
@@ -72,11 +73,36 @@ fn headless_creates_a_session_without_the_interactive_launch() {
         cli,
         Cli {
             headless: true,
+            allow_other_users: false,
             profile: None,
             command: None,
         }
     );
     assert!(!cli.is_interactive_launch());
+}
+
+#[test]
+fn headless_takes_the_other_users_flag_beside_it() {
+    let cli = parse(&["koshi", "--headless", "--allow-other-users"]);
+    assert_eq!(
+        cli,
+        Cli {
+            headless: true,
+            allow_other_users: true,
+            profile: None,
+            command: None,
+        }
+    );
+}
+
+#[test]
+fn the_other_users_flag_without_headless_is_a_usage_error() {
+    // The flag only reaches a session this command creates, and only
+    // `--headless` creates one here, so a bare `koshi --allow-other-users`
+    // would silently do nothing.
+    let error = parse_err(&["koshi", "--allow-other-users"]);
+
+    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -86,6 +112,7 @@ fn attach_without_a_session_picks_one_at_runtime() {
         cli,
         Cli {
             headless: false,
+            allow_other_users: false,
             profile: None,
             command: Some(CliCommand::Attach { session: None }),
         }
@@ -110,6 +137,7 @@ fn bare_detach_names_no_target_and_no_session() {
         cli,
         Cli {
             headless: false,
+            allow_other_users: false,
             profile: None,
             command: Some(CliCommand::Detach {
                 target: None,

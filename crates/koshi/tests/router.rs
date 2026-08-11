@@ -180,6 +180,7 @@ fn create_session(connection: &mut Connection) -> SessionAddress {
         RouterRequestKind::CreateSession {
             profile: None,
             cwd: None,
+            allow_other_users: None,
         },
     ) {
         RouterResult::Created(address) => address,

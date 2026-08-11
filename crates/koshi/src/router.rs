@@ -13,8 +13,8 @@
 //! serving thread only holds a channel sender, so the session list has a
 //! single owner — the dispatcher loop on the main thread. A session that dies
 //! leaves the list two ways: its reaper thread reports the child's exit, or a
-//! lookup finds nothing listening at its address. Both remove the entry and
-//! the files it left behind.
+//! lookup finds nothing listening at its address. Both remove the entry and,
+//! for a session this user started, the files it left behind.
 //!
 //! With no session left, the dispatcher waits one idle window for a request
 //! and exits when none arrives. A caller that needs the router again starts
@@ -70,13 +70,19 @@ const DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 /// The subcommand the router starts itself under to run one session server.
 /// The arguments after it are the session id, the session name,
-/// [`RUNTIME_DIR_FLAG`] with the directory this router serves, and
-/// [`PROFILE_FLAG`] when the create named a profile.
+/// [`RUNTIME_DIR_FLAG`] with the directory this router serves,
+/// [`PROFILE_FLAG`] when the create named a profile, and
+/// [`ALLOW_OTHER_USERS_FLAG`] when the create asked for the other users of
+/// this machine.
 const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
 
 /// The flag carrying a `--profile` name to the session server the router
 /// starts, so the session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
+
+/// The flag telling the session server the router starts to let the other
+/// users of this machine reach the session, whatever its `koshi.kdl` says.
+const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
 /// The Win32 `CREATE_NO_WINDOW` creation flag: the started process gets a
 /// console with no window on screen.
@@ -94,7 +100,9 @@ struct SessionEntry {
     /// The session's control-socket address: a socket-file path on Unix, a
     /// bare pipe name on Windows.
     socket: String,
-    /// The process id of the session server serving that socket.
+    /// The process id of the session server serving that socket, and `0` for
+    /// a session another local user started, whose process this router does
+    /// not own.
     pid: u32,
     /// When the session was created.
     created_at: SystemTime,
@@ -156,7 +164,7 @@ pub fn run_router(runtime_dir: &Path) -> Result<(), Box<dyn std::error::Error>> 
         return Err(error.into());
     }
 
-    let registry = sweep(runtime_dir);
+    let registry = sweep(runtime_dir, ipc_client::shared_base().as_deref());
 
     let (events_tx, events_rx) = mpsc::channel();
     let shutting_down = Arc::new(AtomicBool::new(false));
@@ -371,12 +379,17 @@ fn serve_request(
         RouterRequestKind::Hello { .. } => {
             unreachable!("Hello is answered by the connection thread before dispatch")
         }
-        RouterRequestKind::CreateSession { profile, cwd } => create_session(
+        RouterRequestKind::CreateSession {
+            profile,
+            cwd,
+            allow_other_users,
+        } => create_session(
             runtime_dir,
             registry,
             events_tx,
             profile.as_deref(),
             cwd.as_deref(),
+            allow_other_users,
         ),
         RouterRequestKind::AttachLookup { selector } => {
             attach_lookup(runtime_dir, registry, &selector)
@@ -393,22 +406,28 @@ fn serve_request(
 /// reports something unreadable, or speaks another control-plane protocol
 /// version ends with the child killed, nothing registered, and whatever it
 /// advertised removed. A `cwd` the child cannot enter fails the start.
+///
+/// `allow_other_users` `Some(true)` starts the session server under
+/// [`ALLOW_OTHER_USERS_FLAG`], so the session serves the other users of this
+/// machine whatever its `koshi.kdl` says.
 fn create_session(
     runtime_dir: &Path,
     registry: &mut Registry,
     events_tx: &Sender<RouterEvent>,
     profile: Option<&str>,
     cwd: Option<&Path>,
+    allow_other_users: Option<bool>,
 ) -> RouterResult {
     let id = SessionId::new();
     let name = generate_name(NameKind::Session, |candidate| {
         name_is_taken(registry, candidate)
     });
 
-    let mut child = match spawn_session_server(runtime_dir, id, &name, profile, cwd) {
-        Ok(child) => child,
-        Err(error) => return refused(format!("the session could not be started: {error}")),
-    };
+    let mut child =
+        match spawn_session_server(runtime_dir, id, &name, profile, cwd, allow_other_users) {
+            Ok(child) => child,
+            Err(error) => return refused(format!("the session could not be started: {error}")),
+        };
     let pid = child.id();
 
     let Some(stdout) = child.stdout.take() else {
@@ -524,7 +543,13 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
 ///
 /// The walk is over endpoint files, which exist on every platform, so a
 /// Windows pipe with no directory entry of its own is still found.
-fn sweep(runtime_dir: &Path) -> Registry {
+///
+/// `shared_base` is the machine-wide shared directory while
+/// `allow-other-users` is on, and `None` while it is off. Each session it
+/// advertises for another local user is asked over the address it names, and
+/// registered when it answers. One that does not answer is left out and
+/// nothing of it is removed: its files belong to that user.
+fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
     let mut registry = Registry::new();
     for id in ipc_client::advertised_sessions(runtime_dir) {
         let endpoint = EndpointFile::read(&EndpointFile::path(runtime_dir, id));
@@ -542,6 +567,22 @@ fn sweep(runtime_dir: &Path) -> Registry {
                 );
             }
             _ => unregister(runtime_dir, &mut registry, id),
+        }
+    }
+    for (id, socket) in shared_base
+        .into_iter()
+        .flat_map(|base| ipc_client::foreign_sessions(base, runtime_dir))
+    {
+        if let Ok(overview) = ipc_client::fetch_foreign_overview(id, &socket) {
+            registry.insert(
+                id,
+                SessionEntry {
+                    name: overview.session.name,
+                    socket,
+                    pid: 0,
+                    created_at: overview.session.created_at,
+                },
+            );
         }
     }
     registry
@@ -566,7 +607,9 @@ fn resolve(registry: &Registry, selector: &SessionSelector) -> Option<SessionId>
 
 /// Drop one session from the list and remove what it advertised: its endpoint
 /// file, and on Unix its socket file. Both are derived from the id, so this
-/// works for an entry that was never in the list.
+/// works for an entry that was never in the list. A session another local user
+/// started advertised neither of them here, so nothing of that user's is
+/// removed.
 fn unregister(runtime_dir: &Path, registry: &mut Registry, id: SessionId) {
     registry.remove(&id);
     let _ = std::fs::remove_file(EndpointFile::path(runtime_dir, id));
@@ -577,6 +620,9 @@ fn unregister(runtime_dir: &Path, registry: &mut Registry, id: SessionId) {
 /// command line, its output piped back for the ready report, and the
 /// directory its first shell opens in.
 ///
+/// `allow_other_users` `Some(true)` adds [`ALLOW_OTHER_USERS_FLAG`]; any other
+/// value leaves the session to its own `koshi.kdl`.
+///
 /// On Windows the server runs with the `CREATE_NO_WINDOW` creation flag, so
 /// its console carries no window on screen.
 fn session_server_command(
@@ -585,6 +631,7 @@ fn session_server_command(
     name: &str,
     profile: Option<&str>,
     cwd: Option<&Path>,
+    allow_other_users: Option<bool>,
 ) -> std::io::Result<std::process::Command> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
@@ -595,6 +642,9 @@ fn session_server_command(
         .arg(runtime_dir);
     if let Some(profile) = profile {
         command.arg(PROFILE_FLAG).arg(profile);
+    }
+    if allow_other_users == Some(true) {
+        command.arg(ALLOW_OTHER_USERS_FLAG);
     }
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -618,8 +668,9 @@ fn spawn_session_server(
     name: &str,
     profile: Option<&str>,
     cwd: Option<&Path>,
+    allow_other_users: Option<bool>,
 ) -> std::io::Result<Child> {
-    session_server_command(runtime_dir, id, name, profile, cwd)?.spawn()
+    session_server_command(runtime_dir, id, name, profile, cwd, allow_other_users)?.spawn()
 }
 
 /// Watch one session server until it exits, then report the exit so its

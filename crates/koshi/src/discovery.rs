@@ -2,9 +2,11 @@
 //!
 //! Each running process answers one question — describe yourself, as a
 //! [`koshi_core::discovery::SessionOverview`]. This module does the rest
-//! locally: probe every endpoint file in the runtime directory, drop the
-//! ones nothing listens behind, and turn the answers into the rows a
-//! listing prints or the single record an `inspect` prints.
+//! locally: probe every endpoint file in the runtime directory — and, while
+//! `allow-other-users` is on, every session the shared directory advertises
+//! for the other local users of this machine — drop the ones nothing listens
+//! behind, and turn the answers into the rows a listing prints or the single
+//! record an `inspect` prints.
 //!
 //! A listing row is an id chain plus the names on it: a pane row names its
 //! pane, its tab, and its session, so the ids it prints can be pasted
@@ -75,8 +77,8 @@ pub struct ClientRow {
     pub session_name: String,
 }
 
-/// What one sweep of the runtime directory found: every session that
-/// answered, plus how many running sessions could not be asked.
+/// What one sweep found: every session that answered, plus how many running
+/// sessions could not be asked.
 ///
 /// The unasked count is what keeps an answer honest. "No running session has
 /// pane X" and "there is exactly one session, so it is the default" are both
@@ -173,7 +175,9 @@ impl Discovered {
     }
 }
 
-/// Ask every session the runtime directory advertises to describe itself.
+/// Ask every session the runtime directory advertises to describe itself,
+/// and, while `allow-other-users` is on, every session the shared directory
+/// advertises for the other local users of this machine.
 ///
 /// A session that is gone contributes no rows and is not counted as unasked
 /// — [`fetch_one`] has already swept what it left behind. A session that is
@@ -187,6 +191,21 @@ pub fn fetch_all(runtime_dir: &Path) -> Discovered {
         match fetch_one(runtime_dir, session_id) {
             Ok(overview) => found.sessions.push(overview),
             // Gone: swept by `fetch_one`, and it simply has no rows.
+            Err(CliError::SessionNotFound { .. }) => {}
+            Err(error) => {
+                eprintln!("koshi: session {session_id} did not answer: {error}");
+                found.unasked += 1;
+            }
+        }
+    }
+    for (session_id, socket) in ipc_client::shared_base()
+        .into_iter()
+        .flat_map(|base| ipc_client::foreign_sessions(&base, runtime_dir))
+    {
+        match ipc_client::fetch_foreign_overview(session_id, &socket) {
+            Ok(overview) => found.sessions.push(overview),
+            // Nothing listens: the session is gone. What it left behind
+            // belongs to another user, so it is left where it is.
             Err(CliError::SessionNotFound { .. }) => {}
             Err(error) => {
                 eprintln!("koshi: session {session_id} did not answer: {error}");

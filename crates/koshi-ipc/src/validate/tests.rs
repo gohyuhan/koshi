@@ -1,5 +1,6 @@
 //! Tests for the socket-address trust checks: the location and privacy
-//! checks per platform, and stale-socket reclaim over real sockets.
+//! checks per platform for the private address and for the shared one, and
+//! stale-socket reclaim over real sockets.
 
 use super::*;
 use crate::transport::Listener;
@@ -115,6 +116,97 @@ fn a_missing_runtime_dir_is_untrusted() {
     );
 }
 
+// --- validate_shared_socket_addr, Unix: location + shape ---
+
+/// A fresh directory with mode `0755`, standing in for this user's own
+/// subdirectory of the machine-wide shared directory.
+#[cfg(unix)]
+fn shared_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "koshi-validate-shared-{}-{tag}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create dir");
+    set_mode(&dir, 0o755);
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn an_address_directly_inside_a_shared_dir_this_user_owns_passes() {
+    let dir = shared_dir("passes");
+    let addr = dir.join("session.sock").to_string_lossy().into_owned();
+    validate_shared_socket_addr(&addr, &dir).expect("validate");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_address_outside_the_shared_dir_is_untrusted() {
+    let dir = shared_dir("outside");
+    let addr = std::env::temp_dir()
+        .join("elsewhere.sock")
+        .to_string_lossy()
+        .into_owned();
+    let err = validate_shared_socket_addr(&addr, &dir).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "untrusted socket address {addr}: \
+             not directly inside the koshi shared session directory"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_dir_other_users_may_write_is_untrusted() {
+    let dir = shared_dir("groupwrite");
+    set_mode(&dir, 0o775);
+    let addr = dir.join("session.sock").to_string_lossy().into_owned();
+    let err = validate_shared_socket_addr(&addr, &dir).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "untrusted socket address {addr}: shared session directory mode is 775, expected 755"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_dir_closed_to_other_users_is_untrusted() {
+    let dir = shared_dir("private");
+    set_mode(&dir, 0o700);
+    let addr = dir.join("session.sock").to_string_lossy().into_owned();
+    let err = validate_shared_socket_addr(&addr, &dir).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "untrusted socket address {addr}: shared session directory mode is 700, expected 755"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_standing_in_for_the_shared_dir_is_untrusted() {
+    // A link pointing at a directory that would pass every other check is
+    // exactly the squat this refuses: the target can be moved afterwards.
+    let target = shared_dir("linktarget");
+    let link =
+        std::env::temp_dir().join(format!("koshi-validate-shared-{}-link", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let addr = link.join("session.sock").to_string_lossy().into_owned();
+
+    let err = validate_shared_socket_addr(&addr, &link).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!("untrusted socket address {addr}: shared session directory is a symbolic link")
+    );
+}
+
 // --- validate_socket_addr, Windows: pipe namespace ---
 
 #[cfg(windows)]
@@ -127,6 +219,22 @@ fn a_koshi_prefixed_pipe_name_passes() {
 #[test]
 fn a_pipe_name_outside_the_koshi_namespace_is_untrusted() {
     let err = validate_socket_addr("other-session-abc", Path::new("unused")).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "untrusted socket address other-session-abc: pipe name is outside the koshi- namespace"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_koshi_prefixed_shared_pipe_name_passes() {
+    validate_shared_socket_addr("koshi-session-abc", Path::new("unused")).expect("validate");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_shared_pipe_name_outside_the_koshi_namespace_is_untrusted() {
+    let err = validate_shared_socket_addr("other-session-abc", Path::new("unused")).unwrap_err();
     assert_eq!(
         err.to_string(),
         "untrusted socket address other-session-abc: pipe name is outside the koshi- namespace"

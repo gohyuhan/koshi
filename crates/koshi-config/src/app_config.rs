@@ -39,7 +39,7 @@
 //! [`Direction::Down`], leaving every other field at its built-in default.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
 use koshi_core::geometry::Direction;
@@ -70,6 +70,8 @@ const SECTIONS: &[&str] = &[
     "terminal",
     "logging",
     "allow-beta-features",
+    "allow-other-users",
+    "shared-sessions-dir",
     "auto-close-session",
 ];
 
@@ -150,6 +152,22 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
                 Ok(allowed) => partial.allow_beta_features = Some(allowed),
                 Err(detail) => {
                     warnings.push(format!("ignored `allow-beta-features`: {detail}"));
+                }
+            },
+            "allow-other-users" => match value_bool(node) {
+                Ok(allowed) => partial.allow_other_users = Some(allowed),
+                Err(detail) => {
+                    warnings.push(format!("ignored `allow-other-users`: {detail}"));
+                }
+            },
+            // `shared-sessions-dir` is `Option<Option<PathBuf>>`: the outer
+            // layer marks the field set, the inner carries the directory. A
+            // blank value is ignored with a warning, so the platform's
+            // machine-wide directory stands.
+            "shared-sessions-dir" => match value_nonempty_string(node) {
+                Ok(dir) => partial.shared_sessions_dir = Some(Some(PathBuf::from(dir))),
+                Err(detail) => {
+                    warnings.push(format!("ignored `shared-sessions-dir`: {detail}"));
                 }
             },
             "auto-close-session" => match value_bool(node) {

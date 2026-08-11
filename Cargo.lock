@@ -732,6 +732,7 @@ dependencies = [
  "koshi-storage",
  "koshi-terminal",
  "koshi-test-support",
+ "libc",
  "ratatui",
  "semver",
  "serde",
@@ -828,6 +829,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "uuid",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -877,6 +880,7 @@ name = "koshi-paths"
 version = "0.2.0"
 dependencies = [
  "directories",
+ "libc",
  "tempfile",
 ]
 

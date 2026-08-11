@@ -8,17 +8,35 @@
 //! big-endian length, then that many bytes of JSON encoding one message from
 //! [`protocol`](crate::protocol).
 //!
+//! [`Listener::bind_shared`](crate::transport::Listener::bind_shared) binds a
+//! socket the other local users of this machine may open too, and
+//! [`Connection::peer_is_same_user`](crate::transport::Connection::peer_is_same_user)
+//! reports whether a connected peer runs as the same OS user this process
+//! does.
+//!
 //! A received length prefix is checked against
 //! [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN) before the payload
 //! buffer is allocated, so a peer naming a huge length is refused at the cost
 //! of reading four bytes.
 
 use std::io::{self, Read, Write};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
-use interprocess::local_socket::traits::{Listener as _, Stream as _};
+use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
 use interprocess::local_socket::{self as socket, ListenerOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, TokenUser, PSID, TOKEN_QUERY, TOKEN_USER,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::error::IpcError;
 
@@ -26,6 +44,20 @@ use crate::error::IpcError;
 /// message is far smaller; the cap bounds what a length prefix can make the
 /// reader allocate.
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
+
+/// What the shared control pipe grants, in Windows' [security descriptor
+/// string format][sddl]: the Authenticated Users group — every user logged in
+/// to this machine — may open the pipe for reading and writing.
+///
+/// `0x0012019f` is `FILE_GENERIC_READ | FILE_GENERIC_WRITE` spelled out, which
+/// is what the `GENERIC_READ | GENERIC_WRITE` a caller opens the pipe with maps
+/// to. `FILE_APPEND_DATA` (`0x4`) inside that set is also
+/// `FILE_CREATE_PIPE_INSTANCE`, which the server needs to create the pipe
+/// instance that serves the next caller.
+///
+/// [sddl]: https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+#[cfg(windows)]
+const SHARED_PIPE_ACCESS: &widestring::U16CStr = widestring::u16cstr!("D:(A;;0x0012019f;;;AU)");
 
 /// Map a control-socket address — the string an endpoint file stores — to the
 /// platform's socket name: a socket-file path on Unix, a pipe name on
@@ -64,6 +96,35 @@ impl Listener {
             .create_sync()
             .map_err(io_failure)?;
         Ok(Listener { inner })
+    }
+
+    /// Bind `addr` and start listening, with the other local users of this
+    /// machine able to open it.
+    ///
+    /// On Windows the pipe is created carrying a security descriptor that
+    /// grants the Authenticated Users group read and write, which is what opens
+    /// it to those users. On Unix this binds exactly as [`bind`](Self::bind)
+    /// does: the socket file arrives at the mode the process umask leaves, and
+    /// the caller widens it afterwards.
+    pub fn bind_shared(addr: &str) -> Result<Listener, IpcError> {
+        #[cfg(unix)]
+        {
+            Listener::bind(addr)
+        }
+        #[cfg(windows)]
+        {
+            use interprocess::os::windows::local_socket::ListenerOptionsExt;
+            use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+
+            let access = SecurityDescriptor::deserialize(SHARED_PIPE_ACCESS).map_err(io_failure)?;
+            let name = socket_name(addr).map_err(io_failure)?;
+            let inner = ListenerOptions::new()
+                .name(name)
+                .security_descriptor(access)
+                .create_sync()
+                .map_err(io_failure)?;
+            Ok(Listener { inner })
+        }
     }
 
     /// Block until a caller connects, then hand back that connection.
@@ -111,6 +172,37 @@ impl Connection {
     /// frame arrives.
     pub fn recv<T: DeserializeOwned>(&mut self) -> Result<T, IpcError> {
         read_message(&mut self.stream)
+    }
+
+    /// Report whether the peer process runs as the same OS user as this
+    /// process: on Unix its effective user id, on Windows the user in its
+    /// process token. The OS reports the peer's identity through the socket,
+    /// so a peer cannot forge it.
+    ///
+    /// Failing to learn the peer's identity is an error.
+    pub fn peer_is_same_user(&self) -> Result<bool, IpcError> {
+        let creds = self.stream.peer_creds().map_err(io_failure)?;
+        #[cfg(unix)]
+        {
+            let peer = creds.euid().ok_or_else(|| IpcError::Transport {
+                detail: "the socket reported no peer user id".to_string(),
+            })?;
+            Ok(peer == unsafe { libc::geteuid() })
+        }
+        #[cfg(windows)]
+        {
+            let pid = creds.pid().ok_or_else(|| IpcError::Transport {
+                detail: "the pipe reported no peer process id".to_string(),
+            })?;
+            let peer_process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if peer_process.is_null() {
+                return Err(io_failure(io::Error::last_os_error()));
+            }
+            let peer_process = unsafe { OwnedHandle::from_raw_handle(peer_process) };
+            let peer = token_user(peer_process.as_raw_handle())?;
+            let own = token_user(unsafe { GetCurrentProcess() })?;
+            Ok(unsafe { EqualSid(sid_of(&peer), sid_of(&own)) } != 0)
+        }
     }
 
     /// Split the connection into its reading and its writing half, so one
@@ -227,6 +319,51 @@ fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, IpcErr
     serde_json::from_slice(&payload).map_err(|error| IpcError::MalformedFrame {
         detail: error.to_string(),
     })
+}
+
+/// Read the user of `process`'s token: the bytes `GetTokenInformation`
+/// writes, which start with a [`TOKEN_USER`] whose `Sid` points into the rest
+/// of the same buffer. The buffer is `u64` so it carries the alignment
+/// [`TOKEN_USER`] needs.
+#[cfg(windows)]
+fn token_user(process: HANDLE) -> Result<Vec<u64>, IpcError> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io_failure(io::Error::last_os_error()));
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    // The first call writes no data; it reports the byte count to allocate.
+    let mut needed: u32 = 0;
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        );
+    }
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+    let filled = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            &mut needed,
+        )
+    };
+    if filled == 0 {
+        return Err(io_failure(io::Error::last_os_error()));
+    }
+    Ok(buffer)
+}
+
+/// The `Sid` pointer inside a buffer [`token_user`] filled. It stays valid
+/// only while that buffer lives.
+#[cfg(windows)]
+fn sid_of(buffer: &[u64]) -> PSID {
+    unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
 }
 
 /// True for the connect failures that mean "nothing answers at this

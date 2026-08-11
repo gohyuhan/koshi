@@ -9,6 +9,11 @@
 //! each event, timing renders, and handing every attached client its frame —
 //! until a `core:quit` command arrives or the last pane's child exits, and
 //! tears down.
+//!
+//! Where that control socket is bound depends on who may reach it: this user's
+//! private runtime directory on its own, or the machine-wide shared directory
+//! when `koshi.kdl`'s `allow-other-users` is on or `--allow-other-users` forces
+//! it on for this session.
 
 use std::io::Write;
 use std::path::Path;
@@ -42,11 +47,16 @@ const STARTING_VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// bound. Any failure before that returns `Err` having printed nothing, so a
 /// caller reading standard output sees end of stream and knows the session
 /// never started.
+///
+/// `allow_other_users_override` is the `--allow-other-users` flag the router
+/// passes on: `Some(true)` serves the other users of this machine whatever
+/// `koshi.kdl` says, and `None` leaves that answer to the file.
 pub fn run_session_server(
     runtime_dir: &Path,
     session_id: SessionId,
     session_name: String,
     profile: Option<&str>,
+    allow_other_users_override: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = crate::config::load_app_layer();
     let params = crate::config::logging_params(app.as_ref(), session_id);
@@ -75,6 +85,8 @@ pub fn run_session_server(
         inbox_rx,
         inbox_tx.clone(),
     );
+    // Read before the layer is handed over, which consumes it.
+    let other_users = crate::config::other_users_policy(app.as_ref(), allow_other_users_override);
     server.load_startup_config(app);
 
     // No client is minted here: this process serves whoever attaches over the
@@ -107,7 +119,7 @@ pub fn run_session_server(
 
     // Binds the socket and writes the endpoint file advertising it; the
     // address it reports is the one the ready line carries.
-    let ipc_server = IpcServer::start(runtime_dir, session_id, inbox_tx)?;
+    let ipc_server = IpcServer::start(runtime_dir, session_id, inbox_tx, other_users)?;
     let ready = SessionServerReady {
         protocol_version: ROUTER_PROTOCOL_VERSION,
         socket: ipc_server.addr().to_string(),

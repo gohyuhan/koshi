@@ -16,6 +16,7 @@
 //! through adjacent schemas. Disk discovery and reading live in the binary.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use koshi_core::action::ActionRef;
@@ -39,8 +40,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_THEME: &str = "default";
 
 /// The settings the session host reads: the shared layout floor, the
-/// scrollback buffers it owns, the environment it spawns children into, and
-/// its own log file.
+/// scrollback buffers it owns, the environment it spawns children into, its
+/// own log file, and who else on this machine may reach it.
 ///
 /// One session has one of these however many viewers are attached, because
 /// every field here describes something all of them share. A viewer's own
@@ -60,6 +61,12 @@ pub struct ServerConfig {
     pub logging: LoggingConfig,
     /// Whether entry points marked `#[beta_feature]` may run.
     pub allow_beta_features: bool,
+    /// Whether other users of this machine may reach this session's socket.
+    pub allow_other_users: bool,
+    /// The directory the session sockets other users reach live in. `None`
+    /// takes the platform's machine-wide directory, `/tmp/koshi` on Unix and
+    /// `%ProgramData%\koshi` on Windows.
+    pub shared_sessions_dir: Option<PathBuf>,
     /// Whether the session ends when its last client leaves.
     pub auto_close_session: bool,
 }
@@ -73,6 +80,8 @@ impl Default for ServerConfig {
             terminal: TerminalConfig::default(),
             logging: LoggingConfig::default(),
             allow_beta_features: false,
+            allow_other_users: false,
+            shared_sessions_dir: None,
             auto_close_session: false,
         }
     }

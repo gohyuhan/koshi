@@ -88,3 +88,13 @@ jobs:
       # cross-OS run reports all failures in a single pass, not one per push.
       - name: Test
         run: cargo test --workspace --all-features --locked --no-fail-fast
+
+      # The second-user tests skip without root, because only root may take
+      # on another user id. The Linux and macOS runners allow passwordless
+      # sudo, so the admit-and-refuse flow really executes on both; Windows
+      # has no second account a test can use. `env "PATH=$PATH"` carries the
+      # runner's cargo past sudo's PATH reset, and the flags match the step
+      # above so the already-built test binary is reused.
+      - name: Test as a second user
+        if: runner.os != 'Windows'
+        run: sudo -E env "PATH=$PATH" cargo test -p koshi --test other_user_access --all-features --locked

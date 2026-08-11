@@ -193,8 +193,8 @@ fn serve_session(
         )
         .expect("the session is seeded");
 
-    let ipc_server =
-        IpcServer::start(runtime_dir, session_id, inbox_tx).expect("the control socket binds");
+    let ipc_server = IpcServer::start(runtime_dir, session_id, inbox_tx, None)
+        .expect("the control socket binds");
     server.attach_ipc_server(ipc_server);
 
     serve(&mut server);

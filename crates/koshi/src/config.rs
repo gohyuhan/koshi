@@ -26,6 +26,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
 use koshi_config::keybinding::parse_keybindings;
@@ -39,6 +40,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
 use koshi_observability::logging::LoggingParams;
+use koshi_runtime::ipc_server::{OtherUsers, OtherUsersSetting};
 
 #[cfg(test)]
 mod tests;
@@ -118,6 +120,60 @@ pub(crate) fn logging_params(
         format: logging.format,
         session_id,
     }
+}
+
+/// What the session's control socket needs to serve the other users of this
+/// machine, or `None` when only the user who started the session may reach it.
+///
+/// `forced_on` is the `--allow-other-users` flag: `Some(true)` serves them
+/// whatever `koshi.kdl` says, and `None` leaves the answer to that file's
+/// `allow-other-users`.
+///
+/// A forced switch stays on for the session's whole life. A switch left to the
+/// file is read again on every request from another user, so an
+/// `allow-other-users` turned off after the session started closes the
+/// connections it had admitted.
+///
+/// The socket's directory is `koshi.kdl`'s `shared-sessions-dir` when it names
+/// one, and the platform's machine-wide location otherwise. No directory from
+/// either — Windows reporting no `ProgramData` — serves only this user.
+#[must_use]
+pub(crate) fn other_users_policy(
+    app: Option<&PartialKoshiConfig>,
+    forced_on: Option<bool>,
+) -> Option<OtherUsers> {
+    let server = merge_server(ServerConfig::default(), app.cloned().into_iter().collect());
+    if !forced_on.unwrap_or(server.allow_other_users) {
+        return None;
+    }
+    let shared_dir = server
+        .shared_sessions_dir
+        .or_else(koshi_paths::shared_sessions_dir)?;
+    let still_on: OtherUsersSetting = if forced_on == Some(true) {
+        Arc::new(|| true)
+    } else {
+        Arc::new(allow_other_users_now)
+    };
+    Some(OtherUsers {
+        shared_dir,
+        still_on,
+    })
+}
+
+/// The `server` settings `koshi.kdl` carries right now. Reads and parses the
+/// file again on each call, so the answer is the one the file holds at this
+/// moment.
+#[must_use]
+pub(crate) fn server_config_now() -> ServerConfig {
+    merge_server(
+        ServerConfig::default(),
+        load_app_layer().into_iter().collect(),
+    )
+}
+
+/// Whether `koshi.kdl` carries `allow-other-users` right now.
+fn allow_other_users_now() -> bool {
+    server_config_now().allow_other_users
 }
 
 /// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate that

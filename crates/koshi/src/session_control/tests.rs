@@ -192,11 +192,13 @@ struct RouterLog {
     request: Option<RouterRequestKind>,
 }
 
-/// The create a caller is expected to put on the wire for `profile`.
-fn expected_create(profile: Option<&str>) -> RouterRequestKind {
+/// The create a caller is expected to put on the wire for `profile` and
+/// `allow_other_users`.
+fn expected_create(profile: Option<&str>, allow_other_users: Option<bool>) -> RouterRequestKind {
     RouterRequestKind::CreateSession {
         profile: profile.map(str::to_string),
         cwd: Some(std::env::current_dir().expect("this test process has a directory")),
+        allow_other_users,
     }
 }
 
@@ -279,12 +281,13 @@ fn a_created_answer_hands_back_the_new_session_id() {
         }),
     );
 
-    let created = request_new_session(&runtime_dir, None).expect("the router created a session");
+    let created =
+        request_new_session(&runtime_dir, None, None).expect("the router created a session");
 
     assert_eq!(created, session_id);
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
-    assert_eq!(request, Some(expected_create(None)));
+    assert_eq!(request, Some(expected_create(None, None)));
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
@@ -304,13 +307,39 @@ fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
         }),
     );
 
-    let created =
-        request_headless_session(&runtime_dir, Some("work")).expect("the router created a session");
+    let created = request_headless_session(&runtime_dir, Some("work"), None)
+        .expect("the router created a session");
 
     assert_eq!(created, session_id);
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
-    assert_eq!(request, Some(expected_create(Some("work"))));
+    assert_eq!(request, Some(expected_create(Some("work"), None)));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+/// The wire is the only place `--allow-other-users` can travel, so a create
+/// that does not carry it leaves the new session as private as any other.
+#[test]
+fn a_headless_create_forcing_the_other_users_on_carries_that_answer_to_the_router() {
+    let runtime_dir = test_runtime_dir("create-other-users");
+    let session_id = SessionId::from_uuid(Uuid::from_u128(12));
+    let router = serve_router(
+        &runtime_dir,
+        RouterResult::Created(SessionAddress {
+            id: session_id,
+            name: "amber-fox".to_string(),
+            socket: "unused".to_string(),
+            pid: std::process::id(),
+        }),
+    );
+
+    let created = request_headless_session(&runtime_dir, None, Some(true))
+        .expect("the router created a session");
+
+    assert_eq!(created, session_id);
+    let (hello_ok, request) = saw(&router);
+    assert!(hello_ok, "the hello opens the gate");
+    assert_eq!(request, Some(expected_create(None, Some(true))));
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
@@ -325,7 +354,7 @@ fn a_refused_create_reports_the_routers_own_message() {
         }),
     );
 
-    let error = request_new_session(&runtime_dir, None).expect_err("the router refused");
+    let error = request_new_session(&runtime_dir, None, None).expect_err("the router refused");
 
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
@@ -333,7 +362,7 @@ fn a_refused_create_reports_the_routers_own_message() {
     assert_eq!(detail, "the session server did not start");
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
-    assert_eq!(request, Some(expected_create(None)));
+    assert_eq!(request, Some(expected_create(None, None)));
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
@@ -342,7 +371,8 @@ fn an_answer_to_another_request_names_what_came_back() {
     let runtime_dir = test_runtime_dir("headless-wrong-answer");
     let router = serve_router(&runtime_dir, router_hello_accepted());
 
-    let error = request_new_session(&runtime_dir, None).expect_err("the answer fits no create");
+    let error =
+        request_new_session(&runtime_dir, None, None).expect_err("the answer fits no create");
 
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
@@ -350,7 +380,7 @@ fn an_answer_to_another_request_names_what_came_back() {
     assert_eq!(detail, "the router answered a create session with Hello");
     let (hello_ok, request) = saw(&router);
     assert!(hello_ok, "the hello opens the gate");
-    assert_eq!(request, Some(expected_create(None)));
+    assert_eq!(request, Some(expected_create(None, None)));
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 

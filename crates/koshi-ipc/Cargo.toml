@@ -19,6 +19,10 @@ getrandom = "0.4.3"
 [target."cfg(unix)".dependencies]
 libc = "0.2.188"
 
+[target."cfg(windows)".dependencies]
+widestring = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"
 uuid = "1.24.0"

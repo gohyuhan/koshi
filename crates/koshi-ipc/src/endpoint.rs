@@ -4,7 +4,7 @@
 //! inside the private (`0700`) runtime directory. The file names the
 //! session's control-socket address, names the process advertising it, and
 //! carries the [`ConnectionToken`](crate::protocol::ConnectionToken) a
-//! connection must present at
+//! connection from the same user presents at
 //! [`Hello`](crate::protocol::IpcRequestKind::Hello). The directory is
 //! readable only by the user who started Koshi, so being able to read the
 //! file is itself the same-user proof.
@@ -14,11 +14,17 @@
 //! [`koshi_storage::atomic::write_atomic`], so a reader finds the old content
 //! or the new, never a half-written middle.
 //!
-//! The same module holds the two address helpers every writer and reader
-//! shares: [`socket_addr`](crate::endpoint::socket_addr) builds the
-//! control-socket address a session listens on, and
+//! The same module holds the address helpers every writer and reader shares:
+//! [`socket_addr`](crate::endpoint::socket_addr) builds the control-socket
+//! address a session listens on, and
 //! [`remove_socket_file`](crate::endpoint::remove_socket_file) takes that
 //! address off the disk once the session is gone.
+//! [`shared_socket_addr`](crate::endpoint::shared_socket_addr) builds that
+//! address for a session other local users may reach, and
+//! [`advert_path`](crate::endpoint::advert_path),
+//! [`write_advert`](crate::endpoint::write_advert) and
+//! [`remove_advert`](crate::endpoint::remove_advert) handle the empty marker
+//! file that names such a session on Windows.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +61,55 @@ pub fn socket_addr(runtime_dir: &Path, session: SessionId) -> String {
         let _ = runtime_dir;
         format!("koshi-{session}")
     }
+}
+
+/// The control-socket address a running `session` listens on when other local
+/// users may reach it.
+///
+/// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside
+/// `shared_user_dir` — the location
+/// [`validate_shared_socket_addr`](crate::validate::validate_shared_socket_addr)
+/// accepts. On Windows it is the pipe name [`socket_addr`] gives,
+/// `koshi-session-<uuid>`: pipe names share one machine-wide namespace, so
+/// `shared_user_dir` goes unused there.
+#[must_use]
+pub fn shared_socket_addr(shared_user_dir: &Path, session: SessionId) -> String {
+    #[cfg(unix)]
+    {
+        shared_user_dir
+            .join(format!("{session}.sock"))
+            .display()
+            .to_string()
+    }
+    #[cfg(windows)]
+    {
+        let _ = shared_user_dir;
+        format!("koshi-{session}")
+    }
+}
+
+/// Where the marker advertising `session` machine-wide lives:
+/// `session-<uuid>`, with no extension, directly inside `shared_dir`.
+///
+/// A Windows pipe has no filesystem location, so this marker is what tells a
+/// client which sessions listen on one. It carries no bytes: the pipe name
+/// follows from the session id the file is named after.
+#[must_use]
+pub fn advert_path(shared_dir: &Path, session: SessionId) -> PathBuf {
+    shared_dir.join(session.to_string())
+}
+
+/// Write the marker at `path` as an empty file, replacing whatever is there.
+pub fn write_advert(path: &Path) -> Result<(), IpcError> {
+    std::fs::write(path, b"").map_err(|error| IpcError::EndpointFileWrite {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })
+}
+
+/// Delete the marker at `path`. A path with nothing at it is left alone.
+pub fn remove_advert(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Unlink the socket file at `addr` on Unix, where the address is a

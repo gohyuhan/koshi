@@ -877,6 +877,48 @@ fn error_response_encodes_its_code_in_snake_case() {
     );
 }
 
+#[test]
+fn a_refusal_naming_the_other_users_setting_round_trips() {
+    let response = IpcResponse {
+        request_id: Some(7),
+        result: IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::OtherUsersOff,
+            message: "this Koshi serves only the user who started it".to_string(),
+        }),
+    };
+
+    assert_eq!(round_trip(&response), response);
+    assert_eq!(
+        serde_json::to_value(&response).expect("response encodes"),
+        json!({
+            "request_id": 7,
+            "result": {
+                "Error": {
+                    "code": "other_users_off",
+                    "message": "this Koshi serves only the user who started it"
+                }
+            }
+        })
+    );
+}
+
+/// A build with no name for a refusal code still reads the sentence beside it,
+/// so a koshi older than this one shows why another user was turned away.
+#[test]
+fn a_refusal_code_this_build_cannot_name_reads_as_unknown() {
+    let payload: IpcErrorPayload =
+        serde_json::from_str(r#"{"code":"rate_limited","message":"too many attach requests"}"#)
+            .expect("payload decodes");
+
+    assert_eq!(
+        payload,
+        IpcErrorPayload {
+            code: IpcErrorCode::Unknown,
+            message: "too many attach requests".to_string(),
+        }
+    );
+}
+
 /// A caller branches on the refusal code, so each one keeps its own wire
 /// spelling: a rejected token reads `bad_token`, never the name of another
 /// refusal.
@@ -890,6 +932,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::UnsupportedKind => "unsupported_kind",
         IpcErrorCode::MalformedRequest => "malformed_request",
         IpcErrorCode::HelloRequired => "hello_required",
+        IpcErrorCode::OtherUsersOff => "other_users_off",
         IpcErrorCode::Unknown => "unknown",
     };
 
@@ -899,6 +942,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::UnsupportedKind,
         IpcErrorCode::MalformedRequest,
         IpcErrorCode::HelloRequired,
+        IpcErrorCode::OtherUsersOff,
         IpcErrorCode::Unknown,
     ] {
         assert_eq!(

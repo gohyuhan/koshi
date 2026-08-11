@@ -15,6 +15,15 @@
 //! carries that client's key presses, resizes, pasted text and commands to the
 //! dispatcher and writes nothing back. The peer going away detaches the client.
 //!
+//! Passing [`OtherUsers`] to [`IpcServer::start`] moves the control socket to
+//! the machine-wide shared directory and widens it, so the other local users
+//! of this machine can reach it. The endpoint file keeps its private place and
+//! its `0600` mode either way. Every accepted connection is gated by the user
+//! the OS reports for it: the user who started the session is always served,
+//! and another local user is served only while `allow-other-users` is on. The
+//! setting is read again for each of that user's requests, so turning it off
+//! closes their connections.
+//!
 //! A request kind this build does not have is answered `UnsupportedKind` by
 //! name, and the connection keeps serving.
 //!
@@ -25,8 +34,8 @@
 //! reaches the session, any pane, or any other connection.
 //!
 //! [`IpcServer::shutdown`] stops accepting, joins the accept loop, and
-//! removes the endpoint file and the socket, so nothing advertises a
-//! session that is gone.
+//! removes the endpoint file, the socket and any shared marker, so nothing
+//! advertises a session that is gone.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,16 +45,21 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use koshi_core::ids::{ClientId, SessionId};
-use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{
+    advert_path, remove_advert, remove_socket_file, shared_socket_addr, socket_addr, write_advert,
+    EndpointFile,
+};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::handshake::Handshake;
+use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
     IpcResult,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
+use koshi_ipc::validate::{
+    reclaim_stale_socket, validate_shared_socket_addr, validate_socket_addr,
+};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_renderer::snapshot::Delivery;
 
@@ -57,17 +71,44 @@ use crate::runtime::event::RuntimeEvent;
 /// descriptors) cannot spin a core.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// Reads the `allow-other-users` setting from the configuration again and
+/// reports whether it is on. Called for each connection from another local
+/// user and for each request that user sends, so the answer is always the
+/// current one.
+pub type OtherUsersSetting = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// What [`IpcServer::start`] needs to serve the other local users of this
+/// machine.
+///
+/// Only the control socket moves: it binds in this user's directory under the
+/// machine-wide shared directory, carrying mode `0666` on Unix and a security
+/// descriptor granting Authenticated Users read and write on Windows. The
+/// endpoint file stays in the private runtime directory at mode `0600`, so the
+/// token it carries stays readable only by the user who started the session.
+pub struct OtherUsers {
+    /// The machine-wide directory koshi shares between local users, from
+    /// `koshi_paths::shared_sessions_dir`. This user's directory inside it
+    /// holds the control socket.
+    pub shared_dir: PathBuf,
+    /// The live read of the `allow-other-users` setting.
+    pub still_on: OtherUsersSetting,
+}
+
 /// The serving side of one session's control socket: the bound listener's
 /// accept loop, the address it serves, and the endpoint file advertising it.
 ///
 /// Held by the server for the session's lifetime; [`shutdown`](Self::shutdown)
-/// stops the loop and withdraws both files.
+/// stops the loop and withdraws the files it wrote.
 #[derive(Debug)]
 pub struct IpcServer {
     /// The control-socket address the accept loop is serving.
     addr: String,
     /// The endpoint file advertising `addr` and the connection token.
     endpoint_path: PathBuf,
+    /// The empty marker naming this session among those other local users may
+    /// reach, written on Windows where a pipe has no filesystem entry. `None`
+    /// on Unix, and `None` for a session only its own user may reach.
+    advert: Option<PathBuf>,
     /// Set by [`shutdown`](Self::shutdown); the accept loop exits when it
     /// observes the flag.
     shutting_down: Arc<AtomicBool>,
@@ -77,19 +118,29 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    /// Bind `session`'s control socket inside `runtime_dir`, write the
-    /// endpoint file advertising it, and start serving.
+    /// Bind `session`'s control socket, write the endpoint file advertising
+    /// it, and start serving.
     ///
     /// The steps run in trust order: the runtime directory is created
-    /// private (`0700`), the address is checked against it, any stale
-    /// leftover socket is reclaimed, the listener binds, and only then is
-    /// the endpoint file written — so the advertisement never exists without
-    /// a listener behind it. A failed endpoint write unwinds the bind and
-    /// leaves nothing behind.
+    /// private (`0700`), the address is checked against the directory it sits
+    /// in, any stale leftover socket is reclaimed, the listener binds, and
+    /// only then is the endpoint file written — so the advertisement never
+    /// exists without a listener behind it. A failed endpoint write unwinds
+    /// the bind and leaves nothing behind.
+    ///
+    /// `other_users` `None` binds the socket inside `runtime_dir`, where only
+    /// the user who started the session can reach it. `Some` binds it in this
+    /// user's directory under the machine-wide shared directory instead and
+    /// opens it to the other local users: mode `0666` on Unix, a pipe carrying
+    /// the Authenticated Users access of [`Listener::bind_shared`] on Windows,
+    /// where the marker naming the pipe is written as well. The endpoint file
+    /// is written to the same private path at the same `0600` mode either way;
+    /// only the address it carries differs.
     pub fn start(
         runtime_dir: &Path,
         session: SessionId,
         inbox_tx: Sender<RuntimeEvent>,
+        other_users: Option<OtherUsers>,
     ) -> Result<IpcServer, IpcError> {
         koshi_paths::ensure_private_dir(runtime_dir).map_err(|error| IpcError::Transport {
             detail: format!(
@@ -97,10 +148,36 @@ impl IpcServer {
                 runtime_dir.display()
             ),
         })?;
-        let addr = socket_addr(runtime_dir, session);
-        validate_socket_addr(&addr, runtime_dir)?;
+        let (addr, advert) = match &other_users {
+            None => {
+                let addr = socket_addr(runtime_dir, session);
+                validate_socket_addr(&addr, runtime_dir)?;
+                (addr, None)
+            }
+            Some(other_users) => {
+                let shared_user_dir = ensure_shared_dirs(&other_users.shared_dir)?;
+                let addr = shared_socket_addr(&shared_user_dir, session);
+                validate_shared_socket_addr(&addr, &shared_user_dir)?;
+                // A Windows pipe has no filesystem entry, so a marker file is
+                // what names the session listening on one.
+                let advert = cfg!(windows).then(|| advert_path(&shared_user_dir, session));
+                (addr, advert)
+            }
+        };
         reclaim_stale_socket(&addr)?;
-        let listener = Listener::bind(&addr)?;
+        let listener = if other_users.is_some() {
+            Listener::bind_shared(&addr)?
+        } else {
+            Listener::bind(&addr)?
+        };
+        #[cfg(unix)]
+        if other_users.is_some() {
+            if let Err(error) = widen_socket(&addr) {
+                drop(listener);
+                remove_socket_file(&addr);
+                return Err(error);
+            }
+        }
 
         let token = ConnectionToken::generate();
         let endpoint_path = EndpointFile::path(runtime_dir, session);
@@ -116,16 +193,32 @@ impl IpcServer {
             remove_socket_file(&addr);
             return Err(error);
         }
+        if let Some(advert) = &advert {
+            if let Err(error) = write_advert(advert) {
+                let _ = std::fs::remove_file(&endpoint_path);
+                drop(listener);
+                remove_socket_file(&addr);
+                return Err(error);
+            }
+        }
 
+        let still_on = other_users.map(|other_users| other_users.still_on);
         let shutting_down = Arc::new(AtomicBool::new(false));
         let accept_flag = Arc::clone(&shutting_down);
         let accept_thread = std::thread::spawn(move || {
-            accept_loop(&listener, &token, &inbox_tx, &accept_flag);
+            accept_loop(
+                &listener,
+                &token,
+                &inbox_tx,
+                &accept_flag,
+                still_on.as_ref(),
+            );
         });
 
         Ok(IpcServer {
             addr,
             endpoint_path,
+            advert,
             shutting_down,
             accept_thread: Some(accept_thread),
         })
@@ -138,9 +231,9 @@ impl IpcServer {
     }
 
     /// Stop serving: no further connection is accepted, the accept loop is
-    /// joined, and the endpoint file and socket are removed. Connections
-    /// already being served run out on their own threads; with the
-    /// dispatcher draining, their in-flight requests end in a closed
+    /// joined, and the endpoint file, the socket and any shared marker are
+    /// removed. Connections already being served run out on their own threads;
+    /// with the dispatcher draining, their in-flight requests end in a closed
     /// connection rather than a mutation.
     ///
     /// Dropping an `IpcServer` runs the same teardown, so a path that never
@@ -171,7 +264,55 @@ impl IpcServer {
             }
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
+        if let Some(advert) = &self.advert {
+            remove_advert(advert);
+        }
         remove_socket_file(&self.addr);
+    }
+}
+
+/// Create the machine-wide shared directory and this user's directory inside
+/// it, and hand back this user's directory: where a session other local users
+/// may reach binds its control socket.
+fn ensure_shared_dirs(shared_dir: &Path) -> Result<PathBuf, IpcError> {
+    koshi_paths::ensure_shared_base(shared_dir).map_err(|error| IpcError::Transport {
+        detail: format!(
+            "could not create the shared session directory {}: {error}",
+            shared_dir.display()
+        ),
+    })?;
+    koshi_paths::ensure_shared_user_dir(shared_dir).map_err(|error| IpcError::Transport {
+        detail: format!(
+            "could not create this user's directory under {}: {error}",
+            shared_dir.display()
+        ),
+    })
+}
+
+/// Set the socket file at `addr` to mode `0666`, so every local user of this
+/// machine may connect to it. Unix only: on Windows the address is a pipe name
+/// with no filesystem entry.
+#[cfg(unix)]
+fn widen_socket(addr: &str) -> Result<(), IpcError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(addr, std::fs::Permissions::from_mode(0o666)).map_err(|error| {
+        IpcError::Transport {
+            detail: format!("could not widen the control socket {addr}: {error}"),
+        }
+    })
+}
+
+/// Which peer a newly accepted connection is gated as. `same_user` is what the
+/// OS reports about the process that connected, and `switch_on` is the
+/// `allow-other-users` setting read a moment ago.
+///
+/// Another local user arriving while the setting is off is gated as a peer the
+/// handshake refuses with `OtherUsersOff`, so no request of theirs is served.
+fn admit(same_user: bool, switch_on: bool) -> Peer {
+    Peer::Local {
+        same_user,
+        other_users_allowed: switch_on,
     }
 }
 
@@ -184,11 +325,17 @@ impl Drop for IpcServer {
 /// Accept connections until the shutdown flag is set, giving each its own
 /// serving thread. A failed accept pauses briefly and retries, so one
 /// refused connection cannot stop the socket answering.
+///
+/// `still_on` is the live read of the `allow-other-users` setting, and is
+/// `None` for a session only its own user may reach. Each connection is gated
+/// by the user the OS reports for it; a connection whose user cannot be read
+/// is closed without being served.
 fn accept_loop(
     listener: &Listener,
     token: &ConnectionToken,
     inbox_tx: &Sender<RuntimeEvent>,
     shutting_down: &AtomicBool,
+    still_on: Option<&OtherUsersSetting>,
 ) {
     loop {
         let connection = listener.accept();
@@ -197,9 +344,20 @@ fn accept_loop(
         }
         match connection {
             Ok(connection) => {
+                // The OS reports which user opened the connection, so a peer
+                // cannot claim to be another one.
+                let Ok(same_user) = connection.peer_is_same_user() else {
+                    continue;
+                };
+                let peer = admit(same_user, still_on.is_some_and(|still_on| still_on()));
+                // Another local user's connection carries the setting with it,
+                // so each of their requests is checked against it again.
+                let live_setting = if same_user { None } else { still_on.cloned() };
                 let token = token.clone();
                 let inbox_tx = inbox_tx.clone();
-                std::thread::spawn(move || serve_connection(connection, token, &inbox_tx));
+                std::thread::spawn(move || {
+                    serve_connection(connection, token, &inbox_tx, peer, live_setting);
+                });
             }
             Err(_) => std::thread::sleep(ACCEPT_RETRY_DELAY),
         }
@@ -215,12 +373,19 @@ fn accept_loop(
 /// An answered `Attach` ends the request loop: the connection is handed to
 /// [`stream_events`], which carries that client's events out and that client's
 /// input in for as long as the connection lives.
+///
+/// `live_setting` is the live read of the `allow-other-users` setting on a
+/// connection from another local user, and `None` on one from the user who
+/// started the session. It is read before each request is served, so turning
+/// the setting off closes the connection.
 fn serve_connection(
     mut connection: Connection,
     token: ConnectionToken,
     inbox_tx: &Sender<RuntimeEvent>,
+    peer: Peer,
+    live_setting: Option<OtherUsersSetting>,
 ) {
-    let mut gate = Handshake::new(token);
+    let mut gate = Handshake::new(token, peer);
     loop {
         let request: IncomingRequest = match connection.recv() {
             Ok(request) => request,
@@ -246,6 +411,12 @@ fn serve_connection(
             // stream left. All close this one connection.
             Err(_) => return,
         };
+
+        // The setting can change while this connection is open, so it is read
+        // again rather than trusted from the accept that let the peer in.
+        if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
+            return;
+        }
 
         let request_id = Some(request.request_id);
         // A kind this build does not have comes from a newer koshi. It is
@@ -321,7 +492,13 @@ fn serve_connection(
                     }
                     // The reply is written; from here the connection carries
                     // the client's event stream and the client's own input.
-                    stream_events(connection, accepted.client_id, accepted.events, inbox_tx);
+                    stream_events(
+                        connection,
+                        accepted.client_id,
+                        accepted.events,
+                        inbox_tx,
+                        live_setting,
+                    );
                     return;
                 }
                 // A key press, a resize, a paste and a mouse round belong on an
@@ -391,11 +568,17 @@ fn serve_connection(
 /// last frame, and ends. The reading half keeps reading until the client
 /// closes its end, and that close reads as end of stream — a second detach for
 /// a client already gone.
+///
+/// `live_setting` is the live read of the `allow-other-users` setting on a
+/// connection from another local user, and `None` on one from the user who
+/// started the session. It is read before each frame that client sends is
+/// acted on, so turning the setting off detaches them at their next input.
 fn stream_events(
     connection: Connection,
     client_id: ClientId,
     events: Receiver<Delivery>,
     inbox_tx: &Sender<RuntimeEvent>,
+    live_setting: Option<OtherUsersSetting>,
 ) {
     let (mut reader, mut writer) = connection.split();
     let writer_inbox = inbox_tx.clone();
@@ -430,6 +613,11 @@ fn stream_events(
     });
 
     while let Ok(request) = reader.recv::<IncomingRequest>() {
+        // The setting can change while this client is attached, so it is read
+        // again rather than trusted from the accept that let the peer in.
+        if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
+            break;
+        }
         let kind = match request.kind {
             MaybeKnown::Known(kind) => kind,
             // A kind this build does not have comes from a newer koshi. This

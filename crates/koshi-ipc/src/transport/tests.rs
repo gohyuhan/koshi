@@ -219,6 +219,62 @@ fn request_and_response_cross_a_real_socket() {
     assert_eq!(server.join().expect("server thread"), sent);
 }
 
+/// On Windows this pins the shared pipe's security descriptor from both sides:
+/// the caller opens the pipe with `GENERIC_READ | GENERIC_WRITE`, and the
+/// second caller is served only if the descriptor also let the listener create
+/// the pipe instance behind it.
+#[test]
+fn a_shared_bind_serves_one_caller_after_another() {
+    let addr = test_addr("shared");
+    let listener = Listener::bind_shared(&addr).expect("bind shared");
+
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let mut conn = listener.accept().expect("accept");
+            let request: IpcRequest = conn.recv().expect("server recv");
+            conn.send(&IpcResponse {
+                request_id: Some(request.request_id),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            })
+            .expect("server send");
+        }
+    });
+
+    for request_id in [1, 2] {
+        let mut conn = Connection::connect(&addr).expect("connect");
+        conn.send(&hello_request(request_id)).expect("client send");
+        let response: IpcResponse = conn.recv().expect("client recv");
+        assert_eq!(
+            response,
+            IpcResponse {
+                request_id: Some(request_id),
+                result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            }
+        );
+    }
+    server.join().expect("server thread");
+}
+
+#[test]
+fn a_caller_from_this_same_process_is_reported_as_the_same_user() {
+    let addr = test_addr("peeruser");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        let conn = listener.accept().expect("accept");
+        conn.peer_is_same_user().expect("peer creds")
+    });
+
+    // The caller stays connected until the server has read its credentials.
+    let caller = Connection::connect(&addr).expect("connect");
+    assert!(server.join().expect("server thread"));
+    drop(caller);
+}
+
 #[test]
 fn hello_and_request_sent_back_to_back_arrive_as_two_messages() {
     let addr = test_addr("backtoback");

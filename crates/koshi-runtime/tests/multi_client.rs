@@ -141,7 +141,8 @@ fn served<T: Send + 'static>(
             None,
         )
         .expect("seed the session");
-    let ipc = IpcServer::start(&runtime_dir, session_id, inbox_tx.clone()).expect("start serving");
+    let ipc =
+        IpcServer::start(&runtime_dir, session_id, inbox_tx.clone(), None).expect("start serving");
 
     let caller_dir = runtime_dir.clone();
     let caller_fake = fake.clone();
@@ -942,7 +943,8 @@ fn served_until_quit(
             None,
         )
         .expect("seed the session");
-    let ipc = IpcServer::start(&runtime_dir, session_id, inbox_tx.clone()).expect("start serving");
+    let ipc =
+        IpcServer::start(&runtime_dir, session_id, inbox_tx.clone(), None).expect("start serving");
 
     let caller_dir = runtime_dir.clone();
     let caller = std::thread::spawn(move || {

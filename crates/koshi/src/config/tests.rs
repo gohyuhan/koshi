@@ -498,3 +498,103 @@ fn logging_params_take_the_level_and_format_the_config_names() {
     assert_eq!(params.format, LogFormat::Json);
     assert_eq!(params.session_id, session_id);
 }
+
+// --- Who may reach a session's control socket ---
+
+/// A `koshi.kdl` layer setting `allow-other-users` to `allowed` and naming no
+/// shared directory.
+fn switch_layer(allowed: bool) -> PartialKoshiConfig {
+    PartialKoshiConfig {
+        allow_other_users: Some(allowed),
+        ..Default::default()
+    }
+}
+
+/// A `koshi.kdl` layer setting `allow-other-users` to `allowed` and naming
+/// `dir` as the shared sessions directory.
+fn switch_layer_sharing(allowed: bool, dir: &str) -> PartialKoshiConfig {
+    PartialKoshiConfig {
+        allow_other_users: Some(allowed),
+        shared_sessions_dir: Some(Some(PathBuf::from(dir))),
+        ..Default::default()
+    }
+}
+
+/// The directory a policy shares through, or `None` when the session serves
+/// only the user who started it. `OtherUsers` carries a closure, so the
+/// directory is what a test compares.
+fn shared_dir_of(policy: Option<OtherUsers>) -> Option<PathBuf> {
+    policy.map(|policy| policy.shared_dir)
+}
+
+#[test]
+fn a_fresh_install_serves_only_the_user_who_started_the_session() {
+    assert_eq!(shared_dir_of(other_users_policy(None, None)), None);
+}
+
+#[test]
+fn a_config_turning_the_switch_off_serves_only_that_user() {
+    assert_eq!(
+        shared_dir_of(other_users_policy(Some(&switch_layer(false)), None)),
+        None
+    );
+}
+
+#[test]
+fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
+    assert_eq!(
+        shared_dir_of(other_users_policy(Some(&switch_layer(true)), None)),
+        koshi_paths::shared_sessions_dir()
+    );
+}
+
+#[test]
+fn a_config_naming_a_shared_directory_shares_through_that_one() {
+    assert_eq!(
+        shared_dir_of(other_users_policy(
+            Some(&switch_layer_sharing(true, "/var/run/koshi")),
+            None
+        )),
+        Some(PathBuf::from("/var/run/koshi"))
+    );
+}
+
+#[test]
+fn naming_a_shared_directory_alone_serves_only_this_user() {
+    // The directory says where the sockets would go, never who may reach them.
+    assert_eq!(
+        shared_dir_of(other_users_policy(
+            Some(&switch_layer_sharing(false, "/var/run/koshi")),
+            None
+        )),
+        None
+    );
+}
+
+#[test]
+fn the_flag_shares_a_session_whose_config_says_no() {
+    let policy = other_users_policy(
+        Some(&switch_layer_sharing(false, "/var/run/koshi")),
+        Some(true),
+    )
+    .expect("the flag turns the switch on");
+
+    assert_eq!(policy.shared_dir, PathBuf::from("/var/run/koshi"));
+    // A service unit started under the flag keeps serving whatever the file
+    // says afterwards, so the live read answers the same every time.
+    assert!((policy.still_on)());
+    assert!((policy.still_on)());
+}
+
+#[test]
+fn a_flag_naming_no_other_users_serves_only_this_user() {
+    // `--allow-other-users` sends `Some(true)` or nothing, so no command line
+    // spells this today. An explicit answer beats the file either way.
+    assert_eq!(
+        shared_dir_of(other_users_policy(
+            Some(&switch_layer_sharing(true, "/var/run/koshi")),
+            Some(false)
+        )),
+        None
+    );
+}

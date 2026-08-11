@@ -1,7 +1,8 @@
 //! Tests for the connection handshake gate: a Hello whose version range
-//! overlaps this build's and whose token matches opens it, the settled version
-//! is the highest both sides speak, every refusal carries its exact code and
-//! message, and a refusal never changes what the gate lets through.
+//! overlaps this build's and which meets its peer's token rule opens it, the
+//! settled version is the highest both sides speak, every refusal carries its
+//! exact code and message, and a refusal never changes what the gate lets
+//! through.
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -22,9 +23,44 @@ fn expected() -> ConnectionToken {
     ConnectionToken::new("k7QxSecret")
 }
 
-/// A gate for a fresh connection, still closed.
+/// A gate for a fresh connection from this machine's own user, still closed.
 fn gate() -> Handshake {
-    Handshake::new(expected())
+    Handshake::new(
+        expected(),
+        Peer::Local {
+            same_user: true,
+            other_users_allowed: false,
+        },
+    )
+}
+
+/// A gate for a fresh connection from another machine, still closed.
+fn remote_gate() -> Handshake {
+    Handshake::new(expected(), Peer::Remote)
+}
+
+/// A gate for a fresh connection from another user of this machine, with
+/// `allow-other-users` set to `allowed`.
+fn other_user_gate(allowed: bool) -> Handshake {
+    Handshake::new(
+        expected(),
+        Peer::Local {
+            same_user: false,
+            other_users_allowed: allowed,
+        },
+    )
+}
+
+/// The refusal a Hello from another user earns while `allow-other-users` is
+/// off, spelled out.
+fn other_users_refusal() -> IpcErrorPayload {
+    IpcErrorPayload {
+        code: IpcErrorCode::OtherUsersOff,
+        message: "this Koshi serves only the user who started it; \
+                  set `allow-other-users #true` in koshi.kdl to let \
+                  the other users of this machine in"
+            .to_string(),
+    }
 }
 
 /// A Hello speaking `min` to `max` and presenting the right token.
@@ -123,6 +159,159 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
             code: IpcErrorCode::BadToken,
             message: "the token presented does not match this Koshi's".to_string(),
         })
+    );
+}
+
+#[test]
+fn a_hello_from_another_machine_with_a_wrong_token_is_refused_as_bad_token() {
+    assert_eq!(
+        remote_gate().check(&wrong_token_hello()),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_hello_from_another_machine_with_the_right_token_is_accepted() {
+    let mut gate = remote_gate();
+
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
+}
+
+#[test]
+fn an_allowed_other_user_opens_the_gate_without_a_token() {
+    let mut gate = other_user_gate(true);
+    let hello = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: ConnectionToken::new(""),
+    };
+
+    assert_eq!(gate.check(&hello), Ok(()));
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
+    assert_eq!(
+        gate.check(&IpcRequestKind::Discovery),
+        Ok(()),
+        "the gate is open, so the requests after the Hello are served"
+    );
+}
+
+#[test]
+fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
+    // Turning the setting on widens who may reach the socket, never what the
+    // user who started the session has to present on it.
+    let mut gate = Handshake::new(
+        expected(),
+        Peer::Local {
+            same_user: true,
+            other_users_allowed: true,
+        },
+    );
+
+    assert_eq!(
+        gate.check(&wrong_token_hello()),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        })
+    );
+    assert_eq!(gate.agreed(), None);
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+}
+
+#[test]
+fn an_allowed_other_user_is_admitted_whatever_token_it_presents() {
+    // The token proves a caller read the session's endpoint file, which
+    // another user cannot; their Hello is not judged on the field they fill.
+    let mut gate = other_user_gate(true);
+
+    assert_eq!(gate.check(&wrong_token_hello()), Ok(()));
+    assert_eq!(gate.agreed(), Some(PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
+    // The empty token is what an admitted local user sends. Arriving from
+    // another machine it earns the same refusal as any other wrong one.
+    let hello = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: ConnectionToken::new(""),
+    };
+
+    assert_eq!(
+        remote_gate().check(&hello),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        })
+    );
+}
+
+#[test]
+fn repeated_hellos_never_wear_down_a_setting_that_is_off() {
+    let mut gate = other_user_gate(false);
+
+    for _ in 0..3 {
+        assert_eq!(gate.check(&good_hello()), Err(other_users_refusal()));
+    }
+
+    assert_eq!(gate.agreed(), None);
+    assert_eq!(
+        gate.check(&IpcRequestKind::Discovery),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Discovery arrived before a Hello opened the connection".to_string(),
+        })
+    );
+}
+
+#[test]
+fn another_user_is_refused_while_the_setting_is_off() {
+    assert_eq!(
+        other_user_gate(false).check(&good_hello()),
+        Err(other_users_refusal()),
+        "the right token does not let another user in while the setting is off"
+    );
+    assert_eq!(
+        other_user_gate(false).check(&wrong_token_hello()),
+        Err(other_users_refusal())
+    );
+}
+
+#[test]
+fn a_refused_other_user_leaves_the_gate_closed() {
+    let mut gate = other_user_gate(false);
+
+    gate.check(&good_hello()).expect_err("the Hello is refused");
+
+    assert_eq!(gate.agreed(), None);
+    assert_eq!(
+        gate.check(&IpcRequestKind::Discovery),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Discovery arrived before a Hello opened the connection".to_string(),
+        })
+    );
+}
+
+#[test]
+fn an_out_of_range_hello_from_another_user_is_refused_for_the_version() {
+    assert_eq!(
+        other_user_gate(false).check(&hello_speaking(ABOVE_RANGE, ABOVE_RANGE)),
+        Err(version_refusal(ABOVE_RANGE, ABOVE_RANGE)),
+        "the version is settled before the peer's own rule, for every peer"
+    );
+    assert_eq!(
+        other_user_gate(true).check(&hello_speaking(ABOVE_RANGE, ABOVE_RANGE)),
+        Err(version_refusal(ABOVE_RANGE, ABOVE_RANGE))
+    );
+    assert_eq!(
+        remote_gate().check(&hello_speaking(ABOVE_RANGE, ABOVE_RANGE)),
+        Err(version_refusal(ABOVE_RANGE, ABOVE_RANGE))
     );
 }
 
