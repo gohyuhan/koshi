@@ -10,6 +10,9 @@
 //! router is running. Then this starts one detached and retries the exchange
 //! until the new router answers or the wait runs out — the same path a request
 //! takes when it arrives just as an idle router exits.
+//!
+//! Restarting the running router is the one ask that never starts one. It
+//! sends a single exchange, and reports back when no router was running.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -30,7 +33,8 @@ use crate::error::CliError;
 mod tests;
 
 /// The subcommand this binary starts itself under to run the router. The
-/// argument after it is [`RUNTIME_DIR_FLAG`] with the directory to serve.
+/// arguments after it are [`RUNTIME_DIR_FLAG`] with the directory to serve,
+/// and `--wait-for-lock` when a router hands its place to a replacement.
 pub const ROUTER_SUBCOMMAND: &str = "serve-router";
 
 /// The flag naming the runtime directory a started process serves. Takes that
@@ -86,6 +90,24 @@ pub fn router_request(
             });
         }
         std::thread::sleep(ROUTER_START_POLL);
+    }
+}
+
+/// Ask the router that is already running to restart into the binary on disk.
+///
+/// Sends exactly one Restart exchange and never starts a router. `Ok(false)`
+/// means no router was running, so nothing restarted.
+///
+/// A router that refuses the request is [`CliError::IpcUnavailable`]. An older
+/// router refuses it that way, by name, because its build has no such kind.
+pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
+    match exchange(runtime_dir, &RouterRequestKind::Restart)? {
+        None => Ok(false),
+        Some(RouterResult::Restarting) => Ok(true),
+        Some(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
+            detail: refusal.message,
+        }),
+        Some(other) => Err(unexpected_reply(&other)),
     }
 }
 

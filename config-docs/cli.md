@@ -13,6 +13,9 @@ flag and accepted value.
 | `koshi --headless --allow-other-users` | Open that session so the other users of this machine may reach it |
 | `koshi update` | Check for and install the latest release |
 
+`koshi update` then restarts the background process that tracks sessions into
+the new release, if that process is running. Every session keeps running.
+
 `--headless` prints `[SESSION ID]: session-<uuid>` and exits. Nothing is drawn.
 Attach to it later with `koshi attach session-<uuid>`.
 

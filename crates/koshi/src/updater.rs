@@ -12,9 +12,10 @@
 //! `update.json` in the state directory holds the one thing koshi writes — the
 //! last-check time — so koshi never rewrites the user's config file.
 //!
-//! Nothing here is used by the daemon or the running session: it is a
-//! CLI-side, one-shot flow, so it reads the clock and the network directly
-//! rather than through the runtime's injected services.
+//! This is a CLI-side, one-shot flow. No session runs it, so it reads the
+//! clock and the network directly rather than through the runtime's injected
+//! services. After an install it asks the running router to restart into the
+//! binary just installed.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -30,6 +31,8 @@ use tempfile::{Builder, TempPath};
 use ureq::Agent;
 
 use crate::error::CliError;
+use crate::ipc_client;
+use crate::router_client::restart_running_router;
 
 /// This build's version, from the crate version bumped before each release.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -72,6 +75,7 @@ pub fn run_update_command() -> Result<(), CliError> {
     };
     install_release(&tag).map_err(update_err)?;
     println!("updated to koshi {}", strip_v(&tag));
+    restart_router_after_install();
     Ok(())
 }
 
@@ -109,10 +113,31 @@ pub fn maybe_prompt_startup_update() {
     }
     match install_release(&tag) {
         Ok(()) => {
+            restart_router_after_install();
             println!("updated to koshi {} — relaunch to use it", strip_v(&tag));
             std::process::exit(0);
         }
         Err(err) => eprintln!("koshi: update failed: {err}"),
+    }
+}
+
+/// Ask the running router to restart into the binary just installed, and say
+/// what happened.
+///
+/// Prints nothing when no router is running. A restart that fails prints a
+/// note on standard error; the install itself stands.
+fn restart_router_after_install() {
+    match ipc_client::runtime_dir().and_then(|dir| restart_running_router(&dir)) {
+        Ok(true) => {
+            println!(
+                "the running router restarted into the new binary; every session keeps running"
+            )
+        }
+        Ok(false) => {}
+        Err(err) => eprintln!(
+            "koshi: the running router could not be restarted: {err}; it keeps serving the old \
+             build until it exits"
+        ),
     }
 }
 

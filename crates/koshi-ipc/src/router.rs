@@ -1,5 +1,5 @@
 //! The control-plane protocol: how a client asks the router to create, find,
-//! list, or kill sessions.
+//! or list sessions, and to restart the router itself.
 //!
 //! The router is one process per user. It owns the list of running sessions
 //! and nothing else: a caller asks it for a session's control-socket address,
@@ -35,9 +35,10 @@ use crate::wire::{MaybeKnown, WireName, WireVariants};
 /// it uses when the peer speaks it too.
 ///
 /// Bumps once per release cycle, in the commit that first changes a wire shape
-/// after a release — not once per change. This protocol was born in 0.2.0 and
-/// has never shipped, so it stays 1 until 0.2.0 is out.
-pub const ROUTER_PROTOCOL_VERSION: u32 = 1;
+/// after a release — not once per change. Version 1 is what 0.2.0 speaks;
+/// version 2 adds [`RouterRequestKind::Restart`] and its
+/// [`RouterResult::Restarting`] answer.
+pub const ROUTER_PROTOCOL_VERSION: u32 = 2;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -127,6 +128,10 @@ pub enum RouterRequestKind {
     },
     /// List the running sessions.
     ListSessions,
+    /// Restart the router: it sends its answer, then restarts into the binary
+    /// at the path it started from. The session list is rebuilt from the
+    /// endpoint files, so every running session stays registered.
+    Restart,
 }
 
 impl RouterRequestKind {
@@ -155,6 +160,7 @@ impl RouterRequestKind {
             RouterRequestKind::CreateSession { .. } => "CreateSession",
             RouterRequestKind::AttachLookup { .. } => "AttachLookup",
             RouterRequestKind::ListSessions => "ListSessions",
+            RouterRequestKind::Restart => "Restart",
         }
     }
 }
@@ -222,6 +228,9 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::ListSessions`]: one record per running
     /// session.
     Sessions(Vec<SessionInfo>),
+    /// Answers [`RouterRequestKind::Restart`]: the reply is sent, then the
+    /// router restarts into the binary now on disk.
+    Restarting,
     /// The request was refused.
     Error(IpcErrorPayload),
 }
@@ -414,8 +423,13 @@ impl WireVariants for RouterRequestKind {
     /// Every control-plane request kind this build has. A kind added to
     /// [`RouterRequestKind`] is added here and to
     /// [`RouterRequestKind::name`] in the same change.
-    const VARIANTS: &'static [&'static str] =
-        &["Hello", "CreateSession", "AttachLookup", "ListSessions"];
+    const VARIANTS: &'static [&'static str] = &[
+        "Hello",
+        "CreateSession",
+        "AttachLookup",
+        "ListSessions",
+        "Restart",
+    ];
 }
 
 impl WireName for RouterRequestKind {
@@ -427,7 +441,14 @@ impl WireName for RouterRequestKind {
 impl WireVariants for RouterResult {
     /// Every control-plane answer this build has. A variant added to
     /// [`RouterResult`] is added here in the same change.
-    const VARIANTS: &'static [&'static str] = &["Hello", "Created", "Found", "Sessions", "Error"];
+    const VARIANTS: &'static [&'static str] = &[
+        "Hello",
+        "Created",
+        "Found",
+        "Sessions",
+        "Restarting",
+        "Error",
+    ];
 }
 
 impl WireName for RouterResult {
@@ -437,6 +458,7 @@ impl WireName for RouterResult {
             RouterResult::Created(_) => "Created",
             RouterResult::Found(_) => "Found",
             RouterResult::Sessions(_) => "Sessions",
+            RouterResult::Restarting => "Restarting",
             RouterResult::Error(_) => "Error",
         }
     }

@@ -375,6 +375,7 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
             selector: crate::router::SessionSelector::Name("quiet-lake".to_string()),
         },
         RouterRequestKind::ListSessions,
+        RouterRequestKind::Restart,
     ]
 }
 
@@ -393,6 +394,7 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::Created(address.clone()),
         RouterResult::Found(address),
         RouterResult::Sessions(Vec::new()),
+        RouterResult::Restarting,
         RouterResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,
             message: String::new(),

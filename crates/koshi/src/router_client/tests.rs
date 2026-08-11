@@ -1,9 +1,10 @@
 //! Tests for the client side of the router socket, against a stand-in router
 //! serving a real socket in a temporary runtime directory.
 //!
-//! Every test here finds that stand-in already listening, so the exchange
-//! succeeds on its first attempt and no router is ever started. Starting one
-//! needs whole processes, so that is covered by the integration tests instead.
+//! Every test that starts the stand-in finds it already listening, so the
+//! exchange succeeds on its first attempt and no router is ever started.
+//! Starting one needs whole processes, so that is covered by the integration
+//! tests instead.
 
 use super::*;
 
@@ -12,7 +13,7 @@ use std::time::UNIX_EPOCH;
 
 use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::{ClientId, SessionId};
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{router_socket_addr, RouterHandshake, RouterResponse};
 use koshi_ipc::transport::Listener;
 use tempfile::TempDir;
@@ -142,5 +143,71 @@ fn an_endpoint_file_carrying_the_wrong_token_reports_the_refusal() {
         panic!("expected IpcUnavailable, got {error:?}");
     };
     assert_eq!(detail, "the token presented does not match the router's");
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_restart_with_no_router_running_restarts_nothing() {
+    let runtime_dir = test_runtime_dir();
+
+    let restarted =
+        restart_running_router(runtime_dir.path()).expect("an empty runtime directory answers");
+
+    assert!(!restarted);
+    assert!(!router_endpoint_path(runtime_dir.path()).exists());
+}
+
+#[test]
+fn a_restarting_reply_reports_the_router_restarted() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Restarting),
+    );
+
+    let restarted = restart_running_router(runtime_dir.path()).expect("the exchange succeeds");
+
+    assert!(restarted);
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_reply_that_answers_no_restart_is_reported_as_unexpected() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Sessions(Vec::new())),
+    );
+
+    let error =
+        restart_running_router(runtime_dir.path()).expect_err("the reply answers no restart");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the router answered with an unexpected Sessions reply"
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_refused_restart_reports_the_reason_the_router_gave() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this build has no request kind named Restart".to_string(),
+        })),
+    );
+
+    let error = restart_running_router(runtime_dir.path()).expect_err("the restart is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "this build has no request kind named Restart");
     router.join().expect("the stand-in router exits");
 }

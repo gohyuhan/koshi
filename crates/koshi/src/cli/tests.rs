@@ -812,6 +812,40 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
 }
 
 #[test]
+fn serve_router_takes_the_wait_for_lock_flag() {
+    // The flag is what a router handing its place over passes to the router
+    // it starts, so the new one waits instead of yielding to the old one.
+    assert_eq!(
+        parse(&["koshi", "serve-router", "--runtime-dir", "X"]).command,
+        Some(CliCommand::ServeRouter {
+            runtime_dir: Some(PathBuf::from("X")),
+            wait_for_lock: false,
+        })
+    );
+    assert_eq!(
+        parse(&[
+            "koshi",
+            "serve-router",
+            "--runtime-dir",
+            "X",
+            "--wait-for-lock"
+        ])
+        .command,
+        Some(CliCommand::ServeRouter {
+            runtime_dir: Some(PathBuf::from("X")),
+            wait_for_lock: true,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "serve-router"]).command,
+        Some(CliCommand::ServeRouter {
+            runtime_dir: None,
+            wait_for_lock: false,
+        })
+    );
+}
+
+#[test]
 fn the_two_process_subcommands_are_the_only_ones_kept_out_of_the_help() {
     let hidden: Vec<String> = Cli::command()
         .get_subcommands()

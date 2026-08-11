@@ -55,7 +55,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // pair that does not. The version moves once per release cycle, not once
     // per change, so a shape edit inside an unreleased cycle leaves it alone.
     //
-    // Shape as of control-plane protocol version 1. Round-trip tests cannot
+    // Shape as of control-plane protocol version 2. Round-trip tests cannot
     // catch this: one build encoding and decoding its own structs always
     // agrees with itself.
     assert_eq!(
@@ -129,6 +129,13 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         }),
         r#"{"request_id":4,"kind":"ListSessions"}"#
     );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 5,
+            kind: RouterRequestKind::Restart,
+        }),
+        r#"{"request_id":5,"kind":"Restart"}"#
+    );
 
     assert_eq!(
         encode(&RouterResponse {
@@ -137,7 +144,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
             },
         }),
-        r#"{"request_id":1,"result":{"Hello":{"protocol_version":1}}}"#
+        r#"{"request_id":1,"result":{"Hello":{"protocol_version":2}}}"#
     );
     assert_eq!(
         encode(&RouterResponse {
@@ -162,6 +169,13 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     );
     assert_eq!(
         encode(&RouterResponse {
+            request_id: Some(5),
+            result: RouterResult::Restarting,
+        }),
+        r#"{"request_id":5,"result":"Restarting"}"#
+    );
+    assert_eq!(
+        encode(&RouterResponse {
             request_id: None,
             result: RouterResult::Error(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,
@@ -181,10 +195,11 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
-fn the_control_plane_version_this_build_speaks_is_one() {
-    // Born in 0.2.0 and never released, so shape edits inside this cycle leave
-    // it at 1.
-    assert_eq!(ROUTER_PROTOCOL_VERSION, 1);
+fn this_build_speaks_control_plane_versions_one_to_two() {
+    // Version 2 is this build's own, adding Restart. The floor stays 1, the
+    // version 0.2.0 speaks, so those callers are still served.
+    assert_eq!(ROUTER_PROTOCOL_VERSION, 2);
+    assert_eq!(MIN_ROUTER_PROTOCOL_VERSION, 1);
 }
 
 #[test]
@@ -215,6 +230,7 @@ fn every_request_kind_names_itself_without_its_payload() {
         "AttachLookup"
     );
     assert_eq!(RouterRequestKind::ListSessions.name(), "ListSessions");
+    assert_eq!(RouterRequestKind::Restart.name(), "Restart");
 }
 
 #[test]
@@ -269,6 +285,30 @@ fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
                 cwd: None,
                 allow_other_users: None,
             },
+        }
+    );
+}
+
+#[test]
+fn a_restart_and_its_answer_read_back_from_their_wire_text() {
+    let request: RouterRequest = serde_json::from_str(r#"{"request_id":5,"kind":"Restart"}"#)
+        .expect("a restart request is this version's shape");
+    let response: RouterResponse =
+        serde_json::from_str(r#"{"request_id":5,"result":"Restarting"}"#)
+            .expect("a restarting answer is this version's shape");
+
+    assert_eq!(
+        request,
+        RouterRequest {
+            request_id: 5,
+            kind: RouterRequestKind::Restart,
+        }
+    );
+    assert_eq!(
+        response,
+        RouterResponse {
+            request_id: Some(5),
+            result: RouterResult::Restarting,
         }
     );
 }
@@ -458,6 +498,28 @@ fn a_hello_required_refusal_names_the_kind_without_its_payload() {
             message: "AttachLookup arrived before a Hello opened the connection".to_string(),
         })
     );
+}
+
+#[test]
+fn a_restart_is_refused_before_a_hello_and_served_after_one() {
+    let mut gate = RouterHandshake::new(token());
+
+    assert_eq!(
+        gate.check(&RouterRequestKind::Restart),
+        Err(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Restart arrived before a Hello opened the connection".to_string(),
+        })
+    );
+
+    gate.check(&RouterRequestKind::Hello {
+        min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+        max_protocol_version: ROUTER_PROTOCOL_VERSION,
+        token: token(),
+    })
+    .expect("the Hello is accepted");
+
+    assert_eq!(gate.check(&RouterRequestKind::Restart), Ok(()));
 }
 
 #[test]
