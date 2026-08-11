@@ -12,24 +12,34 @@
 //! One thread accepts connections and gives each its own serving thread; a
 //! serving thread only holds a channel sender, so the session list has a
 //! single owner — the dispatcher loop on the main thread. A session that dies
-//! leaves the list two ways: its reaper thread reports the child's exit, or a
-//! lookup finds nothing listening at its address. Both remove the entry and,
-//! for a session this user started, the files it left behind.
+//! leaves the list three ways: its reaper thread reports the child's exit, on
+//! Unix a watcher thread reports the exit of a session the rebuild picked up,
+//! or a lookup finds nothing listening at its address. All remove the entry
+//! and, for a session this user started, the files it left behind.
+//!
+//! A restart request is answered first and acted on second: the router sends
+//! the `Restarting` reply, then restarts into the binary on disk. On Unix it
+//! replaces its own running image and keeps the same process id; a restart
+//! that fails resumes serving, still ignoring the SIGPIPE signal. Every
+//! serving thread blocks SIGPIPE on its own mask; a write to a peer that
+//! hung up returns an error in every disposition state. On Windows it starts
+//! the new binary, which waits for the router lock, and then runs its own
+//! shutdown and exits.
 //!
 //! With no session left, the dispatcher waits one idle window for a request
 //! and exits when none arrives. A caller that needs the router again starts
 //! it: connect, and on failure spawn the router and retry.
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use fs4::{FileExt, TryLockError};
 use koshi_core::ids::SessionId;
@@ -47,7 +57,7 @@ use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 use koshi_ipc::wire::MaybeKnown;
 
 use crate::ipc_client;
-use crate::router_client::RUNTIME_DIR_FLAG;
+use crate::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
 
 #[cfg(test)]
 mod tests;
@@ -63,6 +73,14 @@ const READY_WAIT: Duration = Duration::from_secs(10);
 /// How long the accept loop pauses after a failed accept before trying
 /// again, so a persistent accept error cannot spin a core.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// How long a replacement router waits for the previous router to release the
+/// router lock. The operating system releases that lock if the previous router
+/// dies.
+const LOCK_HANDOVER_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the lock wait pauses between attempts on the router lock.
+const LOCK_HANDOVER_POLL: Duration = Duration::from_millis(100);
 
 /// How long shutdown pauses after withdrawing the socket, giving a serving
 /// thread time to finish the reply it is writing.
@@ -84,10 +102,25 @@ const PROFILE_FLAG: &str = "--profile";
 /// users of this machine reach the session, whatever its `koshi.kdl` says.
 const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
+/// The flag this router passes to the router it starts, telling that one to
+/// wait for the router lock rather than yield to the router holding it.
+#[cfg(windows)]
+const WAIT_FOR_LOCK_FLAG: &str = "--wait-for-lock";
+
 /// The Win32 `CREATE_NO_WINDOW` creation flag: the started process gets a
 /// console with no window on screen.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
+/// console and does not inherit the caller's.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// The Win32 `CREATE_NEW_PROCESS_GROUP` creation flag: the started process
+/// begins a process group of its own.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// The running sessions, keyed by id. Owned by the dispatcher loop alone.
 type Registry = HashMap<SessionId, SessionEntry>;
@@ -120,28 +153,53 @@ enum RouterEvent {
     },
     /// A session server the router started has exited.
     ChildExited(SessionId),
+    /// The `Restarting` reply has been written to its connection, so the
+    /// router may now restart.
+    RestartDelivered,
+}
+
+/// Why the dispatcher loop ended.
+#[derive(Debug, PartialEq, Eq)]
+enum RouterExit {
+    /// No session is running and the idle window passed, or the events
+    /// channel closed.
+    Idle,
+    /// A `Restarting` reply reached its caller, so the router restarts into
+    /// the binary on disk.
+    Restart,
 }
 
 /// Run the router until no session is left.
 ///
 /// Takes the advisory lock first: another router already holding it means
 /// this call returns `Ok(())` having bound nothing, and the caller connects
-/// to that router instead. With the lock held, the socket is bound, the
-/// endpoint file is written, the session list is rebuilt from what is already
-/// running, and the dispatcher serves requests until an idle window passes
-/// with no session running.
-pub fn run_router(runtime_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// to that router instead. `wait_for_lock` waits up to `LOCK_HANDOVER_WAIT`
+/// for that router to release it, and yields the same way once the wait runs
+/// out. With the lock held, the socket is bound, the endpoint file is written,
+/// the session list is rebuilt from what is already running, and the
+/// dispatcher serves requests until an idle window passes with no session
+/// running.
+///
+/// A restart request ends the dispatcher and restarts this router into the
+/// binary on disk; a restart that fails resumes the dispatcher with everything
+/// the router holds untouched.
+pub fn run_router(
+    runtime_dir: &Path,
+    wait_for_lock: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     koshi_paths::ensure_private_dir(runtime_dir)?;
+
+    // The path this program was started from, read once here. A restart runs
+    // the binary at this path.
+    let exe = std::env::current_exe()?;
 
     let lock_file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(router_lock_path(runtime_dir))?;
-    match FileExt::try_lock(&lock_file) {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(()),
-        Err(TryLockError::Error(error)) => return Err(error.into()),
+    if !take_lock(&lock_file, wait_for_lock)? {
+        return Ok(());
     }
 
     // Trust order: the address is checked against the private directory
@@ -164,19 +222,45 @@ pub fn run_router(runtime_dir: &Path) -> Result<(), Box<dyn std::error::Error>> 
         return Err(error.into());
     }
 
-    let registry = sweep(runtime_dir, ipc_client::shared_base().as_deref());
+    let mut registry = sweep(runtime_dir, ipc_client::shared_base().as_deref());
 
     let (events_tx, events_rx) = mpsc::channel();
     let shutting_down = Arc::new(AtomicBool::new(false));
     let accept_thread = start_accept_thread(listener, token, events_tx.clone(), &shutting_down)?;
 
-    dispatch(
-        runtime_dir.to_path_buf(),
-        events_tx,
-        events_rx,
-        ROUTER_IDLE_EXIT,
-        registry,
-    );
+    #[cfg(unix)]
+    for (id, entry) in &registry {
+        if entry.pid != 0 {
+            watch_session_exit(entry.pid, *id, events_tx.clone());
+        }
+    }
+
+    loop {
+        match dispatch(
+            runtime_dir,
+            &exe,
+            &events_tx,
+            &events_rx,
+            ROUTER_IDLE_EXIT,
+            &mut registry,
+        ) {
+            RouterExit::Idle => break,
+            RouterExit::Restart => {
+                #[cfg(unix)]
+                {
+                    // The call returns only when the exec failed, having put
+                    // the SIGPIPE ignore back; the loop serves on.
+                    let _ = restart_by_exec(&exe, runtime_dir);
+                }
+                #[cfg(windows)]
+                // The new router waits for the lock this one drops last; a
+                // spawn that failed leaves this router serving.
+                if hand_over_to(&exe, runtime_dir).is_ok() {
+                    break;
+                }
+            }
+        }
+    }
 
     shutting_down.store(true, Ordering::SeqCst);
     // The accept loop sits blocked in `accept`; a bare connection wakes it so
@@ -197,6 +281,98 @@ pub fn run_router(runtime_dir: &Path) -> Result<(), Box<dyn std::error::Error>> 
 
     drop(lock_file);
     Ok(())
+}
+
+/// Take the router lock. `true` means this process holds it, and `false` that
+/// another router does.
+///
+/// Without `wait_for_lock` one attempt decides it. With `wait_for_lock` the
+/// attempt is repeated every [`LOCK_HANDOVER_POLL`] for up to
+/// [`LOCK_HANDOVER_WAIT`], and a wait that runs out reads as another router
+/// holding it.
+fn take_lock(lock_file: &File, wait_for_lock: bool) -> std::io::Result<bool> {
+    let deadline = Instant::now() + LOCK_HANDOVER_WAIT;
+    loop {
+        match FileExt::try_lock(lock_file) {
+            Ok(()) => return Ok(true),
+            Err(TryLockError::WouldBlock) => {
+                if !wait_for_lock || Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                std::thread::sleep(LOCK_HANDOVER_POLL);
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
+/// Block SIGPIPE on the calling thread's signal mask.
+///
+/// The blocked signal stays pending and is discarded when the thread ends; a
+/// write to a hung-up peer returns an `EPIPE` error under every process-wide
+/// disposition.
+#[cfg(unix)]
+fn block_sigpipe_on_this_thread() {
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+/// Replace this process's running image with the binary at `exe`, serving the
+/// same runtime directory. The call returns only when the exec failed, and
+/// hands back that error.
+///
+/// `exec` runs the command's setup steps and then, before calling `execvp`,
+/// resets SIGPIPE to `SIG_DFL` in this process. It does that even with no
+/// setup step configured on the command (the standard library's
+/// `sys/process/unix/unix.rs`, in `do_exec`). A failed exec therefore puts
+/// `SIG_IGN` back here before returning, so the resumed router keeps ignoring
+/// the signal a write to a hung-up client raises.
+///
+/// The SIGPIPE reset is the only change this function undoes, so a setup step
+/// added to the command must be undone here beside it.
+///
+/// A successful exec closes every descriptor the standard library opened
+/// close-on-exec, the lock file among them, at the instant the old image ends.
+/// The new image's [`run_router`] then takes the lock, reclaims the socket
+/// path, binds, writes a fresh endpoint file, and rebuilds the session list —
+/// under the same process id.
+#[cfg(unix)]
+fn restart_by_exec(exe: &Path, runtime_dir: &Path) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    let error = std::process::Command::new(exe)
+        .arg(ROUTER_SUBCOMMAND)
+        .arg(RUNTIME_DIR_FLAG)
+        .arg(runtime_dir)
+        .exec();
+    let _ = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    error
+}
+
+/// Start the binary at `exe` as a new router over the same runtime directory,
+/// waiting for the lock this router still holds.
+///
+/// The new router is detached with a process group of its own and no console,
+/// and its input and output go nowhere. An error means nothing was started.
+#[cfg(windows)]
+fn hand_over_to(exe: &Path, runtime_dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    std::process::Command::new(exe)
+        .arg(ROUTER_SUBCOMMAND)
+        .arg(RUNTIME_DIR_FLAG)
+        .arg(runtime_dir)
+        .arg(WAIT_FOR_LOCK_FLAG)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Start the thread that accepts router connections.
@@ -242,11 +418,20 @@ fn accept_loop(
 /// other kind crosses to the dispatcher and comes back as its answer. A
 /// malformed-but-aligned frame is answered with
 /// [`IpcErrorCode::MalformedRequest`] and the connection keeps serving.
+///
+/// A `Restarting` answer that has been written is reported to the dispatcher,
+/// and this connection keeps serving until the router ends.
+///
+/// On Unix the thread blocks SIGPIPE on its own signal mask first; a write to
+/// a peer that hung up returns an error whatever the process-wide disposition
+/// is.
 fn serve_connection(
     mut connection: Connection,
     token: ConnectionToken,
     events_tx: &Sender<RouterEvent>,
 ) {
+    #[cfg(unix)]
+    block_sigpipe_on_this_thread();
     let mut gate = RouterHandshake::new(token);
     loop {
         let request: IncomingRouterRequest = match connection.recv() {
@@ -303,6 +488,7 @@ fn serve_connection(
                         protocol_version: gate
                             .agreed()
                             .expect("an accepted Hello settles the connection's version"),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
                     },
                 },
                 kind => match ask_dispatcher(events_tx, kind) {
@@ -313,6 +499,11 @@ fn serve_connection(
         };
         if connection.send(&response).is_err() {
             return;
+        }
+        if response.result == RouterResult::Restarting {
+            // A send that fails means the dispatcher is gone and the router is
+            // already exiting.
+            let _ = events_tx.send(RouterEvent::RestartDelivered);
         }
     }
 }
@@ -334,22 +525,25 @@ fn ask_dispatcher(
     answer.recv().ok()
 }
 
-/// Serve events until the router ends, and hand back the session list as it
-/// stood.
+/// Serve events until the router ends, leaving the session list as it stood.
 ///
 /// While a session is running the loop blocks for the next event. While none
 /// is, it waits `idle_exit` for one: an event inside that window is served
-/// and the loop goes on, and a window that passes ends the router.
+/// and the loop goes on, and a window that passes ends the loop with
+/// [`RouterExit::Idle`]. A delivered `Restarting` reply ends it with
+/// [`RouterExit::Restart`] instead, so the caller restarts this router into
+/// the binary at `exe`.
 ///
 /// `events_tx` is the loop's own sender, handed to each session's reaper
 /// thread so a child's exit reaches here.
 fn dispatch(
-    runtime_dir: PathBuf,
-    events_tx: Sender<RouterEvent>,
-    events_rx: Receiver<RouterEvent>,
+    runtime_dir: &Path,
+    exe: &Path,
+    events_tx: &Sender<RouterEvent>,
+    events_rx: &Receiver<RouterEvent>,
     idle_exit: Duration,
-    mut registry: Registry,
-) -> Registry {
+    registry: &mut Registry,
+) -> RouterExit {
     loop {
         let received = if registry.is_empty() {
             events_rx.recv_timeout(idle_exit).map_err(|_| ())
@@ -357,13 +551,14 @@ fn dispatch(
             events_rx.recv().map_err(|_| ())
         };
         let Ok(event) = received else {
-            return registry;
+            return RouterExit::Idle;
         };
         match event {
             RouterEvent::Request { kind, reply } => {
-                let _ = reply.send(serve_request(&runtime_dir, &mut registry, &events_tx, kind));
+                let _ = reply.send(serve_request(runtime_dir, exe, registry, events_tx, kind));
             }
-            RouterEvent::ChildExited(id) => unregister(&runtime_dir, &mut registry, id),
+            RouterEvent::ChildExited(id) => unregister(runtime_dir, registry, id),
+            RouterEvent::RestartDelivered => return RouterExit::Restart,
         }
     }
 }
@@ -371,6 +566,7 @@ fn dispatch(
 /// Answer one request against the session list.
 fn serve_request(
     runtime_dir: &Path,
+    exe: &Path,
     registry: &mut Registry,
     events_tx: &Sender<RouterEvent>,
     kind: RouterRequestKind,
@@ -395,6 +591,30 @@ fn serve_request(
             attach_lookup(runtime_dir, registry, &selector)
         }
         RouterRequestKind::ListSessions => list_sessions(runtime_dir, registry),
+        RouterRequestKind::Restart => restart_check(exe),
+    }
+}
+
+/// Answer a restart request by checking the binary at `exe`. A binary that
+/// cannot be read is refused; on Unix, one with no execute permission is
+/// refused too. Nothing is torn down either way.
+fn restart_check(exe: &Path) -> RouterResult {
+    match std::fs::metadata(exe) {
+        Err(error) => refused(format!(
+            "the binary at {} could not be read: {error}",
+            exe.display()
+        )),
+        #[cfg(unix)]
+        Ok(metadata) => {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                refused(format!("the binary at {} is not executable", exe.display()))
+            } else {
+                RouterResult::Restarting
+            }
+        }
+        #[cfg(not(unix))]
+        Ok(_) => RouterResult::Restarting,
     }
 }
 
@@ -684,6 +904,25 @@ fn start_reaper_thread(mut child: Child, id: SessionId, events_tx: Sender<Router
         .spawn(move || {
             let _ = child.wait();
             let _ = events_tx.send(RouterEvent::ChildExited(id));
+        });
+}
+
+/// Watch one session the rebuild picked up until it exits, then report the
+/// exit so its session leaves the list.
+///
+/// After a restart in place, the sessions the previous image started are still
+/// children of this process, and this thread reports their exits. A session
+/// this process is not the parent of fails the wait with `ECHILD` and ends the
+/// thread; the next lookup or listing probes its socket and removes it there.
+#[cfg(unix)]
+fn watch_session_exit(pid: u32, id: SessionId, events_tx: Sender<RouterEvent>) {
+    let _ = std::thread::Builder::new()
+        .name("koshi-router-child".to_string())
+        .spawn(move || {
+            let mut status = 0;
+            if unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) } != -1 {
+                let _ = events_tx.send(RouterEvent::ChildExited(id));
+            }
         });
 }
 

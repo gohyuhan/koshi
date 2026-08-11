@@ -24,7 +24,8 @@ use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
-use interprocess::local_socket::{self as socket, ListenerOptions};
+use interprocess::local_socket::{self as socket, ConnectOptions, ListenerOptions};
+use interprocess::ConnectWaitMode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 #[cfg(windows)]
@@ -137,6 +138,11 @@ impl Listener {
     }
 }
 
+/// How long [`Connection::connect`] waits for the listener to accept. On
+/// Windows a named pipe whose instances all sit unaccepted holds a connect
+/// open without limit; the bound turns that state into a timed-out error.
+pub const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// One open control-socket connection. Both ends hold one: a caller's comes
 /// from [`Connection::connect`], the server's from [`Listener::accept`].
 #[derive(Debug)]
@@ -145,20 +151,26 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Connect to the listener at `addr`. No listener behind the address —
-    /// a leftover file whose process is gone, or nothing there at all — is
-    /// [`IpcError::NoListener`].
+    /// Connect to the listener at `addr`, waiting at most [`CONNECT_WAIT`]
+    /// for the listener to accept. No listener behind the address — a
+    /// leftover file whose process is gone, or nothing there at all — is
+    /// [`IpcError::NoListener`]; a wait that runs out is an
+    /// [`io::ErrorKind::TimedOut`] error.
     pub fn connect(addr: &str) -> Result<Connection, IpcError> {
         let name = socket_name(addr).map_err(io_failure)?;
-        let stream = socket::Stream::connect(name).map_err(|error| {
-            if no_listener_error(&error) {
-                IpcError::NoListener {
-                    addr: addr.to_string(),
+        let stream = ConnectOptions::new()
+            .name(name)
+            .wait_mode(ConnectWaitMode::Timeout(CONNECT_WAIT))
+            .connect_sync()
+            .map_err(|error| {
+                if no_listener_error(&error) {
+                    IpcError::NoListener {
+                        addr: addr.to_string(),
+                    }
+                } else {
+                    io_failure(error)
                 }
-            } else {
-                io_failure(error)
-            }
-        })?;
+            })?;
         Ok(Connection { stream })
     }
 

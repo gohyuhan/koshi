@@ -76,14 +76,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         return config_command::run(command);
     }
 
-    if let Some(CliCommand::ServeRouter { runtime_dir }) = &cli.command {
+    if let Some(CliCommand::ServeRouter {
+        runtime_dir,
+        wait_for_lock,
+    }) = &cli.command
+    {
         // This process becomes the router: it serves the control socket in
         // that directory until no session is left.
         let runtime_dir = match runtime_dir {
             Some(dir) => dir.clone(),
             None => ipc_client::runtime_dir()?,
         };
-        return router::run_router(&runtime_dir).map_err(|err| CliError::Runtime {
+        return router::run_router(&runtime_dir, *wait_for_lock).map_err(|err| CliError::Runtime {
             detail: err.to_string(),
         });
     }

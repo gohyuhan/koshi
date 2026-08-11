@@ -1,9 +1,10 @@
 //! Tests for the client side of the router socket, against a stand-in router
 //! serving a real socket in a temporary runtime directory.
 //!
-//! Every test here finds that stand-in already listening, so the exchange
-//! succeeds on its first attempt and no router is ever started. Starting one
-//! needs whole processes, so that is covered by the integration tests instead.
+//! Every test that starts the stand-in finds it already listening, so the
+//! exchange succeeds on its first attempt and no router is ever started.
+//! Starting one needs whole processes, so that is covered by the integration
+//! tests instead.
 
 use super::*;
 
@@ -12,7 +13,7 @@ use std::time::UNIX_EPOCH;
 
 use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::{ClientId, SessionId};
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{router_socket_addr, RouterHandshake, RouterResponse};
 use koshi_ipc::transport::Listener;
 use tempfile::TempDir;
@@ -69,6 +70,7 @@ fn fake_router(runtime_dir: &Path, script: Script) -> JoinHandle<()> {
         let hello_answer = match gate.check(&hello.kind) {
             Ok(()) => RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
+                version: "9.9.9".to_string(),
             },
             Err(refusal) => RouterResult::Error(refusal),
         };
@@ -143,4 +145,126 @@ fn an_endpoint_file_carrying_the_wrong_token_reports_the_refusal() {
     };
     assert_eq!(detail, "the token presented does not match the router's");
     router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_restart_with_no_router_running_restarts_nothing() {
+    let runtime_dir = test_runtime_dir();
+
+    let restarted =
+        restart_running_router(runtime_dir.path()).expect("an empty runtime directory answers");
+
+    assert!(!restarted);
+    assert!(!router_endpoint_path(runtime_dir.path()).exists());
+}
+
+#[test]
+fn a_restarting_reply_reports_the_router_restarted() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Restarting),
+    );
+
+    let restarted = restart_running_router(runtime_dir.path()).expect("the exchange succeeds");
+
+    assert!(restarted);
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_reply_that_answers_no_restart_is_reported_as_unexpected() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Sessions(Vec::new())),
+    );
+
+    let error =
+        restart_running_router(runtime_dir.path()).expect_err("the reply answers no restart");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the router answered with an unexpected Sessions reply"
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_refused_restart_reports_the_reason_the_router_gave() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this build has no request kind named Restart".to_string(),
+        })),
+    );
+
+    let error = restart_running_router(runtime_dir.path()).expect_err("the restart is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(detail, "this build has no request kind named Restart");
+    router.join().expect("the stand-in router exits");
+}
+
+/// Serve one Hello-only connection as a router would: bind the router's
+/// address, write the endpoint file advertising it, accept one caller, and
+/// answer its Hello with `version`. The thread ends when the caller hangs up.
+fn fake_router_hello_only(runtime_dir: &Path, version: &str) -> JoinHandle<()> {
+    let held = ConnectionToken::generate();
+    let addr = router_socket_addr(runtime_dir);
+    let listener = Listener::bind(&addr).expect("bind the stand-in router");
+    EndpointFile {
+        socket: addr,
+        token: held.clone(),
+        pid: std::process::id(),
+    }
+    .write(&router_endpoint_path(runtime_dir))
+    .expect("write the router endpoint file");
+
+    let version = version.to_string();
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the caller");
+        let mut gate = RouterHandshake::new(held);
+        let hello: RouterRequest = connection.recv().expect("read the hello");
+        let result = match gate.check(&hello.kind) {
+            Ok(()) => RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                version,
+            },
+            Err(refusal) => RouterResult::Error(refusal),
+        };
+        connection
+            .send(&RouterResponse {
+                request_id: Some(hello.request_id),
+                result,
+            })
+            .expect("send the hello reply");
+    })
+}
+
+#[test]
+fn the_running_routers_version_is_read_from_its_hello() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router_hello_only(runtime_dir.path(), "9.9.9");
+
+    let version = running_router_version(runtime_dir.path()).expect("the exchange succeeds");
+
+    assert_eq!(version, Some("9.9.9".to_string()));
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn no_running_router_yields_no_version() {
+    let runtime_dir = test_runtime_dir();
+    assert_eq!(
+        running_router_version(runtime_dir.path()).expect("a missing router is not an error"),
+        None
+    );
 }

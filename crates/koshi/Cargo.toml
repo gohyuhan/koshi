@@ -48,8 +48,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 tempfile = "3.27.0"
 fs4 = "1.1.0"
 
+[target."cfg(unix)".dependencies]
+libc = "0.2.188"
+
 [dev-dependencies]
 koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
-
-[target."cfg(unix)".dev-dependencies]
-libc = "0.2.188"

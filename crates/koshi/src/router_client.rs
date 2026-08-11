@@ -10,6 +10,9 @@
 //! router is running. Then this starts one detached and retries the exchange
 //! until the new router answers or the wait runs out — the same path a request
 //! takes when it arrives just as an idle router exits.
+//!
+//! Restarting the running router is the one ask that never starts one. It
+//! sends a single exchange, and reports back when no router was running.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -30,7 +33,8 @@ use crate::error::CliError;
 mod tests;
 
 /// The subcommand this binary starts itself under to run the router. The
-/// argument after it is [`RUNTIME_DIR_FLAG`] with the directory to serve.
+/// arguments after it are [`RUNTIME_DIR_FLAG`] with the directory to serve,
+/// and `--wait-for-lock` when a router hands its place to a replacement.
 pub const ROUTER_SUBCOMMAND: &str = "serve-router";
 
 /// The flag naming the runtime directory a started process serves. Takes that
@@ -89,6 +93,62 @@ pub fn router_request(
     }
 }
 
+/// Ask the router that is already running to restart into the binary on disk.
+///
+/// Sends exactly one Restart exchange and never starts a router. `Ok(false)`
+/// means no router was running, so nothing restarted.
+///
+/// A router that refuses the request is [`CliError::IpcUnavailable`]. An older
+/// router refuses it that way, by name, because its build has no such kind.
+pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
+    match exchange(runtime_dir, &RouterRequestKind::Restart)? {
+        None => Ok(false),
+        Some(RouterResult::Restarting) => Ok(true),
+        Some(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
+            detail: refusal.message,
+        }),
+        Some(other) => Err(unexpected_reply(&other)),
+    }
+}
+
+/// The build version the running router reports in its Hello answer.
+///
+/// `Ok(None)` means no router is running. An empty string means the router
+/// answered but predates the version field. Sends nothing besides the Hello;
+/// never starts a router.
+pub fn running_router_version(runtime_dir: &Path) -> Result<Option<String>, CliError> {
+    let endpoint = match EndpointFile::read(&router_endpoint_path(runtime_dir)) {
+        Ok(endpoint) => endpoint,
+        Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
+        Err(error) => return Err(talk_failed(error)),
+    };
+    let mut connection = match Connection::connect(&endpoint.socket) {
+        Ok(connection) => connection,
+        Err(IpcError::NoListener { .. }) => return Ok(None),
+        Err(error) => return Err(talk_failed(error)),
+    };
+
+    let hello = RouterRequest {
+        request_id: 1,
+        kind: RouterRequestKind::hello(endpoint.token),
+    };
+    connection.send(&hello).map_err(talk_failed)?;
+    let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
+    match take_result(reply)? {
+        RouterResult::Hello {
+            protocol_version,
+            version,
+        } => {
+            settled_version(protocol_version)?;
+            Ok(Some(version))
+        }
+        RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
+            detail: refusal.message,
+        }),
+        other => Err(unexpected_reply(&other)),
+    }
+}
+
 /// One exchange with a running router: read its endpoint file, connect,
 /// pipeline the Hello and `kind` back to back, and read both replies in order.
 ///
@@ -122,7 +182,9 @@ fn exchange(
 
     let hello_reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
     match take_result(hello_reply)? {
-        RouterResult::Hello { protocol_version } => settled_version(protocol_version)?,
+        RouterResult::Hello {
+            protocol_version, ..
+        } => settled_version(protocol_version)?,
         RouterResult::Error(refusal) => {
             return Err(CliError::IpcUnavailable {
                 detail: refusal.message,
