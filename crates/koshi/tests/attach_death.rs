@@ -4,7 +4,8 @@
 //! client does — Hello then Attach on one connection — and reads the stream
 //! after the server is killed. A killed server writes no goodbye, so the read
 //! fails, which the client turns into "the session ended unexpectedly" and a
-//! non-zero exit.
+//! non-zero exit. A session told to end writes the quit frame first, which the
+//! client turns into "the session ended" and a zero exit.
 //!
 //! Each test serves its own temporary runtime directory, under a short base
 //! because a Unix socket path has an operating-system length cap.
@@ -44,6 +45,8 @@ use koshi_ipc::protocol::{
 use koshi_ipc::router::router_endpoint_path;
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
+
+mod common;
 
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
@@ -157,6 +160,7 @@ fn attach(connection: &mut Connection, session_id: SessionId) {
         kind: IpcRequestKind::Attach {
             viewport: VIEWPORT,
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
     connection
@@ -323,12 +327,7 @@ impl Drop for RunningRouter {
         let Ok(endpoint) = EndpointFile::read(&router_endpoint_path(&self.0)) else {
             return;
         };
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(endpoint.pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        common::end_process(endpoint.pid);
     }
 }
 
@@ -477,6 +476,89 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
     );
 }
 
+/// A real client rides the session replacing its own process image: it leaves
+/// the socket it was on, waits for the one the new image binds, and attaches
+/// again there. The detach at the end ends the client, which only a client
+/// reading a live connection reads.
+#[cfg(unix)]
+#[test]
+fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
+    let home = test_home();
+    let runtime_dir = runtime_dir_under(home.path());
+    let session_id = SessionId::new();
+    let _session = start_session_server(&runtime_dir, session_id);
+    let _router = RunningRouter(runtime_dir.clone());
+
+    wait_for_server(&runtime_dir, session_id);
+    let mut client = start_attaching_client(home.path(), session_id);
+    wait_for_attached(&runtime_dir, session_id, &mut client);
+
+    let before = EndpointFile::read(&EndpointFile::path(&runtime_dir, session_id))
+        .expect("the session advertises a socket");
+    let mut caller = open(&runtime_dir, session_id);
+    caller
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::Restart,
+        })
+        .expect("the server reads the restart");
+    let reply: IpcResponse = caller.recv().expect("the server answers the restart");
+    assert_eq!(reply.result, IpcResult::Restarting);
+    drop(caller);
+
+    // Every image binds a socket under a fresh token, so a token other than the
+    // one read above is the new image serving.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let advertised = EndpointFile::read(&EndpointFile::path(&runtime_dir, session_id));
+        if advertised.is_ok_and(|now| now.token.expose() != before.token.expose()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the session advertised no new socket; {}",
+            why_it_left(&mut client).unwrap_or_else(|| "the client is still running".to_string())
+        );
+        std::thread::sleep(POLL);
+    }
+    // The record is carried across the swap, so it is there before the client
+    // comes back and a detach can land while nobody holds it. Asked for until
+    // the client takes it.
+    let deadline = Instant::now() + WAIT;
+    while client
+        .0
+        .try_wait()
+        .expect("the client's state can be read")
+        .is_none()
+    {
+        let detached = koshi_under(home.path())
+            .arg("detach")
+            .arg("--all")
+            .arg(session_id.to_string())
+            .output()
+            .expect("the koshi binary starts");
+        assert_eq!(
+            detached.status.code(),
+            Some(CliExitCode::Success.code()),
+            "the detach left {}",
+            String::from_utf8_lossy(&detached.stderr)
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the client never took a detach, so it never came back on the new socket"
+        );
+        std::thread::sleep(POLL);
+    }
+
+    let (status, stdout, stderr) = client_ending(&mut client);
+    assert_eq!(status.code(), Some(CliExitCode::Success.code()));
+    assert_eq!(stderr, "");
+    assert!(
+        stdout.ends_with(&format!("detached from session {session_id}\n")),
+        "the client ended with {stdout:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_detach_ends_the_attaching_client_with_a_success() {
@@ -536,6 +618,42 @@ fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
     assert!(
         waited_for_exit(&mut session),
         "the session server outlived its last client"
+    );
+}
+
+/// A session told to end writes the quit frame on every attached stream before
+/// its process goes, so the client says the session ended instead of reporting
+/// it dead.
+#[cfg(unix)]
+#[test]
+fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
+    let home = test_home();
+    write_config(home.path(), "version 1\n");
+    let runtime_dir = runtime_dir_under(home.path());
+    std::fs::create_dir_all(&runtime_dir).expect("a runtime directory under the test home");
+    let session_id = SessionId::new();
+    let mut session = start_session_server_under(home.path(), &runtime_dir, session_id);
+
+    let mut viewer = open(&runtime_dir, session_id);
+    attach(&mut viewer, session_id);
+
+    // `kill-session` names no client, so the session ends rather than one
+    // client leaving it.
+    let killed = koshi_under(home.path())
+        .arg("kill-session")
+        .arg(session_id.to_string())
+        .output()
+        .expect("the koshi binary starts");
+
+    assert_eq!(
+        stream_ending(viewer).expect("the stream ends with a frame"),
+        SessionEvent::Quit,
+        "the kill left {}",
+        String::from_utf8_lossy(&killed.stderr).trim()
+    );
+    assert!(
+        waited_for_exit(&mut session),
+        "the session server outlived the kill"
     );
 }
 

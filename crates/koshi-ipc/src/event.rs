@@ -122,9 +122,14 @@ pub enum SessionEvent {
         /// The tab's new zero-based index.
         new_index: usize,
     },
-    /// The session is shutting down: its last tab closed, so the program
-    /// quits. A terminal frame — nothing follows it.
+    /// The session is over: its last tab closed, a quit command was applied,
+    /// or its last pane's child exited. A terminal frame — nothing follows it.
     Quit,
+    /// The session server is replacing its own process image with the binary
+    /// now on disk. Its socket goes away and comes back under a new connection
+    /// token, and the client attaches again naming the client id it holds. A
+    /// terminal frame — nothing follows it.
+    Restarting,
     /// The server detached this client. The last frame the server writes on
     /// this connection; the session keeps running and the client may attach
     /// again.
@@ -178,6 +183,7 @@ impl SessionEvent {
             SessionEvent::TabFocused { .. } => "TabFocused",
             SessionEvent::TabMoved { .. } => "TabMoved",
             SessionEvent::Quit => "Quit",
+            SessionEvent::Restarting => "Restarting",
             SessionEvent::Detached => "Detached",
             SessionEvent::Resync { .. } => "Resync",
             SessionEvent::MouseAnswer { .. } => "MouseAnswer",
@@ -203,6 +209,7 @@ impl WireVariants for SessionEvent {
         "TabFocused",
         "TabMoved",
         "Quit",
+        "Restarting",
         "Detached",
         "Resync",
         "MouseAnswer",

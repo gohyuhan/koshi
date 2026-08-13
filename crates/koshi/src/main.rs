@@ -16,12 +16,14 @@ use koshi::in_session::InSessionContext;
 use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::pty_supervisor;
 use koshi::router;
 use koshi::session_control;
-use koshi::session_server;
+use koshi::session_server::{self, ResumeSupport};
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
+use koshi_ipc::protocol::ConnectionToken;
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -98,10 +100,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         runtime_dir,
         profile,
         allow_other_users,
+        resume,
+        supervisor_token,
+        supervisor_pid,
     }) = &cli.command
     {
         // This process becomes one session's server: the router started it
-        // and gave it the identity to seed the session under.
+        // and gave it the identity to seed the session under, or the image it
+        // replaces started it and gave it the state to come up from.
         let runtime_dir = match runtime_dir {
             Some(dir) => dir.clone(),
             None => ipc_client::runtime_dir()?,
@@ -112,6 +118,44 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             session_name.clone(),
             profile.as_deref(),
             allow_other_users.then_some(true),
+            resume.as_deref(),
+            supervisor_token.as_deref(),
+            *supervisor_pid,
+        )
+        .map_err(|err| CliError::Runtime {
+            detail: err.to_string(),
+        });
+    }
+
+    if let Some(CliCommand::ResumeSupport) = &cli.command {
+        // A session server about to replace its own image runs the newly
+        // installed binary this way, and reads this line to learn whether that
+        // binary can take its carried state back.
+        println!(
+            "{}",
+            serde_json::to_string(&ResumeSupport::of_this_build())
+                .expect("a pair of numbers always encodes")
+        );
+        return Ok(());
+    }
+
+    if let Some(CliCommand::ServePtySupervisor {
+        session_id,
+        token,
+        runtime_dir,
+    }) = &cli.command
+    {
+        // This process becomes the holder of one session's panes: the session
+        // server started it and gave it the session to serve and the secret a
+        // link presents.
+        let runtime_dir = match runtime_dir {
+            Some(dir) => dir.clone(),
+            None => ipc_client::runtime_dir()?,
+        };
+        return pty_supervisor::run_pty_supervisor(
+            &runtime_dir,
+            *session_id,
+            ConnectionToken::new(token.clone()),
         )
         .map_err(|err| CliError::Runtime {
             detail: err.to_string(),

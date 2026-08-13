@@ -33,6 +33,10 @@ pub mod in_session;
 /// endpoint, submit a command, and read back its result.
 pub mod ipc_client;
 
+/// The process holding one session's panes: it opens and closes every pane's
+/// terminal, and outlives a session server that replaces its own image.
+pub mod pty_supervisor;
+
 /// The router process: it owns the list of running sessions, starts and
 /// reaps one session server per session, and tells callers where to reach
 /// them.

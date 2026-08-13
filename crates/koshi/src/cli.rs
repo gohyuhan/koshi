@@ -485,7 +485,38 @@ pub enum CliCommand {
         /// `koshi.kdl` says.
         #[arg(long)]
         allow_other_users: bool,
+        /// Come up from the state at this path instead of seeding a new
+        /// session. The image being replaced wrote it; this one reads it once
+        /// and removes it.
+        #[arg(long, value_name = "PATH")]
+        resume: Option<PathBuf>,
+        /// The secret the link to the process holding this session's panes
+        /// presents. Windows only, and only on a resume run.
+        #[arg(long, value_name = "TOKEN")]
+        supervisor_token: Option<String>,
+        /// The process id of the process holding this session's panes, which
+        /// its link address is derived from. Windows only, and only on a
+        /// resume run.
+        #[arg(long, value_name = "PID")]
+        supervisor_pid: Option<u32>,
     },
+    /// Run the process holding one session's panes.
+    #[command(hide = true)]
+    ServePtySupervisor {
+        /// The session whose panes this process holds.
+        #[arg(value_parser = parse_session_id, value_name = "SESSION_ID")]
+        session_id: SessionId,
+        /// The secret a link presents at Hello, which the session server
+        /// generated.
+        #[arg(value_name = "TOKEN")]
+        token: String,
+        /// Runtime directory to serve; defaults to this user's own.
+        #[arg(long, value_name = "DIR")]
+        runtime_dir: Option<PathBuf>,
+    },
+    /// Print which resume-file formats this build takes back, as one JSON line.
+    #[command(hide = true)]
+    ResumeSupport,
 }
 
 /// Local config operations.
@@ -859,7 +890,9 @@ impl CliCommand {
             | CliCommand::ListClients { .. }
             | CliCommand::Keys { .. }
             | CliCommand::ServeRouter { .. }
-            | CliCommand::ServeSession { .. } => return None,
+            | CliCommand::ServeSession { .. }
+            | CliCommand::ServePtySupervisor { .. }
+            | CliCommand::ResumeSupport => return None,
         };
         let action = ActionRef::core(name)
             .expect("CLI action names are constants satisfying the action-name grammar");

@@ -10,7 +10,7 @@
 //! Every process a test starts is held in a guard that ends it when the test
 //! drops it, so a failed assertion leaves nothing running.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,10 @@ use koshi_ipc::router::{
 };
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
+
+mod common;
+
+use common::{copy_of_koshi, end_process, start_koshi};
 
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
@@ -97,53 +101,16 @@ fn start_router(runtime_dir: &Path) -> RunningRouter {
 
 /// Start the binary at `exe` as the router serving `runtime_dir`.
 fn start_router_from(exe: &Path, runtime_dir: &Path) -> RunningRouter {
-    let child = Command::new(exe)
-        .arg("serve-router")
-        .arg("--runtime-dir")
-        .arg(runtime_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the koshi binary starts");
+    let child = start_koshi(
+        Command::new(exe)
+            .arg("serve-router")
+            .arg("--runtime-dir")
+            .arg(runtime_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     RunningRouter(child)
-}
-
-/// Copy the `koshi` binary into `dir` and hand back the copy's path. A test
-/// that renames its binary or changes its mode owns that file alone.
-fn copy_of_koshi(dir: &Path) -> PathBuf {
-    let exe = dir.join(if cfg!(windows) { "koshi.exe" } else { "koshi" });
-    std::fs::copy(env!("CARGO_BIN_EXE_koshi"), &exe).expect("the koshi binary is copied");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
-            .expect("the copy runs");
-    }
-    exe
-}
-
-/// End the process with id `pid`, whatever it is doing.
-#[cfg(unix)]
-fn end_process(pid: u32) {
-    let _ = Command::new("kill")
-        .arg("-KILL")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// End the process with id `pid`, whatever it is doing.
-#[cfg(windows)]
-fn end_process(pid: u32) {
-    let _ = Command::new("taskkill")
-        .arg("/PID")
-        .arg(pid.to_string())
-        .arg("/F")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// Open a connection to the router serving `runtime_dir`, with its handshake

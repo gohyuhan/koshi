@@ -797,7 +797,9 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "plugin",
         "previous-tab",
         "resize-pane",
+        "resume-support",
         "run",
+        "serve-pty-supervisor",
         "serve-router",
         "serve-session",
         "toggle-lock",
@@ -846,14 +848,22 @@ fn serve_router_takes_the_wait_for_lock_flag() {
 }
 
 #[test]
-fn the_two_process_subcommands_are_the_only_ones_kept_out_of_the_help() {
+fn the_subcommands_koshi_only_runs_itself_are_the_only_ones_kept_out_of_the_help() {
     let hidden: Vec<String> = Cli::command()
         .get_subcommands()
         .filter(|command| command.is_hide_set())
         .map(|command| command.get_name().to_string())
         .collect();
 
-    assert_eq!(hidden, ["serve-router", "serve-session"]);
+    assert_eq!(
+        hidden,
+        [
+            "serve-router",
+            "serve-session",
+            "serve-pty-supervisor",
+            "resume-support"
+        ]
+    );
 }
 
 #[test]

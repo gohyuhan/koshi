@@ -8,6 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use koshi_core::ids::{ClientId, SessionId};
 
 use super::*;
+use crate::protocol::IpcErrorCode;
 
 /// The one UUID every fixed id below uses.
 fn fixed_uuid() -> uuid::Uuid {

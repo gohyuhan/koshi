@@ -16,6 +16,12 @@
 //! — a detach, the session ending, a dead session server, or a panic — leaves
 //! the outer terminal as it was found.
 //!
+//! A session replacing its own process image is not a way out. The session says
+//! so before it goes; this client leaves the terminal in every mode it is in,
+//! reads that session's endpoint file until it names a new connection token,
+//! and joins the new socket as the same client. The session's first frame there
+//! paints the same panes back, so the screen does not flicker.
+//!
 //! From there the connection carries traffic both ways. The session composes
 //! this terminal's own frame — at this terminal's size and scroll position —
 //! and pushes it down the event stream, which this loop paints. This terminal's
@@ -50,7 +56,7 @@ use std::mem::take;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
@@ -74,6 +80,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
+use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::frame::PaintedFrame;
@@ -96,6 +103,7 @@ use crate::error::CliError;
 use crate::in_session::InSessionContext;
 use crate::ipc_client;
 use crate::router_client::router_request;
+use crate::session_server::RESTART_WINDOW;
 
 /// Rebuilding the snapshot this terminal paints from the frame the session
 /// sent.
@@ -111,6 +119,11 @@ const FALLBACK_VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// The `request_id` the first request the loop sends carries. The Hello is 1
 /// and the Attach is 2.
 const FIRST_LOOP_REQUEST_ID: u64 = 3;
+
+/// How long the wait for a session that is replacing its own process image
+/// pauses between reads of that session's endpoint file. It bounds how long the
+/// user's terminal sits still after the swap finishes.
+const RESTART_POLL: Duration = Duration::from_millis(25);
 
 /// The most decided-but-unwritten mouse actions this client holds, and the most
 /// unanswered border moves it remembers. Both cap the memory a session that
@@ -282,6 +295,10 @@ enum Ending {
     TerminalGone,
     /// The session moved this client to the session named here.
     Switch(SessionId),
+    /// The session is replacing its own process image. The loop waits for the
+    /// session's new socket and attaches again on it. A loop that cannot ends
+    /// here and reports the same death a broken connection reports.
+    Restarting,
 }
 
 /// One thing the loop reacts to: a frame read off the session's event stream,
@@ -291,7 +308,15 @@ enum Ending {
 /// keyboard at once.
 enum Incoming {
     /// A frame the session wrote, or the read that failed.
-    Frame(Result<SessionEvent, IpcError>),
+    Frame {
+        /// Which connection the reader that sent this was reading. A client
+        /// that came back after the session replaced its own process image
+        /// reads a later connection: connection 0 is the first, 1 the one after
+        /// the first restart, and so on.
+        connection: u64,
+        /// The frame itself, or the read that failed.
+        frame: Result<SessionEvent, IpcError>,
+    },
     /// A key, a resize, or this terminal hanging up. Boxed to keep this type
     /// close to the size of a frame.
     Input(Box<RuntimeEvent>),
@@ -422,10 +447,18 @@ pub(crate) fn attach_session(runtime_dir: &Path, session_id: SessionId) -> Resul
 /// The terminal enters raw mode and the alternate screen behind a cleanup
 /// guard this call owns, and leaves both before it returns, so the terminal is
 /// restored between one session and the next.
+///
+/// A session that replaces its own process image is handled inside this one
+/// attachment: the client comes back on the session's new socket as the same
+/// client, and the terminal keeps every mode it is in, so nothing on the screen
+/// flickers.
 fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
     let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
     let mut connection = ipc_client::connect(&endpoint, session_id)?;
-    let (client_id, session_id) = join(&mut connection, &endpoint.token)?;
+    let (client_id, session_id) = join(&mut connection, &endpoint.token, None)?;
+    // The token this client attached under. A session server mints a fresh one
+    // every time it binds, so this is what tells its new socket from its old.
+    let mut token = endpoint.token;
 
     // The session accepted the client, so the terminal may change mode now.
     // The hooks undo every mode this function sets, and the panic hook shares
@@ -470,11 +503,18 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
         .expect("a fixed viewport reads no terminal size")
     });
 
-    // One channel, two producers: the connection's reading half and this
-    // terminal's input thread.
+    // One channel, three producers: the reading half of every connection this
+    // attachment holds in turn, this terminal's input thread, and the loop
+    // itself, which keeps a sender to start the reader it comes back on. A
+    // broken connection reaches the loop as the failed read its own reader
+    // writes here, so the loop ends on that frame, not on the channel closing.
     let (incoming_tx, incoming_rx) = mpsc::channel();
     let (reader, writer) = connection.split();
-    spawn_frame_reader(reader, incoming_tx.clone());
+    // Which connection the loop is reading. Coming back after the session
+    // replaces its own process image counts up, and the loop drops every frame
+    // that does not carry this number.
+    let mut current_connection: u64 = 0;
+    spawn_frame_reader(reader, current_connection, incoming_tx.clone());
 
     // Standard input that is not a terminal has no keys to read, which is what
     // `koshi attach` started with its input redirected has. It runs as a viewer
@@ -483,12 +523,9 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
     if io::stdin().is_tty() {
         let (input_tx, input_rx) = mpsc::channel();
         app::spawn_input_thread(input_tx, client_id);
-        spawn_input_relay(input_rx, incoming_tx);
+        spawn_input_relay(input_rx, incoming_tx.clone());
     } else {
         tracing::info!("standard input is not a terminal, so this client reads no keys");
-        // The frame reader holds the only other sender, so its end must close
-        // the channel the loop waits on.
-        drop(incoming_tx);
     }
 
     // The viewer half: this terminal's own keymap, colors and hint bar, read
@@ -548,7 +585,11 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
         let mut ended = None;
         for received in batch {
             match received {
-                Incoming::Frame(frame) => {
+                // A frame read from a connection this client has already left:
+                // the reader of the connection before a restart ends by
+                // reporting that socket closing.
+                Incoming::Frame { connection, .. } if connection != current_connection => {}
+                Incoming::Frame { frame, .. } => {
                     if let Some(ending) = classify(&frame) {
                         ended = Some(ending);
                         break;
@@ -615,7 +656,34 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
             }
         }
         if let Some(ending) = ended {
-            break ending;
+            if ending != Ending::Restarting {
+                break ending;
+            }
+            // The session is replacing its own process image. The terminal
+            // keeps every mode it is in and the screen is left alone; the
+            // session's first frame on the new connection paints the panes
+            // again.
+            //
+            // The last request on this connection. The queue is written in
+            // order, so it leaves behind every key already on it.
+            uplink.send(IpcRequestKind::Leaving);
+            let Some((rejoined, connection)) = rejoin(runtime_dir, session_id, client_id, &token)
+            else {
+                break ending;
+            };
+            token = rejoined.token;
+            let (reader, writer) = connection.split();
+            current_connection += 1;
+            spawn_frame_reader(reader, current_connection, incoming_tx.clone());
+            // Dropping the queue the old connection's writer thread reads from
+            // is what ends that thread.
+            uplink.requests = spawn_uplink_writer(writer);
+            uplink.next_request_id = FIRST_LOOP_REQUEST_ID;
+            // The new connection numbers its rounds from the start, so no
+            // answer to a border move written on the old one can arrive. The
+            // next move asks for its whole distance from the drag anchor.
+            sent.clear();
+            continue;
         }
         fire_expired_key_sequence(&mut client, &mut uplink, Instant::now());
         // A selection drag held past a pane's edge keeps scrolling while the
@@ -754,9 +822,17 @@ fn lookup(runtime_dir: &Path, selector: &str) -> Result<SessionAddress, CliError
 ///
 /// The client names no identity of its own — the server mints the client id
 /// and answers with it — so both values come from the reply.
+///
+/// `resume` names the client record to come back as: a client returning after
+/// the session replaced its own process image carries it, and a first join
+/// leaves it `None`. The server hands that record back when it still holds it,
+/// the tab that record was viewing still exists, and no connection is
+/// streaming for it, and mints a fresh client otherwise, so the returned id is
+/// the one the caller holds from here either way.
 fn join(
     connection: &mut Connection,
     token: &ConnectionToken,
+    resume: Option<ClientId>,
 ) -> Result<(ClientId, SessionId), CliError> {
     let hello = IpcRequest {
         request_id: 1,
@@ -767,6 +843,7 @@ fn join(
         kind: IpcRequestKind::Attach {
             viewport: viewport(),
             filter: EventFilterSpec::All,
+            resume,
         },
     };
     connection.send(&hello).map_err(ipc_client::talk_failed)?;
@@ -774,7 +851,9 @@ fn join(
 
     let hello_reply: IncomingResponse = connection.recv().map_err(ipc_client::talk_failed)?;
     match ipc_client::take_result(hello_reply)? {
-        IpcResult::Hello { protocol_version } => ipc_client::settled_version(protocol_version)?,
+        IpcResult::Hello {
+            protocol_version, ..
+        } => ipc_client::settled_version(protocol_version)?,
         IpcResult::Error(refusal) => return Err(ipc_client::refused(&refusal)),
         other => return Err(ipc_client::unexpected_reply(&other)),
     }
@@ -788,6 +867,85 @@ fn join(
         } => Ok((client_id, session_id)),
         IpcResult::Error(refusal) => Err(ipc_client::refused(&refusal)),
         other => Err(ipc_client::unexpected_reply(&other)),
+    }
+}
+
+/// Come back to a session that is replacing its own process image: wait for its
+/// new socket, connect to it, and join again as `client_id`. Returns the
+/// endpoint file that socket was advertised in and the open connection to it.
+///
+/// `token` is the token this client attached under; the wait watches it for a
+/// change.
+///
+/// `None` for every way the client cannot come back: another local user's
+/// session, which advertises no endpoint file this user can read; a session
+/// that has not come back inside [`RESTART_WINDOW`]; a new socket that refuses
+/// the connection or the join; and a session that no longer held this client's
+/// record and minted a fresh one. The caller reports every one of them as the
+/// session ending unexpectedly.
+fn rejoin(
+    runtime_dir: &Path,
+    session_id: SessionId,
+    client_id: ClientId,
+    token: &ConnectionToken,
+) -> Option<(EndpointFile, Connection)> {
+    if token.expose().is_empty() {
+        tracing::warn!(
+            %session_id,
+            "another local user's session is restarting, and this user cannot read its endpoint file"
+        );
+        return None;
+    }
+    let deadline = Instant::now() + RESTART_WINDOW;
+    let Some(endpoint) = wait_for_new_endpoint(runtime_dir, session_id, token, deadline) else {
+        tracing::warn!(%session_id, "the session advertised no new socket after its restart");
+        return None;
+    };
+    let mut connection = ipc_client::connect(&endpoint, session_id)
+        .inspect_err(|error| tracing::warn!(%error, "could not reach the restarted session"))
+        .ok()?;
+    let (rejoined, _) = join(&mut connection, &endpoint.token, Some(client_id))
+        .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
+        .ok()?;
+    if rejoined != client_id {
+        tracing::warn!(
+            %session_id,
+            "the restarted session no longer held this client and minted a new one"
+        );
+        return None;
+    }
+    Some((endpoint, connection))
+}
+
+/// Wait for `session_id` to advertise a socket under a token other than
+/// `token`, and hand that endpoint file back. `None` when `deadline` passes
+/// with the token still unchanged.
+///
+/// A session server mints a fresh token every time it binds, so another token
+/// means the session's new image is serving. The process id in the file says
+/// nothing: `execvp` keeps it, so a Unix swap comes back under the same one.
+///
+/// The file is read every [`RESTART_POLL`] until the deadline. A missing or
+/// unreadable file is what the swap leaves while the socket is down, so the
+/// wait reads again. The first read happens before the deadline is checked, so
+/// a deadline already passed still takes a session that is already back.
+fn wait_for_new_endpoint(
+    runtime_dir: &Path,
+    session_id: SessionId,
+    token: &ConnectionToken,
+    deadline: Instant,
+) -> Option<EndpointFile> {
+    let path = EndpointFile::path(runtime_dir, session_id);
+    loop {
+        if let Ok(endpoint) = EndpointFile::read(&path) {
+            if endpoint.token != *token {
+                return Some(endpoint);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(RESTART_POLL);
     }
 }
 
@@ -810,7 +968,15 @@ fn viewport() -> Size {
 /// A frame this build has no variant for is dropped here and never reaches the
 /// loop. It comes from a newer session server, and the frames around it still
 /// draw.
-fn spawn_frame_reader(mut reader: FrameReader, incoming_tx: mpsc::Sender<Incoming>) {
+///
+/// `connection` numbers the connection being read, and every frame carries it,
+/// so the loop can tell this reader's frames from those of a connection it has
+/// already left.
+fn spawn_frame_reader(
+    mut reader: FrameReader,
+    connection: u64,
+    incoming_tx: mpsc::Sender<Incoming>,
+) {
     let _ = thread::Builder::new()
         .name("koshi-attach-reader".to_string())
         .spawn(move || loop {
@@ -823,7 +989,11 @@ fn spawn_frame_reader(mut reader: FrameReader, incoming_tx: mpsc::Sender<Incomin
                 Err(error) => Err(error),
             };
             let broken = frame.is_err();
-            if incoming_tx.send(Incoming::Frame(frame)).is_err() || broken {
+            if incoming_tx
+                .send(Incoming::Frame { connection, frame })
+                .is_err()
+                || broken
+            {
                 break;
             }
         })
@@ -1340,6 +1510,7 @@ fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
     match frame {
         Ok(SessionEvent::Detached) => Some(Ending::Detached),
         Ok(SessionEvent::Quit) => Some(Ending::SessionEnded),
+        Ok(SessionEvent::Restarting) => Some(Ending::Restarting),
         Ok(SessionEvent::SwitchTo { session_id }) => Some(Ending::Switch(*session_id)),
         Ok(_) => None,
         Err(_) => Some(Ending::Died),
@@ -1350,6 +1521,9 @@ fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
 /// session to attach to next: a broken connection names the cause and how to
 /// reattach, and exits non-zero; a switch names the session and prints
 /// nothing.
+///
+/// A restart reaches here only when the client could not come back on the
+/// session's new socket, so it names the same cause and the same way back.
 fn report(ending: Ending, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
     match ending {
         Ending::Detached => {
@@ -1361,7 +1535,7 @@ fn report(ending: Ending, session_id: SessionId) -> Result<Option<SessionId>, Cl
             Ok(None)
         }
         Ending::Switch(target) => Ok(Some(target)),
-        Ending::Died => Err(CliError::Runtime {
+        Ending::Died | Ending::Restarting => Err(CliError::Runtime {
             detail: format!(
                 "the session ended unexpectedly\n  \
                  run `koshi list-sessions`; if session {session_id} is still listed, \

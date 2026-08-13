@@ -44,7 +44,7 @@ use std::time::{Duration, Instant, SystemTime};
 use fs4::{FileExt, TryLockError};
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
-use koshi_ipc::endpoint::{remove_socket_file, socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{remove_socket_file, resume_path, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
@@ -91,16 +91,19 @@ const DRAIN_GRACE: Duration = Duration::from_millis(100);
 /// [`RUNTIME_DIR_FLAG`] with the directory this router serves,
 /// [`PROFILE_FLAG`] when the create named a profile, and
 /// [`ALLOW_OTHER_USERS_FLAG`] when the create asked for the other users of
-/// this machine.
-const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
+/// this machine. A session server replacing its own image starts the new one
+/// under the same subcommand.
+pub(crate) const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
 
 /// The flag carrying a `--profile` name to the session server the router
 /// starts, so the session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
 
 /// The flag telling the session server the router starts to let the other
-/// users of this machine reach the session, whatever its `koshi.kdl` says.
-const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
+/// users of this machine reach the session, whatever its `koshi.kdl` says. A
+/// session server replacing its own image passes it on, so the rebound socket
+/// keeps that reach.
+pub(crate) const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
 /// The flag this router passes to the router it starts, telling that one to
 /// wait for the router lock rather than yield to the router holding it.
@@ -115,12 +118,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
 /// console and does not inherit the caller's.
 #[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+pub(crate) const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// The Win32 `CREATE_NEW_PROCESS_GROUP` creation flag: the started process
 /// begins a process group of its own.
 #[cfg(windows)]
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+pub(crate) const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// The running sessions, keyed by id. Owned by the dispatcher loop alone.
 type Registry = HashMap<SessionId, SessionEntry>;
@@ -769,6 +772,10 @@ fn list_sessions(runtime_dir: &Path, registry: &mut Registry) -> RouterResult {
 /// advertises for another local user is asked over the address it names, and
 /// registered when it answers. One that does not answer is left out and
 /// nothing of it is removed: its files belong to that user.
+///
+/// The last step walks `runtime_dir` for resume files, which the walk over
+/// endpoint files cannot reach once the endpoint file is gone, and removes the
+/// ones [`remove_orphan_resume_files`] finds no owner for.
 fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
     let mut registry = Registry::new();
     for id in ipc_client::advertised_sessions(runtime_dir) {
@@ -805,6 +812,7 @@ fn sweep(runtime_dir: &Path, shared_base: Option<&Path>) -> Registry {
             );
         }
     }
+    remove_orphan_resume_files(runtime_dir, &registry);
     registry
 }
 
@@ -825,15 +833,49 @@ fn resolve(registry: &Registry, selector: &SessionSelector) -> Option<SessionId>
     }
 }
 
-/// Drop one session from the list and remove what it advertised: its endpoint
-/// file, and on Unix its socket file. Both are derived from the id, so this
-/// works for an entry that was never in the list. A session another local user
-/// started advertised neither of them here, so nothing of that user's is
-/// removed.
+/// Drop one session from the list and remove every file it left in
+/// `runtime_dir`: its endpoint file, its resume file, and on Unix its socket
+/// file. All three are derived from the id, so this works for an entry that was
+/// never in the list. A session another local user started left none of them
+/// here, so nothing of that user's is removed.
+///
+/// A session that is replacing its own process image is left alone. Its socket
+/// is unbound for that moment, which every way the router notices a dead
+/// session also notices; its new image rebinds the socket and rewrites the
+/// endpoint file. Past that window the swap is dead, so its resume file goes
+/// with the rest.
 fn unregister(runtime_dir: &Path, registry: &mut Registry, id: SessionId) {
+    if crate::session_server::is_replacing_its_image(runtime_dir, id) {
+        return;
+    }
     registry.remove(&id);
     let _ = std::fs::remove_file(EndpointFile::path(runtime_dir, id));
+    let _ = std::fs::remove_file(resume_path(runtime_dir, id));
     remove_socket_file(&socket_addr(runtime_dir, id));
+}
+
+/// Remove every resume file in `runtime_dir` that no session in `registry`
+/// claims and that is older than
+/// [`RESTART_WINDOW`](crate::session_server::RESTART_WINDOW).
+///
+/// A swap that never reached its new image leaves the file behind with no
+/// endpoint file beside it, so the walk over endpoint files never sees it. That
+/// happens when the new image is killed before it reads the file, and when the
+/// machine loses power mid-swap. A new image that starts at all removes the
+/// file on every way out, so a swap that got that far leaves no orphan.
+///
+/// A file younger than the window belongs to a swap that is still in flight, and
+/// a file whose session is in the list belongs to a session that is running, so
+/// neither is touched.
+fn remove_orphan_resume_files(runtime_dir: &Path, registry: &Registry) {
+    for id in ipc_client::sessions_with_resume_files(runtime_dir) {
+        if registry.contains_key(&id)
+            || crate::session_server::is_replacing_its_image(runtime_dir, id)
+        {
+            continue;
+        }
+        let _ = std::fs::remove_file(resume_path(runtime_dir, id));
+    }
 }
 
 /// Build the command that starts one session server: its identity on the

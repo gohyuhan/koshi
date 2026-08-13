@@ -7,7 +7,11 @@
 //! paste sends, what it ends, what a paste too big for one frame costs, the
 //! picker that chooses how long the loop may sleep, and what one frame draws:
 //! the mode it moves the viewer to, the hint bar it lists that mode's bindings
-//! in, and what a pass must move before the loop draws again on its own.
+//! in, and what a pass must move before the loop draws again on its own. It also
+//! covers coming back after the session replaces its own process image: which
+//! endpoint file the wait takes and which it reads past, that the join names the
+//! client record this terminal holds, and every way back that fails reporting
+//! the death a broken connection already reports.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,9 +27,10 @@ use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
+use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameTab, PaintedFrame};
-use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload, IpcResponse, PROTOCOL_VERSION};
 use koshi_ipc::router::{router_endpoint_path, router_socket_addr, RouterRequest, RouterResponse};
 use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
 use koshi_layout::mode::LayoutMode;
@@ -350,6 +355,283 @@ fn a_switch_names_the_session_to_join_next() {
         report(Ending::Switch(target), SessionId::new()).expect("a switch is a success"),
         Some(target)
     );
+}
+
+#[test]
+fn the_restarting_frame_ends_the_stream_to_come_back_on_the_new_socket() {
+    assert_eq!(
+        classify(&Ok(SessionEvent::Restarting)),
+        Some(Ending::Restarting)
+    );
+}
+
+/// Advertise `session_id` at `token` and `pid`, the way a session server does
+/// every time it binds, and hand back what was written.
+fn advertise(runtime_dir: &Path, session_id: SessionId, token: &str, pid: u32) -> EndpointFile {
+    let endpoint = EndpointFile {
+        socket: socket_addr(runtime_dir, session_id),
+        token: ConnectionToken::new(token),
+        pid,
+    };
+    endpoint
+        .write(&EndpointFile::path(runtime_dir, session_id))
+        .expect("write the session endpoint file");
+    endpoint
+}
+
+/// The token a test's client attached under, which the wait watches for a
+/// change.
+const OLD_TOKEN: &str = "the token this client attached under";
+
+/// The token the image replacing the session mints when it binds again.
+const NEW_TOKEN: &str = "the token the new image minted";
+
+#[test]
+fn the_wait_takes_the_endpoint_file_the_moment_it_names_another_token() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    let advertised = advertise(runtime_dir.path(), session_id, NEW_TOKEN, 4321);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    assert_eq!(
+        wait_for_new_endpoint(
+            runtime_dir.path(),
+            session_id,
+            &ConnectionToken::new(OLD_TOKEN),
+            deadline,
+        ),
+        Some(advertised)
+    );
+    assert!(
+        Instant::now() < deadline,
+        "the wait returned before its deadline"
+    );
+}
+
+#[test]
+fn the_wait_reads_the_endpoint_file_again_until_the_token_changes() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    advertise(runtime_dir.path(), session_id, OLD_TOKEN, 4321);
+
+    let path = runtime_dir.path().to_path_buf();
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        advertise(&path, session_id, NEW_TOKEN, 4321)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let found = wait_for_new_endpoint(
+        runtime_dir.path(),
+        session_id,
+        &ConnectionToken::new(OLD_TOKEN),
+        deadline,
+    );
+    let advertised = writer.join().expect("the writing thread finished");
+    assert_eq!(found, Some(advertised));
+    assert!(
+        Instant::now() < deadline,
+        "the wait returned before its deadline"
+    );
+}
+
+#[test]
+fn the_wait_ignores_an_endpoint_file_still_naming_the_token_this_client_attached_under() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    // A different process id under the same token. On Unix `execvp` keeps the
+    // process id, so only the token tells the new image from the old one.
+    advertise(runtime_dir.path(), session_id, OLD_TOKEN, 9999);
+
+    assert_eq!(
+        wait_for_new_endpoint(
+            runtime_dir.path(),
+            session_id,
+            &ConnectionToken::new(OLD_TOKEN),
+            Instant::now(),
+        ),
+        None
+    );
+}
+
+#[test]
+fn the_wait_ends_at_its_deadline_when_the_session_advertises_nothing() {
+    let runtime_dir = test_runtime_dir();
+    // No endpoint file at all, which is what the swap leaves while the
+    // session's socket is down.
+    assert_eq!(
+        wait_for_new_endpoint(
+            runtime_dir.path(),
+            SessionId::new(),
+            &ConnectionToken::new(OLD_TOKEN),
+            Instant::now(),
+        ),
+        None
+    );
+}
+
+/// A stand-in session that has just come back from replacing its own process
+/// image: it binds `session_id`'s socket, advertises it under [`NEW_TOKEN`],
+/// and serves one connection.
+///
+/// `attached` is how it answers the Attach: `Ok` is the client id it hands back,
+/// `Err` is the sentence it refuses with. It records the Attach it read before
+/// it answers, so a caller holding that answer is a caller whose request is
+/// already in the returned slot.
+fn restarted_session(
+    runtime_dir: &Path,
+    session_id: SessionId,
+    attached: Result<ClientId, &'static str>,
+) -> Arc<Mutex<Option<IpcRequestKind>>> {
+    let addr = socket_addr(runtime_dir, session_id);
+    let listener = Listener::bind(&addr).expect("bind the stand-in session");
+    advertise(runtime_dir, session_id, NEW_TOKEN, std::process::id());
+
+    let asked = Arc::new(Mutex::new(None));
+    let recorded = Arc::clone(&asked);
+    thread::spawn(move || {
+        let Ok(mut connection) = listener.accept() else {
+            return;
+        };
+        while let Ok(request) = connection.recv::<IpcRequest>() {
+            let result = match &request.kind {
+                IpcRequestKind::Hello { .. } => IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: String::from("0.0.0"),
+                },
+                IpcRequestKind::Attach { .. } => {
+                    *recorded.lock().expect("the slot outlives every panic") =
+                        Some(request.kind.clone());
+                    match attached {
+                        Ok(client_id) => IpcResult::Attached {
+                            client_id,
+                            session_id,
+                            structure: AttachedSessionStructureSnapshot {
+                                id: session_id,
+                                name: String::from("session"),
+                                tabs: Vec::new(),
+                                panes: Vec::new(),
+                            },
+                        },
+                        Err(message) => IpcResult::Error(IpcErrorPayload {
+                            code: IpcErrorCode::BadToken,
+                            message: String::from(message),
+                        }),
+                    }
+                }
+                _ => IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::UnsupportedKind,
+                    message: String::from("the stand-in session serves only a join"),
+                }),
+            };
+            let _ = connection.send(&IpcResponse {
+                request_id: Some(request.request_id),
+                result,
+            });
+        }
+    });
+    asked
+}
+
+#[test]
+fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let asked = restarted_session(runtime_dir.path(), session_id, Ok(client_id));
+    let advertised = EndpointFile::read(&EndpointFile::path(runtime_dir.path(), session_id))
+        .expect("the stand-in session advertised its socket");
+
+    let (endpoint, connection) = rejoin(
+        runtime_dir.path(),
+        session_id,
+        client_id,
+        &ConnectionToken::new(OLD_TOKEN),
+    )
+    .expect("the stand-in session handed the client record back");
+    drop(connection);
+
+    assert_eq!(endpoint, advertised);
+    assert_eq!(
+        asked.lock().expect("the slot outlives every panic").clone(),
+        Some(IpcRequestKind::Attach {
+            viewport: viewport(),
+            filter: EventFilterSpec::All,
+            resume: Some(client_id),
+        })
+    );
+}
+
+#[test]
+fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let _asked = restarted_session(
+        runtime_dir.path(),
+        session_id,
+        Err("this session holds no such client"),
+    );
+
+    let attached = rejoin(
+        runtime_dir.path(),
+        session_id,
+        client_id,
+        &ConnectionToken::new(OLD_TOKEN),
+    );
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+}
+
+#[test]
+fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() {
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    let _asked = restarted_session(runtime_dir.path(), session_id, Ok(ClientId::new()));
+
+    let attached = rejoin(
+        runtime_dir.path(),
+        session_id,
+        ClientId::new(),
+        &ConnectionToken::new(OLD_TOKEN),
+    );
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+}
+
+#[test]
+fn another_local_users_restarting_session_is_not_waited_for() {
+    let runtime_dir = test_runtime_dir();
+    let started = Instant::now();
+
+    // The empty token is what a session another local user started is reached
+    // with: this user reads no endpoint file for it, so there is none to watch.
+    let attached = rejoin(
+        runtime_dir.path(),
+        SessionId::new(),
+        ClientId::new(),
+        &ConnectionToken::new(""),
+    );
+
+    assert_eq!(attached.map(|(endpoint, _)| endpoint), None);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "no wait was spent on a session this client cannot watch"
+    );
+}
+
+#[test]
+fn a_restart_this_client_cannot_come_back_from_reports_the_death_it_reports_today() {
+    let session_id = SessionId::new();
+    let error =
+        report(Ending::Restarting, session_id).expect_err("a restart with no way back is an error");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the session ended unexpectedly\n  \
+             run `koshi list-sessions`; if session {session_id} is still listed, \
+             reattach with `koshi attach {session_id}`"
+        )
+    );
+    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
 }
 
 /// The terminal size every mouse fixture below is built at.
@@ -2318,5 +2600,52 @@ fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
     assert_eq!(
         ViewerPaint::read(&client, tab),
         ViewerPaint::read(&client, tab)
+    );
+}
+
+#[test]
+fn a_deadline_already_past_still_takes_a_session_that_is_already_back() {
+    // The client sits out its own wait for the frame that told it, so the
+    // window can be spent by the time the wait runs. The file is read once
+    // before the deadline is weighed, so a session that came back inside the
+    // window is still joined.
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    let advertised = advertise(runtime_dir.path(), session_id, NEW_TOKEN, 4321);
+
+    assert_eq!(
+        wait_for_new_endpoint(
+            runtime_dir.path(),
+            session_id,
+            &ConnectionToken::new(OLD_TOKEN),
+            Instant::now() - Duration::from_secs(1),
+        ),
+        Some(advertised)
+    );
+}
+
+#[test]
+fn the_wait_reads_past_an_endpoint_file_that_is_not_a_file_this_build_reads() {
+    // The swap rewrites the endpoint file, and a client can read it while it
+    // holds bytes no build reads. That read is passed over and the wait keeps
+    // reading, rather than reporting the session gone.
+    let runtime_dir = test_runtime_dir();
+    let session_id = SessionId::new();
+    std::fs::write(EndpointFile::path(runtime_dir.path(), session_id), b"{")
+        .expect("write a half endpoint file");
+
+    let deadline = Instant::now() + Duration::from_millis(200);
+    assert_eq!(
+        wait_for_new_endpoint(
+            runtime_dir.path(),
+            session_id,
+            &ConnectionToken::new(OLD_TOKEN),
+            deadline,
+        ),
+        None
+    );
+    assert!(
+        Instant::now() >= deadline,
+        "the wait sat out its whole window rather than giving up on the first read"
     );
 }

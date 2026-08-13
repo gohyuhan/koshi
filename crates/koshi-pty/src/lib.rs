@@ -28,3 +28,6 @@ pub mod types;
 /// The `PtyBackend` trait and the `PtyHandle` a spawned pane is driven
 /// through; the concrete backend built on `portable-pty` lives in [`portable`].
 pub mod backend;
+
+/// Driving panes that live in another process, over the supervisor link.
+pub mod supervisor;

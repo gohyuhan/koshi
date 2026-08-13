@@ -480,8 +480,9 @@ impl Server {
     }
 
     /// Mark the process for immediate teardown: the event loop polls the quit
-    /// request after each event batch and exits, and teardown group-kills every
-    /// pane's child without the graceful window.
+    /// request before it waits for an event and after each event batch, exits
+    /// once [`awaits_a_client`](Server::awaits_a_client) is false, and teardown
+    /// group-kills every pane's child without the graceful window.
     pub(crate) fn request_quit(&mut self) {
         self.request_graceful_quit();
         self.immediate_shutdown = true;

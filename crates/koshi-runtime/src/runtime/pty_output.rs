@@ -54,7 +54,16 @@ impl Server {
         let screen_after = engine.state().active_screen();
 
         if !replies.is_empty() {
-            let _ = self.pty_backend().write(pane_id, &replies);
+            // A device query holds its asker until the answer lands, so a write
+            // that fails here wedges the pane rather than losing a byte.
+            if let Err(error) = self.pty_backend().write(pane_id, &replies) {
+                tracing::error!(
+                    %pane_id,
+                    %error,
+                    replies = replies.len(),
+                    "the answer to a pane's device query could not be written"
+                );
+            }
         }
         if screen_before != screen_after {
             self.clear_pane_selections(pane_id);

@@ -10,6 +10,10 @@
 //! A session another local user started advertises no endpoint file here. It
 //! is found by name in the machine-wide shared directory instead, and reached
 //! with an empty token, because that session asks another user for none.
+//!
+//! Asking a running session to restart is one more such exchange. A session
+//! that is not listening reads as `NotRunning` rather than an error, so a
+//! caller can walk every advertised session and report each result.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,7 +22,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{CommandId, SessionId, TabId};
-use koshi_ipc::endpoint::{shared_socket_addr, EndpointFile};
+use koshi_ipc::endpoint::{shared_socket_addr, EndpointFile, RESUME_SUFFIX};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
@@ -225,17 +229,120 @@ pub fn fetch_layout(
     }
 }
 
+/// The result of asking a running session to restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRestart {
+    /// The session answered that it is replacing its own process image.
+    Restarting,
+    /// Nothing advertises that session, or nothing listens behind the address
+    /// it advertises, so nothing restarted.
+    NotRunning,
+    /// The session runs a koshi build that has no restart request.
+    TooOld,
+}
+
+/// Ask the running session `session_id` to restart into the binary on disk.
+///
+/// Sends exactly one Restart exchange and never starts a session. Every pane,
+/// its child process, its terminal and its scrollback stay as they are, so a
+/// client that was attached attaches again and finds the session it left.
+///
+/// A session that refuses the request gives [`CliError::IpcUnavailable`]
+/// carrying the sentence the session sent. A session whose build has no such
+/// request answers
+/// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind), which reads as
+/// [`SessionRestart::TooOld`].
+pub fn restart_running_session(
+    runtime_dir: &Path,
+    session_id: SessionId,
+) -> Result<SessionRestart, CliError> {
+    let endpoint = match read_endpoint(runtime_dir, session_id) {
+        Ok(endpoint) => endpoint,
+        Err(CliError::SessionNotFound { .. }) => return Ok(SessionRestart::NotRunning),
+        Err(other) => return Err(other),
+    };
+    let request = IpcRequest {
+        request_id: 2,
+        kind: IpcRequestKind::Restart,
+    };
+    match exchange(&endpoint, session_id, request) {
+        Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
+        Ok(IpcResult::Error(refusal)) if refusal.code == IpcErrorCode::UnsupportedKind => {
+            Ok(SessionRestart::TooOld)
+        }
+        Ok(IpcResult::Error(refusal)) => Err(refused(&refusal)),
+        Ok(other) => Err(unexpected_reply(&other)),
+        Err(CliError::SessionNotFound { .. }) => Ok(SessionRestart::NotRunning),
+        Err(other) => Err(other),
+    }
+}
+
+/// The build version the running session `session_id` reports in its Hello
+/// answer.
+///
+/// `Ok(None)` means no session is running under that id. An empty string means
+/// the session answered but predates the version field. Sends nothing besides
+/// the Hello.
+pub fn running_session_version(
+    runtime_dir: &Path,
+    session_id: SessionId,
+) -> Result<Option<String>, CliError> {
+    let endpoint = match read_endpoint(runtime_dir, session_id) {
+        Ok(endpoint) => endpoint,
+        Err(CliError::SessionNotFound { .. }) => return Ok(None),
+        Err(other) => return Err(other),
+    };
+    let mut connection = match connect(&endpoint, session_id) {
+        Ok(connection) => connection,
+        Err(CliError::SessionNotFound { .. }) => return Ok(None),
+        Err(other) => return Err(other),
+    };
+
+    let hello = IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::hello(endpoint.token),
+    };
+    connection.send(&hello).map_err(talk_failed)?;
+    let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
+    match take_result(reply)? {
+        IpcResult::Hello {
+            protocol_version,
+            version,
+        } => {
+            settled_version(protocol_version)?;
+            Ok(Some(version))
+        }
+        IpcResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(unexpected_reply(&other)),
+    }
+}
+
 /// Every session with an endpoint file in `runtime_dir`, in no particular
 /// order. A file is counted by its name alone (`session-<uuid>.json`);
 /// whether anything still listens behind it is the caller's probe to make.
 /// An unreadable directory reads as no sessions.
 pub fn advertised_sessions(runtime_dir: &Path) -> Vec<SessionId> {
+    sessions_named_by(runtime_dir, ".json")
+}
+
+/// Every session with a resume file in `runtime_dir`, in no particular order.
+/// A file is counted by its name alone (`session-<uuid>` plus
+/// [`RESUME_SUFFIX`]); whether that session still runs is the caller's check to
+/// make. An unreadable directory reads as no sessions.
+pub fn sessions_with_resume_files(runtime_dir: &Path) -> Vec<SessionId> {
+    sessions_named_by(runtime_dir, RESUME_SUFFIX)
+}
+
+/// Every session `runtime_dir` holds a file for whose name is `session-<uuid>`
+/// plus `suffix`, in no particular order. An unreadable directory reads as no
+/// sessions.
+fn sessions_named_by(runtime_dir: &Path, suffix: &str) -> Vec<SessionId> {
     let Ok(entries) = std::fs::read_dir(runtime_dir) else {
         return Vec::new();
     };
     entries
         .filter_map(Result::ok)
-        .filter_map(|entry| session_id_of(entry.file_name().to_str()?, ".json"))
+        .filter_map(|entry| session_id_of(entry.file_name().to_str()?, suffix))
         .collect()
 }
 
@@ -354,7 +461,9 @@ fn exchange(
 
     let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
     match take_result(hello_reply)? {
-        IpcResult::Hello { protocol_version } => settled_version(protocol_version)?,
+        IpcResult::Hello {
+            protocol_version, ..
+        } => settled_version(protocol_version)?,
         IpcResult::Error(refusal) => return Err(refused(&refusal)),
         other => return Err(unexpected_reply(&other)),
     }

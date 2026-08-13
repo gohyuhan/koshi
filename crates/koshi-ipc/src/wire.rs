@@ -5,13 +5,14 @@
 //! Plain decoding refuses an unknown variant, and the refusal happens at the
 //! frame layer, so one unreadable message ends the whole connection.
 //!
-//! [`MaybeKnown`](crate::wire::MaybeKnown) reads the variant name out of the
-//! message first and compares it against
+//! [`MaybeKnown`](crate::wire::MaybeKnown) decodes the message, and a message
+//! that decodes is [`MaybeKnown::Known`](crate::wire::MaybeKnown::Known). A
+//! message that does not decode has its variant name read and compared against
 //! [`WireVariants::VARIANTS`](crate::wire::WireVariants::VARIANTS), the names
-//! this build has. A name on the list decodes as usual, and any error it
-//! produces is a real decoding error. A name off the list becomes
+//! this build has. A name off the list becomes
 //! [`MaybeKnown::Unknown`](crate::wire::MaybeKnown::Unknown), which the caller
-//! answers and then keeps reading.
+//! answers and then keeps reading. A name on the list keeps the decoding
+//! error.
 //!
 //! Example — a build that has no `Floating` request kind:
 //!
@@ -67,21 +68,26 @@ impl<'de, T> Deserialize<'de> for MaybeKnown<T>
 where
     T: DeserializeOwned + WireVariants,
 {
-    /// The message is held as its raw JSON text while the name is read, then
-    /// decoded from that same text.
+    /// The message is held as its raw JSON text and decoded from that text.
+    /// The payload is read once when the decode succeeds. After a decode
+    /// fails, the variant name is read out of the same text: a name this build
+    /// does not have makes the value unknown, and a name it has keeps the
+    /// decoding error.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = <&RawValue>::deserialize(deserializer)?.get();
+        let refusal = match serde_json::from_str(text) {
+            Ok(value) => return Ok(MaybeKnown::Known(value)),
+            Err(refusal) => refusal,
+        };
         let Some(name) = variant_name(text) else {
             return Err(D::Error::custom(
                 "a wire value is a variant name, or a one-key object naming one",
             ));
         };
-        if !T::VARIANTS.contains(&name.as_str()) {
-            return Ok(MaybeKnown::Unknown { name });
+        if T::VARIANTS.contains(&name.as_str()) {
+            return Err(D::Error::custom(refusal));
         }
-        serde_json::from_str(text)
-            .map(MaybeKnown::Known)
-            .map_err(D::Error::custom)
+        Ok(MaybeKnown::Unknown { name })
     }
 }
 

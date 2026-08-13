@@ -816,6 +816,7 @@ dependencies = [
 name = "koshi-ipc"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "getrandom 0.4.3",
  "interprocess",
  "koshi-core",
@@ -905,9 +906,11 @@ name = "koshi-pty"
 version = "0.2.0"
 dependencies = [
  "koshi-core",
+ "koshi-ipc",
  "libc",
  "nix",
  "portable-pty",
+ "tempfile",
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
 ]
@@ -941,10 +944,13 @@ dependencies = [
  "koshi-pty",
  "koshi-renderer",
  "koshi-session",
+ "koshi-storage",
  "koshi-terminal",
  "koshi-test-support",
  "ratatui",
+ "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "uuid",
 ]
@@ -977,6 +983,8 @@ version = "0.2.0"
 dependencies = [
  "koshi-core",
  "percent-encoding",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "unicode-segmentation",
  "unicode-width 0.2.2",

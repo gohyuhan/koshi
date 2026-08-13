@@ -205,11 +205,25 @@ fn no_event_is_ever_logged_as_an_error() {
             reason: "unreadable".to_string(),
         })),
         Event::Quit,
+        Event::Restarting,
     ]);
 
     assert!(
         !out.contains(r#""level":"ERROR""#),
         "an event was logged as an error: {out}"
+    );
+}
+
+// A session that keeps running under a new process image gets its own line: it
+// is what explains a jump in the log's process id.
+#[test]
+fn restarting_is_info_saying_the_session_swaps_its_image() {
+    let out = captured(&[Event::Restarting]);
+
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(
+        out.contains(r#""message":"session restarting into the binary on disk""#),
+        "{out}"
     );
 }
 

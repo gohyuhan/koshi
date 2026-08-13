@@ -26,6 +26,7 @@ use super::*;
 fn hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 

@@ -123,6 +123,37 @@ fn naming_an_unknown_variant_never_reads_its_payload() {
     );
 }
 
+/// The decode runs first, and the name is read only when it fails, so a value
+/// that decodes never reaches the `VARIANTS` list.
+/// [`every_wire_enum_lists_the_variants_it_writes`] keeps the two in step for
+/// the real wire enums.
+#[test]
+fn a_value_that_decodes_is_known_even_when_variants_omits_its_name() {
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    enum Partial {
+        Listed { value: u32 },
+        Unlisted { value: u32 },
+    }
+
+    impl WireVariants for Partial {
+        const VARIANTS: &'static [&'static str] = &["Listed"];
+    }
+
+    let decoded: MaybeKnown<Partial> = serde_json::from_str(r#"{"Unlisted":{"value":3}}"#).unwrap();
+    assert_eq!(decoded, MaybeKnown::Known(Partial::Unlisted { value: 3 }));
+
+    let listed: MaybeKnown<Partial> = serde_json::from_str(r#"{"Listed":{"value":4}}"#).unwrap();
+    assert_eq!(listed, MaybeKnown::Known(Partial::Listed { value: 4 }));
+
+    let absent: MaybeKnown<Partial> = serde_json::from_str(r#"{"Added":{"value":5}}"#).unwrap();
+    assert_eq!(
+        absent,
+        MaybeKnown::Unknown {
+            name: "Added".to_string()
+        }
+    );
+}
+
 #[test]
 fn or_default_falls_back_for_a_value_this_build_cannot_read() {
     #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
@@ -219,6 +250,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
             filter: crate::protocol::EventFilterSpec::All,
+            resume: None,
         },
         IpcRequestKind::KeyPress {
             chord: koshi_core::key::KeyChord::new(
@@ -243,6 +275,8 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         ))),
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab: None },
+        IpcRequestKind::Restart,
+        IpcRequestKind::Leaving,
     ]
 }
 
@@ -251,6 +285,7 @@ fn sample_results() -> Vec<IpcResult> {
     vec![
         IpcResult::Hello {
             protocol_version: 2,
+            version: String::new(),
         },
         IpcResult::Attached {
             client_id: koshi_core::ids::ClientId::new(),
@@ -278,6 +313,7 @@ fn sample_results() -> Vec<IpcResult> {
             tabs: Vec::new(),
             clients: Vec::new(),
         }),
+        IpcResult::Restarting,
         IpcResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,
             message: String::new(),
@@ -345,6 +381,7 @@ fn sample_events() -> Vec<SessionEvent> {
             new_index: 1,
         },
         SessionEvent::Quit,
+        SessionEvent::Restarting,
         SessionEvent::Detached,
         SessionEvent::Resync { dropped_count: 1 },
         SessionEvent::MouseAnswer {

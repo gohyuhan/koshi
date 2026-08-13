@@ -15,8 +15,10 @@
 //! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
 //! that crosses the IPC socket.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::SystemTime;
+use std::sync::{Arc, OnceLock};
+use std::time::{Instant, SystemTime};
 
 use koshi_core::{
     command::{CommandEnvelope, CommandResult},
@@ -159,6 +161,12 @@ pub enum RuntimeEvent {
     /// its event subscription in one turn and answers with
     /// [`AttachAccepted`], or with `None` when no session is running.
     IpcAttach {
+        /// The client record the caller asks to come back as, after the
+        /// session replaced its own process image. The dispatcher hands that
+        /// record back when it still holds it, the tab that record was viewing
+        /// still exists, and no connection is streaming for it, and mints a
+        /// fresh client otherwise.
+        resume: Option<ClientId>,
         /// The caller's terminal size in cells, recorded as the client's
         /// viewport.
         viewport: Size,
@@ -188,13 +196,32 @@ pub enum RuntimeEvent {
         /// Where the dispatcher sends the layout.
         reply: Sender<Option<SessionLayout>>,
     },
+    /// A restart request delivered over the IPC socket: the caller asks this
+    /// process to replace its own image with the binary at the path it started
+    /// from. Carries the reply sender the connection thread waits on; the
+    /// dispatcher checks what the swap needs and answers `Ok(())` when the
+    /// restart is accepted, or `Err` carrying the sentence naming what is
+    /// wrong. A refused restart changes nothing and the session keeps serving.
+    IpcRestart {
+        /// Where the dispatcher sends its verdict.
+        reply: Sender<Result<(), String>>,
+    },
+    /// The grace window for the clients whose records came across an image
+    /// swap has closed. The dispatcher detaches every one of those clients
+    /// that has not attached again, and does nothing when they all have.
+    DropUnclaimedClients {
+        /// When the window closed, supplied by the producer so the handler
+        /// never reads the clock itself.
+        deadline: Instant,
+    },
     /// A capability-checked command issued by a plugin.
     Plugin(CommandEnvelope),
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
-/// record, the session it joined, the structure built for the attach reply,
-/// and the receiving end of the client's own event queue.
+/// record, the session it joined, the structure built for the attach reply, the
+/// receiving end of the client's own event queue, and the session's shared
+/// ending notice.
 ///
 /// The whole of it comes out of one dispatcher turn, so the structure names
 /// the same state the queue's first event follows.
@@ -208,6 +235,83 @@ pub struct AttachAccepted {
     pub structure: AttachedSessionStructureSnapshot,
     /// The client's event queue. Dropping it ends the subscription.
     pub events: Receiver<Delivery>,
+    /// Shared with the session, so this client's writing thread learns that the
+    /// session is ending even when the queue above is full, and so the session
+    /// learns when that thread has written the last frame.
+    pub ending_notice: Arc<EndingNotice>,
+}
+
+/// How a client's event stream ends: the last frame that client's writing
+/// thread writes before it stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEnding {
+    /// The session ended.
+    Quit,
+    /// The session is replacing its own process image. A client that reads this
+    /// waits for the session's new socket and attaches again on it.
+    Restarting,
+}
+
+/// What the session and every attached client's writing thread share about the
+/// session's last frame.
+///
+/// Publishing that frame raises the notice. A writing thread reads it at the
+/// top of each turn: raised, it drops whatever is still queued for that client,
+/// writes the frame the notice names, and ends. The queue each client reads is
+/// bounded, so a published last frame does not reach a client whose queue is
+/// full; this is what reaches that client instead. A client whose queue the
+/// server closed already left the session, so its writing thread keeps to its
+/// own goodbye.
+///
+/// [`writers_running`](Self::writers_running) counts the writing threads that
+/// have not ended. Each one ends right after it writes the last frame, so the
+/// session waits for the count to reach zero before it replaces its own process
+/// image or tears the process down.
+///
+/// Before → after: a client's queue holds its full 1024 deliveries when the
+/// session quits → the quit does not fit the queue, the writing thread reads
+/// the raised notice at its next turn, writes the quit frame, and the client
+/// says the session ended instead of reading end of stream.
+#[derive(Debug, Default)]
+pub struct EndingNotice {
+    /// Which frame ends every attached client's stream; empty while the session
+    /// serves. Set once: the session is ending by then.
+    ending: OnceLock<SessionEnding>,
+    /// How many client writing threads have started and not yet ended.
+    writers: AtomicUsize,
+}
+
+impl EndingNotice {
+    /// Raise the notice: every attached client's writing thread writes
+    /// `ending`'s frame at its next turn. The notice keeps the ending it was
+    /// raised with first.
+    pub fn raise(&self, ending: SessionEnding) {
+        let _ = self.ending.set(ending);
+    }
+
+    /// How every attached client's stream ends, or `None` while the session
+    /// serves.
+    #[must_use]
+    pub fn raised(&self) -> Option<SessionEnding> {
+        self.ending.get().copied()
+    }
+
+    /// Count one client writing thread as started. Paired with
+    /// [`writer_ended`](Self::writer_ended).
+    pub fn writer_started(&self) {
+        self.writers.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Count one client writing thread as ended.
+    pub fn writer_ended(&self) {
+        self.writers.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// How many client writing threads have started and not yet ended.
+    #[must_use]
+    pub fn writers_running(&self) -> usize {
+        self.writers.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]

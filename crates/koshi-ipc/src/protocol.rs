@@ -220,6 +220,14 @@ pub enum IpcRequestKind {
         viewport: Size,
         /// Which of the session's events the client receives.
         filter: EventFilterSpec,
+        /// The client record to come back as, named by a caller re-attaching
+        /// after the session replaced its own process image. The server hands
+        /// that record back when it still holds it, the tab that record was
+        /// viewing still exists, and no connection is streaming for it, and
+        /// mints a fresh client otherwise. Absent on a first attach, and from
+        /// a caller that predates this field.
+        #[serde(default)]
+        resume: Option<ClientId>,
     },
     /// One key press the attached client's keymap did not bind, for the pane
     /// it is typing into.
@@ -255,6 +263,19 @@ pub enum IpcRequestKind {
         /// The one tab to describe, or every tab when absent.
         tab: Option<TabId>,
     },
+    /// Restart the session server: it sends its answer, then replaces its own
+    /// process image with the binary at the path it started from. Every pane,
+    /// its child process, its terminal and its scrollback stay as they are, so
+    /// each attached client attaches again and finds the session it left.
+    Restart,
+    /// The caller sends nothing more on this connection. The session serves
+    /// every request that arrived before it, then closes the connection. No
+    /// answer comes back.
+    ///
+    /// An attached client sends it when it reads
+    /// [`SessionEvent::Restarting`](crate::event::SessionEvent::Restarting).
+    /// Requests arrive in the order the caller queued them.
+    Leaving,
 }
 
 impl IpcRequestKind {
@@ -287,6 +308,8 @@ impl IpcRequestKind {
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
+            IpcRequestKind::Restart => "Restart",
+            IpcRequestKind::Leaving => "Leaving",
         }
     }
 }
@@ -396,6 +419,10 @@ pub enum IpcResult {
         /// The version both sides use on this connection: the highest they
         /// both speak.
         protocol_version: u32,
+        /// The build version of the answering session server, e.g. `0.3.0`.
+        /// Empty when the session server predates this field.
+        #[serde(default)]
+        version: String,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
@@ -415,6 +442,9 @@ pub enum IpcResult {
     Overview(SessionOverview),
     /// The session's layout: each tab's split tree and its solved rectangles.
     Layout(SessionLayout),
+    /// Answers [`IpcRequestKind::Restart`]: the reply is sent, then the
+    /// session server replaces its image with the binary now on disk.
+    Restarting,
     /// The request was refused.
     Error(IpcErrorPayload),
 }
@@ -480,6 +510,8 @@ impl WireVariants for IpcRequestKind {
         "SubmitCommand",
         "Discovery",
         "Layout",
+        "Restart",
+        "Leaving",
     ];
 }
 
@@ -498,6 +530,7 @@ impl WireVariants for IpcResult {
         "CommandResult",
         "Overview",
         "Layout",
+        "Restarting",
         "Error",
     ];
 }
@@ -510,6 +543,7 @@ impl WireName for IpcResult {
             IpcResult::CommandResult(_) => "CommandResult",
             IpcResult::Overview(_) => "Overview",
             IpcResult::Layout(_) => "Layout",
+            IpcResult::Restarting => "Restarting",
             IpcResult::Error(_) => "Error",
         }
     }

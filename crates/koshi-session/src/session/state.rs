@@ -121,7 +121,7 @@ impl Tab {
 /// live reference: a config reload builds a new snapshot for new sessions
 /// instead of rewriting a running one underneath its clients. Placeholder
 /// shell: the config model fills it in.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionConfig;
 
 /// Handle to a session's plugin runtime. Placeholder shell: the plugin
@@ -136,7 +136,7 @@ pub struct PluginRuntimeHandle;
 /// input mode — lives on that client's entry in [`ClientRegistry`], never
 /// as a session-global field: two attached clients must be able to look at
 /// different tabs and panes at the same time.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Unique id, stable for the session's whole life.
     pub id: SessionId,
@@ -156,7 +156,10 @@ pub struct Session {
     pub clients: ClientRegistry,
     /// The configuration this session started with.
     pub config_snapshot: SessionConfig,
-    /// The session's plugin runtime, once one is running.
+    /// The session's plugin runtime, once one is running. A handle names a
+    /// live process, so a serialized session leaves it out and a deserialized
+    /// one reads back as `None`.
+    #[serde(skip)]
     pub plugin_runtime_ref: Option<PluginRuntimeHandle>,
 
     lifecycle: SessionLifecycle,

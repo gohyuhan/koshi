@@ -127,9 +127,14 @@ pub enum Event {
     Plugin(PluginEvent),
 
     // Session lifecycle.
-    /// The session is shutting down: its last tab closed, so the program
-    /// quits. A terminal event — nothing follows it.
+    /// The session is over: its last tab closed, a quit command was applied,
+    /// or its last pane's child exited. A terminal event — nothing follows it.
     Quit,
+    /// The session server is replacing its own process image with the binary
+    /// now on disk. The session, its panes and their child processes stay as
+    /// they are; only the process running them changes. A terminal event —
+    /// nothing follows it.
+    Restarting,
 }
 
 impl Event {
@@ -175,6 +180,7 @@ impl Event {
             Event::Copied(_) => "Copied",
             Event::Plugin(_) => "Plugin",
             Event::Quit => "Quit",
+            Event::Restarting => "Restarting",
         }
     }
 }
@@ -681,6 +687,7 @@ pub fn classify(event: &Event) -> EventClass {
         Event::Copied(_) => EventClass::Critical,
         Event::Plugin(_) => EventClass::Critical,
         Event::Quit => EventClass::Critical,
+        Event::Restarting => EventClass::Critical,
     }
 }
 

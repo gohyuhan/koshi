@@ -28,7 +28,8 @@ use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{agreed_version, ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use crate::handshake::{GateWords, VersionGate};
+use crate::protocol::{ConnectionToken, IpcErrorPayload};
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 /// The highest control-plane protocol version this build speaks, and the one
@@ -42,7 +43,7 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = 2;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
-/// [`IpcErrorCode::UnsupportedVersion`].
+/// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
 /// The floor is 1, the version 0.2.0 speaks, because the router is born in
 /// 0.2.0 and no earlier build has one.
@@ -253,29 +254,32 @@ pub struct SessionServerReady {
     pub socket: String,
 }
 
+/// What the control-plane protocol's gate calls itself, and the versions it
+/// speaks.
+const ROUTER_WORDS: GateWords = GateWords {
+    peer: "router",
+    token_owner: "the router's",
+    caller: "caller",
+    versions: "control-plane protocol versions",
+    channel: "connection",
+    min_version: MIN_ROUTER_PROTOCOL_VERSION,
+    max_version: ROUTER_PROTOCOL_VERSION,
+};
+
 /// One router connection's handshake gate, held by the router for the
 /// connection's lifetime. Starts closed; a [`RouterRequestKind::Hello`] whose
 /// version range overlaps this build's and whose token matches opens it, and
-/// every other request kind is served only while it is open.
+/// every other request kind is served only while it is open. The check itself
+/// is the gate every koshi protocol shares.
 #[derive(Debug)]
-pub struct RouterHandshake {
-    /// The token the router wrote to its endpoint file; a Hello must present
-    /// an equal one.
-    expected: ConnectionToken,
-    /// The control-plane protocol version settled for this connection, once a
-    /// Hello has been accepted on it.
-    agreed: Option<u32>,
-}
+pub struct RouterHandshake(VersionGate);
 
 impl RouterHandshake {
     /// A gate for one newly accepted router connection, closed until a Hello
     /// opens it.
     #[must_use]
     pub fn new(expected: ConnectionToken) -> RouterHandshake {
-        RouterHandshake {
-            expected,
-            agreed: None,
-        }
+        RouterHandshake(VersionGate::new(expected, ROUTER_WORDS))
     }
 
     /// The control-plane protocol version this connection settled on, or
@@ -285,27 +289,19 @@ impl RouterHandshake {
     /// which version the two of them use.
     #[must_use]
     pub fn agreed(&self) -> Option<u32> {
-        self.agreed
+        self.0.agreed()
     }
 
     /// The refusal for a request kind this build does not have, named `name`.
     ///
-    /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
-    /// the same as any other kind arriving before a Hello. An open gate
-    /// answers [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it,
-    /// and the connection keeps serving.
+    /// A closed gate answers
+    /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired), the
+    /// same as any other kind arriving before a Hello. An open gate answers
+    /// [`UnsupportedKind`](crate::protocol::IpcErrorCode::UnsupportedKind)
+    /// naming it, and the connection keeps serving.
     #[must_use]
     pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
-        if self.agreed.is_none() {
-            return IpcErrorPayload {
-                code: IpcErrorCode::HelloRequired,
-                message: format!("{name} arrived before a Hello opened the connection"),
-            };
-        }
-        IpcErrorPayload {
-            code: IpcErrorCode::UnsupportedKind,
-            message: format!("this router has no request kind named {name}"),
-        }
+        self.0.refuse_unknown(name)
     }
 
     /// Check one incoming request kind against the connection's state.
@@ -313,12 +309,14 @@ impl RouterHandshake {
     /// A [`Hello`](RouterRequestKind::Hello) is checked version first, then
     /// token: a caller whose version range does not overlap
     /// [`MIN_ROUTER_PROTOCOL_VERSION`]`..=`[`ROUTER_PROTOCOL_VERSION`] is
-    /// refused as [`UnsupportedVersion`](IpcErrorCode::UnsupportedVersion)
+    /// refused as
+    /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion)
     /// with both ranges named, a token that does not equal the router's is
-    /// refused as [`BadToken`](IpcErrorCode::BadToken), and a Hello passing
-    /// both checks settles the connection's version and opens the gate. Any
-    /// other kind is accepted while the gate is open and refused as
-    /// [`HelloRequired`](IpcErrorCode::HelloRequired) while it is not.
+    /// refused as [`BadToken`](crate::protocol::IpcErrorCode::BadToken), and a
+    /// Hello passing both checks settles the connection's version and opens the
+    /// gate. Any other kind is accepted while the gate is open and refused as
+    /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired) while it
+    /// is not.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered
     /// with [`RouterResult::Hello`] carrying [`agreed`](Self::agreed). An
@@ -330,45 +328,10 @@ impl RouterHandshake {
                 min_protocol_version,
                 max_protocol_version,
                 token,
-            } => {
-                let Some(agreed) = agreed_version(
-                    *min_protocol_version,
-                    *max_protocol_version,
-                    MIN_ROUTER_PROTOCOL_VERSION,
-                    ROUTER_PROTOCOL_VERSION,
-                ) else {
-                    return Err(IpcErrorPayload {
-                        code: IpcErrorCode::UnsupportedVersion,
-                        message: format!(
-                            "the caller speaks control-plane protocol versions \
-                             {min_protocol_version} to {max_protocol_version}, \
-                             this router speaks {MIN_ROUTER_PROTOCOL_VERSION} to \
-                             {ROUTER_PROTOCOL_VERSION}"
-                        ),
-                    });
-                };
-                if *token != self.expected {
-                    return Err(IpcErrorPayload {
-                        code: IpcErrorCode::BadToken,
-                        message: "the token presented does not match the router's".to_string(),
-                    });
-                }
-                self.agreed = Some(agreed);
-                Ok(())
-            }
-            other => {
-                if self.agreed.is_some() {
-                    Ok(())
-                } else {
-                    Err(IpcErrorPayload {
-                        code: IpcErrorCode::HelloRequired,
-                        message: format!(
-                            "{} arrived before a Hello opened the connection",
-                            other.name()
-                        ),
-                    })
-                }
-            }
+            } => self
+                .0
+                .hello(*min_protocol_version, *max_protocol_version, token),
+            other => self.0.other(other.name()),
         }
     }
 }

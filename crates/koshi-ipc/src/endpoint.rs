@@ -20,7 +20,9 @@
 //! [`remove_socket_file`](crate::endpoint::remove_socket_file) takes that
 //! address off the disk once the session is gone.
 //! [`shared_socket_addr`](crate::endpoint::shared_socket_addr) builds that
-//! address for a session other local users may reach, and
+//! address for a session other local users may reach,
+//! [`resume_path`](crate::endpoint::resume_path) names the file a session
+//! replacing its own process image leaves its state in, and
 //! [`advert_path`](crate::endpoint::advert_path),
 //! [`write_advert`](crate::endpoint::write_advert) and
 //! [`remove_advert`](crate::endpoint::remove_advert) handle the empty marker
@@ -86,6 +88,24 @@ pub fn shared_socket_addr(shared_user_dir: &Path, session: SessionId) -> String 
         let _ = shared_user_dir;
         format!("koshi-{session}")
     }
+}
+
+/// What a resume file's name ends in, after the session id. Every reader that
+/// walks a directory for resume files matches on this, so the name is built and
+/// recognised from one place.
+pub const RESUME_SUFFIX: &str = ".resume";
+
+/// Where the resume file for `session` lives: `session-<uuid>.resume`,
+/// directly beside that session's endpoint file inside `runtime_dir`.
+///
+/// A session server about to replace its own process image writes there the
+/// state its next image takes back; the new image reads that state and deletes
+/// the file. The router reads the same path to tell a session that is replacing
+/// its image from one that stopped answering, and removes a file no session
+/// claims any more.
+#[must_use]
+pub fn resume_path(runtime_dir: &Path, session: SessionId) -> PathBuf {
+    runtime_dir.join(format!("{session}{RESUME_SUFFIX}"))
 }
 
 /// Where the marker advertising `session` machine-wide lives:

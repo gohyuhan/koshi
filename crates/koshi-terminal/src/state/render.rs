@@ -1,6 +1,8 @@
 //! The per-screen rendering state — the pen, the active GL slot, and the
 //! `G0`–`G3` charset designations — plus the [`Charset`] each slot can name.
 
+use serde::{Deserialize, Serialize};
+
 use crate::style::Style;
 
 /// A character set a `G0`–`G3` slot can be designated to, selected into the
@@ -9,7 +11,7 @@ use crate::style::Style;
 /// Part of the per-screen [`RenderState`]. Only the three sets real applications
 /// use are modeled; an unrecognized designation final byte falls back to
 /// [`Ascii`](Charset::Ascii) (a passthrough).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Charset {
     /// US-ASCII (`ESC ( B`): every byte prints as itself. The default.
     #[default]
@@ -30,7 +32,7 @@ pub enum Charset {
 /// alternate-screen entry (`?47`/`?1047`/`?1049`) clones the primary's render
 /// state into the alternate. DECSC snapshots the active screen's render state
 /// into a [`SavedCursor`](crate::state::SavedCursor); DECRC restores it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderState {
     /// The pen applied to printed cells (colors + text attributes).
     pub(in crate::state) style: Style,

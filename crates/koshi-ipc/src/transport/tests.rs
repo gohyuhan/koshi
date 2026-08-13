@@ -196,6 +196,7 @@ fn request_and_response_cross_a_real_socket() {
             request_id: Some(request.request_id),
             result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
         })
         .expect("server send");
@@ -213,6 +214,7 @@ fn request_and_response_cross_a_real_socket() {
             request_id: Some(7),
             result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
         }
     );
@@ -236,6 +238,7 @@ fn a_shared_bind_serves_one_caller_after_another() {
                 request_id: Some(request.request_id),
                 result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             })
             .expect("server send");
@@ -252,6 +255,7 @@ fn a_shared_bind_serves_one_caller_after_another() {
                 request_id: Some(request_id),
                 result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             }
         );
@@ -319,6 +323,7 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
                     request_id: Some(id),
                     result: IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
                     },
                 })
                 .expect("server send");
@@ -368,6 +373,118 @@ fn one_listener_serves_two_callers_in_turn() {
     }
 
     assert_eq!(server.join().expect("server thread"), vec![10, 20]);
+}
+
+// --- closing one connection's read direction ---
+
+#[test]
+fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
+    let addr = test_addr("readclose-next");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut conn = listener.accept().expect("accept");
+        let closer = conn.read_closer().expect("take the read closer");
+        sent_rx.recv().expect("the caller sent its frame");
+        closer.close();
+        // The caller's frame is on the socket by now, and the read still ends.
+        conn.recv::<IpcRequest>()
+    });
+
+    let mut caller = Connection::connect(&addr).expect("connect");
+    caller.send(&hello_request(1)).expect("client send");
+    sent_tx.send(()).expect("the closer is told");
+
+    let err = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+}
+
+#[test]
+fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
+    let addr = test_addr("readclose-split");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let conn = listener.accept().expect("accept");
+        let closer = conn.read_closer().expect("take the read closer");
+        let (mut reader, _writer) = conn.split();
+        sent_rx.recv().expect("the caller sent its frame");
+        closer.close();
+        reader.recv::<IpcRequest>()
+    });
+
+    let mut caller = Connection::connect(&addr).expect("connect");
+    caller.send(&hello_request(2)).expect("client send");
+    sent_tx.send(()).expect("the closer is told");
+
+    let err = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+}
+
+#[test]
+fn a_closed_read_direction_leaves_the_writing_direction_open() {
+    let addr = test_addr("readclose-write");
+    let listener = Listener::bind(&addr).expect("bind");
+    let owed = IpcResponse {
+        request_id: Some(3),
+        result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+    let sent = owed.clone();
+
+    let server = thread::spawn(move || {
+        let mut conn = listener.accept().expect("accept");
+        conn.read_closer().expect("take the read closer").close();
+        conn.send(&sent).expect("server send");
+    });
+
+    let mut caller = Connection::connect(&addr).expect("connect");
+    assert_eq!(caller.recv::<IpcResponse>().expect("client recv"), owed);
+    server.join().expect("server thread");
+}
+
+/// Unix only: a Windows named pipe has no half-close, so a read already waiting
+/// on the pipe ends when its peer sends the next frame or hangs up.
+#[cfg(unix)]
+#[test]
+fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
+    use std::io::Write as _;
+
+    let addr = test_addr("readclose-blocked");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    // Half a length prefix: the reader waits inside the read for the rest of
+    // the header, past the check it makes before reading.
+    let mut caller = std::os::unix::net::UnixStream::connect(&addr).expect("connect");
+    caller.write_all(&[0, 0]).expect("write half a header");
+
+    let mut conn = listener.accept().expect("accept");
+    let closer = conn.read_closer().expect("take the read closer");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let reading = thread::spawn(move || {
+        started_tx
+            .send(())
+            .expect("the reader reports it is starting");
+        conn.recv::<IpcRequest>()
+    });
+
+    started_rx.recv().expect("the reader started");
+    thread::sleep(std::time::Duration::from_millis(50));
+    closer.close();
+
+    let err = reading.join().expect("reading thread").unwrap_err();
+    let IpcError::Disconnected = err else {
+        panic!("wrong error: {err}");
+    };
+    drop(caller);
 }
 
 #[test]

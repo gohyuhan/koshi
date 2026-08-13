@@ -14,8 +14,8 @@
 //!
 //! This is a CLI-side, one-shot flow. No session runs it, so it reads the
 //! clock and the network directly rather than through the runtime's injected
-//! services. After an install it asks the running router to restart into the
-//! binary just installed.
+//! services. After an install it asks every running session, and then the
+//! running router, to restart into the binary just installed.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -25,13 +25,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use koshi_config::app_config::parse_app_config;
 use koshi_config::layer::merge_client;
 use koshi_config::types::{ClientConfig, UpdateConfig};
+use koshi_core::ids::SessionId;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempPath};
 use ureq::Agent;
 
 use crate::error::CliError;
-use crate::ipc_client;
+use crate::ipc_client::{self, restart_running_session, running_session_version, SessionRestart};
 use crate::router_client::{restart_running_router, running_router_version};
 
 /// This build's version, from the crate version bumped before each release.
@@ -75,6 +76,7 @@ pub fn run_update_command() -> Result<(), CliError> {
     };
     install_release(&tag).map_err(update_err)?;
     println!("updated to koshi {}", strip_v(&tag));
+    restart_sessions_after_install(strip_v(&tag));
     restart_router_after_install(strip_v(&tag));
     Ok(())
 }
@@ -113,6 +115,7 @@ pub fn maybe_prompt_startup_update() {
     }
     match install_release(&tag) {
         Ok(()) => {
+            restart_sessions_after_install(strip_v(&tag));
             restart_router_after_install(strip_v(&tag));
             println!("updated to koshi {} — relaunch to use it", strip_v(&tag));
             std::process::exit(0);
@@ -121,8 +124,8 @@ pub fn maybe_prompt_startup_update() {
     }
 }
 
-/// How long a restarted router has to come back answering Hello with the
-/// installed version, matching the lock-handover wait on Windows.
+/// How long a restarted router or session has to come back answering Hello
+/// with the installed version, matching the lock-handover wait on Windows.
 const RESTART_CONFIRM_WAIT: Duration = Duration::from_secs(10);
 
 /// The pause between two Hello probes while waiting for the confirmation.
@@ -150,15 +153,17 @@ fn restart_router_after_install(installed: &str) {
     };
     match restart_running_router(&dir) {
         Ok(false) => {}
-        Ok(true) => match wait_for_router_version(&dir, installed, RESTART_CONFIRM_WAIT) {
-            Some(version) if version == installed => println!(
+        Ok(true) => match wait_for_version(installed, RESTART_CONFIRM_WAIT, || {
+            probe_router_version(&dir)
+        }) {
+            VersionAnswer::Installed => println!(
                 "the running router restarted into the new binary; every session keeps running"
             ),
-            Some(version) => eprintln!(
+            VersionAnswer::Other(version) => eprintln!(
                 "koshi: the running router still reports {version} after the restart; it keeps \
                  serving that build; every session keeps running"
             ),
-            None => eprintln!(
+            VersionAnswer::Silent => eprintln!(
                 "koshi: the router restart was not confirmed: no router answered within \
                  {} seconds; every session keeps running",
                 RESTART_CONFIRM_WAIT.as_secs()
@@ -171,22 +176,36 @@ fn restart_router_after_install(installed: &str) {
     }
 }
 
-/// Poll the running router until its Hello reports `want`, for up to `wait`.
+/// How the wait for a restarted router or session ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionAnswer {
+    /// It answered with the version the wait was for.
+    Installed,
+    /// The last version it answered with, which was another one.
+    Other(String),
+    /// It answered nothing before the wait ran out.
+    Silent,
+}
+
+/// Poll `probe` until it reports `want`, for up to `wait`.
 ///
-/// Returns `Some(want)` on confirmation, the last different version a router
-/// answered with, or `None` when no router answered at all. A connect failure
-/// counts as no answer and the poll continues: the router is mid-restart.
-fn wait_for_router_version(runtime_dir: &Path, want: &str, wait: Duration) -> Option<String> {
+/// A probe that gives no answer counts as none and the poll continues: the peer
+/// is mid-restart.
+fn wait_for_version(
+    want: &str,
+    wait: Duration,
+    probe: impl Fn() -> Option<String>,
+) -> VersionAnswer {
     let deadline = Instant::now() + wait;
     let mut last_answer = None;
     loop {
-        match probe_router_version(runtime_dir) {
-            Some(version) if version == want => return Some(version),
+        match probe() {
+            Some(version) if version == want => return VersionAnswer::Installed,
             Some(version) => last_answer = Some(version),
             None => {}
         }
         if Instant::now() >= deadline {
-            return last_answer;
+            return last_answer.map_or(VersionAnswer::Silent, VersionAnswer::Other);
         }
         std::thread::sleep(RESTART_CONFIRM_POLL);
     }
@@ -194,15 +213,115 @@ fn wait_for_router_version(runtime_dir: &Path, want: &str, wait: Duration) -> Op
 
 /// One version probe, bounded by [`RESTART_PROBE_TIMEOUT`].
 ///
-/// The exchange runs on its own thread. A probe that runs out the bound
-/// reads as no answer; its thread is left behind and ends with this process.
-fn probe_router_version(runtime_dir: &Path) -> Option<String> {
+/// `ask` runs on its own thread. A probe that runs out the bound reads as no
+/// answer; its thread is left behind and ends with this process.
+fn probe_version(ask: impl FnOnce() -> Option<String> + Send + 'static) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let dir = runtime_dir.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(running_router_version(&dir).ok().flatten());
+        let _ = tx.send(ask());
     });
     rx.recv_timeout(RESTART_PROBE_TIMEOUT).unwrap_or(None)
+}
+
+/// One probe of the running router's version.
+fn probe_router_version(runtime_dir: &Path) -> Option<String> {
+    let dir = runtime_dir.to_path_buf();
+    probe_version(move || running_router_version(&dir).ok().flatten())
+}
+
+/// One probe of the running session `session_id`'s version.
+fn probe_session_version(runtime_dir: &Path, session_id: SessionId) -> Option<String> {
+    let dir = runtime_dir.to_path_buf();
+    probe_version(move || running_session_version(&dir, session_id).ok().flatten())
+}
+
+/// The result of asking one running session to restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionOutcome {
+    /// The session restarted and now reports the installed version.
+    Confirmed,
+    /// The session restarted and still reports the version named here.
+    StillOn(String),
+    /// The session restarted and answered nothing within the wait.
+    Unconfirmed,
+    /// The session runs a koshi build that has no restart request.
+    TooOld,
+    /// The session refused the restart or could not be reached. Carries the
+    /// sentence naming what went wrong.
+    Failed(String),
+}
+
+/// Ask every session `runtime_dir` advertises to restart into the binary just
+/// installed, and print one line per session.
+///
+/// Prints nothing for a session that is no longer listening. Success is printed
+/// only after that session's Hello reports `installed`. Every other result
+/// prints a note on standard error, and the install itself stands.
+fn restart_sessions_after_install(installed: &str) {
+    let dir = match ipc_client::runtime_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("koshi: the running sessions could not be reached: {err}");
+            return;
+        }
+    };
+    for (session_id, outcome) in restart_advertised_sessions(&dir, installed, RESTART_CONFIRM_WAIT)
+    {
+        match outcome {
+            SessionOutcome::Confirmed => {
+                println!("{session_id} restarted into the new binary; its panes keep running")
+            }
+            SessionOutcome::StillOn(version) => eprintln!(
+                "koshi: {session_id} still reports {version} after the restart; it keeps serving \
+                 that build; its panes keep running"
+            ),
+            SessionOutcome::Unconfirmed => eprintln!(
+                "koshi: the restart of {session_id} was not confirmed: it answered nothing \
+                 within {} seconds; its panes keep running",
+                RESTART_CONFIRM_WAIT.as_secs()
+            ),
+            SessionOutcome::TooOld => eprintln!(
+                "koshi: {session_id} runs a koshi that cannot replace its own binary; end that \
+                 session and start it again to run the new build"
+            ),
+            SessionOutcome::Failed(detail) => eprintln!(
+                "koshi: {session_id} could not be restarted: {detail}; it keeps serving the old \
+                 build until you end that session and start it again"
+            ),
+        }
+    }
+}
+
+/// Ask every session `runtime_dir` advertises to restart, waiting up to `wait`
+/// on each for a Hello reporting `installed`, and hand back each result.
+///
+/// A session no longer listening is left out. One session's failure never ends
+/// the walk: every advertised session is asked, whatever the one before it
+/// answered.
+fn restart_advertised_sessions(
+    runtime_dir: &Path,
+    installed: &str,
+    wait: Duration,
+) -> Vec<(SessionId, SessionOutcome)> {
+    let mut outcomes = Vec::new();
+    for session_id in ipc_client::advertised_sessions(runtime_dir) {
+        let outcome = match restart_running_session(runtime_dir, session_id) {
+            Ok(SessionRestart::NotRunning) => continue,
+            Ok(SessionRestart::TooOld) => SessionOutcome::TooOld,
+            Ok(SessionRestart::Restarting) => {
+                match wait_for_version(installed, wait, || {
+                    probe_session_version(runtime_dir, session_id)
+                }) {
+                    VersionAnswer::Installed => SessionOutcome::Confirmed,
+                    VersionAnswer::Other(version) => SessionOutcome::StillOn(version),
+                    VersionAnswer::Silent => SessionOutcome::Unconfirmed,
+                }
+            }
+            Err(err) => SessionOutcome::Failed(err.to_string()),
+        };
+        outcomes.push((session_id, outcome));
+    }
+    outcomes
 }
 
 // ---------------------------------------------------------------------------

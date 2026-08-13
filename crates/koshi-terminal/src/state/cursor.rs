@@ -1,9 +1,11 @@
 //! The text cursor and the cursor/render snapshot saved by DECSC/DECRC.
 
+use serde::{Deserialize, Serialize};
+
 use super::render::RenderState;
 
 /// A cursor position and the render state captured by DECSC, restored by DECRC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedCursor {
     /// Saved zero-based row within the grid.
     pub(in crate::state) row: u16,
@@ -20,7 +22,7 @@ pub struct SavedCursor {
 }
 
 /// The text cursor: position, visibility, and the deferred-wrap latch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     /// Zero-based row within the active grid (internally 0-based despite
     /// 1-based ANSI addressing).

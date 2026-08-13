@@ -98,6 +98,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                     hello.request_id,
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
                     },
                 );
                 send(
@@ -134,6 +135,7 @@ fn fake_session(runtime_dir: &Path, session: SessionId, script: Script) -> JoinH
                     hello.request_id,
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
                     },
                 );
                 send(
@@ -319,6 +321,7 @@ fn fake_layout_session(
             hello.request_id,
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
         );
         send(&mut connection, query.request_id, answer);
@@ -506,6 +509,7 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
         session,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
     );
 
@@ -586,6 +590,7 @@ fn fake_foreign_session(
             hello.request_id,
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
         );
         send(

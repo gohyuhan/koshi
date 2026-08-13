@@ -18,9 +18,9 @@ use crate::server::Server;
 impl Server {
     /// Route one inbox event to its handler, publishing whatever events the
     /// handler emits. Returns [`ControlFlow::Break`] when the event is a quit
-    /// request, so the loop stops. A [`RuntimeEvent::Quit`] is a terminal
-    /// hangup — explicit quit travels through the `core:quit` command — so it
-    /// breaks the loop and leaves teardown on the graceful path.
+    /// request, which each loop reads on its own terms. A [`RuntimeEvent::Quit`]
+    /// is a terminal hangup — explicit quit travels through the `core:quit`
+    /// command — so it breaks the loop and leaves teardown on the graceful path.
     pub fn handle_runtime_event(&mut self, event: RuntimeEvent) -> ControlFlow<()> {
         match event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
@@ -101,6 +101,7 @@ impl Server {
                 let _ = reply.send(result);
             }
             RuntimeEvent::IpcAttach {
+                resume,
                 viewport,
                 filter,
                 attached_at,
@@ -109,13 +110,22 @@ impl Server {
                 // The client and its subscription are registered together here,
                 // so the structure in the answer and the queue's first event
                 // describe one continuous state.
-                let _ = reply.send(self.handle_ipc_attach(viewport, filter, attached_at));
+                let _ = reply.send(self.handle_ipc_attach(resume, viewport, filter, attached_at));
             }
             RuntimeEvent::IpcDiscovery { reply } => {
                 let _ = reply.send(self.build_overview());
             }
             RuntimeEvent::IpcLayout { tab, reply } => {
                 let _ = reply.send(self.build_session_layout(tab));
+            }
+            // The verdict is answered here and the swap runs after the loop
+            // ends, so the caller reads the reply on a socket that is still up.
+            RuntimeEvent::IpcRestart { reply } => {
+                let _ = reply.send(self.handle_ipc_restart());
+            }
+            RuntimeEvent::DropUnclaimedClients { deadline } => {
+                let events = self.handle_drop_unclaimed_clients(deadline);
+                self.publish_events(&events);
             }
             RuntimeEvent::Plugin(envelope) => {
                 let _ = self.submit_command(envelope);

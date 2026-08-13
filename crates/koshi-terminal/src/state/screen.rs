@@ -1,7 +1,9 @@
 //! Which of the two screen buffers is active.
 
+use serde::{Deserialize, Serialize};
+
 /// Which of the two screen buffers is currently active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Screen {
     /// The normal, scrolling screen.
     #[default]

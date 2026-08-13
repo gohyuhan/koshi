@@ -20,7 +20,7 @@ use koshi_ipc::protocol::{
     EventFilterSpec, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
-use crate::runtime::event::AttachAccepted;
+use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
 
 use super::*;
 
@@ -104,6 +104,7 @@ fn spawn_attaching_dispatcher(
     let (seen_tx, seen_rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         let mut queues = Vec::new();
+        let ending_notice = Arc::new(EndingNotice::default());
         while let Ok(event) = inbox_rx.recv() {
             match event {
                 RuntimeEvent::IpcAttach { reply, .. } => {
@@ -114,6 +115,7 @@ fn spawn_attaching_dispatcher(
                         session_id,
                         structure: attached_structure(session_id),
                         events: events_rx,
+                        ending_notice: Arc::clone(&ending_notice),
                     }));
                 }
                 detached @ RuntimeEvent::ClientDetached { .. } => {
@@ -131,6 +133,255 @@ fn spawn_attaching_dispatcher(
         }
     });
     (handle, seen_rx)
+}
+
+/// A stand-in dispatcher that answers the first attach with `events` and
+/// `ending_notice`, and drops everything else it drains. Exits when every
+/// inbox sender is gone.
+fn spawn_ending_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    client_id: ClientId,
+    session_id: SessionId,
+    events: Receiver<Delivery>,
+    ending_notice: Arc<EndingNotice>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut queue = Some(events);
+        while let Ok(event) = inbox_rx.recv() {
+            if let RuntimeEvent::IpcAttach { reply, .. } = event {
+                let Some(events) = queue.take() else {
+                    continue;
+                };
+                let _ = reply.send(Some(AttachAccepted {
+                    client_id,
+                    session_id,
+                    structure: attached_structure(session_id),
+                    events,
+                    ending_notice: Arc::clone(&ending_notice),
+                }));
+            }
+        }
+    })
+}
+
+/// Wait until no client writing thread is left on `notice`, and hand back how
+/// many are. Fails the test rather than hanging if one never ends.
+fn wait_for_writers_to_end(notice: &EndingNotice) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while notice.writers_running() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    notice.writers_running()
+}
+
+#[test]
+fn a_client_whose_queue_is_full_is_still_told_the_session_is_restarting() {
+    // A client's queue is bounded and the restart is published onto it like any
+    // other event, so a client whose queue is full never takes it.
+    // That client would read end of stream when the image is replaced and
+    // report the session dead, instead of coming back on its new socket.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, EventFilter, SUBSCRIBER_QUEUE_CAPACITY};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("restart-full-queue");
+
+    let mut bus = EventBus::new();
+    let (_, events) = bus.subscribe(EventFilter::All);
+    let tab = TabId::new();
+    for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
+        bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
+    }
+    // The announcement: publishing the restart raises the notice and puts the
+    // event on a queue with no room left for it.
+    let notice = Arc::clone(bus.ending_notice());
+    bus.publish(&Event::Restarting);
+    assert_eq!(notice.raised(), Some(SessionEnding::Restarting));
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher =
+        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    // The first frame, not a frame somewhere behind the backlog: the queue
+    // still holds its full 1024 deliveries, and none of them is written.
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::Restarting,
+    );
+    assert_eq!(
+        wait_for_writers_to_end(&notice),
+        0,
+        "the writing thread must end once the client holds the restart frame"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
+    // A client's queue is bounded and the quit is published onto it like any
+    // other event, so a client whose queue is full never takes it. That client
+    // would read end of stream when the session ends and report it dead,
+    // instead of saying the session ended.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, EventFilter, SUBSCRIBER_QUEUE_CAPACITY};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("quit-full-queue");
+
+    let mut bus = EventBus::new();
+    let (_, events) = bus.subscribe(EventFilter::All);
+    let tab = TabId::new();
+    for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
+        bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
+    }
+    // The announcement: publishing the quit raises the notice and puts the
+    // event on a queue with no room left for it.
+    let notice = Arc::clone(bus.ending_notice());
+    bus.publish(&Event::Quit);
+    assert_eq!(notice.raised(), Some(SessionEnding::Quit));
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher =
+        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    // The first frame, not a frame somewhere behind the backlog: the queue
+    // still holds its full 1024 deliveries, and none of them is written.
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::Quit,
+    );
+    assert_eq!(
+        wait_for_writers_to_end(&notice),
+        0,
+        "the writing thread must end once the client holds the quit frame"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
+    // `auto-close-session` ends the session the moment its last client
+    // detaches, so the notice is raised while that client's writing thread
+    // still holds frames to write. That client asked to leave, so the detach is
+    // what it reads.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, EventFilter};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("detach-then-quit");
+
+    let mut bus = EventBus::new();
+    let (subscriber, events) = bus.subscribe(EventFilter::All);
+    bus.publish(&Event::TabCreated(TabCreated {
+        tab_id: TabId::new(),
+    }));
+    // The detach closes the queue behind the frame it already holds; the
+    // session ends right after.
+    bus.unsubscribe(subscriber);
+    let notice = Arc::clone(bus.ending_notice());
+    bus.publish(&Event::Quit);
+    assert_eq!(notice.raised(), Some(SessionEnding::Quit));
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher =
+        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::Detached,
+    );
+    assert_eq!(
+        wait_for_writers_to_end(&notice),
+        0,
+        "the writing thread must end once the client holds the detach frame"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_are_still_queued() {
+    // The events that end a session and the quit itself are published in one
+    // pass, so a client's queue can hold both when its writing thread takes its
+    // first turn. The raised notice is what that thread writes, whatever the
+    // queue still holds: the pane's exit is queued ahead of the quit here, and
+    // the client reads the quit alone.
+    use koshi_core::event::{Event, PaneProcessExited};
+
+    use crate::runtime::bus::{EventBus, EventFilter};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("quit-behind-queue");
+
+    let mut bus = EventBus::new();
+    let (_, events) = bus.subscribe(EventFilter::All);
+    let pane = PaneId::new();
+    bus.publish(&Event::PaneProcessExited(PaneProcessExited {
+        pane_id: pane,
+        exit_code: Some(0),
+    }));
+    // The announcement: the queue has room, so the quit is queued behind the
+    // exit and the notice is raised as well.
+    let notice = Arc::clone(bus.ending_notice());
+    bus.publish(&Event::Quit);
+    assert_eq!(notice.raised(), Some(SessionEnding::Quit));
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher =
+        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::Quit,
+    );
+    assert_eq!(
+        wait_for_writers_to_end(&notice),
+        0,
+        "the writing thread must end once the client holds the quit frame"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
 }
 
 /// A served socket whose stand-in dispatcher accepts an attach as `client_id`,
@@ -169,6 +420,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
             kind: IpcRequestKind::Attach {
                 viewport: VIEWPORT,
                 filter: EventFilterSpec::All,
+                resume: None,
             },
         })
         .expect("send attach");
@@ -249,10 +501,11 @@ fn hello_for(runtime_dir: &Path, session: SessionId) -> IpcRequest {
 }
 
 /// The answer an accepted Hello earns: both sides speak this build's version,
-/// so they settle on it.
+/// so they settle on it, and the answer names the build the session runs.
 fn hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 
@@ -479,6 +732,7 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
         reply.result,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
         "the answer names the highest version both sides speak"
     );
@@ -1431,6 +1685,8 @@ fn serve_other_user(
     let setting = Arc::clone(still_on);
     let serving = std::thread::spawn(move || {
         let connection = listener.accept().expect("accept");
+        let intake = Arc::new(Intake::default());
+        let served = intake.accept(&connection).expect("the intake takes it");
         serve_connection(
             connection,
             ConnectionToken::generate(),
@@ -1440,6 +1696,7 @@ fn serve_other_user(
                 other_users_allowed: true,
             },
             Some(Arc::new(move || setting.load(Ordering::SeqCst))),
+            &served,
         );
     });
     let caller = Connection::connect(&addr).expect("connect");
@@ -1559,6 +1816,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
             kind: IpcRequestKind::Attach {
                 viewport: VIEWPORT,
                 filter: EventFilterSpec::All,
+                resume: None,
             },
         })
         .expect("send attach");
@@ -1683,4 +1941,633 @@ fn admit_gates_the_starting_user_always_and_the_other_users_by_the_setting() {
             other_users_allowed: true,
         },
     );
+}
+
+/// A stand-in dispatcher that answers every restart request with `verdict` and
+/// every discovery request with `overview`, so a test reads what a refusal or
+/// an acceptance looks like on the socket and whether the session keeps
+/// serving after it. Exits when every inbox sender is gone.
+fn spawn_restart_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    verdict: Result<(), String>,
+    overview: Option<SessionOverview>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(event) = inbox_rx.recv() {
+            match event {
+                RuntimeEvent::IpcRestart { reply } => {
+                    let _ = reply.send(verdict.clone());
+                }
+                RuntimeEvent::IpcDiscovery { reply } => {
+                    let _ = reply.send(overview.clone());
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// A served socket whose stand-in dispatcher answers restart requests with
+/// `verdict` and discovery requests with `overview`.
+fn serve_restartable(
+    tag: &str,
+    verdict: Result<(), String>,
+    overview: Option<SessionOverview>,
+) -> (IpcServer, SessionId, PathBuf, JoinHandle<()>) {
+    let runtime_dir = test_runtime_dir(tag);
+    let session = SessionId::new();
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_restart_dispatcher(inbox_rx, verdict, overview);
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+    (server, session, runtime_dir, dispatcher)
+}
+
+/// Say hello, send a restart, and hand back what the restart was answered.
+fn restart_over(runtime_dir: &Path, session: SessionId) -> (Connection, IpcResult) {
+    let mut connection = connect_to(runtime_dir, session);
+    connection
+        .send(&hello_for(runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Restart,
+        })
+        .expect("send restart");
+    let reply: IpcResponse = connection.recv().expect("restart reply");
+    assert_eq!(reply.request_id, Some(2));
+    (connection, reply.result)
+}
+
+/// Ask for the session's description on an open connection and hand back the
+/// answer, so a test can show the session still serves after a refusal.
+fn discovery_over(connection: &mut Connection, request_id: u64) -> IpcResult {
+    connection
+        .send(&IpcRequest {
+            request_id,
+            kind: IpcRequestKind::Discovery,
+        })
+        .expect("send discovery");
+    let reply: IpcResponse = connection.recv().expect("discovery reply");
+    assert_eq!(reply.request_id, Some(request_id));
+    reply.result
+}
+
+#[test]
+fn an_accepted_restart_is_answered_restarting() {
+    let (server, session, runtime_dir, dispatcher) =
+        serve_restartable("restart-accepted", Ok(()), None);
+
+    let (connection, result) = restart_over(&runtime_dir, session);
+
+    assert_eq!(result, IpcResult::Restarting);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// The Hello gate covers the restart like every other kind, so a caller that
+/// never opened the connection cannot make the session replace its own image.
+#[test]
+fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_serving() {
+    let (server, session, runtime_dir, dispatcher) =
+        serve_restartable("restart-early", Ok(()), Some(overview_named("still-here")));
+    let mut connection = connect_to(&runtime_dir, session);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 9,
+            kind: IpcRequestKind::Restart,
+        })
+        .expect("send restart before the hello");
+    let refusal: IpcResponse = connection.recv().expect("refusal reply");
+
+    assert_eq!(refusal.request_id, Some(9));
+    assert_eq!(
+        refusal.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Restart arrived before a Hello opened the connection".to_string(),
+        }),
+    );
+
+    // The gate is still closed, so the same connection still answers.
+    assert_eq!(
+        discovery_over(&mut connection, 10),
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: "Discovery arrived before a Hello opened the connection".to_string(),
+        }),
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+/// A binary this machine could not run, written into `dir`: on Unix a file
+/// with its execute permission dropped, elsewhere a path with nothing at it.
+/// Hands back the path and the sentence the check refuses it with.
+fn unrunnable_binary(dir: &Path) -> (PathBuf, String) {
+    std::fs::create_dir_all(dir).expect("the directory is created");
+    let exe = dir.join("koshi");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::write(&exe, b"").expect("the stand-in binary is written");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644))
+            .expect("the execute permission is dropped");
+        let message = format!("the binary at {} is not executable", exe.display());
+        (exe, message)
+    }
+    #[cfg(not(unix))]
+    {
+        let error = std::fs::metadata(&exe).expect_err("nothing is at that path");
+        let message = format!("the binary at {} could not be read: {error}", exe.display());
+        (exe, message)
+    }
+}
+
+/// The reply is the session's only chance to refuse: after it the swap runs. A
+/// binary this machine could not run must never reach it, and the refusal must
+/// leave the session serving.
+#[test]
+fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serving() {
+    let binary_dir = test_runtime_dir("restart-bad-binary-dir");
+    let (exe, message) = unrunnable_binary(&binary_dir);
+    let overview = overview_named("still-here");
+    let (server, session, runtime_dir, dispatcher) = serve_restartable(
+        "restart-bad-binary",
+        crate::server::binary_is_runnable(&exe),
+        Some(overview.clone()),
+    );
+
+    let (mut connection, result) = restart_over(&runtime_dir, session);
+
+    assert_eq!(
+        result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message,
+        }),
+    );
+    // Nothing was torn down, so the session answers the next request.
+    assert_eq!(
+        discovery_over(&mut connection, 3),
+        IpcResult::Overview(overview)
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+    cleanup(&binary_dir);
+}
+
+/// A pane whose terminal exposes no descriptor cannot cross the swap, so the
+/// restart is refused and the pane is named. Windows keeps every pane's
+/// pseudoconsole in the supervisor process, so no pane holds a restart back
+/// there.
+#[cfg(unix)]
+#[test]
+fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_pane() {
+    let stranded = PaneId::new();
+    let panes = [koshi_pty::portable::CarriedPtyPane {
+        pane_id: stranded,
+        terminal_fd: None,
+        pid: 51234,
+        size: koshi_core::process::PtySize { cols: 80, rows: 24 },
+        exit: None,
+    }];
+    let overview = overview_named("still-here");
+    let (server, session, runtime_dir, dispatcher) = serve_restartable(
+        "restart-no-fd",
+        crate::server::panes_can_be_carried(&panes),
+        Some(overview.clone()),
+    );
+
+    let (mut connection, result) = restart_over(&runtime_dir, session);
+
+    assert_eq!(
+        result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: format!(
+                "pane {stranded} has no terminal descriptor, \
+                 so its terminal cannot cross the swap"
+            ),
+        }),
+    );
+    assert_eq!(
+        discovery_over(&mut connection, 3),
+        IpcResult::Overview(overview)
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing() {
+    // A `Restart` reaches the dispatcher only over a connection that is serving
+    // requests. An attached connection is carrying one client's events instead,
+    // so the request ends that stream and no restart request is made.
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("attached-restart", client);
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::Restart,
+        })
+        .expect("send restart");
+
+    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("goodbye frame"),
+        SessionEvent::Detached,
+    );
+    assert!(
+        matches!(
+            connection.recv::<SessionEvent>(),
+            Err(IpcError::Disconnected),
+        ),
+        "the stream ends after the goodbye, with no answer to the restart",
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+// --- leaving ---
+
+/// Wait until `server` counts no attached client's connection, and hand back
+/// how many it counts. Fails the test rather than hanging if one never ends.
+fn wait_for_clients_to_leave(server: &IpcServer) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.attached_connections() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    server.attached_connections()
+}
+
+/// Wait until `server` counts `want` attached clients' connections, and hand
+/// back how many it counts. The count rises on the serving thread after the
+/// attach reply is written, so a caller that just read that reply polls here.
+fn wait_for_attached(server: &IpcServer, want: usize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.attached_connections() != want && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    server.attached_connections()
+}
+
+#[test]
+fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
+    // A client that reads the restart frame sends `Leaving` and writes nothing
+    // after it. Requests arrive in the order the client queued them, so reading
+    // that one is what says the session holds every key that client typed. The
+    // image swap waits for exactly this before it carries the session out.
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) = serve_attachable("leaving", client);
+    let mut connection = attach_to(&runtime_dir, session, client);
+    assert_eq!(
+        wait_for_attached(&server, 1),
+        1,
+        "the attached client's connection is counted while it is read"
+    );
+
+    let typed = [
+        KeyChord::new(ModFlags::CTRL, Key::Char('a')),
+        KeyChord::new(ModFlags::CTRL, Key::Char('b')),
+        KeyChord::new(ModFlags::CTRL, Key::Char('c')),
+    ];
+    for (round, chord) in typed.iter().enumerate() {
+        connection
+            .send(&IpcRequest {
+                request_id: 3 + round as u64,
+                kind: IpcRequestKind::KeyPress { chord: *chord },
+            })
+            .expect("send the key press");
+    }
+    connection
+        .send(&IpcRequest {
+            request_id: 6,
+            kind: IpcRequestKind::Leaving,
+        })
+        .expect("send leaving");
+
+    for chord in typed {
+        let RuntimeEvent::ClientKeyPress {
+            client_id,
+            chord: pressed,
+        } = seen
+            .recv_timeout(Duration::from_secs(5))
+            .expect("key press event")
+        else {
+            panic!("expected ClientKeyPress");
+        };
+        assert_eq!(client_id, client);
+        assert_eq!(pressed, chord);
+    }
+    // The reading half ends on the request that follows those keys, so the
+    // client's record is released here and nowhere earlier.
+    assert!(
+        matches!(
+            seen.recv_timeout(Duration::from_secs(5)).expect("detach event"),
+            RuntimeEvent::ClientDetached { client_id } if client_id == client,
+        ),
+        "leaving detaches the client that left",
+    );
+    assert_eq!(
+        wait_for_clients_to_leave(&server),
+        0,
+        "the connection is no longer counted once its client has left"
+    );
+
+    // The session closes the connection it was serving: the stream carries this
+    // client's goodbye and then ends.
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the goodbye frame"),
+        SessionEvent::Detached,
+    );
+    assert!(matches!(
+        connection.recv::<SessionEvent>(),
+        Err(IpcError::Disconnected),
+    ));
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_control_connection_that_leaves_is_closed_with_no_answer() {
+    // Nothing on a control connection is left half-answered when it leaves:
+    // every request it sent was answered as it was served, and the request that
+    // ends it carries no answer of its own.
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("leaving-control", client);
+
+    let mut connection = connect_to(&runtime_dir, session);
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Leaving,
+        })
+        .expect("send leaving");
+    assert!(
+        matches!(
+            connection.recv::<IpcResponse>(),
+            Err(IpcError::Disconnected),
+        ),
+        "a connection that leaves is closed with no answer",
+    );
+    // A control connection carries no client, so nothing about it reaches the
+    // session.
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+    );
+    assert_eq!(server.attached_connections(), 0);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+// --- rotating the token ---
+
+#[test]
+fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
+    let (server, session, runtime_dir, dispatcher) = serve("rotate-token", None);
+    let endpoint_path = EndpointFile::path(&runtime_dir, session);
+    let first = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+
+    server
+        .rotate_token()
+        .expect("the fresh token is advertised");
+
+    let second = EndpointFile::read(&endpoint_path).expect("endpoint file readable");
+    assert_ne!(
+        second.token, first.token,
+        "the rotation advertises a new secret",
+    );
+    assert_eq!(
+        second.socket, first.socket,
+        "the address the session is serving on does not change",
+    );
+
+    let mut old = connect_to(&runtime_dir, session);
+    old.send(&IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Hello {
+            min_protocol_version: MIN_PROTOCOL_VERSION,
+            max_protocol_version: PROTOCOL_VERSION,
+            token: first.token,
+        },
+    })
+    .expect("send hello with the token from before the rotation");
+    let refusal: IpcResponse = old.recv().expect("reply");
+    assert_eq!(
+        refusal.result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let mut fresh = connect_to(&runtime_dir, session);
+    fresh
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello with the rotated secret");
+    let accepted: IpcResponse = fresh.recv().expect("hello reply");
+    assert_eq!(accepted.result, hello_accepted());
+
+    drop(old);
+    drop(fresh);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
+    // The image swap closes the intake and then finds it cannot go through
+    // with the swap. The session keeps this socket, so it has to serve on it
+    // again.
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("rotate-reopen", client);
+
+    server.close_intake();
+    server
+        .rotate_token()
+        .expect("the fresh token is advertised");
+
+    let mut connection = connect_to(&runtime_dir, session);
+    connection
+        .send(&hello_for(&runtime_dir, session))
+        .expect("send hello");
+    let accepted: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(accepted.result, hello_accepted());
+
+    // Served, not merely accepted: what this connection sends reaches the
+    // dispatcher again.
+    let chord = KeyChord::new(ModFlags::CTRL, Key::Char('r'));
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Attach {
+                viewport: VIEWPORT,
+                filter: EventFilterSpec::All,
+                resume: None,
+            },
+        })
+        .expect("send attach");
+    let attached: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attached.request_id, Some(2));
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::KeyPress { chord },
+        })
+        .expect("send the key press");
+    let RuntimeEvent::ClientKeyPress {
+        client_id,
+        chord: pressed,
+    } = seen
+        .recv_timeout(Duration::from_secs(5))
+        .expect("key press")
+    else {
+        panic!("expected ClientKeyPress");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(pressed, chord);
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+// --- closing the intake ---
+
+#[test]
+fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher() {
+    // The image swap closes the intake and then makes one pass over the runtime
+    // inbox. A key press that reached the dispatcher after that pass would be
+    // neither applied nor carried across, so the user's keystroke would vanish.
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("intake-closed");
+    // The test keeps an inbox sender of its own, so it can end this client's
+    // writing thread once the intake refuses the detach that would.
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_attaching_dispatcher(inbox_rx, client, session);
+    let server =
+        IpcServer::start(&runtime_dir, session, inbox_tx.clone(), None).expect("start serving");
+    let mut connection = attach_to(&runtime_dir, session, client);
+    let taken = KeyChord::new(ModFlags::CTRL, Key::Char('a'));
+    let refused = KeyChord::new(ModFlags::CTRL, Key::Char('b'));
+
+    // Before the close: the connection carries this client's keys, so the press
+    // reaches the dispatcher.
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            kind: IpcRequestKind::KeyPress { chord: taken },
+        })
+        .expect("send the key press the session takes");
+    let RuntimeEvent::ClientKeyPress { client_id, chord } = seen.recv().expect("key press event")
+    else {
+        panic!("expected ClientKeyPress");
+    };
+    assert_eq!(client_id, client);
+    assert_eq!(chord, taken);
+
+    server.close_intake();
+
+    // After the close: the client is refused. Its send fails outright, or the
+    // press is read and never handed over. Either way nothing more reaches the
+    // dispatcher — including the detach the connection's own ending would
+    // otherwise queue, which is what keeps this client's record carried across.
+    let _ = connection.send(&IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::KeyPress { chord: refused },
+    });
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+    );
+
+    drop(connection);
+    // Closing this client's queue is what ends its writing thread, and the
+    // dispatcher ends once every inbox sender is gone.
+    inbox_tx
+        .send(RuntimeEvent::ClientDetached { client_id: client })
+        .expect("the detach is queued");
+    drop(inbox_tx);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_connection_accepted_after_the_intake_closes_is_not_served() {
+    // A caller that connects while the swap is carrying the state out must not
+    // be answered: the session it would reach is about to be replaced.
+    let client = ClientId::new();
+    let (server, session, runtime_dir, dispatcher, seen) =
+        serve_attachable("intake-closed-accept", client);
+
+    server.close_intake();
+
+    let mut connection = connect_to(&runtime_dir, session);
+    // A send may fail as the accept loop drops the connection; the read that
+    // follows reports end of stream either way.
+    let _ = connection.send(&hello_for(&runtime_dir, session));
+    assert!(
+        matches!(
+            connection.recv::<IpcResponse>(),
+            Err(IpcError::Disconnected),
+        ),
+        "a connection accepted after the intake closed is closed unanswered",
+    );
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
 }
