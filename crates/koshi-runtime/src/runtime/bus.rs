@@ -21,12 +21,21 @@
 //! snapshot rides the same queue as events, so the subscriber reads the
 //! backlog it already had, then the snapshot, then live events again.
 //!
+//! [`Event::Quit`] and [`Event::Restarting`] are the exception: each is the
+//! stream's last frame, so it reaches a desynced subscriber as well as a live
+//! one. A client reading either one leaves this socket; after a restart it
+//! joins the session's new socket. Publishing either one also raises the
+//! [`EndingNotice`] this bus shares with every attached client's writing
+//! thread, which is the path that last frame takes to a client whose queue is
+//! full.
+//!
 //! A subscriber in another process works in the wire spellings from
 //! `koshi-ipc` instead. The two conversions between them live here: the
 //! [`From`] impl on [`EventFilter`] reads the filter an attaching client sent,
 //! and [`wire_event`] turns one queue item into the frame that client is sent.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::Arc;
 
 use koshi_core::event::{classify, Event, EventClass, SubscriberLagged};
 use koshi_core::ids::{SessionId, SubscriberId};
@@ -35,6 +44,7 @@ use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::EventFilterSpec;
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 
+use crate::runtime::event::{EndingNotice, SessionEnding};
 use crate::runtime::frame::wire_frame;
 
 /// How many undelivered events one subscriber's queue holds. An event
@@ -74,7 +84,7 @@ enum DeliveryState {
     /// Matching events are delivered as they are published.
     Live,
     /// A critical event did not fit the queue; nothing is delivered until a
-    /// snapshot lands.
+    /// snapshot lands, apart from the event that ends the stream.
     Desynced {
         /// How many critical events the subscriber has missed, counting the one
         /// that caused the pause.
@@ -118,15 +128,25 @@ struct Subscriber {
 pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.
     subscribers: Vec<Subscriber>,
+    /// Shared with every attached client's writing thread: raised by
+    /// [`publish`](Self::publish) with the last frame it delivers.
+    ending: Arc<EndingNotice>,
 }
 
 impl EventBus {
-    /// A bus with no subscribers.
+    /// A bus with no subscribers, over a session that is still serving.
     #[must_use]
     pub(crate) fn new() -> Self {
         EventBus {
             subscribers: Vec::new(),
+            ending: Arc::new(EndingNotice::default()),
         }
+    }
+
+    /// Borrow what this bus and every attached client's writing thread share
+    /// about the session's last frame.
+    pub(crate) fn ending_notice(&self) -> &Arc<EndingNotice> {
+        &self.ending
     }
 
     /// Register a subscriber for the events `filter` selects and hand back its
@@ -145,40 +165,66 @@ impl EventBus {
         (id, rx)
     }
 
-    /// Deliver `event` to every live subscriber whose filter matches it.
+    /// Deliver `event` to every live subscriber whose filter matches it, and
+    /// to every desynced one when `event` ends the stream. An event that ends
+    /// the stream raises the [`EndingNotice`] first, so a subscriber whose
+    /// queue has no room for it is told over the notice instead.
     ///
-    /// A desynced subscriber receives nothing, and counts the event when it is
-    /// [`EventClass::Critical`]. A live subscriber whose queue is full misses a
-    /// [`EventClass::Lossy`] event (logged as a warning) and becomes desynced on
-    /// a [`EventClass::Critical`] one.
+    /// A desynced subscriber receives nothing else, and counts what it misses
+    /// when that is [`EventClass::Critical`]. A live subscriber whose queue is
+    /// full misses a [`EventClass::Lossy`] event (logged as a warning) and
+    /// becomes desynced on a [`EventClass::Critical`] one. A desynced
+    /// subscriber whose queue is full misses the last frame too, and counts it.
     ///
     /// A subscriber whose receiver is gone is removed, and its id returned so
     /// the caller can drop whatever it keeps alongside the subscription. The
     /// returned list is empty on every publish that removes nobody.
     pub(crate) fn publish(&mut self, event: &Event) -> Vec<SubscriberId> {
         let class = classify(event);
+        // The stream's last frame, delivered whatever state the subscriber is
+        // in: the client reading it leaves this socket. The notice carries it
+        // to a client whose queue has no room left for it.
+        let ending = match event {
+            Event::Quit => Some(SessionEnding::Quit),
+            Event::Restarting => Some(SessionEnding::Restarting),
+            _ => None,
+        };
+        if let Some(ending) = ending {
+            self.ending.raise(ending);
+        }
+        let ends_the_stream = ending.is_some();
         let mut removed = Vec::new();
         self.subscribers.retain_mut(|subscriber| {
             if !subscriber.filter.matches(event) {
                 return true;
             }
             if let DeliveryState::Desynced { dropped } = &mut subscriber.state {
-                if class == EventClass::Critical {
-                    *dropped += 1;
+                if !ends_the_stream {
+                    if class == EventClass::Critical {
+                        *dropped += 1;
+                    }
+                    return true;
                 }
-                return true;
             }
             match subscriber.tx.try_send(Delivery::Event(event.clone())) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
-                    match class {
-                        EventClass::Lossy => tracing::warn!(
+                    match (&mut subscriber.state, class) {
+                        (DeliveryState::Desynced { dropped }, _) => {
+                            *dropped += 1;
+                            tracing::warn!(
+                                subscriber = %subscriber.id,
+                                event = event.name(),
+                                "last frame dropped; subscriber queue full"
+                            );
+                        }
+                        (DeliveryState::Live, EventClass::Lossy) => tracing::warn!(
                             subscriber = %subscriber.id,
                             event = event.name(),
                             "event dropped; subscriber queue full"
                         ),
-                        EventClass::Critical => {
-                            subscriber.state = DeliveryState::Desynced { dropped: 1 };
+                        (state @ DeliveryState::Live, EventClass::Critical) => {
+                            *state = DeliveryState::Desynced { dropped: 1 };
                             tracing::warn!(
                                 subscriber = %subscriber.id,
                                 event = event.name(),
@@ -480,6 +526,7 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 new_index: payload.new_index,
             }),
             Event::Quit => Some(SessionEvent::Quit),
+            Event::Restarting => Some(SessionEvent::Restarting),
             // Pane content, PTY sizing, input, mouse, selection, plugin and
             // per-client view events carry no structure change.
             _ => None,

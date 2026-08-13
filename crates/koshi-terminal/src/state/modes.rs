@@ -1,6 +1,8 @@
 //! Terminal mode flags and the mouse tracking/encoding levels the renderer and
 //! input layers consult.
 
+use serde::{Deserialize, Serialize};
+
 /// Which mouse events a pane's program asked to be reported. The terminal
 /// engine sets it from the DEC private modes `?9`/`?1000`/`?1002`/`?1003`.
 /// Independent of [`MouseEncoding`]. Full documentation on
@@ -10,7 +12,7 @@ pub use koshi_core::mouse::MouseTracking;
 /// How a mouse report's coordinate bytes are encoded, set via the DEC private
 /// modes `?1005`/`?1006`/`?1015`. Orthogonal to [`MouseTracking`]: an app sets a
 /// tracking level and an encoding independently (e.g. `?1000h` then `?1006h`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum MouseEncoding {
     /// Legacy X10 single-byte coordinates (default).
     #[default]
@@ -37,7 +39,7 @@ pub enum MouseEncoding {
 /// (att610) sets blinking on its own. Blinking is therefore one piece of state
 /// with two writers, read back through
 /// [`TerminalState::cursor_blink`](crate::state::TerminalState::cursor_blink).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     /// A box filling the whole cell.
     Block,
@@ -54,7 +56,7 @@ pub enum CursorShape {
 /// the mouse [tracking][MouseTracking] level and [encoding][MouseEncoding]
 /// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), and
 /// alternate-scroll (`?1007`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalModes {
     /// `?2004` — wrap pasted text in `ESC[200~`…`ESC[201~` so the app can tell
     /// typed input from a paste.

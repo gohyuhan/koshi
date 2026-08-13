@@ -3,7 +3,13 @@
 use super::*;
 use std::time::SystemTime;
 
-use crate::client::ClientOrigin;
+use koshi_core::command::{GridPos, Selection, SelectionKind};
+use koshi_core::geometry::SplitDirection;
+use koshi_core::lock::LockMode;
+use koshi_layout::tree::{LayoutChild, SplitNode};
+use koshi_pane::pane::state::PaneRecord;
+
+use crate::client::{AuthorityTier, ClientOrigin};
 
 /// Attach a client viewing `tab` with the given viewport.
 fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
@@ -289,4 +295,183 @@ fn detaching_the_last_client_of_a_stopping_session_does_not_revert_it() {
 
     assert_eq!(removed.map(|c| c.id()), Some(id));
     assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+}
+
+/// A whole session must survive being written out and read back: its identity
+/// and lifecycle, its tabs with their nested layout trees, its pane registry,
+/// and the view state each attached client keeps to itself.
+#[test]
+fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
+    let tab_one = TabId::new();
+    let tab_two = TabId::new();
+    let pane_one = PaneId::new();
+    let pane_two = PaneId::new();
+    let pane_three = PaneId::new();
+    let pane_four = PaneId::new();
+
+    let mut session = Session::new(
+        SessionId::new(),
+        "carried".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session
+        .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
+        .expect("a starting session accepts its first tab");
+
+    // Tab one splits left and right, and its right half splits again: pane one
+    // fills the left, panes two and three share the right.
+    let tab_one_layout = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutChild::new(LayoutNode::Pane(pane_one)),
+            LayoutChild::new(LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Vertical,
+                vec![
+                    LayoutChild::new(LayoutNode::Pane(pane_two)),
+                    LayoutChild::new(LayoutNode::Pane(pane_three)),
+                ],
+            ))),
+        ],
+    ));
+    let mut first_tab = Tab::new(tab_one, "one".to_owned(), 0, pane_one);
+    first_tab.update_layout(tab_one_layout.clone());
+    first_tab.record_focus_mru(pane_two);
+    session.tabs.insert(tab_one, first_tab);
+    session
+        .tabs
+        .insert(tab_two, Tab::new(tab_two, "two".to_owned(), 1, pane_four));
+
+    for pane in [pane_one, pane_two, pane_three, pane_four] {
+        session
+            .panes
+            .insert(PaneRecord::new(pane, SystemTime::UNIX_EPOCH))
+            .expect("each pane id is registered once");
+    }
+
+    let highlight = Selection {
+        kind: SelectionKind::Block,
+        anchor: GridPos { row: 12, col: 4 },
+        cursor: GridPos { row: 40, col: 9 },
+    };
+
+    // The first client watches tab one zoomed on pane two, scrolled up in it,
+    // locked, grabbing the mouse, with a highlight up.
+    let first_id = ClientId::new();
+    let mut first = Client::new(
+        first_id,
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        Size {
+            cols: 100,
+            rows: 30,
+        },
+        tab_one,
+        ClientOrigin::Local,
+        "C-brave-otter".to_owned(),
+        3,
+    );
+    first.update_focused_pane(tab_one, pane_two);
+    first.update_focused_pane(tab_two, pane_four);
+    first.zoom_pane(tab_one, pane_two);
+    first.set_scroll_offset(pane_two, 7);
+    first.update_lock_mode(LockMode::Locked);
+    first.toggle_mouse_select();
+    first.set_selection(pane_two, highlight);
+    session.attach_client(first);
+
+    // The second client watches tab two, tiled, scrolled up in a different
+    // pane, so no field is the same for both.
+    let second_id = ClientId::new();
+    let mut second = Client::new(
+        second_id,
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        tab_two,
+        ClientOrigin::Local,
+        "C-calm-heron".to_owned(),
+        5,
+    );
+    second.update_focused_pane(tab_one, pane_one);
+    second.set_scroll_offset(pane_three, 3);
+    session.attach_client(second);
+
+    let written = serde_json::to_string(&session).expect("the session writes out");
+    let read_back: Session = serde_json::from_str(&written).expect("the session reads back");
+
+    assert_eq!(read_back.id, session.id);
+    assert_eq!(read_back.name, "carried");
+    assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
+    assert_eq!(*read_back.lifecycle(), SessionLifecycle::Running);
+    // The plugin runtime handle names a live process, so it is left out.
+    assert!(read_back.plugin_runtime_ref.is_none());
+
+    assert_eq!(read_back.tabs.len(), 2);
+    let recovered_one = read_back.tabs.get(&tab_one).expect("tab one is carried");
+    assert_eq!(recovered_one.id(), tab_one);
+    assert_eq!(recovered_one.name(), "one");
+    assert_eq!(recovered_one.index(), 0);
+    assert_eq!(*recovered_one.layout(), tab_one_layout);
+    assert_eq!(recovered_one.focus_mru(), [pane_two].as_slice());
+    assert_eq!(*recovered_one.lifecycle(), TabLifecycle::Creating);
+    let recovered_two = read_back.tabs.get(&tab_two).expect("tab two is carried");
+    assert_eq!(recovered_two.index(), 1);
+    assert_eq!(*recovered_two.layout(), LayoutNode::Pane(pane_four));
+
+    assert_eq!(read_back.panes.len(), 4);
+    for pane in [pane_one, pane_two, pane_three, pane_four] {
+        let record = read_back
+            .panes
+            .get(pane)
+            .expect("the pane record is carried");
+        assert_eq!(record.id(), pane);
+        assert_eq!(*record.lifecycle(), PaneLifecycle::Spawning);
+    }
+
+    assert_eq!(read_back.clients.len(), 2);
+    let recovered_first = read_back
+        .clients
+        .get(first_id)
+        .expect("the first client is carried");
+    assert_eq!(recovered_first.session_id(), session.id);
+    assert_eq!(recovered_first.attached_at(), SystemTime::UNIX_EPOCH);
+    assert_eq!(recovered_first.origin(), ClientOrigin::Local);
+    assert_eq!(recovered_first.tier(), AuthorityTier::Admin);
+    assert_eq!(recovered_first.label(), "C-brave-otter");
+    assert_eq!(recovered_first.colour(), 3);
+    assert_eq!(
+        recovered_first.viewport(),
+        Size {
+            cols: 100,
+            rows: 30
+        }
+    );
+    assert_eq!(recovered_first.active_tab(), tab_one);
+    assert_eq!(recovered_first.lock_mode(), LockMode::Locked);
+    assert!(recovered_first.mouse_select());
+    assert_eq!(recovered_first.focused_pane(tab_one), Some(pane_two));
+    assert_eq!(recovered_first.focused_pane(tab_two), Some(pane_four));
+    assert_eq!(recovered_first.zoomed_pane(tab_one), Some(pane_two));
+    assert_eq!(recovered_first.zoomed_pane(tab_two), None);
+    assert_eq!(recovered_first.scroll_offset(pane_two), 7);
+    assert_eq!(recovered_first.scroll_offset(pane_three), 0);
+    assert_eq!(recovered_first.selection(pane_two), Some(highlight));
+    assert_eq!(recovered_first.selection(pane_one), None);
+
+    let recovered_second = read_back
+        .clients
+        .get(second_id)
+        .expect("the second client is carried");
+    assert_eq!(recovered_second.label(), "C-calm-heron");
+    assert_eq!(recovered_second.colour(), 5);
+    assert_eq!(recovered_second.viewport(), Size { cols: 80, rows: 24 });
+    assert_eq!(recovered_second.active_tab(), tab_two);
+    assert_eq!(recovered_second.lock_mode(), LockMode::Normal);
+    assert!(!recovered_second.mouse_select());
+    assert_eq!(recovered_second.focused_pane(tab_one), Some(pane_one));
+    assert_eq!(recovered_second.focused_pane(tab_two), None);
+    assert_eq!(recovered_second.zoomed_pane(tab_one), None);
+    assert_eq!(recovered_second.scroll_offset(pane_three), 3);
+    assert_eq!(recovered_second.scroll_offset(pane_two), 0);
 }

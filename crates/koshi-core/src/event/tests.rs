@@ -248,6 +248,7 @@ fn remaining_event_variants_survive_a_json_round_trip() {
         pane_id: PaneId::new(),
     }));
     roundtrip(&Event::Quit);
+    roundtrip(&Event::Restarting);
 }
 
 /// The privacy guarantee is structural, not advisory. The tier of an input
@@ -325,7 +326,7 @@ fn variant_name<T: std::fmt::Debug>(value: &T) -> String {
 }
 
 /// One instance per top-level `Event` variant, its canonical name, and class.
-fn event_cases() -> [(Event, &'static str, EventClass); 37] {
+fn event_cases() -> [(Event, &'static str, EventClass); 38] {
     [
         (
             Event::PaneCreated(PaneCreated {
@@ -631,21 +632,22 @@ fn event_cases() -> [(Event, &'static str, EventClass); 37] {
             EventClass::Critical,
         ),
         (Event::Quit, "Quit", EventClass::Critical),
+        (Event::Restarting, "Restarting", EventClass::Critical),
     ]
 }
 
-/// Checks 37 distinct top-level event names against `Debug` and [`Event::name`].
+/// Checks 38 distinct top-level event names against `Debug` and [`Event::name`].
 #[test]
 fn event_variant_names_are_canonical() {
     let cases = event_cases();
     let mut names = std::collections::BTreeSet::new();
-    assert_eq!(cases.len(), 37);
+    assert_eq!(cases.len(), 38);
     for (event, name, _) in cases {
         assert_eq!(variant_name(&event), name);
         assert_eq!(event.name(), name);
         assert!(names.insert(name), "duplicate event name: {name}");
     }
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 38);
 }
 
 #[test]
@@ -663,7 +665,7 @@ fn classify_maps_every_event_variant() {
     }
 
     assert_eq!(lossy, 7);
-    assert_eq!(critical, 30);
+    assert_eq!(critical, 31);
 }
 
 #[test]

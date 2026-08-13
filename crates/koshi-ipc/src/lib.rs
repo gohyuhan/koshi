@@ -3,6 +3,8 @@
 
 /// The session structure a client receives when it attaches.
 pub mod attach;
+/// Bytes on the wire: one base64 string per byte payload.
+pub mod bytes;
 /// Endpoint file: how a running koshi advertises its socket and token.
 pub mod endpoint;
 /// Error types.
@@ -20,6 +22,10 @@ pub mod protocol;
 /// sessions, the handshake that opens a router connection, and the fixed
 /// names the router serves under.
 pub mod router;
+/// The pane-supervisor protocol: the messages a session server drives the
+/// process holding its panes with, the events that process sends back, the
+/// handshake that opens the link, and the address it listens on.
+pub mod supervisor;
 /// Transport layer.
 pub mod transport;
 /// Shared types.

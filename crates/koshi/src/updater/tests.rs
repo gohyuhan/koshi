@@ -1,18 +1,21 @@
 //! Tests for the self-update helpers: version comparison, check scheduling,
-//! archive URL construction, state serialization, and the restart
-//! confirmation wait.
+//! archive URL construction, state serialization, the restart confirmation
+//! wait, and the walk that restarts every running session.
 
 use super::*;
 
 use std::thread::JoinHandle;
 
-use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::endpoint::{socket_addr, EndpointFile};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    IpcResult, PROTOCOL_VERSION,
+};
 use koshi_ipc::router::{
     router_endpoint_path, router_socket_addr, RouterHandshake, RouterRequest, RouterResponse,
     RouterResult, ROUTER_PROTOCOL_VERSION,
 };
-use koshi_ipc::transport::Listener;
+use koshi_ipc::transport::{Connection, Listener};
 use tempfile::TempDir;
 
 /// A fresh directory to stand in for the runtime dir, under a short base so
@@ -66,9 +69,11 @@ fn a_router_reporting_the_installed_version_confirms_the_restart() {
     let runtime_dir = test_runtime_dir();
     let router = fake_router_reporting(runtime_dir.path(), "3.3.3");
 
-    let confirmed = wait_for_router_version(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+    let confirmed = wait_for_version("3.3.3", Duration::from_secs(5), || {
+        probe_router_version(runtime_dir.path())
+    });
 
-    assert_eq!(confirmed, Some("3.3.3".to_string()));
+    assert_eq!(confirmed, VersionAnswer::Installed);
     router.join().expect("the stand-in served its connection");
 }
 
@@ -77,9 +82,11 @@ fn a_router_still_on_another_version_is_reported_after_the_wait() {
     let runtime_dir = test_runtime_dir();
     let router = fake_router_reporting(runtime_dir.path(), "1.0.0");
 
-    let answered = wait_for_router_version(runtime_dir.path(), "2.0.0", Duration::from_millis(250));
+    let answered = wait_for_version("2.0.0", Duration::from_millis(250), || {
+        probe_router_version(runtime_dir.path())
+    });
 
-    assert_eq!(answered, Some("1.0.0".to_string()));
+    assert_eq!(answered, VersionAnswer::Other("1.0.0".to_string()));
     router.join().expect("the stand-in served its connection");
 }
 
@@ -87,9 +94,255 @@ fn a_router_still_on_another_version_is_reported_after_the_wait() {
 fn no_router_answering_reports_no_version_after_the_wait() {
     let runtime_dir = test_runtime_dir();
     assert_eq!(
-        wait_for_router_version(runtime_dir.path(), "2.0.0", Duration::from_millis(50)),
-        None
+        wait_for_version("2.0.0", Duration::from_millis(50), || probe_router_version(
+            runtime_dir.path()
+        )),
+        VersionAnswer::Silent
     );
+}
+
+// --- restarting every running session ---
+
+/// What a stand-in session answers with.
+struct SessionScript {
+    /// The answer to the Restart request.
+    restart: IpcResult,
+    /// The build version every Hello answer of this session carries.
+    version: String,
+}
+
+/// Serve `connections` callers as a session would: bind the session's address,
+/// write the endpoint file advertising it, then answer that many callers.
+///
+/// The first caller writes a Hello and a Restart back to back and is answered
+/// per `script`. Every caller after the first writes a Hello alone and is
+/// answered with the script's version. A caller arriving once `connections`
+/// are served finds nothing listening, which is what a session that is
+/// replacing its own image looks like.
+fn fake_session(
+    runtime_dir: &Path,
+    session: SessionId,
+    script: SessionScript,
+    connections: usize,
+) -> JoinHandle<()> {
+    let held = ConnectionToken::generate();
+    let addr = socket_addr(runtime_dir, session);
+    let listener = Listener::bind(&addr).expect("bind the stand-in session");
+    EndpointFile {
+        socket: addr,
+        token: held.clone(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(runtime_dir, session))
+    .expect("write the session endpoint file");
+
+    std::thread::spawn(move || {
+        let SessionScript { restart, version } = script;
+        for served in 0..connections {
+            let mut connection = listener.accept().expect("accept the caller");
+            let hello: IpcRequest = connection.recv().expect("read the hello");
+            let IpcRequestKind::Hello {
+                token: presented, ..
+            } = &hello.kind
+            else {
+                panic!("expected a Hello first");
+            };
+            assert_eq!(
+                presented, &held,
+                "the caller presents the endpoint file's token"
+            );
+
+            if served == 0 {
+                let asked: IpcRequest = connection.recv().expect("read the restart");
+                assert_eq!(
+                    asked.kind,
+                    IpcRequestKind::Restart,
+                    "expected a Restart after the Hello"
+                );
+                answer(
+                    &mut connection,
+                    hello.request_id,
+                    IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        version: version.clone(),
+                    },
+                );
+                answer(&mut connection, asked.request_id, restart.clone());
+            } else {
+                answer(
+                    &mut connection,
+                    hello.request_id,
+                    IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        version: version.clone(),
+                    },
+                );
+            }
+        }
+    })
+}
+
+/// Answer `request_id` with `result` on `connection`.
+fn answer(connection: &mut Connection, request_id: u64, result: IpcResult) {
+    connection
+        .send(&IpcResponse {
+            request_id: Some(request_id),
+            result,
+        })
+        .expect("send the scripted reply");
+}
+
+/// The refusal a koshi whose build has no Restart request answers with.
+fn no_such_request() -> IpcResult {
+    IpcResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::UnsupportedKind,
+        message: "this koshi has no Restart request".to_string(),
+    })
+}
+
+#[test]
+fn a_session_reporting_the_installed_version_confirms_its_restart() {
+    let runtime_dir = test_runtime_dir();
+    let session = SessionId::new();
+    let stand_in = fake_session(
+        runtime_dir.path(),
+        session,
+        SessionScript {
+            restart: IpcResult::Restarting,
+            version: "3.3.3".to_string(),
+        },
+        2,
+    );
+
+    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+
+    assert_eq!(outcomes, vec![(session, SessionOutcome::Confirmed)]);
+    stand_in
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_still_on_the_old_version_is_reported_after_the_wait() {
+    let runtime_dir = test_runtime_dir();
+    let session = SessionId::new();
+    let stand_in = fake_session(
+        runtime_dir.path(),
+        session,
+        SessionScript {
+            restart: IpcResult::Restarting,
+            version: "1.0.0".to_string(),
+        },
+        2,
+    );
+
+    let outcomes =
+        restart_advertised_sessions(runtime_dir.path(), "2.0.0", Duration::from_millis(250));
+
+    assert_eq!(
+        outcomes,
+        vec![(session, SessionOutcome::StillOn("1.0.0".to_string()))]
+    );
+    stand_in
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_with_no_restart_request_is_reported_as_too_old() {
+    let runtime_dir = test_runtime_dir();
+    let session = SessionId::new();
+    let stand_in = fake_session(
+        runtime_dir.path(),
+        session,
+        SessionScript {
+            restart: no_such_request(),
+            version: "1.0.0".to_string(),
+        },
+        1,
+    );
+
+    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+
+    assert_eq!(outcomes, vec![(session, SessionOutcome::TooOld)]);
+    stand_in.join().expect("the stand-in served its connection");
+}
+
+#[test]
+fn one_session_refusing_still_leaves_every_other_session_asked() {
+    let runtime_dir = test_runtime_dir();
+    let confirms_one = SessionId::new();
+    let refuses = SessionId::new();
+    let confirms_two = SessionId::new();
+    let stand_ins = vec![
+        fake_session(
+            runtime_dir.path(),
+            confirms_one,
+            SessionScript {
+                restart: IpcResult::Restarting,
+                version: "3.3.3".to_string(),
+            },
+            2,
+        ),
+        fake_session(
+            runtime_dir.path(),
+            refuses,
+            SessionScript {
+                restart: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::MalformedRequest,
+                    message: "a pane is mid-write".to_string(),
+                }),
+                version: "3.3.3".to_string(),
+            },
+            1,
+        ),
+        fake_session(
+            runtime_dir.path(),
+            confirms_two,
+            SessionScript {
+                restart: IpcResult::Restarting,
+                version: "3.3.3".to_string(),
+            },
+            2,
+        ),
+    ];
+
+    let mut outcomes =
+        restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+    outcomes.sort_by_key(|(id, _)| id.to_string());
+    let mut expected = vec![
+        (confirms_one, SessionOutcome::Confirmed),
+        (
+            refuses,
+            SessionOutcome::Failed("IPC unavailable: a pane is mid-write".to_string()),
+        ),
+        (confirms_two, SessionOutcome::Confirmed),
+    ];
+    expected.sort_by_key(|(id, _)| id.to_string());
+
+    assert_eq!(outcomes, expected);
+    for stand_in in stand_ins {
+        stand_in
+            .join()
+            .expect("the stand-in served its connections");
+    }
+}
+
+#[test]
+fn no_running_session_leaves_the_router_confirmation_unchanged() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router_reporting(runtime_dir.path(), "3.3.3");
+
+    let outcomes = restart_advertised_sessions(runtime_dir.path(), "3.3.3", Duration::from_secs(5));
+
+    assert_eq!(outcomes, Vec::new());
+    assert_eq!(
+        wait_for_version("3.3.3", Duration::from_secs(5), || probe_router_version(
+            runtime_dir.path()
+        )),
+        VersionAnswer::Installed
+    );
+    router.join().expect("the stand-in served its connection");
 }
 
 #[test]

@@ -134,6 +134,7 @@ fn every_event() -> Vec<SessionEvent> {
             new_index: 0,
         },
         SessionEvent::Quit,
+        SessionEvent::Restarting,
         SessionEvent::Detached,
         SessionEvent::Resync { dropped_count: 4 },
         SessionEvent::SwitchTo {
@@ -316,7 +317,9 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
     // stream, which reads to the user as a session that stops updating.
     //
     // So a change here — add, remove, rename, or retype anything below — turns
-    // this red, and `PROTOCOL_VERSION` goes up in the same commit.
+    // this red. Renaming or retyping a field also moves `PROTOCOL_VERSION` in
+    // the same commit; adding a whole frame, which an older client skips as
+    // unknown and keeps reading past, does not.
     //
     // Shape as of protocol version 2. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
@@ -344,6 +347,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!({ "TabFocused": { "client_id": id, "tab_id": id, "prior_tab": id } }),
             json!({ "TabMoved": { "tab_id": id, "old_index": 2, "new_index": 0 } }),
             json!("Quit"),
+            json!("Restarting"),
             json!("Detached"),
             json!({ "Resync": { "dropped_count": 4 } }),
             json!({ "SwitchTo": { "session_id": id } }),

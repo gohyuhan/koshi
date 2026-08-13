@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// A working directory reported by the shell via OSC 7: the decoded `path`
 /// together with the `host` the shell named in the URI authority.
 ///
@@ -9,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// and refuse to inherit a directory reported from a remote host — a shell over
 /// SSH reports `file://remote/…`. The parser stores the report verbatim and
 /// makes no local/remote decision; that check lives at the spawn layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedCwd {
     /// The URI authority (the part between `//` and the path), or `None` when
     /// it was empty (`file:///path`). `localhost` and the local machine's own

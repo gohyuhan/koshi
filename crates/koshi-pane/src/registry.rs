@@ -6,12 +6,13 @@
 use std::collections::HashMap;
 
 use koshi_core::ids::PaneId;
+use serde::{Deserialize, Serialize};
 
 use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 
 /// Owns the [`PaneRecord`] of every pane in one session, keyed by id. The map
 /// is private. Records go in and out only through the methods below.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneRegistry {
     records: HashMap<PaneId, PaneRecord>,
 }

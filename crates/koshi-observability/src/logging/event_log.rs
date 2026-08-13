@@ -155,6 +155,10 @@ pub fn log_event(event: &Event) {
         // --- session end.
         Event::Quit => tracing::info!("session quitting"),
 
+        // --- image swap: the session keeps running under a new process image.
+        // This line explains a jump in the log's process id.
+        Event::Restarting => tracing::info!("session restarting into the binary on disk"),
+
         Event::Plugin(plugin_event) => log_plugin_event(plugin_event),
 
         // --- no line, for the reasons the module doc lists.

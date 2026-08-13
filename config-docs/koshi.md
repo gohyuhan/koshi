@@ -223,8 +223,9 @@ makes, so turning it off shuts those users out without a restart: a new
 connection is refused, and a terminal already attached is dropped the next time
 it types. Each command reads the file again as it runs, so a listing shows what
 your file says at that moment. Turning it on reaches the sessions you start
-after the change: where a session's socket sits is settled when that session
-starts.
+after the change. A running session keeps the socket it already has until it
+restarts. `koshi update` restarts every session it finds, and a restarted
+session reads this key again and binds where your file says at that moment.
 
 A session started with `koshi --headless --allow-other-users` keeps other users
 for its whole life. That session never reads this key.

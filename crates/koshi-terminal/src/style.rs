@@ -5,8 +5,10 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// The visual style of a single cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Style {
     /// Foreground (text) color.
     fg: Color,
@@ -121,7 +123,7 @@ impl Style {
 }
 
 /// A foreground or background color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Color {
     /// The terminal's configured default color.
     #[default]
@@ -143,7 +145,7 @@ pub enum Color {
 /// exists per grid slot and per scrollback-row column, so these two bytes are
 /// paid hundreds of thousands of times over in a live session. Adding an
 /// attribute takes a spare bit, not another field.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AttrFlags(u16);
 
 impl AttrFlags {
@@ -275,7 +277,7 @@ impl fmt::Debug for AttrFlags {
 /// values, so a cell draws at most one underline and applying a new style
 /// replaces the previous one. Selected by SGR 4 / 21 / 24 and the extended
 /// `4:n` subparameter forms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum UnderlineStyle {
     /// Not underlined (SGR 24 or `4:0`).
     #[default]

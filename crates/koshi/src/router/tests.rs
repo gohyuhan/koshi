@@ -10,6 +10,7 @@ use super::*;
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
+use crate::session_server::RESTART_WINDOW;
 use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_ipc::endpoint::{advert_path, shared_socket_addr};
 use koshi_ipc::protocol::{IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
@@ -225,6 +226,94 @@ fn the_rebuild_drops_an_endpoint_nothing_listens_behind() {
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
 }
 
+/// Write a resume file for `session` in `runtime_dir` and stamp it `age` old,
+/// the way a session server about to replace its own image leaves one behind.
+fn aged_resume_file(runtime_dir: &Path, session: SessionId, age: Duration) -> PathBuf {
+    let path = resume_path(runtime_dir, session);
+    let file = std::fs::File::create(&path).expect("the resume file is written");
+    file.set_modified(SystemTime::now() - age)
+        .expect("the resume file is aged");
+    path
+}
+
+/// Older than the window a swap has to come back in, so the swap that wrote it
+/// is dead.
+const PAST_THE_WINDOW: Duration = Duration::from_secs(RESTART_WINDOW.as_secs() + 1);
+
+/// Well inside the window a swap has to come back in, so the swap that wrote it
+/// may still be in flight.
+const INSIDE_THE_WINDOW: Duration = Duration::from_secs(1);
+
+#[test]
+fn removing_a_session_takes_its_resume_file_with_it() {
+    // A swap that died leaves the file behind holding every pane's screen and
+    // scrollback. Nothing else on the machine ever reads it again.
+    let gone = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let endpoint_path = EndpointFile::path(runtime_dir.path(), gone);
+    EndpointFile {
+        socket: socket_addr(runtime_dir.path(), gone),
+        token: ConnectionToken::new("d".repeat(64)),
+        pid: 4242,
+    }
+    .write(&endpoint_path)
+    .expect("the endpoint file is written");
+    let resume_file = aged_resume_file(runtime_dir.path(), gone, PAST_THE_WINDOW);
+
+    let mut registry = registry_of(&[(gone, "S-quiet-lake")]);
+    unregister(runtime_dir.path(), &mut registry, gone);
+
+    assert_eq!(registry, Registry::new());
+    assert!(!endpoint_path.exists(), "the endpoint file is removed");
+    assert!(!resume_file.exists(), "the resume file is removed");
+}
+
+#[test]
+fn the_rebuild_removes_a_resume_file_no_session_claims() {
+    // The new image never started, so nothing deleted the file and no endpoint
+    // file is left to walk it from. Without this the file stays on the disk for
+    // as long as the machine does.
+    let dead = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let resume_file = aged_resume_file(runtime_dir.path(), dead, PAST_THE_WINDOW);
+
+    assert_eq!(sweep(runtime_dir.path(), None), Registry::new());
+    assert!(!resume_file.exists(), "the orphan resume file is removed");
+}
+
+#[test]
+fn the_rebuild_leaves_a_resume_file_a_swap_is_still_writing_its_way_out_of() {
+    // The session server has written the file and has yet to bind its new
+    // socket. Removing it here would cost that session every pane's screen.
+    let swapping = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let resume_file = aged_resume_file(runtime_dir.path(), swapping, INSIDE_THE_WINDOW);
+
+    assert_eq!(sweep(runtime_dir.path(), None), Registry::new());
+    assert!(
+        resume_file.exists(),
+        "a swap in flight keeps its resume file"
+    );
+}
+
+#[test]
+fn the_rebuild_leaves_the_resume_file_of_a_session_that_is_still_running() {
+    // The file is old enough to look dead, and the session it belongs to is in
+    // the list. The list is what decides, so nothing of a live session is
+    // removed.
+    let live = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let resume_file = aged_resume_file(runtime_dir.path(), live, PAST_THE_WINDOW);
+    let registry = registry_of(&[(live, "S-quiet-lake")]);
+
+    remove_orphan_resume_files(runtime_dir.path(), &registry);
+
+    assert!(
+        resume_file.exists(),
+        "a running session keeps its resume file"
+    );
+}
+
 /// Advertise `session` in `shared_base` the way a session another local user
 /// started advertises itself, and hand back the control-socket address that
 /// names. On Unix that is a subdirectory named after another user's id; on
@@ -281,6 +370,7 @@ fn foreign_session_server(
                 request_id: Some(hello.request_id),
                 result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                 },
             },
             IpcResponse {

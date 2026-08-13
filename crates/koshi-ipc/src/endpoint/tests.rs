@@ -27,6 +27,20 @@ fn the_path_is_session_uuid_json_directly_inside_the_runtime_dir() {
     );
 }
 
+#[test]
+fn the_resume_path_sits_beside_the_endpoint_file_under_the_same_name() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session = SessionId::from_uuid(uuid);
+    assert_eq!(
+        resume_path(Path::new("/run/koshi"), session),
+        Path::new("/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.resume")
+    );
+    assert_eq!(
+        resume_path(Path::new("/run/koshi"), session).parent(),
+        EndpointFile::path(Path::new("/run/koshi"), session).parent()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn the_shared_socket_addr_is_session_uuid_sock_inside_the_shared_user_dir() {

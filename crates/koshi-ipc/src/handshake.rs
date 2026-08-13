@@ -14,6 +14,14 @@
 //! named by [`Peer`](crate::handshake::Peer). The listener that accepted the
 //! connection fills that in from what the OS reports, never from anything the
 //! caller sent.
+//!
+//! The rule itself — settle the version, check the token, open the gate, and
+//! refuse every other kind until it is open — is one `VersionGate`, shared
+//! with the control-plane gate
+//! [`RouterHandshake`](crate::router::RouterHandshake) and the supervisor-link
+//! gate [`SupervisorHandshake`](crate::supervisor::SupervisorHandshake). Each
+//! protocol carries its own version range and its own words in `GateWords`, so
+//! the three refusals read in each protocol's own terms.
 
 use crate::protocol::{
     agreed_version, ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequestKind,
@@ -35,21 +43,178 @@ pub enum Peer {
     Remote,
 }
 
+/// What one protocol calls itself in its gate's refusals, and the versions
+/// that protocol speaks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GateWords {
+    /// The side the gate serves, written as "this {peer}", e.g. `"Koshi"`,
+    /// `"router"`, `"supervisor"`.
+    pub(crate) peer: &'static str,
+    /// Whose token a Hello must present, e.g. `"this Koshi's"`,
+    /// `"the router's"`.
+    pub(crate) token_owner: &'static str,
+    /// The side the gate judges, e.g. `"caller"`, `"session server"`.
+    pub(crate) caller: &'static str,
+    /// What this protocol calls its version numbers, e.g.
+    /// `"protocol versions"`, `"control-plane protocol versions"`.
+    pub(crate) versions: &'static str,
+    /// What this protocol calls one accepted connection, e.g. `"connection"`,
+    /// `"link"`.
+    pub(crate) channel: &'static str,
+    /// The lowest version of this protocol that this build speaks.
+    pub(crate) min_version: u32,
+    /// The highest version of this protocol that this build speaks.
+    pub(crate) max_version: u32,
+}
+
+/// The handshake rule every protocol's gate runs, held for one connection's
+/// lifetime: the token a Hello must present, the version settled once one is
+/// accepted, and the words this protocol refuses in.
+#[derive(Debug)]
+pub(crate) struct VersionGate {
+    /// The token this build wrote to its endpoint file; a Hello that is asked
+    /// for a token must present an equal one.
+    expected: ConnectionToken,
+    /// The protocol version settled for this connection, once a Hello has
+    /// been accepted on it.
+    agreed: Option<u32>,
+    /// What this protocol calls itself and the versions it speaks.
+    words: GateWords,
+}
+
+impl VersionGate {
+    /// A gate for one newly accepted connection, closed until a Hello opens
+    /// it.
+    pub(crate) fn new(expected: ConnectionToken, words: GateWords) -> VersionGate {
+        VersionGate {
+            expected,
+            agreed: None,
+            words,
+        }
+    }
+
+    /// The protocol version this connection settled on, or `None` while no
+    /// Hello has been accepted.
+    pub(crate) fn agreed(&self) -> Option<u32> {
+        self.agreed
+    }
+
+    /// The version both sides use, given the range `min` to `max` the caller
+    /// speaks: the highest they both have. `Err` names both ranges as
+    /// [`UnsupportedVersion`](IpcErrorCode::UnsupportedVersion).
+    pub(crate) fn version(&self, min: u32, max: u32) -> Result<u32, IpcErrorPayload> {
+        agreed_version(min, max, self.words.min_version, self.words.max_version).ok_or_else(|| {
+            IpcErrorPayload {
+                code: IpcErrorCode::UnsupportedVersion,
+                message: format!(
+                    "the {} speaks {} {min} to {max}, this {} speaks {} to {}",
+                    self.words.caller,
+                    self.words.versions,
+                    self.words.peer,
+                    self.words.min_version,
+                    self.words.max_version
+                ),
+            }
+        })
+    }
+
+    /// `Ok(())` when `token` equals the one this build holds, and
+    /// [`BadToken`](IpcErrorCode::BadToken) otherwise.
+    pub(crate) fn token(&self, token: &ConnectionToken) -> Result<(), IpcErrorPayload> {
+        if *token != self.expected {
+            return Err(IpcErrorPayload {
+                code: IpcErrorCode::BadToken,
+                message: format!(
+                    "the token presented does not match {}",
+                    self.words.token_owner
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Open the gate on `agreed`, the version this connection settled on.
+    pub(crate) fn open(&mut self, agreed: u32) {
+        self.agreed = Some(agreed);
+    }
+
+    /// Check a Hello whose only rule is its token: the version range first,
+    /// then the token, and the gate opens once both pass. A refusal leaves the
+    /// gate as it was.
+    pub(crate) fn hello(
+        &mut self,
+        min: u32,
+        max: u32,
+        token: &ConnectionToken,
+    ) -> Result<(), IpcErrorPayload> {
+        let agreed = self.version(min, max)?;
+        self.token(token)?;
+        self.open(agreed);
+        Ok(())
+    }
+
+    /// Check a request kind that is not a Hello, named `name`: served while
+    /// the gate is open, refused as
+    /// [`HelloRequired`](IpcErrorCode::HelloRequired) while it is closed.
+    pub(crate) fn other(&self, name: &str) -> Result<(), IpcErrorPayload> {
+        if self.agreed.is_some() {
+            return Ok(());
+        }
+        Err(self.hello_required(name))
+    }
+
+    /// The refusal for a request kind this build does not have, named `name`.
+    ///
+    /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
+    /// the same as any other kind arriving before a Hello, so an unopened
+    /// connection learns nothing about which kinds exist. An open gate answers
+    /// [`UnsupportedKind`](IpcErrorCode::UnsupportedKind) naming it, and the
+    /// connection keeps serving.
+    pub(crate) fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
+        if self.agreed.is_none() {
+            return self.hello_required(name);
+        }
+        IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: format!("this {} has no request kind named {name}", self.words.peer),
+        }
+    }
+
+    /// The refusal a closed gate answers the kind named `name` with.
+    fn hello_required(&self, name: &str) -> IpcErrorPayload {
+        IpcErrorPayload {
+            code: IpcErrorCode::HelloRequired,
+            message: format!(
+                "{name} arrived before a Hello opened the {}",
+                self.words.channel
+            ),
+        }
+    }
+}
+
+/// What the session protocol's gate calls itself, and the versions it speaks.
+const SESSION_WORDS: GateWords = GateWords {
+    peer: "Koshi",
+    token_owner: "this Koshi's",
+    caller: "caller",
+    versions: "protocol versions",
+    channel: "connection",
+    min_version: MIN_PROTOCOL_VERSION,
+    max_version: PROTOCOL_VERSION,
+};
+
 /// One connection's handshake gate, held by the server for the connection's
 /// lifetime. Starts closed; an [`IpcRequestKind::Hello`] whose version range
 /// overlaps this build's and which meets its [`Peer`]'s token rule opens it,
 /// and every other request kind is served only while it is open.
 #[derive(Debug)]
 pub struct Handshake {
-    /// The token this Koshi wrote to its endpoint file; a Hello that is asked
-    /// for a token must present an equal one.
-    expected: ConnectionToken,
+    /// The version range, the token and the settled version, in the session
+    /// protocol's words.
+    gate: VersionGate,
     /// Where this connection came from, which decides whether its Hello is
     /// asked for the token at all.
     peer: Peer,
-    /// The protocol version settled for this connection, once a Hello has
-    /// been accepted on it.
-    agreed: Option<u32>,
 }
 
 impl Handshake {
@@ -58,9 +223,8 @@ impl Handshake {
     #[must_use]
     pub fn new(expected: ConnectionToken, peer: Peer) -> Handshake {
         Handshake {
-            expected,
+            gate: VersionGate::new(expected, SESSION_WORDS),
             peer,
-            agreed: None,
         }
     }
 
@@ -72,7 +236,7 @@ impl Handshake {
     /// learns which version the two of them use.
     #[must_use]
     pub fn agreed(&self) -> Option<u32> {
-        self.agreed
+        self.gate.agreed()
     }
 
     /// The refusal for a request kind this build does not have, named `name`.
@@ -84,16 +248,7 @@ impl Handshake {
     /// connection keeps serving.
     #[must_use]
     pub fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
-        if self.agreed.is_none() {
-            return IpcErrorPayload {
-                code: IpcErrorCode::HelloRequired,
-                message: format!("{name} arrived before a Hello opened the connection"),
-            };
-        }
-        IpcErrorPayload {
-            code: IpcErrorCode::UnsupportedKind,
-            message: format!("this Koshi has no request kind named {name}"),
-        }
+        self.gate.refuse_unknown(name)
     }
 
     /// Check one incoming request kind against the connection's state.
@@ -130,21 +285,9 @@ impl Handshake {
                 max_protocol_version,
                 token,
             } => {
-                let Some(agreed) = agreed_version(
-                    *min_protocol_version,
-                    *max_protocol_version,
-                    MIN_PROTOCOL_VERSION,
-                    PROTOCOL_VERSION,
-                ) else {
-                    return Err(IpcErrorPayload {
-                        code: IpcErrorCode::UnsupportedVersion,
-                        message: format!(
-                            "the caller speaks protocol versions \
-                             {min_protocol_version} to {max_protocol_version}, \
-                             this Koshi speaks {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}"
-                        ),
-                    });
-                };
+                let agreed = self
+                    .gate
+                    .version(*min_protocol_version, *max_protocol_version)?;
                 match self.peer {
                     // Another user of this machine is asked for no token, so
                     // the setting alone lets them in.
@@ -165,32 +308,12 @@ impl Handshake {
                     Peer::Local {
                         same_user: true, ..
                     }
-                    | Peer::Remote => {
-                        if *token != self.expected {
-                            return Err(IpcErrorPayload {
-                                code: IpcErrorCode::BadToken,
-                                message: "the token presented does not match this Koshi's"
-                                    .to_string(),
-                            });
-                        }
-                    }
+                    | Peer::Remote => self.gate.token(token)?,
                 }
-                self.agreed = Some(agreed);
+                self.gate.open(agreed);
                 Ok(())
             }
-            other => {
-                if self.agreed.is_some() {
-                    Ok(())
-                } else {
-                    Err(IpcErrorPayload {
-                        code: IpcErrorCode::HelloRequired,
-                        message: format!(
-                            "{} arrived before a Hello opened the connection",
-                            other.name()
-                        ),
-                    })
-                }
-            }
+            other => self.gate.other(other.name()),
         }
     }
 }

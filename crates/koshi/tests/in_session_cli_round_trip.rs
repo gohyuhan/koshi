@@ -289,6 +289,7 @@ fn attach(session: &RunningSession) -> AttachedClient {
         kind: IpcRequestKind::Attach {
             viewport: VIEWPORT,
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
     connection

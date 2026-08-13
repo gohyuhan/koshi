@@ -207,6 +207,7 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
         reply.result,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     );
     connection
@@ -225,6 +226,7 @@ fn attach_sized(
             kind: IpcRequestKind::Attach {
                 viewport,
                 filter: EventFilterSpec::All,
+                resume: None,
             },
         })
         .expect("send attach");
@@ -897,9 +899,11 @@ const QUIT_POLL: Duration = Duration::from_millis(50);
 /// to close waits this out.
 const QUIT_PATIENCE: Duration = Duration::from_secs(2);
 
-/// [`served`] with `auto-close-session` set to `auto_close`, run under the loop
-/// the per-session server binary runs: the quit request is read after every
-/// event, and the inbox's own quit hangup is applied like any other event. The
+/// [`served`] with `auto-close-session` set to `auto_close`, run under a loop
+/// modelled on the per-session server binary's, minus the wait for clients
+/// carried across an image swap, which no server here has: the quit request is
+/// read after every event, and the inbox's own quit hangup is applied like any
+/// other event. The
 /// serving thread queues a dropped connection's detach, and the exchange thread
 /// queues the hangup, so the loop keeps reading until the quit request is set
 /// or [`QUIT_PATIENCE`] has passed.

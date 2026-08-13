@@ -1,14 +1,17 @@
 //! The cell grid: the 2-D array of [`Cell`]s backing one screen buffer.
 
-use crate::style::Style;
 use std::cmp::min;
+
+use serde::{Deserialize, Serialize};
+
+use crate::style::Style;
 
 /// The part of a cell that almost no cell has: the continuation code points
 /// layered over its base character.
 ///
 /// It is a type of its own so a [`Cell`] can hold it behind a *thin* pointer —
 /// eight bytes, and null unless the cell actually has continuations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CellExtra {
     /// The continuation code points in arrival order. Never empty: the box is
     /// allocated only when the first one arrives.
@@ -20,7 +23,7 @@ struct CellExtra {
 /// A cell occupies 32 bytes on a 64-bit target, and one exists per grid slot
 /// and per scrollback-row column. The continuation code points sit behind a
 /// pointer that is null for a plain cell.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// The base character occupying the cell.
     ch: char,
@@ -149,7 +152,7 @@ impl Cell {
 
 /// How a row ends relative to the row directly below it. This is row state,
 /// not cell state: it records whether the two rows hold one logical line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RowEnd {
     /// The row ends its logical line: the next row starts a new one.
     #[default]
@@ -181,7 +184,7 @@ pub(crate) fn content_len(row: &[Cell]) -> usize {
 }
 
 /// A fixed-size grid of cells, addressed `rows[row][col]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grid {
     /// Row-major cell storage: `rows[row][col]`.
     rows: Vec<Vec<Cell>>,

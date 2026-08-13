@@ -368,8 +368,11 @@ session id.
 |---|---|
 | `koshi update` | Check for and install a newer release |
 
-The background process that tracks sessions restarts into the new release, if
-that process is running. Every session keeps running.
+Each running session that can restarts into the new release, and then the
+background process that tracks sessions does. A session keeps its panes, the
+programs running in them and their scrollback, and an attached terminal rejoins
+on its own. A session that refuses the restart is named on standard error and
+keeps the old build.
 
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 

@@ -171,6 +171,7 @@ fn serve_discovery(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<
             hello.request_id,
             IpcResult::Hello {
                 protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
         );
         reply(

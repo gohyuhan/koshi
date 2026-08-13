@@ -49,6 +49,12 @@ use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PR
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
 
+mod common;
+
+#[cfg(unix)]
+use common::copy_of_koshi;
+use common::start_koshi;
+
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
 const WAIT: Duration = Duration::from_secs(20);
@@ -274,8 +280,7 @@ fn koshi_every_user_can_run() -> (TempDir, PathBuf) {
     let dir = test_home();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
         .expect("the directory holding the copy opens to every local user");
-    let copy = dir.path().join("koshi");
-    std::fs::copy(env!("CARGO_BIN_EXE_koshi"), &copy).expect("the koshi binary is copied");
+    let copy = copy_of_koshi(dir.path());
     (dir, copy)
 }
 
@@ -326,6 +331,16 @@ fn koshi_under_as(binary: &Path, home: &Path, uid: u32, gid: u32) -> std::proces
     command
 }
 
+/// Run `command` to its end and hand back its exit status and both output
+/// streams. Starting goes through [`start_koshi`], which waits out a program
+/// file the operating system reports as busy.
+#[cfg(unix)]
+fn koshi_output(command: &mut std::process::Command) -> std::process::Output {
+    start_koshi(command)
+        .wait_with_output()
+        .expect("the koshi binary runs to its end")
+}
+
 /// Start one session's server under `home`, so it reads the `koshi.kdl` written
 /// there rather than the developer's own.
 #[cfg(unix)]
@@ -334,15 +349,15 @@ fn start_session_server_under(
     runtime_dir: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let child = koshi_under(home)
-        .arg("serve-session")
-        .arg(session_id.to_string())
-        .arg(SESSION_NAME)
-        .arg("--runtime-dir")
-        .arg(runtime_dir)
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("the koshi binary starts");
+    let child = start_koshi(
+        koshi_under(home)
+            .arg("serve-session")
+            .arg(session_id.to_string())
+            .arg(SESSION_NAME)
+            .arg("--runtime-dir")
+            .arg(runtime_dir)
+            .stdout(Stdio::null()),
+    );
     RunningSession(child)
 }
 
@@ -403,10 +418,8 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
     let_every_user_read_the_config(other_home.path());
     let (_koshi_dir, koshi) = koshi_every_user_can_run();
 
-    let listed = koshi_under_as(&koshi, other_home.path(), uid, gid)
-        .arg("list-sessions")
-        .output()
-        .expect("the koshi binary starts");
+    let listed =
+        koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
     assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
     assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
     assert_eq!(
@@ -414,11 +427,11 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
         one_session_listing(session_id)
     );
 
-    let killed = koshi_under_as(&koshi, other_home.path(), uid, gid)
-        .arg("kill-session")
-        .arg(session_id.to_string())
-        .output()
-        .expect("the koshi binary starts");
+    let killed = koshi_output(
+        koshi_under_as(&koshi, other_home.path(), uid, gid)
+            .arg("kill-session")
+            .arg(session_id.to_string()),
+    );
     // The success reply races the socket shutdown, so the server process
     // ending is what says the kill landed, not the exit code.
     assert!(
@@ -462,19 +475,17 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
     let_every_user_read_the_config(other_home.path());
     let (_koshi_dir, koshi) = koshi_every_user_can_run();
 
-    let listed = koshi_under_as(&koshi, other_home.path(), uid, gid)
-        .arg("list-sessions")
-        .output()
-        .expect("the koshi binary starts");
+    let listed =
+        koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
     assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
     assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
     assert_eq!(String::from_utf8_lossy(&listed.stdout), "id  name\n");
 
-    let killed = koshi_under_as(&koshi, other_home.path(), uid, gid)
-        .arg("kill-session")
-        .arg(session_id.to_string())
-        .output()
-        .expect("the koshi binary starts");
+    let killed = koshi_output(
+        koshi_under_as(&koshi, other_home.path(), uid, gid)
+            .arg("kill-session")
+            .arg(session_id.to_string()),
+    );
     assert_eq!(
         killed.status.code(),
         Some(CliExitCode::SessionNotFound.code())
@@ -521,10 +532,7 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     assert_eq!(endpoint_path.parent(), Some(runtime_dir.as_path()));
     assert_eq!(mode_of(&endpoint_path), 0o600);
 
-    let listed = koshi_under(home.path())
-        .arg("list-sessions")
-        .output()
-        .expect("the koshi binary starts");
+    let listed = koshi_output(koshi_under(home.path()).arg("list-sessions"));
     assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
     assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
     assert_eq!(
@@ -601,19 +609,19 @@ fn start_shared_session_server(
     program_data: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_koshi"))
-        .arg("serve-session")
-        .arg(session_id.to_string())
-        .arg(SESSION_NAME)
-        .arg("--runtime-dir")
-        .arg(runtime_dir)
-        .arg("--allow-other-users")
-        .env("ProgramData", program_data)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the koshi binary starts");
+    let child = start_koshi(
+        std::process::Command::new(env!("CARGO_BIN_EXE_koshi"))
+            .arg("serve-session")
+            .arg(session_id.to_string())
+            .arg(SESSION_NAME)
+            .arg("--runtime-dir")
+            .arg(runtime_dir)
+            .arg("--allow-other-users")
+            .env("ProgramData", program_data)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     RunningSession(child)
 }
 
@@ -652,7 +660,8 @@ fn open(endpoint: &EndpointFile) -> Connection {
     assert_eq!(
         reply.result,
         IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION
+            protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     );
     connection

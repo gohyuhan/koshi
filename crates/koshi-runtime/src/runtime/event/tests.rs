@@ -119,6 +119,18 @@ fn ipc_discovery_carries_a_working_reply_channel() {
 }
 
 #[test]
+fn an_ending_notice_starts_empty_and_holds_the_ending_it_was_raised_with() {
+    for ending in [SessionEnding::Quit, SessionEnding::Restarting] {
+        let notice = EndingNotice::default();
+        assert_eq!(notice.raised(), None);
+        notice.raise(ending);
+        assert_eq!(notice.raised(), Some(ending));
+        notice.raise(ending);
+        assert_eq!(notice.raised(), Some(ending));
+    }
+}
+
+#[test]
 fn plugin_carries_its_envelope() {
     let env = envelope();
     let plugin = RuntimeEvent::Plugin(env.clone());

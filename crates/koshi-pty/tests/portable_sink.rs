@@ -200,14 +200,10 @@ impl Recorder {
         exit_among(&self.snapshot())
     }
 
-    /// Block until an exit has been recorded, or `TIMEOUT` elapses, answering
-    /// the child's cursor-position queries meanwhile — see
-    /// [`answer_cursor_queries`].
-    fn wait_for_exit(&self, backend: &PortablePtyBackend, pane: PaneId) -> Option<ExitStatus> {
+    /// Block until an exit has been recorded, or `TIMEOUT` elapses.
+    fn wait_for_exit(&self) -> Option<ExitStatus> {
         let deadline = Instant::now() + TIMEOUT;
-        let mut answered = 0;
         loop {
-            answered = answer_cursor_queries(backend, pane, &self.text(), answered);
             if let Some(status) = self.exit() {
                 return Some(status);
             }
@@ -259,11 +255,6 @@ impl ClosingSink {
             text: Mutex::new(String::new()),
         })
     }
-
-    /// Everything delivered so far, read as lossy UTF-8.
-    fn text(&self) -> String {
-        self.text.lock().expect("closing sink").clone()
-    }
 }
 
 impl PtySink for ClosingSink {
@@ -313,38 +304,6 @@ impl PtySink for RefusingSink {
     }
 }
 
-/// The cursor-position query a child sends to find out where it is printing:
-/// `ESC [ 6 n`. Windows' console layer sends one as a pane starts up and waits
-/// for the answer before letting the child run.
-const CURSOR_QUERY: &str = "\x1b[6n";
-
-/// The answer to [`CURSOR_QUERY`]: the cursor sits at row 1, column 1.
-const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
-
-/// Answer any cursor-position query in `output` that has not been answered
-/// yet, returning the new total answered.
-///
-/// A real pane answers these through the terminal engine, which parses the
-/// child's output and writes replies back. These tests drive the backend on
-/// its own, with no engine between, so an unanswered query leaves the child
-/// waiting forever and it never runs — on Windows that means no output, no
-/// exit, and a pane that never ends.
-///
-/// Nothing is written when no query has arrived, so a child that never asks
-/// (every Unix shell here) is never sent bytes it did not ask for.
-fn answer_cursor_queries(
-    backend: &PortablePtyBackend,
-    pane: PaneId,
-    output: &str,
-    answered: usize,
-) -> usize {
-    let asked = output.matches(CURSOR_QUERY).count();
-    for _ in answered..asked {
-        let _ = backend.write(pane, CURSOR_REPLY);
-    }
-    asked
-}
-
 /// Build a spawn spec running `body` through the platform's shell, inheriting
 /// cwd and env.
 fn script(body: &str) -> SpawnSpec {
@@ -377,14 +336,11 @@ fn a_channel_backed_pane_reports_the_same_childs_exit() {
     let deadline = Instant::now() + TIMEOUT;
     let mut status = None;
     let mut seen = Vec::new();
-    let mut answered = 0;
     while status.is_none() && Instant::now() < deadline {
         // Drain output too, so a full buffer can never be what stops the child.
         while let Some(chunk) = handle.try_read_output() {
             seen.extend(chunk);
         }
-        answered =
-            answer_cursor_queries(&backend, pane_id, &String::from_utf8_lossy(&seen), answered);
         status = handle.try_exit_status();
         if status.is_none() {
             thread::sleep(Duration::from_millis(5));
@@ -410,7 +366,7 @@ fn a_sink_receives_the_childs_output_and_then_its_exit() {
     }
 
     assert_eq!(
-        recorder.wait_for_exit(&backend, pane_id),
+        recorder.wait_for_exit(),
         Some(ExitStatus::ExitCode(3)),
         "no exit reached the sink; it was handed: {:?}",
         recorder.snapshot()
@@ -514,7 +470,7 @@ fn closing_a_pane_releases_its_reader_while_a_descendant_still_holds_the_termina
 
     let started = Instant::now();
     assert_eq!(
-        recorder.wait_for_exit(&backend, pane_id),
+        recorder.wait_for_exit(),
         Some(ExitStatus::ExitCode(5)),
         "the pane was never told its child ended"
     );
@@ -589,9 +545,7 @@ fn a_consumer_may_close_the_pane_from_inside_the_exit_it_is_handed() {
     // hang this test rather than fail it, and a hung test reports nothing about
     // which guarantee broke.
     let deadline = Instant::now() + TIMEOUT;
-    let mut answered = 0;
     while !*sink.closed.lock().expect("closing sink") && Instant::now() < deadline {
-        answered = answer_cursor_queries(&backend, pane_id, &sink.text(), answered);
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
@@ -621,7 +575,7 @@ fn a_pane_reports_its_child_ending_even_when_the_pty_never_reports_an_end() {
     }
 
     assert_eq!(
-        recorder.wait_for_exit(&backend, pane_id),
+        recorder.wait_for_exit(),
         Some(ExitStatus::ExitCode(5)),
         "the pane was never told its child ended"
     );
@@ -701,7 +655,7 @@ fn a_settled_pane_forwards_no_more_of_a_descendants_output() {
     }
 
     assert_eq!(
-        recorder.wait_for_exit(&backend, pane_id),
+        recorder.wait_for_exit(),
         Some(ExitStatus::ExitCode(5)),
         "the pane was never told its child ended"
     );
@@ -741,10 +695,7 @@ fn a_sink_backed_pane_hands_back_a_handle_with_no_channels() {
     assert_eq!(handle.try_exit_status(), None);
 
     // The sink is still the one being fed.
-    assert_eq!(
-        recorder.wait_for_exit(&backend, pane_id),
-        Some(ExitStatus::ExitCode(0))
-    );
+    assert_eq!(recorder.wait_for_exit(), Some(ExitStatus::ExitCode(0)));
 }
 
 #[test]

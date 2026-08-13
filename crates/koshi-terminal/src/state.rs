@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 use koshi_core::process::PtySize;
 
+use serde::{Deserialize, Serialize};
+
 use crate::grid::state::{Cell, Grid};
 use crate::scrollback::{Scrollback, ScrollbackLimit};
 use crate::selection::TextView;
@@ -46,7 +48,7 @@ pub use render::{Charset, RenderState};
 pub use screen::Screen;
 
 /// The full emulation state of one terminal pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalState {
     /// The primary (normal, scrolling) screen buffer, reference-counted so a
     /// render snapshot can share it without copying; a write clones it once on

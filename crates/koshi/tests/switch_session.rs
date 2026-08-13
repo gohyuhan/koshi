@@ -47,6 +47,10 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::Connection;
 use tempfile::TempDir;
 
+mod common;
+
+use common::end_process;
+
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
 const WAIT: Duration = Duration::from_secs(20);
@@ -88,29 +92,6 @@ impl Drop for RunningSessions {
             end_process(*pid);
         }
     }
-}
-
-/// End the process with id `pid`, whatever it is doing.
-#[cfg(unix)]
-fn end_process(pid: u32) {
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// End the process with id `pid`, whatever it is doing.
-#[cfg(windows)]
-fn end_process(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .arg("/PID")
-        .arg(pid.to_string())
-        .arg("/F")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// Start the `koshi` binary as the router serving `runtime_dir`.
@@ -238,6 +219,7 @@ fn attach(connection: &mut Connection, session_id: SessionId) -> ClientId {
         kind: IpcRequestKind::Attach {
             viewport: VIEWPORT,
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
     connection

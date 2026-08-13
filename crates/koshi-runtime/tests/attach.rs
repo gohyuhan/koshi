@@ -27,7 +27,7 @@ use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseInput, MouseKind, MouseTracking};
-use koshi_core::process::PtySize;
+use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
@@ -184,6 +184,7 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
         reply.result,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     );
     connection
@@ -211,6 +212,7 @@ fn attach_sized(
             kind: IpcRequestKind::Attach {
                 viewport,
                 filter: EventFilterSpec::All,
+                resume: None,
             },
         })
         .expect("send attach");
@@ -609,6 +611,100 @@ fn the_event_stream_ends_with_the_quit_frame() {
 
     let session = server.sessions().get(&session_id).expect("session running");
     assert_eq!(session.clients.len(), 0);
+}
+
+/// A pane's program exiting reaches every attached client while the session
+/// keeps serving. A second pane is what keeps it serving: the session ends when
+/// its last pane goes, and an ending session drops what is queued for a client.
+#[test]
+fn the_stream_carries_a_pane_exit_while_the_session_keeps_serving() {
+    let (server, _fake, (session_id, second)) = served(
+        "pane-exit-on-stream",
+        |dir, session_id, fake| {
+            let mut viewer = open(&dir, session_id);
+            let (client_id, _, structure) = attach(&mut viewer, 2);
+            let first = structure.panes[0].id;
+
+            let mut caller = open(&dir, session_id);
+            let emitted = submit(
+                &mut caller,
+                session_id,
+                Command::NewPane(NewPaneArgs {
+                    source: Some(first),
+                    tab: None,
+                    direction: Direction::Right,
+                    stacked: false,
+                    cwd: None,
+                    command: None,
+                    client: Some(client_id),
+                }),
+                3,
+            );
+            let second = emitted
+                .iter()
+                .find_map(|event| match event {
+                    Event::PaneCreated(created) => Some(created.pane_id),
+                    _ => None,
+                })
+                .expect("the split emitted the new pane");
+
+            // A dying program closes its terminal and then exits, and the forwarder
+            // relays the exit once the output before it is drained.
+            fake.close_output(second)
+                .expect("the second pane's terminal closes");
+            fake.trigger_child_exit(second, ExitStatus::ExitCode(0))
+                .expect("the second pane's program exits");
+
+            let (viewer, frames) = read_frames_until(
+                viewer,
+                move |frame| matches!(frame, SessionEvent::PaneProcessExited { pane_id, .. } if *pane_id == second),
+            );
+            assert_eq!(
+                frames.last(),
+                Some(&SessionEvent::PaneProcessExited {
+                    pane_id: second,
+                    exit_code: Some(0),
+                }),
+            );
+            (vec![viewer, caller], (session_id, second))
+        },
+    );
+
+    // The pane the program left is gone, and the one the client is viewing is
+    // still there.
+    let session = server.sessions().get(&session_id).expect("session running");
+    assert_eq!(session.panes.len(), 1);
+    assert!(session.panes.get(second).is_none());
+}
+
+/// The only pane's program exiting ends the session by itself, with no close
+/// asked for: the stream ends with the quit frame, and the session is left with
+/// no pane and no tab.
+#[test]
+fn the_event_stream_ends_with_the_quit_frame_when_the_only_program_exits() {
+    let (server, _fake, session_id) = served("quit-on-program-exit", |dir, session_id, fake| {
+        let mut viewer = open(&dir, session_id);
+        let (_, _, structure) = attach(&mut viewer, 2);
+        let only_pane = structure.panes[0].id;
+
+        // A dying program closes its terminal and then exits, and the forwarder
+        // relays the exit once the output before it is drained.
+        fake.close_output(only_pane)
+            .expect("the only pane's terminal closes");
+        fake.trigger_child_exit(only_pane, ExitStatus::ExitCode(0))
+            .expect("the only pane's program exits");
+
+        // The exit and the quit the session ends on are published in one pass,
+        // and the raised ending drops whatever is still queued for a client, so
+        // the quit frame is the one frame this stream is promised.
+        let (viewer, frames) = read_frames_until(viewer, |frame| *frame == SessionEvent::Quit);
+        assert_eq!(frames.last(), Some(&SessionEvent::Quit));
+        (vec![viewer], session_id)
+    });
+
+    let session = server.sessions().get(&session_id).expect("session running");
+    assert_eq!(session.panes.len(), 0);
+    assert_eq!(session.tabs.len(), 0);
 }
 
 #[test]

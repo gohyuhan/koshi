@@ -18,10 +18,21 @@
 //! [`MAX_FRAME_LEN`](crate::transport::MAX_FRAME_LEN) before the payload
 //! buffer is allocated, so a peer naming a huge length is refused at the cost
 //! of reading four bytes.
+//!
+//! [`Connection::read_closer`](crate::transport::Connection::read_closer)
+//! hands out a [`ReadCloser`](crate::transport::ReadCloser): the handle another
+//! thread holds to end the reading side of a connection while the thread
+//! serving it is blocked reading. The writing side is left alone.
 
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::net::Shutdown;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
 use interprocess::local_socket::{self as socket, ConnectOptions, ListenerOptions};
@@ -134,7 +145,7 @@ impl Listener {
     /// the next `accept` clears it, so a server calls this in a loop.
     pub fn accept(&self) -> Result<Connection, IpcError> {
         let stream = self.inner.accept().map_err(io_failure)?;
-        Ok(Connection { stream })
+        Ok(Connection::new(stream))
     }
 }
 
@@ -148,9 +159,20 @@ pub const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 #[derive(Debug)]
 pub struct Connection {
     stream: socket::Stream,
+    /// Set by [`ReadCloser::close`]. Every read after it reports
+    /// [`IpcError::Disconnected`] without touching the socket.
+    read_closed: Arc<AtomicBool>,
 }
 
 impl Connection {
+    /// Wrap a connected stream, with its read direction open.
+    fn new(stream: socket::Stream) -> Connection {
+        Connection {
+            stream,
+            read_closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Connect to the listener at `addr`, waiting at most [`CONNECT_WAIT`]
     /// for the listener to accept. No listener behind the address — a
     /// leftover file whose process is gone, or nothing there at all — is
@@ -171,7 +193,7 @@ impl Connection {
                     io_failure(error)
                 }
             })?;
-        Ok(Connection { stream })
+        Ok(Connection::new(stream))
     }
 
     /// Send one message as one frame. Blocks until the bytes are handed to
@@ -181,9 +203,30 @@ impl Connection {
     }
 
     /// Read one frame and decode its message as `T`. Blocks until a whole
-    /// frame arrives.
+    /// frame arrives. A connection whose read direction is closed reports
+    /// [`IpcError::Disconnected`].
     pub fn recv<T: DeserializeOwned>(&mut self) -> Result<T, IpcError> {
+        if self.read_closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
         read_message(&mut self.stream)
+    }
+
+    /// Take the handle on this connection's read direction, for another thread
+    /// to close with while this one reads.
+    ///
+    /// The socket is duplicated, so the handle stays usable after the
+    /// connection is split, moved to another thread or dropped. One connection
+    /// may hand out several; each closes the same read direction.
+    ///
+    /// # Errors
+    /// Returns the failure of duplicating the socket.
+    pub fn read_closer(&self) -> Result<ReadCloser, IpcError> {
+        Ok(ReadCloser {
+            closed: Arc::clone(&self.read_closed),
+            #[cfg(unix)]
+            socket: duplicate_socket(&self.stream)?,
+        })
     }
 
     /// Report whether the peer process runs as the same OS user as this
@@ -227,7 +270,10 @@ impl Connection {
     pub fn split(self) -> (FrameReader, FrameWriter) {
         let (recv_half, send_half) = self.stream.split();
         (
-            FrameReader { half: recv_half },
+            FrameReader {
+                half: recv_half,
+                closed: self.read_closed,
+            },
             FrameWriter { half: send_half },
         )
     }
@@ -237,15 +283,65 @@ impl Connection {
 #[derive(Debug)]
 pub struct FrameReader {
     half: socket::RecvHalf,
+    /// Set by [`ReadCloser::close`]. Every read after it reports
+    /// [`IpcError::Disconnected`] without touching the socket.
+    closed: Arc<AtomicBool>,
 }
 
 impl FrameReader {
     /// Read one frame and decode its message as `T`. Blocks until a whole
-    /// frame arrives. The peer closing its writing end is
-    /// [`IpcError::Disconnected`].
+    /// frame arrives. The peer closing its writing end, and a read direction
+    /// this side closed, are both [`IpcError::Disconnected`].
     pub fn recv<T: DeserializeOwned>(&mut self) -> Result<T, IpcError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
         read_message(&mut self.half)
     }
+}
+
+/// The handle on one connection's read direction, held by a thread other than
+/// the one reading that connection. Taken with
+/// [`Connection::read_closer`].
+///
+/// The handle keeps working after the connection is split: it closes the read
+/// direction of both a [`Connection`] and the [`FrameReader`] it splits into.
+#[derive(Debug)]
+pub struct ReadCloser {
+    /// Shared with the connection this handle came from.
+    closed: Arc<AtomicBool>,
+    /// The connection's socket, duplicated. Both descriptors name one socket,
+    /// so shutting this one's read direction shuts the connection's.
+    #[cfg(unix)]
+    socket: UnixStream,
+}
+
+impl ReadCloser {
+    /// Close the connection's read direction: every [`Connection::recv`] and
+    /// [`FrameReader::recv`] from here reports [`IpcError::Disconnected`]. The
+    /// writing direction stays open, so a reply the connection still owes its
+    /// peer goes out.
+    ///
+    /// On Unix a read the reader is already blocked in ends as well, because
+    /// the socket's read direction is shut. A Windows named pipe has no
+    /// half-close: a read already waiting on the pipe ends when its peer sends
+    /// the next frame or hangs up, and every read after that one reports end of
+    /// stream.
+    ///
+    /// Closing an already-closed read direction changes nothing.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        let _ = self.socket.shutdown(Shutdown::Read);
+    }
+}
+
+/// Duplicate the socket a connection reads and writes. Unix only: a Windows
+/// named pipe carries no read direction to shut on its own.
+#[cfg(unix)]
+fn duplicate_socket(stream: &socket::Stream) -> Result<UnixStream, IpcError> {
+    let socket::Stream::UdSocket(uds) = stream;
+    uds.inner().try_clone().map_err(io_failure)
 }
 
 /// The writing half of a split [`Connection`]. Reads nothing.

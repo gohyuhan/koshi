@@ -10,11 +10,13 @@
 //! reads client view state and a client never mutates session or pane data.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    path::Path,
     sync::{
         mpsc::{Receiver, Sender},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use koshi_config::layer::PartialKoshiConfig;
@@ -28,13 +30,15 @@ use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_observability::logging::event_log::log_event;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
+use koshi_pty::portable::CarriedPtyPane;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
     ipc_server::IpcServer,
-    placeholder::{SnapshotProvider, Storage},
+    placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage},
+    resume::{CarriedPane, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT},
     runtime::{
         bus::{EventBus, EventFilter},
         event::RuntimeEvent,
@@ -42,6 +46,84 @@ use crate::{
         render_schedule::RenderScheduler,
     },
 };
+
+/// How long an announcement waits for every attached client's writing thread to
+/// put the session's last frame on that client's socket.
+///
+/// Bounds the whole wait, not one client. A writing thread blocked inside its
+/// write — a client that stopped reading its socket — never ends, so the wait
+/// stops here and the session goes on without it.
+const CLIENTS_TOLD_LIMIT: Duration = Duration::from_secs(1);
+
+/// How long the wait for the client writing threads pauses between reads of
+/// how many are still running.
+const CLIENTS_TOLD_POLL: Duration = Duration::from_millis(2);
+
+/// What a restart request must be able to promise before the session accepts
+/// it. `Err` carries the sentence the caller is refused with, naming what is
+/// wrong.
+///
+/// Installed by the session server, which holds the path of the binary a swap
+/// would run and the concrete PTY backend the pane records come from. It builds
+/// the check out of [`binary_is_runnable`], [`panes_can_be_carried`], a wait for
+/// every pane's writer to settle, and a run of the new binary to read which
+/// resume formats it takes back. A process with no check installed refuses every
+/// restart.
+pub type RestartCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+/// Whether the binary at `exe` is one this machine could run: it can be read,
+/// and on Unix it carries an execute bit.
+///
+/// # Errors
+/// Returns the sentence naming the path and what is wrong with it.
+pub fn binary_is_runnable(exe: &Path) -> Result<(), String> {
+    match std::fs::metadata(exe) {
+        Err(error) => Err(format!(
+            "the binary at {} could not be read: {error}",
+            exe.display()
+        )),
+        #[cfg(unix)]
+        Ok(metadata) => {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                Err(format!("the binary at {} is not executable", exe.display()))
+            } else {
+                Ok(())
+            }
+        }
+        #[cfg(not(unix))]
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Whether every pane in `panes` could cross an image swap: on Unix a pane's
+/// terminal must expose a descriptor, since the descriptor is what the next
+/// image takes the pane back by.
+///
+/// # Errors
+/// Returns the sentence naming the first pane whose terminal exposes no
+/// descriptor.
+#[cfg(unix)]
+pub fn panes_can_be_carried(panes: &[CarriedPtyPane]) -> Result<(), String> {
+    match panes.iter().find(|pane| pane.terminal_fd.is_none()) {
+        Some(pane) => Err(format!(
+            "pane {} has no terminal descriptor, so its terminal cannot cross the swap",
+            pane.pane_id
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Whether every pane in `panes` could cross an image swap. Always yes here:
+/// every pane's pseudoconsole stays in the supervisor process, which outlives
+/// the swap.
+///
+/// # Errors
+/// Never returns an error.
+#[cfg(windows)]
+pub fn panes_can_be_carried(_panes: &[CarriedPtyPane]) -> Result<(), String> {
+    Ok(())
+}
 
 /// The authoritative half of one koshi process: owns the sessions and their
 /// layout trees, the per-pane terminal engines, the shared PTY backend, the
@@ -118,11 +200,31 @@ pub struct Server {
     /// command-dispatch path reads it; [`is_draining`](Self::is_draining) is
     /// its only reader.
     pub(crate) draining: bool,
-    /// True when an explicit quit chord requested zero-grace process teardown.
+    /// True when a quit asked for zero-grace process teardown, in this process
+    /// or carried across an image swap.
     pub(crate) immediate_shutdown: bool,
-    /// True once a `core:quit` command was applied. The event loop polls it
-    /// after each event batch and exits; the flag never resets.
+    /// True once a `core:quit` command was applied, in this process or carried
+    /// across an image swap. The event loop polls it before it waits for an
+    /// event and after each event batch, and exits once
+    /// [`awaits_a_client`](Self::awaits_a_client) is false; the flag never
+    /// resets.
     pub(crate) quit_requested: bool,
+    /// True once a restart request passed [`restart_check`](Self::restart_check)
+    /// and was accepted. The event loop polls it after each event batch and
+    /// exits into the swap. [`cancel_restart`](Self::cancel_restart) puts it
+    /// back to false when the swap is abandoned and the session keeps serving in
+    /// this process.
+    pub(crate) restart_requested: bool,
+    /// What a restart must promise before it is accepted, installed by the
+    /// session server. `None` refuses every restart.
+    restart_check: Option<RestartCheck>,
+    /// The clients whose records came across an image swap and have not
+    /// attached again yet. Filled by [`resume`](Self::resume) from the carried
+    /// sessions, emptied one id at a time as those clients attach again, and
+    /// read by
+    /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
+    /// when the grace window closes.
+    pub(crate) awaiting_reconnect: HashSet<ClientId>,
     /// Bytes waiting to be written to each client's own outer terminal —
     /// escape sequences aimed at the terminal program the client runs in, not
     /// at any pane's child. The copy queues its OSC 52 clipboard write here;
@@ -166,11 +268,158 @@ impl Server {
             draining: false,
             immediate_shutdown: false,
             quit_requested: false,
+            restart_requested: false,
+            restart_check: None,
+            awaiting_reconnect: HashSet::new(),
             host_writes: HashMap::new(),
             app_layer,
             config,
             client_config,
         }
+    }
+
+    /// Rebuild a server from the state a previous process image carried out,
+    /// over panes that are already running.
+    ///
+    /// The event bus, the action registry, the render scheduler, the built-in
+    /// config defaults, the subscribers and the control socket are all built
+    /// fresh here, on the stock [`NullSnapshotProvider`] and [`NullStorage`].
+    /// What comes from the swap is what [`ResumeBody`] carries, over `handles`
+    /// and `sizes`, plus the records of the clients that were told to attach
+    /// again.
+    /// [`load_startup_config`](Self::load_startup_config) still runs afterwards,
+    /// so the session comes back on the `koshi.kdl` that is on disk at that
+    /// moment.
+    ///
+    /// Two callers reach this, and they differ in where `handles` comes from.
+    /// The new image after a successful swap passes the handles its backend
+    /// built by taking each pane back from its descriptor and process id. The
+    /// old image after a swap that failed to start passes
+    /// [`PtyHandle::detached`] handles: it never let its panes go, so the same
+    /// backend still holds them.
+    ///
+    /// No connection survives the swap, so every client the carried sessions
+    /// hold starts out awaiting its own re-attach. Each one that attaches again
+    /// naming its id leaves that set, and whoever is left is detached when the
+    /// grace window closes.
+    pub fn resume(
+        pty_backend: Arc<dyn PtyBackend>,
+        inbox_rx: Receiver<RuntimeEvent>,
+        inbox_tx: Sender<RuntimeEvent>,
+        body: ResumeBody,
+        handles: HashMap<PaneId, PtyHandle>,
+        sizes: HashMap<PaneId, PtySize>,
+    ) -> Self {
+        let mut server = Server::new(
+            pty_backend,
+            Arc::new(NullSnapshotProvider),
+            Arc::new(NullStorage),
+            inbox_rx,
+            inbox_tx,
+        );
+        server.awaiting_reconnect = body
+            .sessions
+            .values()
+            .flat_map(|session| session.clients.list_attached())
+            .map(|client| client.id())
+            .collect();
+        server.sessions = body.sessions;
+        // A quit applied before the swap comes back with its kind. The serve
+        // loop leaves it alone while any carried client is still expected, so
+        // the clients that were told to come back are the ones it ends for.
+        if let Some(quit) = body.quit {
+            server.quit_requested = true;
+            server.immediate_shutdown = quit == CarriedQuit::Immediate;
+        }
+        let mut undecoded = body.undecoded;
+        server.terminal_engines = body
+            .engines
+            .into_iter()
+            .map(|(pane_id, state)| {
+                let held = undecoded.remove(&pane_id).unwrap_or_default();
+                (pane_id, TerminalEngine::from_state(state, &held))
+            })
+            .collect();
+        server.pty_handles = handles;
+        server.pty_sizes = sizes;
+        server
+    }
+
+    /// Drain this server into the two halves of its resume file: the header
+    /// naming `session_id`, `session_name` and every pane in `panes`, and the
+    /// body [`ResumeBody`] names.
+    ///
+    /// The state moves out of the server, which is left with no sessions and no
+    /// terminal engines, so no pane's grid or scrollback is copied on the way.
+    ///
+    /// The parser itself is dropped, so each engine hands over the bytes that
+    /// reproduce its position.
+    ///
+    /// `panes` is what the concrete PTY backend reports as live. A pane's size
+    /// in the header is this server's own record of it; a pane this server has
+    /// no size for takes the size the backend reports. On Unix each record also
+    /// names the terminal its descriptor is the master of. A pane whose child
+    /// the backend already reaped carries that child's exit status.
+    pub fn carry_out(
+        &mut self,
+        session_id: SessionId,
+        session_name: String,
+        panes: &[CarriedPtyPane],
+    ) -> (ResumeHeader, ResumeBody) {
+        let carried = panes
+            .iter()
+            .map(|pane| {
+                let size = self
+                    .pty_sizes
+                    .get(&pane.pane_id)
+                    .copied()
+                    .unwrap_or(pane.size);
+                CarriedPane {
+                    pane_id: pane.pane_id,
+                    pid: pane.pid,
+                    rows: size.rows,
+                    cols: size.cols,
+                    #[cfg(unix)]
+                    terminal_fd: pane.terminal_fd,
+                    #[cfg(windows)]
+                    terminal_fd: None,
+                    #[cfg(unix)]
+                    terminal_name: pane
+                        .terminal_fd
+                        .and_then(koshi_pty::portable::terminal_master_name),
+                    #[cfg(windows)]
+                    terminal_name: None,
+                    exit: pane.exit,
+                }
+            })
+            .collect();
+        let header = ResumeHeader {
+            format: RESUME_FORMAT,
+            session_id,
+            session_name,
+            panes: carried,
+        };
+        let mut undecoded = HashMap::new();
+        let engines = std::mem::take(&mut self.terminal_engines)
+            .into_iter()
+            .map(|(pane_id, engine)| {
+                if !engine.undecoded().is_empty() {
+                    undecoded.insert(pane_id, engine.undecoded().to_vec());
+                }
+                (pane_id, engine.into_state())
+            })
+            .collect();
+        let body = ResumeBody {
+            sessions: std::mem::take(&mut self.sessions),
+            engines,
+            undecoded,
+            quit: self.quit_requested.then_some(if self.immediate_shutdown {
+                CarriedQuit::Immediate
+            } else {
+                CarriedQuit::Graceful
+            }),
+        };
+        (header, body)
     }
 
     /// The client→server door: dispatch one command envelope against live
@@ -267,7 +516,9 @@ impl Server {
     }
 
     /// Put each client's current frame on its queue. Called once per due
-    /// render, after [`resync_lagged`](Self::resync_lagged).
+    /// render, after [`resync_lagged`](Self::resync_lagged), and once more by a
+    /// caller that has stopped rendering and still holds bytes for a client's
+    /// own terminal.
     ///
     /// The frame is the subscriber's viewing client's, built by
     /// [`build_snapshot`](Self::build_snapshot).
@@ -351,11 +602,151 @@ impl Server {
             .extend_from_slice(bytes);
     }
 
-    /// Whether a `core:quit` command was applied; the event loop exits when
-    /// this turns true.
+    /// Whether a `core:quit` command was applied, in this process or carried
+    /// across an image swap. The event loop exits once this is true and
+    /// [`awaits_a_client`](Self::awaits_a_client) is false.
     #[must_use]
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Whether a restart request was accepted; the event loop exits into the
+    /// image swap when this turns true.
+    #[must_use]
+    pub fn restart_requested(&self) -> bool {
+        self.restart_requested
+    }
+
+    /// Install what a restart request must promise before it is accepted.
+    /// Called by the session server before the event loop starts, and again on
+    /// the server it keeps after a swap that did not start, so that server
+    /// answers the next restart too.
+    pub fn set_restart_check(&mut self, check: RestartCheck) {
+        self.restart_check = Some(check);
+    }
+
+    /// Take the accepted restart back, so the event loop stops asking for the
+    /// swap. Called when the swap was abandoned before anything irreversible
+    /// happened and the session keeps serving in this process.
+    pub fn cancel_restart(&mut self) {
+        self.restart_requested = false;
+    }
+
+    /// Whether any client's record came across an image swap and has not been
+    /// claimed again.
+    ///
+    /// A session that still expects a client does not end: the client was told
+    /// to come back, so it is given its window to do so and read what ended the
+    /// session. The window is what empties this — see
+    /// `handle_drop_unclaimed_clients` — so the wait is always bounded.
+    #[must_use]
+    pub fn awaits_a_client(&self) -> bool {
+        !self.awaiting_reconnect.is_empty()
+    }
+
+    /// Tell every attached client that this session is replacing its own
+    /// process image, so each one waits for it and attaches again, and return
+    /// once every one of them holds that frame.
+    ///
+    /// [`Event::Restarting`] is the stream's last frame for the clients that
+    /// receive it, the same way [`Event::Quit`] is. Publishing it raises the
+    /// shared [`EndingNotice`](crate::runtime::event::EndingNotice), which is
+    /// what reaches a client whose bounded queue is full, since the event
+    /// itself does not fit that queue.
+    ///
+    /// The wait then holds until every client's writing thread has written the
+    /// frame and ended, or until one second passes, so the caller can replace
+    /// the process image knowing nothing is left half-told.
+    pub fn announce_restarting(&mut self) {
+        self.publish_events(&[Event::Restarting]);
+        self.wait_for_clients_told();
+    }
+
+    /// Tell every attached client that this session ended, so each one says so
+    /// rather than reporting a session that died, and return once every one of
+    /// them holds that frame.
+    ///
+    /// [`Event::Quit`] is the stream's last frame for the clients that receive
+    /// it. Publishing it raises the shared
+    /// [`EndingNotice`](crate::runtime::event::EndingNotice), which is what
+    /// reaches a client whose bounded queue is full.
+    ///
+    /// A notice that is already raised keeps the frame it was raised with, so
+    /// this call publishes nothing while one is up. Two things raise it: a
+    /// session that published its quit itself, which closing the last tab does,
+    /// so the quit frame goes out exactly once; and
+    /// [`announce_restarting`](Self::announce_restarting), which leaves
+    /// [`SessionEnding::Restarting`](crate::runtime::event::SessionEnding) as
+    /// the frame every attached client has already read and left this stream on,
+    /// so a quit that follows it reaches no client.
+    ///
+    /// The wait then holds until every client's writing thread has written the
+    /// frame and ended, or until one second passes, so the caller can tear the
+    /// process down knowing nothing is left half-told.
+    pub fn announce_quit(&mut self) {
+        if self.event_bus.ending_notice().raised().is_none() {
+            self.publish_events(&[Event::Quit]);
+        }
+        self.wait_for_clients_told();
+    }
+
+    /// Wait until every attached client's writing thread has written the
+    /// session's last frame and ended.
+    ///
+    /// A client that stopped reading its socket leaves its thread blocked
+    /// inside its write, so the wait gives up after
+    /// [`CLIENTS_TOLD_LIMIT`] and says so.
+    fn wait_for_clients_told(&self) {
+        let deadline = Instant::now() + CLIENTS_TOLD_LIMIT;
+        while self.event_bus.ending_notice().writers_running() > 0 {
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    clients = self.event_bus.ending_notice().writers_running(),
+                    "a client did not take the last frame within the wait"
+                );
+                return;
+            }
+            std::thread::sleep(CLIENTS_TOLD_POLL);
+        }
+    }
+
+    /// Borrow what this session and its clients' writing threads share about
+    /// the session's last frame.
+    #[cfg(test)]
+    pub(crate) fn ending_notice(&self) -> &Arc<crate::runtime::event::EndingNotice> {
+        self.event_bus.ending_notice()
+    }
+
+    /// Hand the runtime inbox's receiving end over, consuming the server.
+    ///
+    /// The image swap calls this: the panes keep delivering into the same inbox
+    /// across the swap, so the server [`resume`](Self::resume) builds reads the
+    /// same receiver the drained one held.
+    #[must_use]
+    pub fn into_inbox_rx(self) -> Receiver<RuntimeEvent> {
+        self.inbox_rx
+    }
+
+    /// Serve one restart request: run the installed check, and accept the
+    /// restart only when it passes.
+    ///
+    /// An accepted restart sets [`restart_requested`](Self::restart_requested)
+    /// and changes nothing else, so the swap runs after the reply is written. A
+    /// refused one changes nothing at all and the session keeps serving.
+    ///
+    /// # Errors
+    /// Returns the sentence the caller is refused with: whatever the installed
+    /// check named, or that this process cannot replace its own image when no
+    /// check is installed.
+    pub(crate) fn handle_ipc_restart(&mut self) -> Result<(), String> {
+        let Some(check) = self.restart_check.clone() else {
+            return Err(
+                "this koshi cannot replace its own image, so it cannot restart".to_string(),
+            );
+        };
+        check()?;
+        self.restart_requested = true;
+        Ok(())
     }
 
     /// Borrow the session map.

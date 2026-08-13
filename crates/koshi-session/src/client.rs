@@ -18,6 +18,7 @@ use koshi_core::{
     lock::LockMode,
 };
 use koshi_layout::mode::LayoutMode;
+use serde::{Deserialize, Serialize};
 
 /// Convert a full client terminal viewport into the middle pane region by
 /// reserving one top tabline row and one bottom key-hint row.
@@ -32,7 +33,7 @@ pub const fn pane_viewport(viewport: Size) -> Size {
 /// Where a client connected from, decided by the server when it accepts the
 /// connection. The machine's own socket is the only way in, so every client
 /// is [`ClientOrigin::Local`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientOrigin {
     /// Connected over the local socket on this machine.
     Local,
@@ -41,7 +42,7 @@ pub enum ClientOrigin {
 /// What a client is allowed to do. Read from the client's origin inside
 /// [`Client::new`] and never taken from a caller, so nothing a client sends
 /// can raise its own authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthorityTier {
     /// Every command the session accepts.
     Admin,
@@ -52,7 +53,7 @@ pub enum AuthorityTier {
 /// client's alone. Two clients on the same session — and even viewing the same
 /// tab — keep independent focus, lock mode, and viewport, so they never fight
 /// over one cursor or mode.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
     id: ClientId,
     session_id: SessionId,
@@ -404,7 +405,7 @@ impl Client {
 /// focus, lock mode, and viewport live on each [`Client`] — so attached
 /// terminals stay independent. The map is ordered, so iteration walks
 /// clients in id order deterministically.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ClientRegistry {
     records: BTreeMap<ClientId, Client>,
 }

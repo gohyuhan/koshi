@@ -17,8 +17,11 @@ koshi-paths = { version = "0.2.0", path = "../koshi-paths" }
 koshi-pty = { version = "0.2.0", path = "../koshi-pty" }
 koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
 koshi-session = { version = "0.2.0", path = "../koshi-session" }
+koshi-storage = { version = "0.2.0", path = "../koshi-storage" }
 koshi-terminal = { version = "0.2.0", path = "../koshi-terminal" }
 ratatui = { version = "0.30.2", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
@@ -27,5 +30,5 @@ tracing = "0.1.44"
 # so this adds no cycle.
 koshi-client = { version = "0.2.0", path = "../koshi-client" }
 koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
-serde_json = "1.0.151"
+tempfile = "3.27.0"
 uuid = "1.24.0"

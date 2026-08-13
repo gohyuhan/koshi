@@ -10,6 +10,8 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::grid::state::{content_len, Cell, RowEnd};
 
 /// Default scrollback line cap: 10 000 lines per pane.
@@ -81,7 +83,7 @@ impl Default for ScrollbackLimit {
 
 /// The scrollback buffer for one pane: a `VecDeque` of rows (oldest at the
 /// front), bounded by line- and byte-count caps with truncation accounting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
     /// with how it ended ([`RowEnd`]) so a resize reflow can re-join

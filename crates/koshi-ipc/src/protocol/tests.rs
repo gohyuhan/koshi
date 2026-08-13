@@ -392,8 +392,10 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
     // the user as a session that opens to a blank screen.
     //
     // So a change here — add, remove, rename, or retype anything below,
-    // including inside `AttachedSessionStructureSnapshot` — turns this red,
-    // and `PROTOCOL_VERSION` goes up in the same commit.
+    // including inside `AttachedSessionStructureSnapshot` — turns this red.
+    // Renaming or retyping a field also moves `PROTOCOL_VERSION` in the same
+    // commit; adding one that carries `#[serde(default)]`, which an older peer
+    // decodes by taking the default, does not.
     //
     // Shape as of protocol version 2. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
@@ -402,6 +404,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
         kind: IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
 
@@ -412,7 +415,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             "kind": {
                 "Attach": {
                     "viewport": { "cols": 80, "rows": 24 },
-                    "filter": "All"
+                    "filter": "All",
+                    "resume": null
                 }
             }
         })
@@ -523,10 +527,75 @@ fn attach_request_round_trips() {
         kind: IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
 
     assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+            resume: Some(ClientId::from_uuid(fixed_uuid())),
+        },
+    };
+
+    assert_eq!(round_trip(&request), request);
+}
+
+#[test]
+fn an_attach_request_written_without_the_resume_field_decodes_as_no_claim() {
+    // A caller built before the field exists writes an attach without it. It
+    // must still attach, as a client naming no record to come back as.
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+    )
+    .expect("an attach without the resume field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+                resume: None,
+            },
+        }
+    );
+}
+
+#[test]
+fn restart_request_round_trips() {
+    let request = IpcRequest {
+        request_id: 5,
+        kind: IpcRequestKind::Restart,
+    };
+
+    assert_eq!(round_trip(&request), request);
+    assert_eq!(
+        serde_json::to_value(&request).expect("request encodes"),
+        json!({ "request_id": 5, "kind": "Restart" })
+    );
+}
+
+#[test]
+fn restarting_response_round_trips() {
+    let response = IpcResponse {
+        request_id: Some(5),
+        result: IpcResult::Restarting,
+    };
+
+    assert_eq!(round_trip(&response), response);
+    assert_eq!(
+        serde_json::to_value(&response).expect("response encodes"),
+        json!({ "request_id": 5, "result": "Restarting" })
+    );
 }
 
 #[test]
@@ -565,6 +634,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
         kind: IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
+            resume: None,
         },
     };
 
@@ -708,10 +778,32 @@ fn hello_response_round_trips() {
         request_id: Some(1),
         result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
+            version: "0.3.0".to_string(),
         },
     };
 
     assert_eq!(round_trip(&response), response);
+}
+
+#[test]
+fn a_hello_response_written_without_the_build_version_decodes_as_empty() {
+    // A session server built before the field exists answers a Hello without
+    // it. The caller reads the connection's protocol version as it always did
+    // and learns no build version.
+    let decoded: IpcResponse =
+        serde_json::from_str(r#"{"request_id":1,"result":{"Hello":{"protocol_version":2}}}"#)
+            .expect("a hello answer without the build version decodes");
+
+    assert_eq!(
+        decoded,
+        IpcResponse {
+            request_id: Some(1),
+            result: IpcResult::Hello {
+                protocol_version: 2,
+                version: String::new(),
+            },
+        }
+    );
 }
 
 #[test]
@@ -976,6 +1068,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
             &serde_json::to_value(IpcRequestKind::Attach {
                 viewport: Size { cols: 80, rows: 24 },
                 filter: EventFilterSpec::All,
+                resume: None,
             })
             .unwrap()
         ),
@@ -993,6 +1086,10 @@ fn each_request_kind_is_tagged_with_its_own_name() {
         tag_of(&serde_json::to_value(IpcRequestKind::Layout { tab: None }).unwrap()),
         "Layout"
     );
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Restart).unwrap(),
+        json!("Restart")
+    );
 }
 
 #[test]
@@ -1001,6 +1098,7 @@ fn each_result_is_tagged_with_its_own_name() {
         tag_of(
             &serde_json::to_value(IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                version: "0.3.0".to_string(),
             })
             .unwrap()
         ),
@@ -1034,6 +1132,10 @@ fn each_result_is_tagged_with_its_own_name() {
     assert_eq!(
         tag_of(&serde_json::to_value(IpcResult::Layout(layout())).unwrap()),
         "Layout"
+    );
+    assert_eq!(
+        serde_json::to_value(IpcResult::Restarting).unwrap(),
+        json!("Restarting")
     );
     assert_eq!(
         tag_of(
@@ -1076,7 +1178,8 @@ fn a_response_envelope_this_build_reads_decodes() {
         IpcResponse {
             request_id: Some(7),
             result: IpcResult::Hello {
-                protocol_version: 2
+                protocol_version: 2,
+                version: String::new(),
             },
         }
     );
@@ -1206,6 +1309,7 @@ fn every_request_kind_names_itself_without_its_payload() {
         IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
+            resume: None,
         }
         .name(),
         "Attach"
@@ -1248,6 +1352,7 @@ fn every_request_kind_names_itself_without_its_payload() {
         .name(),
         "Layout"
     );
+    assert_eq!(IpcRequestKind::Restart.name(), "Restart");
 }
 
 /// Serializing is how the token reaches the endpoint file and the socket, so

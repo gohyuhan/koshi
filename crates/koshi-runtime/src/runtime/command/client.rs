@@ -3,15 +3,27 @@
 
 use super::*;
 
+use std::time::Instant;
+
 use crate::runtime::attach::session_structure;
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::AttachAccepted;
 
 impl Server {
     /// Serve one attach arriving over the control socket, in this single
-    /// dispatcher turn: mint the client, register it on the running session's
-    /// first tab, publish what the attach emitted, subscribe it to the events
+    /// dispatcher turn: settle which client this is, register it on the tab it
+    /// views, publish what the attach emitted, subscribe it to the events
     /// `filter` selects, and read the session's structure back.
+    ///
+    /// `resume` names the client record a caller asks to come back as, after
+    /// the session replaced its own process image. The record is handed back
+    /// when the session still holds it, the tab it was viewing still exists,
+    /// and no connection is streaming for it: the arriving viewport replaces
+    /// the record's, and its per-tab focus, zoom, scrollback offsets,
+    /// selections, lock mode, label, colour and tier all stay. Everything else
+    /// — no `resume`, an id the session does not hold, an id whose tab is gone,
+    /// an id a connection is already streaming for — mints a fresh client on
+    /// the session's first tab, so an attach never fails over `resume`.
     ///
     /// Registration and subscription land in the same turn, so the structure
     /// returned here and the queue's first event describe one continuous
@@ -21,6 +33,7 @@ impl Server {
     /// caller; the handler never reads the clock itself.
     pub(crate) fn handle_ipc_attach(
         &mut self,
+        resume: Option<ClientId>,
         viewport: Size,
         filter: EventFilter,
         attached_at: SystemTime,
@@ -29,9 +42,21 @@ impl Server {
         // command creates another in-process.
         let session = self.sessions.values().next()?;
         let session_id = session.id;
-        let active_tab = session.tabs.values().min_by_key(|tab| tab.index())?.id();
+        let first_tab = session.tabs.values().min_by_key(|tab| tab.index())?.id();
 
-        let client_id = ClientId::new();
+        let claimed = resume.and_then(|claimed_id| {
+            let client = session.clients.get(claimed_id)?;
+            let client_tab = client.active_tab();
+            let streaming = self
+                .subscriptions
+                .iter()
+                .any(|&(_, viewed)| viewed == claimed_id);
+            (session.tabs.contains_key(&client_tab) && !streaming)
+                .then_some((claimed_id, client_tab))
+        });
+        let (client_id, active_tab) = claimed.unwrap_or_else(|| (ClientId::new(), first_tab));
+        self.awaiting_reconnect.remove(&client_id);
+
         let emitted =
             self.handle_client_attach(session_id, client_id, viewport, active_tab, attached_at);
         self.publish_events(&emitted);
@@ -46,6 +71,7 @@ impl Server {
             session_id,
             structure: session_structure(session),
             events,
+            ending_notice: Arc::clone(self.event_bus.ending_notice()),
         })
     }
 
@@ -238,7 +264,15 @@ impl Server {
     /// source names a client. Target resolution happens at command resolution
     /// before this is reached. With `auto-close-session` on, a detach that
     /// leaves the session with no client requests a graceful quit.
+    ///
+    /// A detach for a client that is still awaiting reconnect is dropped: that
+    /// record's fate belongs to the grace window, which detaches it through
+    /// `handle_drop_unclaimed_clients` after removing it from the set.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
+        if self.awaiting_reconnect.contains(&client_id) {
+            return Vec::new();
+        }
+
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
@@ -281,6 +315,40 @@ impl Server {
             self.request_graceful_quit();
         }
 
+        events
+    }
+
+    /// Detach every client whose record came across an image swap and has not
+    /// attached again by `deadline`.
+    ///
+    /// Each one goes through
+    /// [`handle_client_detach`](Self::handle_client_detach), so its tab reflows
+    /// and `auto-close-session` still ends a session left with no client. A
+    /// client that attached again already left the set, so the usual case
+    /// detaches nobody and emits nothing. The detaches run in client-id order,
+    /// so the events they emit arrive in one settled order.
+    ///
+    /// `deadline` is when the grace window closed, supplied by the producer;
+    /// the handler never reads the clock to decide anything.
+    pub(crate) fn handle_drop_unclaimed_clients(&mut self, deadline: Instant) -> Vec<Event> {
+        if self.awaiting_reconnect.is_empty() {
+            return Vec::new();
+        }
+        let mut unclaimed: Vec<ClientId> = std::mem::take(&mut self.awaiting_reconnect)
+            .into_iter()
+            .collect();
+        unclaimed.sort();
+        tracing::info!(
+            unclaimed = unclaimed.len(),
+            waited_ms = Instant::now()
+                .saturating_duration_since(deadline)
+                .as_millis(),
+            "detaching the clients that did not attach again after the restart"
+        );
+        let mut events = Vec::new();
+        for client_id in unclaimed {
+            events.extend(self.handle_client_detach(client_id));
+        }
         events
     }
 

@@ -13,8 +13,19 @@ flag and accepted value.
 | `koshi --headless --allow-other-users` | Open that session so the other users of this machine may reach it |
 | `koshi update` | Check for and install the latest release |
 
-`koshi update` then restarts the background process that tracks sessions into
-the new release, if that process is running. Every session keeps running.
+`koshi update` then restarts each running session that can into the new release,
+and after them the background process that tracks sessions. A session keeps its
+panes, the programs running in them and their scrollback, and an attached
+terminal rejoins the session on its own.
+
+`koshi update` names every session that did not move on standard error, and that
+session keeps the old build until you end it and start it again. A session
+refuses the restart when a pane's program stopped reading its input, when a pane
+has no terminal to carry, when this machine cannot run the new binary, or when
+the new binary does not read the resume file this build writes. A session
+running a koshi with no restart at all, one that still reports the old version
+after the restart, and one that answers nothing within ten seconds are all
+reported the same way.
 
 `--headless` prints `[SESSION ID]: session-<uuid>` and exits. Nothing is drawn.
 Attach to it later with `koshi attach session-<uuid>`.

@@ -2,11 +2,14 @@
 //! events in order over their own queues, a dropped receiver ends its
 //! subscription, a lossy event that does not fit a full queue is dropped for
 //! that subscriber only, and a critical one that does not fit desyncs the
-//! subscriber until a snapshot resyncs it. Then the painted frame: it lands on
-//! a live subscriber's queue and is refused by a desynced one. Then a round's
-//! mouse answers, which ride the same queue and desync the subscriber when they
-//! do not fit. Then bytes for the terminal a subscriber's client runs in, and
-//! the session a subscriber's client moves to, which ride it the same way.
+//! subscriber until a snapshot resyncs it. The quit and the restart reach a
+//! desynced subscriber all the same, since each ends its stream, and each
+//! raises the bus's ending notice for the queues they do not fit. Then the
+//! painted frame: it lands on a live subscriber's queue and is refused by a
+//! desynced one. Then a round's mouse answers, which ride the same queue and
+//! desync the subscriber when they do not fit. Then bytes for the terminal a
+//! subscriber's client runs in, and the session a subscriber's client moves to,
+//! which ride it the same way.
 //!
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
@@ -303,6 +306,101 @@ fn the_dropped_count_holds_the_trigger_plus_withheld_critical_events_only() {
             lagged: SubscriberLagged {
                 subscriber_id: id,
                 dropped_count: 4,
+                event_class: EventClass::Critical,
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
+    // The queue is bounded, so the restart is dropped like any other event that
+    // does not fit. The ending notice holds it instead, which is what the
+    // client's writing thread reads rather than waiting on the queue.
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+
+    bus.publish(&Event::Restarting);
+
+    assert_eq!(
+        bus.ending_notice().raised(),
+        Some(SessionEnding::Restarting)
+    );
+    assert_eq!(bus.desynced(), vec![id]);
+    let taken = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(taken.len(), SUBSCRIBER_QUEUE_CAPACITY);
+    assert!(
+        taken
+            .iter()
+            .all(|delivery| *delivery
+                == Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab }))),
+        "the queue must hold its backlog and nothing else"
+    );
+}
+
+#[test]
+fn a_desynced_subscriber_is_told_the_session_is_restarting() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    // The client drains its backlog, so the queue has room again while the
+    // subscriber is still awaiting its snapshot.
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    bus.publish(&Event::Restarting);
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Restarting)]
+    );
+}
+
+#[test]
+fn a_desynced_subscriber_is_told_the_session_quit() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+
+    bus.publish(&Event::Quit);
+
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Quit)]
+    );
+}
+
+#[test]
+fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
+    let tab = TabId::new();
+    let mut bus = EventBus::new();
+    let (id, rx) = bus.subscribe(EventFilter::All);
+    fill_to_capacity(&mut bus, tab);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+
+    // The queue is still full, so the restart does not fit either: the count
+    // holds the event that desynced the subscriber plus this one.
+    bus.publish(&Event::Restarting);
+
+    assert_eq!(bus.desynced(), vec![id]);
+    assert_eq!(rx.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
+    let frame = snapshot();
+    assert!(bus.try_resync(id, frame.clone()));
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            snapshot: frame,
+            lagged: SubscriberLagged {
+                subscriber_id: id,
+                dropped_count: 2,
                 event_class: EventClass::Critical,
             },
         }]
@@ -893,6 +991,10 @@ fn every_structure_event_converts_to_its_wire_frame() {
     assert_eq!(
         wire_event(&Delivery::Event(Event::Quit)),
         Some(SessionEvent::Quit)
+    );
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::Restarting)),
+        Some(SessionEvent::Restarting)
     );
 }
 
