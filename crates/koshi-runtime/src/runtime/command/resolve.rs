@@ -16,6 +16,9 @@ impl Server {
     /// the acting client for a client-scoped command, then target resolution.
     /// Returns the first failure, or `Ok(())` when the command is well-formed
     /// against current state.
+    ///
+    /// [`Server::dispatch_reporting_spare`] is the only caller and runs this
+    /// before any handler, so every command crosses this gate.
     pub(super) fn validate(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
         // 1. CLI admission: a CLI source may only submit commands the CLI's
         //    own verbs build.

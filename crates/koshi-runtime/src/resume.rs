@@ -14,10 +14,11 @@
 //! does change, so
 //! [`ResumeHeader::format`] numbers it: [`RESUME_FORMAT`] is what this build
 //! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_body`] refuses
-//! anything outside that range.
+//! anything outside that range. The two formats differ in one key: format 1
+//! carries a `tier` key on every attached client, format 2 carries none.
 //!
 //! Example: a server holding two panes writes
-//! `{"header":{"format":1,…,"panes":[{"pane_id":…,"pid":51234,"rows":20,"cols":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit":null},…]},"body":{…}}`.
+//! `{"header":{"format":2,…,"panes":[{"pane_id":…,"pid":51234,"rows":20,"cols":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit":null},…]},"body":{…}}`.
 //! The next image reads the header, checks that descriptor 9 is still the
 //! master of `/dev/ttys009`, takes it and process 51234 back as that pane, then
 //! reads the body and puts the pane's screen back under it.
@@ -34,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 /// The resume-file format this build writes.
-pub const RESUME_FORMAT: u32 = 1;
+pub const RESUME_FORMAT: u32 = 2;
 
 /// The oldest resume-file format this build reads.
 pub const RESUME_FORMAT_MIN: u32 = 1;

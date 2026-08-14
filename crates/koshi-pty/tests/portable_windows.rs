@@ -15,7 +15,8 @@
 //! Microsoft's reference does not sanction — see the `koshi_pty::portable`
 //! module documentation. Nothing in this file answers the pseudoconsole's
 //! cursor-position query, which it waits on before letting its child print;
-//! the pane's reader answers it.
+//! `spawn` queues the answer as the pane opens, and the pane's reader takes
+//! the query itself out of the output.
 #![cfg(windows)]
 
 use std::collections::BTreeMap;
@@ -59,8 +60,8 @@ fn wait_exit(handle: &PtyHandle, timeout: Duration) -> Option<ExitStatus> {
 }
 
 /// The cursor-position query (DSR, `CSI 6 n`) the pseudoconsole sends before it
-/// lets its child print. The pane's reader answers it and removes it from the
-/// output.
+/// lets its child print. `spawn` queues the answer on the pane's input, and the
+/// pane's reader removes the query from the output.
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 /// Read the pane's output until `needle` appears or `timeout` runs out, and
@@ -93,9 +94,9 @@ fn read_until(handle: &PtyHandle, needle: &str, timeout: Duration) -> String {
 /// command can produce `42`. `exit 7` ends the child with 7, which arrives once
 /// the console is closed and the reader has read it out.
 ///
-/// Nothing here answers the pseudoconsole's cursor-position query; the pane's
-/// reader does. A pane whose query goes unanswered prints nothing, so the
-/// banner below fails first.
+/// Nothing here answers the pseudoconsole's cursor-position query; `spawn`
+/// queues the answer as the pane opens. A pane whose query goes unanswered
+/// prints nothing, so the banner below fails first.
 #[test]
 fn a_pane_takes_input_and_prints_the_child_output() {
     let backend = PortablePtyBackend::new();

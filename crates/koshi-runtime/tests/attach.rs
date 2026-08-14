@@ -42,7 +42,7 @@ use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
-use koshi_session::client::{pane_viewport, AuthorityTier, ClientOrigin};
+use koshi_session::client::{pane_viewport, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 /// The terminal size every attaching client in these tests reports.
@@ -402,7 +402,6 @@ fn one_attach_registers_the_client_the_server_minted() {
     assert_eq!(client.id(), client_id);
     assert_eq!(client.session_id(), session_id);
     assert_eq!(client.origin(), ClientOrigin::Local);
-    assert_eq!(client.tier(), AuthorityTier::Admin);
     assert_eq!(client.colour(), 0);
     assert_eq!(client.viewport(), VIEWPORT);
     assert_eq!(client.active_tab(), structure.tabs[0].id);
@@ -434,11 +433,13 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
 
         let reply: IpcResponse = viewer.recv().expect("attach reply");
         assert_eq!(reply.request_id, Some(2));
-        assert!(
-            matches!(reply.result, IpcResult::Attached { .. }),
-            "the attach was answered with {:?}",
-            reply.result
-        );
+        let IpcResult::Attached {
+            session_id: joined, ..
+        } = reply.result
+        else {
+            panic!("the attach was answered with {:?}", reply.result);
+        };
+        assert_eq!(joined, session_id, "the attach joined the session it named");
         (vec![viewer], session_id)
     });
 
@@ -453,11 +454,6 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
         client.origin(),
         ClientOrigin::Local,
         "the origin comes from the connection, not the request"
-    );
-    assert_eq!(
-        client.tier(),
-        AuthorityTier::Admin,
-        "the authority is the server's own answer for a local client"
     );
     assert_eq!(
         client.viewport(),

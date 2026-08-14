@@ -613,12 +613,66 @@ fn attached_response_round_trips() {
 }
 
 #[test]
+fn an_attach_envelope_carrying_an_authority_field_is_refused() {
+    // The envelope's own fields are fixed: an attach frame that adds one beside
+    // `request_id` and `kind` fails to decode.
+    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":4,"tier":"admin","kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+    );
+
+    // The same frame without the extra field decodes in
+    // `an_attach_naming_its_own_authority_carries_none_of_it` below, so the
+    // extra field is the only difference.
+    let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
+    assert_eq!(
+        error.to_string(),
+        "unknown field `tier`, expected `request_id` or `kind` at line 1 column 22"
+    );
+}
+
+#[test]
+fn an_attach_envelope_naming_where_it_connected_from_is_refused() {
+    // The server reads the origin off the connection. An attach frame that
+    // names one at the envelope level fails to decode.
+    let decoded: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":4,"origin":"Remote","kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+    );
+
+    let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
+    assert_eq!(
+        error.to_string(),
+        "unknown field `origin`, expected `request_id` or `kind` at line 1 column 24"
+    );
+}
+
+#[test]
+fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
+    // An `Attach` carrying an `origin` decodes, because a field inside the
+    // request kind is ignored. The decoded request holds exactly the viewport
+    // and filter, so the named origin reaches no code.
+    let with_origin: IpcRequest = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","origin":"Remote"}}}"#,
+    )
+    .expect("an attach carrying an extra field still decodes");
+
+    assert_eq!(
+        with_origin,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+                resume: None,
+            },
+        }
+    );
+}
+
+#[test]
 fn an_attach_naming_its_own_authority_carries_none_of_it() {
-    // A caller cannot say what it is allowed to do: the server decides that
-    // from the connection it arrived on. An `Attach` carrying a `tier` decodes,
-    // because a field this build does not know is ignored — and the decoded
-    // request holds exactly the viewport and filter, so the extra field reaches
-    // no code at all.
+    // An `Attach` carrying a field this build does not know decodes, because a
+    // field inside the request kind is ignored. The decoded request holds
+    // exactly the viewport and filter, so the extra field reaches no code.
     let with_tier: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","tier":"admin"}}}"#,
     )

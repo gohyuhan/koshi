@@ -374,6 +374,19 @@ fn one_session_listing(session_id: SessionId) -> String {
     )
 }
 
+/// The answer `koshi server-version --format json` gives when the only server
+/// this user reaches is one session another user started: no router of this
+/// user's own, and that session naming the build it runs.
+#[cfg(unix)]
+fn one_server_version_answer(session_id: SessionId, build: &str) -> String {
+    format!(
+        "[\n  {{\n    \"kind\": \"router\",\n    \"session\": null,\n    \
+         \"state\": \"not_running\"\n  }},\n  {{\n    \"kind\": \"session\",\n    \
+         \"session\": \"{}\",\n    \"state\": \"running\",\n    \"version\": \"{build}\"\n  }}\n]\n",
+        session_id.as_uuid()
+    )
+}
+
 /// A session another local user started shows up in this user's listing and
 /// takes this user's kill, while `allow-other-users` is on for both of them.
 #[cfg(unix)]
@@ -425,6 +438,21 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
     assert_eq!(
         String::from_utf8_lossy(&listed.stdout),
         one_session_listing(session_id)
+    );
+
+    // The version walk reaches the same session the listing did, so a session
+    // another user started names its build here too.
+    let versions = koshi_output(
+        koshi_under_as(&koshi, other_home.path(), uid, gid)
+            .arg("server-version")
+            .arg("--format")
+            .arg("json"),
+    );
+    assert_eq!(String::from_utf8_lossy(&versions.stderr), "");
+    assert_eq!(versions.status.code(), Some(CliExitCode::Success.code()));
+    assert_eq!(
+        String::from_utf8_lossy(&versions.stdout),
+        one_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
     );
 
     let killed = koshi_output(
@@ -538,6 +566,21 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     assert_eq!(
         String::from_utf8_lossy(&listed.stdout),
         one_session_listing(session_id)
+    );
+
+    // The version walk covers the same two places the listing does, so this
+    // user's own session earns one row here and not two.
+    let versions = koshi_output(
+        koshi_under(home.path())
+            .arg("server-version")
+            .arg("--format")
+            .arg("json"),
+    );
+    assert_eq!(String::from_utf8_lossy(&versions.stderr), "");
+    assert_eq!(versions.status.code(), Some(CliExitCode::Success.code()));
+    assert_eq!(
+        String::from_utf8_lossy(&versions.stdout),
+        one_server_version_answer(session_id, env!("CARGO_PKG_VERSION"))
     );
 }
 

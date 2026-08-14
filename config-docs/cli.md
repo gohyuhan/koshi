@@ -184,6 +184,51 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
 
+## Versions
+
+| Command | Result |
+|---|---|
+| `koshi version [--format table\|json]` | Print the build of the koshi program you just ran |
+| `koshi server-version [--session <NAME_OR_ID>] [--format table\|json]` | Print the build each running koshi server runs |
+
+`koshi version` prints the same line as `koshi --version`.
+
+```text
+koshi version
+koshi 0.2.0
+```
+
+These two answers differ while an update rolls out. `koshi update` installs a
+new binary, the router restarts into it, and each session server replaces its
+own image one at a time. Until every swap lands, the program your shell runs is
+a newer build than the process answering it:
+
+```text
+koshi server-version
+kind     session                                       version
+router   -                                             0.2.0
+session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.2.0
+session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.1.0
+```
+
+The version column reads:
+
+| Cell | Meaning |
+|---|---|
+| a build, like `0.2.0` | The server answered and named it |
+| `unknown` | The server answered and is too old to name its build |
+| `not running` | Nothing is listening there |
+| `unreachable` | The server could not be asked; the reason prints on standard error |
+
+A server that could not be asked does not sink the rest of the answer: the
+other rows still print, and the command exits 4 so a script reading only the
+rows never takes a partial answer for the whole picture. Everything answering
+exits 0, including a machine running nothing at all.
+
+`--session` reports that one session and leaves out the router. It takes the
+session id or its exact generated name. A name must match exactly one running
+session.
+
 ## Debugging
 
 | Command | Result |

@@ -1,6 +1,6 @@
 //! Client and ClientRegistry unit tests.
 //!
-//! Tests verify the server-set identity (origin, tier, label, colour), client
+//! Tests verify the server-set identity (origin, label, colour), client
 //! state tracking (focus, viewport, lock mode, zoom, scrollback view,
 //! highlights) and registry operations (attach, detach, lookup, mutation).
 
@@ -12,7 +12,7 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use super::{pane_viewport, AuthorityTier, Client, ClientOrigin, ClientRegistry};
+use super::{pane_viewport, Client, ClientOrigin, ClientRegistry};
 
 /// Creates a test client with the given ID and active tab.
 fn a_client_with(id: ClientId, active_tab: TabId) -> Client {
@@ -34,23 +34,66 @@ fn a_client(active_tab: TabId) -> Client {
 }
 
 #[test]
-fn a_local_client_is_admin_and_keeps_its_label_and_colour() {
-    let client = Client::new(
-        ClientId::new(),
-        SessionId::new(),
-        SystemTime::UNIX_EPOCH,
-        Size { cols: 80, rows: 24 },
-        TabId::new(),
-        ClientOrigin::Local,
-        "C-swift-otter".to_string(),
-        3,
-    );
+fn a_client_keeps_the_origin_label_and_colour_it_was_made_with() {
+    for origin in [ClientOrigin::Local, ClientOrigin::Remote] {
+        let client = Client::new(
+            ClientId::new(),
+            SessionId::new(),
+            SystemTime::UNIX_EPOCH,
+            Size { cols: 80, rows: 24 },
+            TabId::new(),
+            origin,
+            "C-swift-otter".to_string(),
+            3,
+        );
 
-    // The tier comes from the origin alone — no caller ever passes one in.
-    assert_eq!(client.origin(), ClientOrigin::Local);
-    assert_eq!(client.tier(), AuthorityTier::Admin);
-    assert_eq!(client.label(), "C-swift-otter");
-    assert_eq!(client.colour(), 3);
+        assert_eq!(client.origin(), origin);
+        assert_eq!(client.label(), "C-swift-otter");
+        assert_eq!(client.colour(), 3);
+    }
+}
+
+#[test]
+fn a_client_carries_where_it_connected_from_across_a_serde_round_trip() {
+    for (origin, written) in [
+        (ClientOrigin::Local, "Local"),
+        (ClientOrigin::Remote, "Remote"),
+    ] {
+        let id = ClientId::new();
+        let session_id = SessionId::new();
+        let active_tab = TabId::new();
+        let client = Client::new(
+            id,
+            session_id,
+            SystemTime::UNIX_EPOCH,
+            Size { cols: 80, rows: 24 },
+            active_tab,
+            origin,
+            "C-swift-otter".to_string(),
+            3,
+        );
+
+        let text = serde_json::to_string(&client).expect("the client encodes");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&text).expect("the encoded client is json");
+        assert_eq!(
+            encoded["origin"],
+            serde_json::Value::String(written.to_string())
+        );
+        assert_eq!(
+            encoded.get("tier"),
+            None,
+            "a client record carries no authority key"
+        );
+
+        let read_back: Client = serde_json::from_str(&text).expect("the client decodes");
+        assert_eq!(read_back.id(), id);
+        assert_eq!(read_back.session_id(), session_id);
+        assert_eq!(read_back.origin(), origin);
+        assert_eq!(read_back.label(), "C-swift-otter");
+        assert_eq!(read_back.colour(), 3);
+        assert_eq!(read_back.active_tab(), active_tab);
+    }
 }
 
 #[test]

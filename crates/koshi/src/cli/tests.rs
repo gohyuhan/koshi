@@ -802,10 +802,12 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "serve-pty-supervisor",
         "serve-router",
         "serve-session",
+        "server-version",
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",
         "update",
+        "version",
     ]
     .map(String::from)
     .to_vec();
@@ -2231,5 +2233,73 @@ fn move_tab_and_focus_tab_carry_their_tab_id_into_the_command() {
                 client: None,
             })
         ))
+    );
+}
+
+#[test]
+fn the_version_verbs_parse() {
+    assert_eq!(
+        parse(&["koshi", "version"]).command,
+        Some(CliCommand::Version {
+            format: FormatArg::Table,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "version", "--format", "json"]).command,
+        Some(CliCommand::Version {
+            format: FormatArg::Json,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "server-version"]).command,
+        Some(CliCommand::ServerVersion {
+            session: None,
+            format: FormatArg::Table,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "server-version", "--format", "json"]).command,
+        Some(CliCommand::ServerVersion {
+            session: None,
+            format: FormatArg::Json,
+        })
+    );
+}
+
+#[test]
+fn server_version_takes_a_session_by_name_or_by_id() {
+    let session = SessionId::new();
+    assert_eq!(
+        parse(&["koshi", "server-version", "--session", "work"]).command,
+        Some(CliCommand::ServerVersion {
+            session: Some(SessionRef::Name("work".to_string())),
+            format: FormatArg::Table,
+        })
+    );
+    assert_eq!(
+        parse(&["koshi", "server-version", "--session", &session.to_string()]).command,
+        Some(CliCommand::ServerVersion {
+            session: Some(SessionRef::Id(session)),
+            format: FormatArg::Table,
+        })
+    );
+}
+
+#[test]
+fn server_version_rejects_an_unknown_format() {
+    let err = parse_err(&["koshi", "server-version", "--format", "yaml"]);
+    assert_eq!(err.kind(), ErrorKind::InvalidValue);
+}
+
+#[test]
+fn neither_version_verb_is_an_action_the_socket_serves() {
+    assert_eq!(
+        command(&["koshi", "version"]).to_action(&ResolvedTargets::default(), Direction::Right),
+        None
+    );
+    assert_eq!(
+        command(&["koshi", "server-version"])
+            .to_action(&ResolvedTargets::default(), Direction::Right),
+        None
     );
 }

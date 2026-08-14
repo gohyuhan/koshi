@@ -169,7 +169,10 @@ pub enum FormatArg {
 /// answers are rendered by [`crate::output`]. `actions` introspects the action
 /// registry through its `list`/`explain` subcommands, and `keys` introspects
 /// the keymap through its own subcommand tree. `config` validates and migrates
-/// files locally. `plugin` remains bare until its argument surface is built.
+/// files locally. `version` prints this program's own build, and
+/// `server-version` asks each running koshi server for the build it runs;
+/// both carry `--format` and render through [`crate::output`]. `plugin`
+/// remains bare until its argument surface is built.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// List running sessions.
@@ -380,6 +383,23 @@ pub enum CliCommand {
     Plugin,
     /// Download and install the latest koshi release.
     Update,
+    /// Print the version of the koshi program running this command.
+    Version {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Print the version of every running koshi server: this machine's
+    /// router, and each running session.
+    ServerVersion {
+        /// Report this session alone, by id or name, and leave out the
+        /// router.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// Introspect the action registry.
     Actions {
         /// What to introspect.
@@ -883,6 +903,8 @@ impl CliCommand {
             | CliCommand::Debug { .. }
             | CliCommand::Plugin
             | CliCommand::Update
+            | CliCommand::Version { .. }
+            | CliCommand::ServerVersion { .. }
             | CliCommand::Actions { .. }
             | CliCommand::Inspect { .. }
             | CliCommand::ListTabs { .. }

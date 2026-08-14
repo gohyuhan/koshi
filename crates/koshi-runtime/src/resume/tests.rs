@@ -1,8 +1,9 @@
 //! Tests for the state a session server carries across a process-image swap:
 //! a populated server drained into a resume file and rebuilt from it, what the
 //! drain leaves behind, a sequence the swap cut in half finishing in the next
-//! image, what the header still yields when the body cannot be read, and what a
-//! body format this build does not know is answered with.
+//! image, what the header still yields when the body cannot be read, what a
+//! body format this build does not know is answered with, and what a body
+//! written in the older client format reads back as.
 
 use std::path::Path;
 use std::sync::{mpsc, Arc};
@@ -17,6 +18,7 @@ use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pty::backend::state::{PtyBackend, PtyHandle};
 use koshi_pty::portable::CarriedPtyPane;
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_terminal::grid::state::Cell;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use tempfile::TempDir;
@@ -997,4 +999,141 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
         ),
         other => panic!("expected a corrupt header, got {other:?}"),
     }
+}
+
+#[test]
+fn a_carried_session_with_its_client_comes_back_whole() {
+    // The body carries every attached client: a record written by this build
+    // reads back with the identity it went out with, wherever it connected
+    // from.
+    for (origin, written_origin) in [
+        (ClientOrigin::Local, "Local"),
+        (ClientOrigin::Remote, "Remote"),
+    ] {
+        let dir = TempDir::new().expect("create temp dir");
+        let path = dir.path().join("client.resume");
+        let session_id = SessionId::new();
+        let client_id = ClientId::new();
+        let tab_id = TabId::new();
+        let mut session = Session::new(
+            session_id,
+            "carried".to_string(),
+            SystemTime::UNIX_EPOCH,
+            ClientRegistry::new(),
+        );
+        session.attach_client(Client::new(
+            client_id,
+            session_id,
+            SystemTime::UNIX_EPOCH,
+            VIEWPORT,
+            tab_id,
+            origin,
+            "C-swift-otter".to_string(),
+            3,
+        ));
+        let header = ResumeHeader {
+            format: RESUME_FORMAT,
+            session_id,
+            session_name: "carried".to_string(),
+            panes: Vec::new(),
+        };
+        let body = ResumeBody {
+            sessions: HashMap::from([(session_id, session)]),
+            engines: HashMap::new(),
+            undecoded: HashMap::new(),
+            quit: None,
+        };
+        write(&path, &header, &body).expect("write the resume file");
+
+        let (read_back, raw_body) = read_header(&path).expect("read the header back");
+
+        // Format 2 writes the origin and no authority key. The header's format
+        // number and the client record's shape move together.
+        let encoded: serde_json::Value =
+            serde_json::from_str(raw_body.get()).expect("the body is json");
+        let record = &encoded["sessions"][session_id.as_uuid().to_string()]["clients"]["records"]
+            [client_id.as_uuid().to_string()];
+        assert_eq!(
+            record["origin"],
+            serde_json::Value::String(written_origin.to_string())
+        );
+        assert_eq!(
+            record.get("tier"),
+            None,
+            "format {RESUME_FORMAT} writes no authority key"
+        );
+
+        let read_body = read_body(read_back.format, &raw_body).expect("read the body back");
+
+        assert_eq!(read_back.format, RESUME_FORMAT);
+        assert_eq!(RESUME_FORMAT, 2);
+        let carried = &read_body.sessions[&session_id];
+        assert_eq!(carried.id, session_id);
+        let client = carried.clients.get(client_id).expect("the carried client");
+        assert_eq!(client.id(), client_id);
+        assert_eq!(client.origin(), origin);
+        assert_eq!(client.label(), "C-swift-otter");
+        assert_eq!(client.colour(), 3);
+        assert_eq!(client.active_tab(), tab_id);
+    }
+}
+
+#[test]
+fn a_carried_file_written_before_this_change_still_reads() {
+    // A format 1 body carries a `tier` key on every client. This build reads
+    // that body and takes the client back with the identity it names.
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let mut clients = serde_json::Map::new();
+    clients.insert(
+        client_id.as_uuid().to_string(),
+        serde_json::json!({
+            "id": client_id,
+            "session_id": session_id,
+            "attached_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "viewport": { "cols": 80, "rows": 24 },
+            "active_tab": tab_id,
+            "origin": "Local",
+            "label": "C-swift-otter",
+            "colour": 3,
+            "tier": "Admin",
+            "focus_by_tab": {},
+            "lock_mode": "Normal",
+            "mouse_select": false,
+            "scroll_by_pane": {},
+            "selection_by_pane": {},
+            "zoom_by_tab": {},
+        }),
+    );
+    let mut sessions = serde_json::Map::new();
+    sessions.insert(
+        session_id.as_uuid().to_string(),
+        serde_json::json!({
+            "id": session_id,
+            "name": "carried",
+            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "tabs": {},
+            "panes": { "records": {} },
+            "clients": { "records": clients },
+            "config_snapshot": null,
+            "lifecycle": "Starting",
+        }),
+    );
+    let written = serde_json::json!({ "sessions": sessions, "engines": {} });
+    let raw = serde_json::value::RawValue::from_string(written.to_string())
+        .expect("the body is one json value");
+
+    assert_eq!(RESUME_FORMAT_MIN, 1);
+    let body = read_body(1, &raw).expect("a body written before this change reads back");
+
+    let carried = &body.sessions[&session_id];
+    assert_eq!(carried.id, session_id);
+    let client = carried.clients.get(client_id).expect("the carried client");
+    assert_eq!(client.id(), client_id);
+    assert_eq!(client.origin(), ClientOrigin::Local);
+    assert_eq!(client.label(), "C-swift-otter");
+    assert_eq!(client.colour(), 3);
+    assert_eq!(client.active_tab(), tab_id);
+    assert_eq!(client.viewport(), Size { cols: 80, rows: 24 });
 }

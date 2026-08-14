@@ -20,7 +20,7 @@ impl Server {
     /// when the session still holds it, the tab it was viewing still exists,
     /// and no connection is streaming for it: the arriving viewport replaces
     /// the record's, and its per-tab focus, zoom, scrollback offsets,
-    /// selections, lock mode, label, colour and tier all stay. Everything else
+    /// selections, lock mode, label and colour all stay. Everything else
     /// — no `resume`, an id the session does not hold, an id whose tab is gone,
     /// an id a connection is already streaming for — mints a fresh client on
     /// the session's first tab, so an attach never fails over `resume`.
@@ -83,10 +83,10 @@ impl Server {
     /// is never recorded twice. Within the target session an id that is already
     /// attached is a re-attach: its view updates in place, keeping its per-tab
     /// focus, scrollback offsets, and lock mode, and the tab it moves off of
-    /// reflows too. A fresh id is registered anew, carrying
-    /// [`ClientOrigin::Local`], a generated `C-<adjective>-<noun>` label that
-    /// no client in the session already holds, and the lowest palette index no
-    /// attached client is painted in.
+    /// reflows too. A fresh id is registered anew as [`ClientOrigin::Local`],
+    /// with a generated `C-<adjective>-<noun>` label that no client in the
+    /// session already holds, and the lowest palette index no attached client
+    /// is painted in.
     ///
     /// The viewer joins each affected tab's effective size
     /// ([`Session::tab_viewport`], the per-axis minimum across every client
