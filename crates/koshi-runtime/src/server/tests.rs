@@ -16,7 +16,7 @@ use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_renderer::snapshot::Delivery;
-use koshi_session::client::{AuthorityTier, ClientOrigin, ClientRegistry};
+use koshi_session::client::{ClientOrigin, ClientRegistry};
 use koshi_session::session::state::Tab;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -160,7 +160,7 @@ fn a_fresh_server_has_no_draining_or_quit_flags_set() {
 }
 
 #[test]
-fn every_attached_client_is_a_local_admin_with_its_own_generated_label() {
+fn every_attached_client_is_local_with_its_own_generated_label() {
     let (mut server, first) = booted_server();
     let session_id = *server.sessions().keys().next().expect("session");
     let active_tab = server.sessions()[&session_id]
@@ -178,9 +178,7 @@ fn every_attached_client_is_a_local_admin_with_its_own_generated_label() {
     let attached = clients.get(second).expect("attached client");
 
     assert_eq!(bootstrapped.origin(), ClientOrigin::Local);
-    assert_eq!(bootstrapped.tier(), AuthorityTier::Admin);
     assert_eq!(attached.origin(), ClientOrigin::Local);
-    assert_eq!(attached.tier(), AuthorityTier::Admin);
 
     // Both labels are generated as `C-<adjective>-<noun>`, and the attaching
     // client never takes the label the bootstrapped one already holds.

@@ -9,7 +9,7 @@ use koshi_core::lock::LockMode;
 use koshi_layout::tree::{LayoutChild, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{AuthorityTier, ClientOrigin};
+use crate::client::ClientOrigin;
 
 /// Attach a client viewing `tab` with the given viewport.
 fn viewer(session: &mut Session, tab: TabId, cols: u16, rows: u16) {
@@ -437,7 +437,6 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(recovered_first.session_id(), session.id);
     assert_eq!(recovered_first.attached_at(), SystemTime::UNIX_EPOCH);
     assert_eq!(recovered_first.origin(), ClientOrigin::Local);
-    assert_eq!(recovered_first.tier(), AuthorityTier::Admin);
     assert_eq!(recovered_first.label(), "C-brave-otter");
     assert_eq!(recovered_first.colour(), 3);
     assert_eq!(

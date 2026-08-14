@@ -7,16 +7,16 @@
 //! pane defaulting, and `InvalidState` session admission — build sessions with
 //! the helpers below and install them into the runtime's `sessions` map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, CopyTarget, EnablePluginArgs,
-    FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs,
-    PluginCommand, ResizePaneArgs, RunCommandPaneArgs, Selection, SelectionKind, TabTarget,
-    VisualCommand, WriteToPaneArgs,
+    ClosePaneArgs, CloseTabArgs, CommandKind, CommandSource, CopyArgs, CopyTarget,
+    EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveTabArgs, NewPaneArgs,
+    NewTabArgs, PluginCommand, ResizePaneArgs, RunCommandPaneArgs, Selection, SelectionKind,
+    TabTarget, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, Size, SplitDirection};
@@ -172,15 +172,22 @@ fn add_tab(session: &mut Session, tab_id: TabId, root_pane: PaneId) {
         .insert(tab_id, Tab::new(tab_id, "t".to_string(), index, root_pane));
 }
 
-/// Attach a client viewing `tab`, optionally with `focused` recorded there.
-fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: Option<PaneId>) {
+/// Attach a client viewing `tab` that connected from `origin`, optionally with
+/// `focused` recorded there.
+fn add_client_with_origin(
+    session: &mut Session,
+    client_id: ClientId,
+    tab: TabId,
+    focused: Option<PaneId>,
+    origin: ClientOrigin,
+) {
     let mut client = Client::new(
         client_id,
         session.id,
         SystemTime::now(),
         Size { cols: 80, rows: 24 },
         tab,
-        ClientOrigin::Local,
+        origin,
         "C-test-client".to_string(),
         0,
     );
@@ -188,6 +195,12 @@ fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: O
         client.update_focused_pane(tab, pane);
     }
     session.attach_client(client);
+}
+
+/// Attach a client with [`ClientOrigin::Local`] viewing `tab`, optionally with
+/// `focused` recorded there.
+fn add_client(session: &mut Session, client_id: ClientId, tab: TabId, focused: Option<PaneId>) {
+    add_client_with_origin(session, client_id, tab, focused, ClientOrigin::Local);
 }
 
 /// Poll the fake backend until `pane` records a kill, then return the history.
@@ -294,6 +307,454 @@ fn client_source_with_no_attached_client_is_stale() {
             reason: RejectReason::SourceClientStale,
             help: None,
         }
+    );
+}
+
+/// A runtime holding one session with two tabs, one pane each, and one attached
+/// client that connected from `origin` and views the first tab's pane. Every
+/// command kind has a real target here. The sender keeps the inbox open.
+fn matrix_runtime(
+    origin: ClientOrigin,
+) -> (Server, mpsc::Sender<RuntimeEvent>, ClientId, TabId, PaneId) {
+    let (mut rt, tx) = new_runtime();
+    let client_id = ClientId::new();
+    let first_tab = TabId::new();
+    let first_pane = PaneId::new();
+    let second_tab = TabId::new();
+    let second_pane = PaneId::new();
+
+    let mut session = bare_session(SessionId::new());
+    add_pane(&mut session, first_pane);
+    add_tab(&mut session, first_tab, first_pane);
+    add_pane(&mut session, second_pane);
+    add_tab(&mut session, second_tab, second_pane);
+    add_client_with_origin(&mut session, client_id, first_tab, Some(first_pane), origin);
+    rt.sessions.insert(session.id, session);
+
+    (rt, tx, client_id, first_tab, first_pane)
+}
+
+/// Every command kind this build has, one entry each. [`command_for`] matches
+/// over the enum, so a new variant stops the build there.
+const EVERY_COMMAND_KIND: [CommandKind; 20] = [
+    CommandKind::NewPane,
+    CommandKind::ClosePane,
+    CommandKind::ResizePane,
+    CommandKind::FocusPane,
+    CommandKind::NewTab,
+    CommandKind::CloseTab,
+    CommandKind::FocusTab,
+    CommandKind::WriteToPane,
+    CommandKind::ToggleLockMode,
+    CommandKind::SetLockMode,
+    CommandKind::ToggleMouseSelect,
+    CommandKind::RunCommandPane,
+    CommandKind::Visual,
+    CommandKind::Plugin,
+    CommandKind::TogglePaneFullscreen,
+    CommandKind::MoveTab,
+    CommandKind::Quit,
+    CommandKind::Detach,
+    CommandKind::DetachAll,
+    CommandKind::SwitchSession,
+];
+
+/// One command of `kind`, aimed at `tab` and `pane` — the tab and pane the
+/// acting client of [`matrix_runtime`] views. `SwitchSession` names a session
+/// id no runtime holds, so it resolves the same way on every runtime.
+fn command_for(kind: CommandKind, tab: TabId, pane: PaneId) -> Command {
+    match kind {
+        CommandKind::NewPane => Command::NewPane(new_pane_args()),
+        CommandKind::ClosePane => Command::ClosePane(ClosePaneArgs {
+            pane: Some(pane),
+            force: true,
+            tree: false,
+        }),
+        CommandKind::ResizePane => Command::ResizePane(ResizePaneArgs {
+            pane: Some(pane),
+            direction: Direction::Left,
+            size: 5,
+        }),
+        CommandKind::FocusPane => Command::FocusPane(FocusPaneArgs {
+            target: FocusTarget::Pane(pane),
+            client: None,
+        }),
+        CommandKind::NewTab => Command::NewTab(NewTabArgs::default()),
+        CommandKind::CloseTab => Command::CloseTab(CloseTabArgs {
+            tab: Some(tab),
+            force: true,
+            tree: false,
+        }),
+        CommandKind::FocusTab => Command::FocusTab(FocusTabArgs {
+            target: TabTarget::Next,
+            client: None,
+        }),
+        CommandKind::WriteToPane => Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane),
+            data: vec![b'x'],
+        }),
+        CommandKind::ToggleLockMode => Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        CommandKind::SetLockMode => Command::SetLockMode(LockModeArgs {
+            locked: true,
+            client: None,
+        }),
+        CommandKind::ToggleMouseSelect => Command::ToggleMouseSelect,
+        CommandKind::RunCommandPane => Command::RunCommandPane(RunCommandPaneArgs {
+            command: spawn_spec(),
+            cwd: None,
+            source: Some(pane),
+            tab: Some(tab),
+            direction: Direction::Right,
+            stacked: false,
+            client: None,
+        }),
+        CommandKind::Visual => {
+            Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs { pane }))
+        }
+        CommandKind::Plugin => Command::Plugin(PluginCommand::Enable(EnablePluginArgs {
+            plugin: PluginId::new(),
+        })),
+        CommandKind::TogglePaneFullscreen => Command::TogglePaneFullscreen,
+        CommandKind::MoveTab => Command::MoveTab(MoveTabArgs {
+            tab: Some(tab),
+            index: 1,
+        }),
+        CommandKind::Quit => Command::Quit,
+        CommandKind::Detach => Command::Detach(DetachArgs { client: None }),
+        CommandKind::DetachAll => Command::DetachAll,
+        CommandKind::SwitchSession => Command::SwitchSession(SwitchSessionArgs {
+            client: None,
+            session: SessionId::new(),
+        }),
+    }
+}
+
+/// What a dispatch answered, with everything that differs between two runtimes
+/// taken out: the names of the emitted events in order when it applied, or the
+/// reason and help text when it was refused.
+fn outcome_of(result: &CommandResult) -> Result<Vec<&'static str>, (RejectReason, Option<&str>)> {
+    match result {
+        CommandResult::Ok { emitted_events, .. } => {
+            Ok(emitted_events.iter().map(Event::name).collect())
+        }
+        CommandResult::Rejected { reason, help, .. } => Err((*reason, help.as_deref())),
+    }
+}
+
+/// Every session the runtime holds, in session-id order, encoded as one json
+/// text. Comparing two of these compares the whole of the runtime's session
+/// state — every tab, pane, client and lifecycle field — not a chosen few.
+fn all_session_state(rt: &Server) -> String {
+    let mut ordered: Vec<(SessionId, &Session)> = rt
+        .sessions
+        .iter()
+        .map(|(session_id, session)| (*session_id, session))
+        .collect();
+    ordered.sort_by_key(|(session_id, _)| *session_id);
+    serde_json::to_string(&ordered).expect("the sessions encode")
+}
+
+/// A runtime holding two sessions, each with one tab, one pane and one attached
+/// local client. Returns the runtime, the first session's client, tab and pane,
+/// and the second session's client. The sender keeps the inbox open.
+fn two_session_runtime() -> (
+    Server,
+    mpsc::Sender<RuntimeEvent>,
+    ClientId,
+    TabId,
+    PaneId,
+    ClientId,
+) {
+    let (mut rt, tx) = new_runtime();
+    let first_client = ClientId::new();
+    let first_tab = TabId::new();
+    let first_pane = PaneId::new();
+    let mut first = bare_session(SessionId::new());
+    add_pane(&mut first, first_pane);
+    add_tab(&mut first, first_tab, first_pane);
+    add_client(&mut first, first_client, first_tab, Some(first_pane));
+    rt.sessions.insert(first.id, first);
+
+    let second_client = ClientId::new();
+    let second_tab = TabId::new();
+    let second_pane = PaneId::new();
+    let mut second = bare_session(SessionId::new());
+    add_pane(&mut second, second_pane);
+    add_tab(&mut second, second_tab, second_pane);
+    add_client(&mut second, second_client, second_tab, Some(second_pane));
+    rt.sessions.insert(second.id, second);
+
+    (rt, tx, first_client, first_tab, first_pane, second_client)
+}
+
+#[test]
+fn a_refused_command_leaves_every_session_byte_for_byte_the_same() {
+    let (mut rt, _tx, _client_id, _tab, pane) = matrix_runtime(ClientOrigin::Local);
+    let before = all_session_state(&rt);
+
+    // A close aimed at a real pane, from a client the session does not hold.
+    // Every session encodes the same before and after, so no part of the
+    // handler ran on the pane the close named.
+    let env = envelope_from(
+        CommandSource::key_binding(ClientId::new()),
+        Command::ClosePane(ClosePaneArgs {
+            pane: Some(pane),
+            force: true,
+            tree: false,
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        }
+    );
+    assert_eq!(
+        all_session_state(&rt),
+        before,
+        "a refused command changed a session"
+    );
+}
+
+#[test]
+fn a_command_from_a_client_id_no_session_holds_is_refused_and_changes_nothing() {
+    let (mut rt, _tx, _client_id, _tab, pane) = matrix_runtime(ClientOrigin::Local);
+    let before = all_session_state(&rt);
+
+    // The id belongs to no client anywhere, so there is no session to act in.
+    let env = envelope_from(
+        CommandSource::key_binding(ClientId::new()),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane),
+            data: vec![b'x'],
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        }
+    );
+    assert_eq!(
+        RejectReason::SourceClientStale.to_string(),
+        "source client has detached"
+    );
+    assert_eq!(
+        all_session_state(&rt),
+        before,
+        "a refused command changed a session"
+    );
+}
+
+#[test]
+fn a_command_from_a_client_that_has_detached_is_refused_and_changes_nothing() {
+    let (mut rt, _tx, client_id, _tab, pane) = matrix_runtime(ClientOrigin::Local);
+    let session_id = *rt.sessions.keys().next().expect("the session");
+    let detached = rt
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .detach_client(client_id)
+        .expect("the client was attached");
+    assert_eq!(detached.id(), client_id);
+    let before = all_session_state(&rt);
+
+    // The id was attached a moment ago; the session no longer holds it.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane: Some(pane),
+            data: vec![b'x'],
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        }
+    );
+    assert_eq!(
+        RejectReason::SourceClientStale.to_string(),
+        "source client has detached"
+    );
+    assert_eq!(
+        all_session_state(&rt),
+        before,
+        "a refused command changed a session"
+    );
+}
+
+#[test]
+fn a_command_naming_a_client_of_another_session_is_refused_and_changes_nothing() {
+    let (mut rt, _tx, first_client, _tab, _pane, second_client) = two_session_runtime();
+    let before = all_session_state(&rt);
+
+    // The detach names a real, attached client — of the other session. The
+    // acting session is the issuer's, and that client is not in it.
+    let env = envelope_from(
+        CommandSource::key_binding(first_client),
+        Command::Detach(DetachArgs {
+            client: Some(second_client),
+        }),
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    assert_eq!(
+        RejectReason::TargetNotFound.to_string(),
+        "no target matched"
+    );
+    assert_eq!(
+        all_session_state(&rt),
+        before,
+        "a refused command changed a session"
+    );
+}
+
+#[test]
+fn a_client_that_connected_from_another_machine_is_admitted_like_a_local_one() {
+    let (mut rt, _tx, client_id, _tab, _pane) = matrix_runtime(ClientOrigin::Remote);
+    let session_id = *rt.sessions.keys().next().expect("the session");
+
+    // Where the client connected from decides nothing about admission: its
+    // command reaches the handler and changes its own state.
+    let env = envelope_from(
+        CommandSource::key_binding(client_id),
+        Command::ToggleMouseSelect,
+    );
+    let command_id = env.id;
+
+    assert_eq!(
+        rt.dispatch(env),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::MouseSelectChanged(MouseSelectChanged {
+                client_id,
+                on: true,
+            })],
+        }
+    );
+
+    let client = rt.sessions[&session_id]
+        .clients
+        .get(client_id)
+        .expect("client");
+    assert!(client.mouse_select(), "the toggle turned mouse-select on");
+    assert_eq!(client.origin(), ClientOrigin::Remote);
+}
+
+/// Where every client still attached to the runtime's single session connected
+/// from, in client-id order.
+fn attached_origins(rt: &Server) -> Vec<ClientOrigin> {
+    let session_id = *rt.sessions.keys().next().expect("the session");
+    rt.sessions[&session_id]
+        .clients
+        .list_attached()
+        .map(Client::origin)
+        .collect()
+}
+
+#[test]
+fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
+    let mut listed = HashSet::new();
+    let mut applied = Vec::new();
+
+    for kind in EVERY_COMMAND_KIND {
+        assert!(listed.insert(kind), "{kind:?} is listed twice");
+
+        // One fresh runtime per side, so a command that mutates cannot leak
+        // into the next kind or across the two sides.
+        let (mut local_rt, _local_tx, local_client, local_tab, local_pane) =
+            matrix_runtime(ClientOrigin::Local);
+        let local_command = command_for(kind, local_tab, local_pane);
+        assert_eq!(
+            local_command.kind(),
+            kind,
+            "the listed kind and the command built for it disagree"
+        );
+        let local = local_rt.dispatch(envelope_from(
+            CommandSource::key_binding(local_client),
+            local_command,
+        ));
+
+        let (mut remote_rt, _remote_tx, remote_client, remote_tab, remote_pane) =
+            matrix_runtime(ClientOrigin::Remote);
+        let remote = remote_rt.dispatch(envelope_from(
+            CommandSource::key_binding(remote_client),
+            command_for(kind, remote_tab, remote_pane),
+        ));
+
+        // The whole answer, not only whether it was refused: a refusal matches
+        // reason and help text, and a success matches the emitted events one
+        // for one, in order.
+        let local_outcome = outcome_of(&local);
+        assert_eq!(
+            outcome_of(&remote),
+            local_outcome,
+            "{kind:?} answered a remote client differently from a local one"
+        );
+
+        // The same clients are left attached on both sides, and each remote one
+        // still reads back as remote: dispatch never writes the origin.
+        assert_eq!(
+            attached_origins(&remote_rt),
+            attached_origins(&local_rt)
+                .into_iter()
+                .map(|_| ClientOrigin::Remote)
+                .collect::<Vec<ClientOrigin>>(),
+            "{kind:?} left a different set of clients attached on the remote side"
+        );
+
+        if local_outcome.is_ok() {
+            applied.push(kind);
+        }
+    }
+
+    // The kinds that reach their handler on this fixture, so the comparison
+    // above is not two matching refusals every time. The four missing ones are
+    // refused by what the fixture holds, identically on both sides: a resize
+    // has no border to move in a single-pane tab, a write has no running child
+    // to take the bytes, a plugin command has no handler yet, and the switch
+    // has no connected viewer to send the move over.
+    assert_eq!(
+        applied,
+        vec![
+            CommandKind::NewPane,
+            CommandKind::ClosePane,
+            CommandKind::FocusPane,
+            CommandKind::NewTab,
+            CommandKind::CloseTab,
+            CommandKind::FocusTab,
+            CommandKind::ToggleLockMode,
+            CommandKind::SetLockMode,
+            CommandKind::ToggleMouseSelect,
+            CommandKind::RunCommandPane,
+            CommandKind::Visual,
+            CommandKind::TogglePaneFullscreen,
+            CommandKind::MoveTab,
+            CommandKind::Quit,
+            CommandKind::Detach,
+            CommandKind::DetachAll,
+        ]
     );
 }
 

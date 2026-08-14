@@ -66,8 +66,12 @@ pub mod targeting;
 pub mod keymap;
 
 /// Table and JSON rendering for discovery query answers, action-registry
-/// introspection, keymap introspection, and the `debug` dumps.
+/// introspection, keymap introspection, the `debug` dumps, and the version
+/// answers.
 pub mod output;
 
 /// Self-update: check GitHub for a newer koshi release and install it.
 pub mod updater;
+
+/// Which koshi build is running: this program, and each koshi server.
+pub mod version;

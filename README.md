@@ -362,10 +362,12 @@ session id.
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a keybinding file without applying it |
 
-### Updating
+### Versions and updating
 
 | Command | Result |
 |---|---|
+| `koshi version [--format table\|json]` | Print the build of the koshi program you just ran |
+| `koshi server-version [--session <NAME_OR_ID>] [--format table\|json]` | Print the build each running koshi server runs |
 | `koshi update` | Check for and install a newer release |
 
 Each running session that can restarts into the new release, and then the
@@ -373,6 +375,9 @@ background process that tracks sessions does. A session keeps its panes, the
 programs running in them and their scrollback, and an attached terminal rejoins
 on its own. A session that refuses the restart is named on standard error and
 keeps the old build.
+
+`koshi server-version` is how you see that: one row per running server, so a
+session still on the old build shows beside the ones that moved.
 
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 

@@ -266,8 +266,9 @@ const PANE_SIZE: koshi_core::process::PtySize = koshi_core::process::PtySize { c
 /// The cursor-position query (DSR, `CSI 6 n`) a pane's terminal asks.
 ///
 /// A Windows pseudoconsole asks one as the pane starts and hands over nothing
-/// its child printed until the answer reaches it. The pane's reader answers it
-/// and removes it from the output, so none reaches the link.
+/// its child printed until the answer reaches it. The supervisor's backend
+/// queues the answer as the pane opens, and the pane's reader removes the query
+/// from the output, so none reaches the link.
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 /// The line the pane opened by
@@ -302,12 +303,12 @@ fn printing_spec(marker: &str) -> koshi_core::process::SpawnSpec {
 }
 
 /// Wait until the consumer holds `needle` for `pane`, and hand back everything
-/// the consumer holds. Answers nothing; the pane's reader answers its terminal
-/// inside the supervisor.
+/// the consumer holds. Answers nothing; the supervisor answers its own panes'
+/// terminals.
 ///
 /// Fails the test once [`PRINT_WAIT`] has passed, naming what the consumer
 /// holds: nothing held means no byte crossed the link, and the query alone
-/// means the pane's reader delivered it instead of answering it.
+/// means the pane's reader delivered it instead of removing it.
 fn read_until_printed(sink: &RecordingSink, pane: PaneId, needle: &[u8]) -> Vec<u8> {
     let deadline = Instant::now() + PRINT_WAIT;
     loop {
@@ -1176,7 +1177,7 @@ fn a_panes_child_prints_through_the_link_once_its_terminal_is_answered() {
     assert_eq!(
         count_queries(&held),
         0,
-        "the pane's reader answers the terminal's query and takes it out, so none crosses the link"
+        "the pane's reader takes the terminal's query out, so none crosses the link"
     );
     // The child kept running after it printed, so what arrived is its output
     // and not the flush of a child that ended.

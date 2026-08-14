@@ -22,6 +22,7 @@ use koshi::session_control;
 use koshi::session_server::{self, ResumeSupport};
 use koshi::targeting::{self, Route};
 use koshi::updater;
+use koshi::version;
 use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
 use koshi_ipc::protocol::ConnectionToken;
 
@@ -166,6 +167,27 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // `update` runs locally: it talks to GitHub and the local filesystem,
         // not the session daemon.
         return updater::run_update_command();
+    }
+
+    if let Some(CliCommand::Version { format }) = &cli.command {
+        // This program's own build, so nothing is asked over a socket.
+        print!(
+            "{}",
+            output::render_client_version(&version::ClientVersion::of_this_build(), *format)
+        );
+        return Ok(());
+    }
+
+    if let Some(CliCommand::ServerVersion { session, format }) = &cli.command {
+        // Each koshi server names its own build in its greeting, so this
+        // dispatches no command and renders locally. The rows print whether or
+        // not every server answered, and the exit code carries the gap.
+        let rows = version::server_version_rows(session.as_ref())?;
+        print!("{}", output::render_server_versions(&rows, *format));
+        return match version::unreachable_servers(&rows) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
     }
 
     if let Some(command) = cli.command.as_ref().filter(|command| is_discovery(command)) {
