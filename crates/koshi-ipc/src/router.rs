@@ -23,6 +23,7 @@
 //! session that targets another travels the same way.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::SessionId;
@@ -30,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handshake::{GateWords, VersionGate};
 use crate::protocol::{ConnectionToken, IpcErrorPayload};
+use crate::remote_tokens::{TokenEntry, TokenScope};
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 /// The highest control-plane protocol version this build speaks, and the one
@@ -38,8 +40,11 @@ use crate::wire::{MaybeKnown, WireName, WireVariants};
 /// Bumps once per release cycle, in the commit that first changes a wire shape
 /// after a release — not once per change. Version 1 is what 0.2.0 speaks;
 /// version 2 adds [`RouterRequestKind::Restart`] and its
-/// [`RouterResult::Restarting`] answer.
-pub const ROUTER_PROTOCOL_VERSION: u32 = 2;
+/// [`RouterResult::Restarting`] answer; version 3 adds
+/// [`RouterRequestKind::GrantToken`], [`RouterRequestKind::RevokeToken`] and
+/// [`RouterRequestKind::ListTokens`] with their [`RouterResult::Granted`],
+/// [`RouterResult::Revoked`] and [`RouterResult::Tokens`] answers.
+pub const ROUTER_PROTOCOL_VERSION: u32 = 3;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -133,6 +138,37 @@ pub enum RouterRequestKind {
     /// at the path it started from. The session list is rebuilt from the
     /// endpoint files, so every running session stays registered.
     Restart,
+    /// Hand `identity` a fresh remote access secret on `scope`. A grant that
+    /// identity already holds on that same scope stops working.
+    ///
+    /// The router reads the clock once and stamps both the issue time and the
+    /// expiry time from that one reading. A span the clock cannot represent is
+    /// refused.
+    GrantToken {
+        /// Who the grant is handed to, in the words the operator typed.
+        identity: String,
+        /// How far the grant reaches.
+        scope: TokenScope,
+        /// How long the token works, counted from the issue time, or `None`
+        /// when it never stops working.
+        expires_in: Option<Duration>,
+    },
+    /// Stop the remote access grants `identity` holds.
+    RevokeToken {
+        /// Whose grants stop working.
+        identity: String,
+        /// The one grant that stops working, or `None` to stop every grant
+        /// the identity holds.
+        scope: Option<TokenScope>,
+    },
+    /// List the remote access grants this machine has made.
+    ListTokens {
+        /// The scope to list the reaching grants of, or `None` to list every
+        /// grant on this machine. A session scope lists the host-wide grants
+        /// beside the grants scoped to that session; a host-wide scope lists
+        /// the host-wide grants alone.
+        scope: Option<TokenScope>,
+    },
 }
 
 impl RouterRequestKind {
@@ -162,6 +198,9 @@ impl RouterRequestKind {
             RouterRequestKind::AttachLookup { .. } => "AttachLookup",
             RouterRequestKind::ListSessions => "ListSessions",
             RouterRequestKind::Restart => "Restart",
+            RouterRequestKind::GrantToken { .. } => "GrantToken",
+            RouterRequestKind::RevokeToken { .. } => "RevokeToken",
+            RouterRequestKind::ListTokens { .. } => "ListTokens",
         }
     }
 }
@@ -236,6 +275,21 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::Restart`]: the reply is sent, then the
     /// router restarts into the binary now on disk.
     Restarting,
+    /// Answers [`RouterRequestKind::GrantToken`]: the grant is made.
+    Granted {
+        /// The secret the caller shows the operator once. `ConnectionToken`'s
+        /// `Debug` and `Display` write it redacted.
+        token: ConnectionToken,
+        /// Whether a grant the identity already held on this scope stopped
+        /// working.
+        replaced: bool,
+    },
+    /// Answers [`RouterRequestKind::RevokeToken`]: the scope of every grant
+    /// this call stopped, empty when the identity held none.
+    Revoked(Vec<TokenScope>),
+    /// Answers [`RouterRequestKind::ListTokens`]: one entry per grant,
+    /// narrowed by the request's scope.
+    Tokens(Vec<TokenEntry>),
     /// The request was refused.
     Error(IpcErrorPayload),
 }
@@ -396,6 +450,9 @@ impl WireVariants for RouterRequestKind {
         "AttachLookup",
         "ListSessions",
         "Restart",
+        "GrantToken",
+        "RevokeToken",
+        "ListTokens",
     ];
 }
 
@@ -414,6 +471,9 @@ impl WireVariants for RouterResult {
         "Found",
         "Sessions",
         "Restarting",
+        "Granted",
+        "Revoked",
+        "Tokens",
         "Error",
     ];
 }
@@ -426,6 +486,9 @@ impl WireName for RouterResult {
             RouterResult::Found(_) => "Found",
             RouterResult::Sessions(_) => "Sessions",
             RouterResult::Restarting => "Restarting",
+            RouterResult::Granted { .. } => "Granted",
+            RouterResult::Revoked(_) => "Revoked",
+            RouterResult::Tokens(_) => "Tokens",
             RouterResult::Error(_) => "Error",
         }
     }

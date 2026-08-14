@@ -34,6 +34,9 @@ enum Script {
     /// The endpoint file carries the router's own token, so the Hello opens
     /// the connection and the request behind it is answered with this result.
     AcceptAndAnswer(RouterResult),
+    /// The same, and the Hello reports the build named here. An empty string
+    /// is what a router that predates the build field answers.
+    AcceptAndAnswerAs(String, RouterResult),
     /// The endpoint file carries a token the router does not hold, so the
     /// Hello is refused and the request behind it is refused too.
     RefuseHello,
@@ -48,8 +51,12 @@ enum Script {
 fn fake_router(runtime_dir: &Path, script: Script) -> JoinHandle<()> {
     let held = ConnectionToken::generate();
     let advertised = match script {
-        Script::AcceptAndAnswer(_) => held.clone(),
+        Script::AcceptAndAnswer(_) | Script::AcceptAndAnswerAs(..) => held.clone(),
         Script::RefuseHello => ConnectionToken::generate(),
+    };
+    let reported_build = match &script {
+        Script::AcceptAndAnswerAs(version, _) => version.clone(),
+        Script::AcceptAndAnswer(_) | Script::RefuseHello => "9.9.9".to_string(),
     };
     let addr = router_socket_addr(runtime_dir);
     let listener = Listener::bind(&addr).expect("bind the stand-in router");
@@ -70,7 +77,7 @@ fn fake_router(runtime_dir: &Path, script: Script) -> JoinHandle<()> {
         let hello_answer = match gate.check(&hello.kind) {
             Ok(()) => RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
-                version: "9.9.9".to_string(),
+                version: reported_build,
             },
             Err(refusal) => RouterResult::Error(refusal),
         };
@@ -82,12 +89,14 @@ fn fake_router(runtime_dir: &Path, script: Script) -> JoinHandle<()> {
             .expect("send the hello reply");
 
         match (gate.check(&request.kind), script) {
-            (Ok(()), Script::AcceptAndAnswer(answer)) => connection
-                .send(&RouterResponse {
-                    request_id: Some(request.request_id),
-                    result: answer,
-                })
-                .expect("send the request reply"),
+            (Ok(()), Script::AcceptAndAnswer(answer) | Script::AcceptAndAnswerAs(_, answer)) => {
+                connection
+                    .send(&RouterResponse {
+                        request_id: Some(request.request_id),
+                        result: answer,
+                    })
+                    .expect("send the request reply")
+            }
             (Ok(()), Script::RefuseHello) => panic!("a refused hello leaves the gate closed"),
             // A refused Hello is the caller's cue to stop, so whether it is
             // still reading when this reply lands is a race.
@@ -209,7 +218,70 @@ fn a_refused_restart_reports_the_reason_the_router_gave() {
     let CliError::IpcUnavailable { detail } = error else {
         panic!("expected IpcUnavailable, got {error:?}");
     };
-    assert_eq!(detail, "this build has no request kind named Restart");
+    // The stand-in router reports build 9.9.9, so the reason it gave is
+    // followed by the two builds and what ends the mismatch.
+    assert_eq!(
+        detail,
+        format!(
+            "this build has no request kind named Restart — the running router is koshi 9.9.9 \
+             and this command is koshi {}; the router serves its own build until it restarts, \
+             which it does once no session is left running",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_router_that_reports_no_build_is_named_as_an_older_koshi() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswerAs(
+            String::new(),
+            RouterResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::UnsupportedKind,
+                message: "this build has no request kind named Restart".to_string(),
+            }),
+        ),
+    );
+
+    let error = restart_running_router(runtime_dir.path()).expect_err("the restart is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "this build has no request kind named Restart — the running router is an older koshi \
+             that does not report its build and this command is koshi {}; the router serves its \
+             own build until it restarts, which it does once no session is left running",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_refusal_that_is_not_an_unknown_kind_is_left_as_the_router_wrote_it() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "the session name is not one this router knows".to_string(),
+        })),
+    );
+
+    let error = restart_running_router(runtime_dir.path()).expect_err("the restart is refused");
+
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    // The stand-in router reports build 9.9.9, and this refusal still reads as
+    // the router wrote it: only an unknown request kind names the two builds.
+    assert_eq!(detail, "the session name is not one this router knows");
     router.join().expect("the stand-in router exits");
 }
 

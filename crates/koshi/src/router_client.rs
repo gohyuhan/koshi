@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
+use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
     router_endpoint_path, IncomingRouterResponse, RouterRequest, RouterRequestKind, RouterResult,
     MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
@@ -181,20 +182,58 @@ fn exchange(
     connection.send(&request).map_err(talk_failed)?;
 
     let hello_reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    match take_result(hello_reply)? {
+    let router_version = match take_result(hello_reply)? {
         RouterResult::Hello {
-            protocol_version, ..
-        } => settled_version(protocol_version)?,
+            protocol_version,
+            version,
+        } => {
+            settled_version(protocol_version)?;
+            version
+        }
         RouterResult::Error(refusal) => {
             return Err(CliError::IpcUnavailable {
                 detail: refusal.message,
             })
         }
         other => return Err(unexpected_reply(&other)),
-    }
+    };
 
     let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    take_result(reply).map(Some)
+    take_result(reply).map(|result| Some(name_other_build(result, &router_version)))
+}
+
+/// A request kind the router does not have, restated to name both builds.
+///
+/// Only [`IpcErrorCode::UnsupportedKind`] is restated, and only when the
+/// router reports a build other than this one: that pairing is a request this
+/// koshi has and the running router does not. Every other answer, every other
+/// refusal, and every refusal from a router on this build passes through
+/// unchanged.
+///
+/// `router_version` is the build the router reported in its Hello, empty when
+/// the router predates that field.
+fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult {
+    let this_version = env!("CARGO_PKG_VERSION");
+    let RouterResult::Error(refusal) = result else {
+        return result;
+    };
+    if refusal.code != IpcErrorCode::UnsupportedKind || router_version == this_version {
+        return RouterResult::Error(refusal);
+    }
+    let running = if router_version.is_empty() {
+        "an older koshi that does not report its build".to_string()
+    } else {
+        format!("koshi {router_version}")
+    };
+    RouterResult::Error(IpcErrorPayload {
+        code: refusal.code,
+        message: format!(
+            "{} — the running router is {running} and this command is koshi {this_version}; the \
+             router serves its own build until it restarts, which it does once no session is \
+             left running",
+            refusal.message
+        ),
+    })
 }
 
 /// Check the version the router settled on against the range this build sent.

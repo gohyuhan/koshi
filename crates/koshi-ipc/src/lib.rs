@@ -18,6 +18,9 @@ pub mod handshake;
 /// One session's layout: each tab's split tree and the rectangles it solves to.
 pub mod layout;
 pub mod protocol;
+/// The machine's remote access tokens: what a grant records, where it is
+/// stored, and what a presented token reaches.
+pub mod remote_tokens;
 /// The control-plane protocol: the messages that create, find, list and kill
 /// sessions, the handshake that opens a router connection, and the fixed
 /// names the router serves under.

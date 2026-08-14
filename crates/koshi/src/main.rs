@@ -20,6 +20,7 @@ use koshi::pty_supervisor;
 use koshi::router;
 use koshi::session_control;
 use koshi::session_server::{self, ResumeSupport};
+use koshi::share;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi::version;
@@ -77,6 +78,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     if let Some(CliCommand::Config { command }) = &cli.command {
         return config_command::run(command);
+    }
+
+    if let Some(CliCommand::Share { command }) = &cli.command {
+        // Every share verb asks the router, which owns the token store, so it
+        // reads no pane environment and behaves the same inside a pane and
+        // outside one.
+        return share::run(command);
     }
 
     if let Some(CliCommand::ServeRouter {
