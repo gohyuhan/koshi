@@ -47,6 +47,7 @@ use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{remove_socket_file, resume_path, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::remote_tokens::{store_path, TokenScope, TokenStore};
 use koshi_ipc::router::{
     router_endpoint_path, router_lock_path, router_socket_addr, IncomingRouterRequest,
     RouterHandshake, RouterRequestKind, RouterResponse, RouterResult, SessionAddress,
@@ -196,6 +197,11 @@ pub fn run_router(
     // the binary at this path.
     let exe = std::env::current_exe()?;
 
+    // Where this machine's remote access tokens live, resolved once here. A
+    // machine with no resolvable data directory has no store, so it holds no
+    // remote access token.
+    let token_store = koshi_paths::data_dir().map(|dir| store_path(&dir));
+
     let lock_file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -242,6 +248,7 @@ pub fn run_router(
         match dispatch(
             runtime_dir,
             &exe,
+            token_store.as_deref(),
             &events_tx,
             &events_rx,
             ROUTER_IDLE_EXIT,
@@ -538,10 +545,12 @@ fn ask_dispatcher(
 /// the binary at `exe`.
 ///
 /// `events_tx` is the loop's own sender, handed to each session's reaper
-/// thread so a child's exit reaches here.
+/// thread so a child's exit reaches here. `token_store` is the remote access
+/// token store every token request is answered against.
 fn dispatch(
     runtime_dir: &Path,
     exe: &Path,
+    token_store: Option<&Path>,
     events_tx: &Sender<RouterEvent>,
     events_rx: &Receiver<RouterEvent>,
     idle_exit: Duration,
@@ -558,7 +567,14 @@ fn dispatch(
         };
         match event {
             RouterEvent::Request { kind, reply } => {
-                let _ = reply.send(serve_request(runtime_dir, exe, registry, events_tx, kind));
+                let _ = reply.send(serve_request(
+                    runtime_dir,
+                    exe,
+                    token_store,
+                    registry,
+                    events_tx,
+                    kind,
+                ));
             }
             RouterEvent::ChildExited(id) => unregister(runtime_dir, registry, id),
             RouterEvent::RestartDelivered => return RouterExit::Restart,
@@ -567,9 +583,13 @@ fn dispatch(
 }
 
 /// Answer one request against the session list.
+///
+/// The dispatcher answers one request at a time, so the remote access token
+/// store at `token_store` has one writer.
 fn serve_request(
     runtime_dir: &Path,
     exe: &Path,
+    token_store: Option<&Path>,
     registry: &mut Registry,
     events_tx: &Sender<RouterEvent>,
     kind: RouterRequestKind,
@@ -595,6 +615,100 @@ fn serve_request(
         }
         RouterRequestKind::ListSessions => list_sessions(runtime_dir, registry),
         RouterRequestKind::Restart => restart_check(exe),
+        RouterRequestKind::GrantToken {
+            identity,
+            scope,
+            expires_in,
+        } => grant_token(token_store, identity, scope, expires_in),
+        RouterRequestKind::RevokeToken { identity, scope } => {
+            revoke_token(token_store, &identity, scope.as_ref())
+        }
+        RouterRequestKind::ListTokens { scope } => list_tokens(token_store, scope.as_ref()),
+    }
+}
+
+/// The remote access token store at `token_store`, with the path to write it
+/// back to.
+///
+/// `None` means this machine has no data directory to hold a store. A store
+/// whose bytes cannot be read is refused, so a malformed file refuses every
+/// token request and changes nothing.
+fn open_store(token_store: Option<&Path>) -> Result<(&Path, TokenStore), RouterResult> {
+    let Some(path) = token_store else {
+        return Err(refused(
+            "this machine has no data directory, so no remote access token can be stored"
+                .to_string(),
+        ));
+    };
+    match TokenStore::read(path) {
+        Ok(store) => Ok((path, store)),
+        Err(error) => Err(refused(error.to_string())),
+    }
+}
+
+/// Hand `identity` a fresh secret on `scope` and write the store back.
+///
+/// The clock is read once, and both the issue time and the expiry are stamped
+/// from that one reading. `expires_in` is added to the issue time with a
+/// checked add: a span the clock cannot represent is refused before anything
+/// is written, so the store file is left as it stood.
+fn grant_token(
+    token_store: Option<&Path>,
+    identity: String,
+    scope: TokenScope,
+    expires_in: Option<Duration>,
+) -> RouterResult {
+    let (path, mut store) = match open_store(token_store) {
+        Ok(opened) => opened,
+        Err(refusal) => return refusal,
+    };
+    let issued_at = SystemTime::now();
+    let expires_at = match expires_in {
+        None => None,
+        Some(span) => match issued_at.checked_add(span) {
+            Some(at) => Some(at),
+            None => {
+                return refused(
+                    "the expiry is further ahead than this machine's clock can represent"
+                        .to_string(),
+                )
+            }
+        },
+    };
+    let (token, replaced) = store.grant(identity, scope, issued_at, expires_at);
+    if let Err(error) = store.write(path) {
+        return refused(error.to_string());
+    }
+    RouterResult::Granted { token, replaced }
+}
+
+/// Stop the grants `identity` holds, narrowed to one scope when `scope` is
+/// given, and write the store back when this call stopped anything.
+fn revoke_token(
+    token_store: Option<&Path>,
+    identity: &str,
+    scope: Option<&TokenScope>,
+) -> RouterResult {
+    let (path, mut store) = match open_store(token_store) {
+        Ok(opened) => opened,
+        Err(refusal) => return refusal,
+    };
+    let stopped = store.revoke(identity, scope, SystemTime::now());
+    if stopped.is_empty() {
+        return RouterResult::Revoked(stopped);
+    }
+    if let Err(error) = store.write(path) {
+        return refused(error.to_string());
+    }
+    RouterResult::Revoked(stopped)
+}
+
+/// Every grant this machine has made, narrowed to the grants that reach
+/// `scope` when one is given. The store is not written.
+fn list_tokens(token_store: Option<&Path>, scope: Option<&TokenScope>) -> RouterResult {
+    match open_store(token_store) {
+        Ok((_, store)) => RouterResult::Tokens(store.entries(scope)),
+        Err(refusal) => refusal,
     }
 }
 
@@ -672,14 +786,14 @@ fn create_session(
 
     // ponytail: creates serialize the dispatcher; move the wait onto the
     // monitor thread if create latency matters.
-    let report = match ready_rx.recv_timeout(READY_WAIT) {
-        Ok(Some(report)) if report.protocol_version == ROUTER_PROTOCOL_VERSION => report,
-        _ => {
+    let report = match accept_ready(ready_rx.recv_timeout(READY_WAIT).ok().flatten()) {
+        Ok(report) => report,
+        Err(reason) => {
             kill_child(&mut child);
             // A child that bound its socket before it was killed left an
             // endpoint file behind; this takes it back off the disk.
             unregister(runtime_dir, registry, id);
-            return refused("the session did not report a bound socket".to_string());
+            return refused(reason);
         }
     };
 
@@ -933,6 +1047,30 @@ fn spawn_session_server(
     allow_other_users: Option<bool>,
 ) -> std::io::Result<Child> {
     session_server_command(runtime_dir, id, name, profile, cwd, allow_other_users)?.spawn()
+}
+
+/// The line a freshly spawned session server printed, or the reason to refuse
+/// the session.
+///
+/// `None` is a session server that printed nothing readable before the wait
+/// ran out. A report naming another control-plane protocol version comes from
+/// a koshi binary that is a different build from this running router: the
+/// router spawns the binary now on disk, and that binary can be replaced while
+/// the router keeps serving.
+fn accept_ready(report: Option<SessionServerReady>) -> Result<SessionServerReady, String> {
+    let Some(report) = report else {
+        return Err("the session did not report a bound socket".to_string());
+    };
+    if report.protocol_version != ROUTER_PROTOCOL_VERSION {
+        return Err(format!(
+            "the koshi binary on disk speaks control-plane protocol version {} and this running \
+             router speaks {ROUTER_PROTOCOL_VERSION}, so they are different builds; the router \
+             serves its own build until it restarts, which it does once no session is left \
+             running",
+            report.protocol_version
+        ));
+    }
+    Ok(report)
 }
 
 /// Watch one session server until it exits, then report the exit so its

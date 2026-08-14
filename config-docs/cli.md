@@ -184,6 +184,83 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
 
+## Remote access
+
+| Command | Result |
+|---|---|
+| `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>\|never]` | Grant an identity a remote access token |
+| `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
+| `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
+
+An absent `--session` reads one way on `grant` and another way on `revoke`.
+`koshi share grant alice` gives alice one token that reaches every session on
+this machine. `koshi share revoke alice` stops every grant alice holds: the one
+that reaches every session, and each one that reaches a single session.
+
+`koshi share list --session quiet-lake` lists every grant that reaches the
+session `quiet-lake` — the grants scoped to that session, and the grants that
+reach every session on this machine, whose `scope` column reads `host`. It
+answers "who can get into this session". `koshi share list` with no `--session`
+lists every grant this machine has made.
+
+An identity holds at most one grant per scope. Granting the same identity on
+the same scope again hands out a fresh token and takes the place of the old
+one, so a second `koshi share grant alice` leaves alice with exactly one
+host-wide token — the new one. When the grant it replaced was still standing,
+the output says so before printing the new token:
+
+```text
+the token alice already held on host stopped working.
+```
+
+That line is absent when the grant it replaced had already been revoked or had
+already expired, because nothing that still worked stopped working.
+
+`--session` takes a session id or a display name. A name that matches two
+running sessions is refused, and the error lists every matching id.
+
+`--expires` defaults to `24h`. It takes a count and one unit letter — `30s`,
+`15m`, `24h`, `7d` — or the word `never`. The count is read as written, so
+`+1h` and `007h` are both taken as the number they spell.
+
+A count of `0` is taken as written too: the grant runs out at the instant it is
+made, so `koshi share grant alice --expires 0s` prints a token that admits
+nothing. Revoke it or grant again to hand alice one that works.
+
+A length koshi cannot represent is refused, and no token is granted:
+
+```text
+koshi share grant alice --expires 18446744073709551615d
+```
+
+is refused by the command, because the count times its unit does not fit the
+length koshi carries.
+
+```text
+koshi share grant alice --expires 10000000000000000000s
+```
+
+is refused by the router, because the expiry lands further ahead than this
+machine's clock can represent.
+
+A grant prints its token once, so copy it from that one printing. Anyone
+holding the token can run anything the granting user can. This build has no
+remote listener, so a granted token cannot be used to connect yet.
+
+The `koshi share list` columns read:
+
+| Column | Meaning |
+|---|---|
+| `identity` | Who the grant was handed to |
+| `scope` | `host` when the grant reaches every session on this machine, else the id of the one session it reaches |
+| `issued` | When the grant was made |
+| `expires` | When the grant stops working on its own |
+| `last_used` | When a presented token last reached a session through this grant |
+| `revoked` | When an operator stopped the grant |
+
+In table cells a time prints as whole seconds since the Unix epoch, and an
+absent value prints as `-`.
+
 ## Versions
 
 | Command | Result |

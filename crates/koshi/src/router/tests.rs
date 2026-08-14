@@ -1,9 +1,10 @@
 //! Tests for the router's session list and its dispatcher loop, run in
 //! process against a hand-built list: no router is bound and no session
 //! server is started, so the name walk, selector resolution, removal, the
-//! idle-exit rule, the lock handover, and the answer to a restart request are
-//! exercised on their own. Starting a real router and a real session server
-//! needs whole processes, so that is covered by the integration tests instead.
+//! idle-exit rule, the lock handover, the answer to a restart request, and the
+//! three remote access token requests are exercised on their own. Starting a
+//! real router and a real session server needs whole processes, so that is
+//! covered by the integration tests instead.
 
 use super::*;
 
@@ -14,6 +15,7 @@ use crate::session_server::RESTART_WINDOW;
 use koshi_core::discovery::{SessionInfo, SessionOverview};
 use koshi_ipc::endpoint::{advert_path, shared_socket_addr};
 use koshi_ipc::protocol::{IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
+use koshi_ipc::remote_tokens::{hash_token, TokenEntry, TOKEN_STORE_FORMAT};
 use tempfile::TempDir;
 
 /// A fresh directory to stand in for the runtime dir, under a short base so
@@ -455,6 +457,7 @@ fn an_idle_window_that_passes_with_no_session_running_ends_the_loop() {
     let exit = dispatch(
         runtime_dir.path(),
         &test_exe(),
+        None,
         &events_tx,
         &events_rx,
         TEST_IDLE_EXIT,
@@ -483,6 +486,7 @@ fn a_request_inside_the_idle_window_is_served_and_the_loop_goes_on() {
     let exit = dispatch(
         runtime_dir.path(),
         &test_exe(),
+        None,
         &events_tx,
         &events_rx,
         TEST_IDLE_EXIT,
@@ -513,6 +517,7 @@ fn a_delivered_restart_reply_ends_the_loop_for_the_swap() {
     let exit = dispatch(
         runtime_dir.path(),
         &test_exe(),
+        None,
         &events_tx,
         &events_rx,
         TEST_IDLE_EXIT,
@@ -539,6 +544,7 @@ fn a_running_session_keeps_the_loop_alive_past_the_idle_window() {
         let exit = dispatch(
             &held,
             &test_exe(),
+            None,
             &events_tx,
             &events_rx,
             TEST_IDLE_EXIT,
@@ -580,6 +586,7 @@ fn a_session_that_exits_while_another_runs_leaves_the_loop_serving() {
         let exit = dispatch(
             &held,
             &test_exe(),
+            None,
             &events_tx,
             &events_rx,
             TEST_IDLE_EXIT,
@@ -887,6 +894,7 @@ fn a_restart_request_is_answered_from_the_binary_on_disk() {
     let answer = serve_request(
         runtime_dir.path(),
         &exe,
+        None,
         &mut registry,
         &events_tx,
         RouterRequestKind::Restart,
@@ -908,6 +916,7 @@ fn a_restart_request_naming_a_binary_that_cannot_be_read_is_refused() {
     let answer = serve_request(
         runtime_dir.path(),
         &exe,
+        None,
         &mut registry,
         &events_tx,
         RouterRequestKind::Restart,
@@ -940,6 +949,7 @@ fn a_restart_request_naming_a_non_executable_binary_is_refused() {
     let answer = serve_request(
         runtime_dir.path(),
         &exe,
+        None,
         &mut registry,
         &events_tx,
         RouterRequestKind::Restart,
@@ -1068,4 +1078,486 @@ fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
     .join()
     .expect("the thread survives the raised SIGPIPE");
     assert!(survived, "the raise itself reported an error");
+}
+
+/// One token request answered the way the dispatcher answers it: against the
+/// store at `store`, with an empty session list and an events channel nothing
+/// reads. `store` is `None` for a machine with no data directory. The runtime
+/// directory is a fresh temporary one, which no token request reads.
+fn answer_token_request(store: Option<&Path>, kind: RouterRequestKind) -> RouterResult {
+    let runtime_dir = test_runtime_dir();
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut registry = Registry::new();
+    serve_request(
+        runtime_dir.path(),
+        &test_exe(),
+        store,
+        &mut registry,
+        &events_tx,
+        kind,
+    )
+}
+
+/// A grant request for `identity` on `scope`, working for `expires_in` and
+/// never stopping on its own when that is `None`.
+fn grant_request(
+    identity: &str,
+    scope: TokenScope,
+    expires_in: Option<Duration>,
+) -> RouterRequestKind {
+    RouterRequestKind::GrantToken {
+        identity: identity.to_string(),
+        scope,
+        expires_in,
+    }
+}
+
+/// Make one grant that never stops on its own and hand back its secret. A
+/// refused grant fails the calling test.
+fn granted_token(store: &Path, identity: &str, scope: TokenScope) -> ConnectionToken {
+    let answer = answer_token_request(Some(store), grant_request(identity, scope, None));
+    match answer {
+        RouterResult::Granted { token, .. } => token,
+        other => panic!("the grant was refused: {other:?}"),
+    }
+}
+
+/// Rewrite the store at `store` with line breaks and indents, and hand back
+/// the bytes now on disk.
+///
+/// The reader takes those bytes and the writer never produces them, so a
+/// later byte comparison against them fails if anything wrote the store, even
+/// a write that put the same records back.
+fn spaced_out(store: &Path) -> Vec<u8> {
+    let held = TokenStore::read(store).expect("the store reads back");
+    let spaced = serde_json::to_vec_pretty(&held).expect("the store encodes with indents");
+    std::fs::write(store, &spaced).expect("the spaced store is written");
+    spaced
+}
+
+/// The one refusal every token request gets when the store cannot be opened.
+fn token_refusal(message: &str) -> RouterResult {
+    RouterResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::MalformedRequest,
+        message: message.to_string(),
+    })
+}
+
+/// One of each token request, so a test can check that a store which cannot
+/// be opened refuses all three the same way.
+fn every_token_request(session: SessionId) -> [RouterRequestKind; 3] {
+    [
+        grant_request("ada", TokenScope::HostWide, None),
+        RouterRequestKind::RevokeToken {
+            identity: "ada".to_string(),
+            scope: None,
+        },
+        RouterRequestKind::ListTokens {
+            scope: Some(TokenScope::Session(session)),
+        },
+    ]
+}
+
+#[test]
+fn a_grant_writes_one_record_holding_the_hash_of_the_secret_it_hands_back() {
+    // The operator sees the secret once, from the answer. The store keeps only
+    // its hash, so a reader of the file cannot open a connection.
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+
+    let answer = answer_token_request(
+        Some(&store),
+        grant_request("ada", TokenScope::HostWide, None),
+    );
+
+    let RouterResult::Granted { token, replaced } = answer else {
+        panic!("the grant was refused: {answer:?}")
+    };
+    assert!(!replaced, "the store held no grant for ada to replace");
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.format, TOKEN_STORE_FORMAT);
+    assert_eq!(written.records.len(), 1);
+    assert_eq!(written.records[0].identity, "ada");
+    assert_eq!(written.records[0].hash, hash_token(&token));
+    assert_eq!(written.records[0].scope, TokenScope::HostWide);
+    assert_eq!(written.records[0].expires_at, None);
+    assert_eq!(written.records[0].last_used_at, None);
+    assert_eq!(written.records[0].revoked_at, None);
+    let bytes = std::fs::read(&store).expect("the store file is on disk");
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains(token.expose()),
+        "the secret itself never reaches the disk"
+    );
+}
+
+#[test]
+fn a_second_grant_replaces_the_one_on_the_same_scope_and_adds_one_on_another() {
+    // An identity holds at most one grant per scope, so re-granting the same
+    // scope stops the old secret while a second scope stands beside the first.
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let session = SessionId::new();
+    let first = granted_token(&store, "ada", TokenScope::HostWide);
+
+    let again = answer_token_request(
+        Some(&store),
+        grant_request("ada", TokenScope::HostWide, None),
+    );
+
+    let RouterResult::Granted {
+        token: second,
+        replaced,
+    } = again
+    else {
+        panic!("the second grant was refused: {again:?}")
+    };
+    assert!(replaced, "ada already held a host-wide grant");
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 1);
+    assert_eq!(written.records[0].hash, hash_token(&second));
+    assert_ne!(
+        hash_token(&second),
+        hash_token(&first),
+        "the replacement hands out a different secret"
+    );
+
+    let other_scope = answer_token_request(
+        Some(&store),
+        grant_request("ada", TokenScope::Session(session), None),
+    );
+
+    let RouterResult::Granted { replaced, .. } = other_scope else {
+        panic!("the grant on the session scope was refused: {other_scope:?}")
+    };
+    assert!(!replaced, "ada held no grant on that session");
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 2);
+    assert_eq!(written.records[0].scope, TokenScope::HostWide);
+    assert_eq!(written.records[1].scope, TokenScope::Session(session));
+}
+
+#[test]
+fn a_grant_expires_the_given_span_after_the_clock_reading_it_was_issued_at() {
+    // The router reads the clock once and stamps both times from that one
+    // reading, so the gap between them is exactly the span asked for.
+    const A_DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+
+    let answer = answer_token_request(
+        Some(&store),
+        grant_request("ada", TokenScope::HostWide, Some(A_DAY)),
+    );
+
+    let RouterResult::Granted { replaced, .. } = answer else {
+        panic!("the grant was refused: {answer:?}")
+    };
+    assert!(!replaced, "the store held no grant for ada to replace");
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 1);
+    let expires_at = written.records[0]
+        .expires_at
+        .expect("the grant carries an expiry");
+    assert_eq!(
+        expires_at
+            .duration_since(written.records[0].issued_at)
+            .expect("the expiry is after the issue time"),
+        A_DAY
+    );
+
+    let no_expiry = answer_token_request(
+        Some(&store),
+        grant_request("grace", TokenScope::HostWide, None),
+    );
+
+    let RouterResult::Granted { replaced, .. } = no_expiry else {
+        panic!("the grant was refused: {no_expiry:?}")
+    };
+    assert!(!replaced, "the store held no grant for grace to replace");
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 2);
+    assert_eq!(
+        written.records[1].expires_at, None,
+        "a grant with no span never stops on its own"
+    );
+}
+
+#[test]
+fn a_span_the_clock_cannot_represent_is_refused_and_leaves_the_store_alone() {
+    // The add is checked, so the far-off expiry comes back as a refusal rather
+    // than ending the router's own thread. The refusal returns before any
+    // write, so the file on disk is untouched either way.
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let too_far = grant_request(
+        "ada",
+        TokenScope::HostWide,
+        Some(Duration::from_secs(u64::MAX)),
+    );
+    let refusal =
+        token_refusal("the expiry is further ahead than this machine's clock can represent");
+
+    assert_eq!(answer_token_request(Some(&store), too_far), refusal);
+    assert!(
+        !store.exists(),
+        "the refusal came before the store was created"
+    );
+
+    let _ = granted_token(&store, "ada", TokenScope::HostWide);
+    let before = spaced_out(&store);
+    let too_far = grant_request(
+        "ada",
+        TokenScope::HostWide,
+        Some(Duration::from_secs(u64::MAX)),
+    );
+
+    assert_eq!(answer_token_request(Some(&store), too_far), refusal);
+    assert_eq!(
+        std::fs::read(&store).expect("the store file is still there"),
+        before,
+        "the refused grant wrote nothing"
+    );
+}
+
+#[test]
+fn a_bare_revoke_stops_every_grant_the_identity_holds_in_the_stores_order() {
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let session = SessionId::new();
+    let _ = granted_token(&store, "ada", TokenScope::HostWide);
+    let _ = granted_token(&store, "ada", TokenScope::Session(session));
+
+    let before = SystemTime::now();
+    let answer = answer_token_request(
+        Some(&store),
+        RouterRequestKind::RevokeToken {
+            identity: "ada".to_string(),
+            scope: None,
+        },
+    );
+    let after = SystemTime::now();
+
+    assert_eq!(
+        answer,
+        RouterResult::Revoked(vec![TokenScope::HostWide, TokenScope::Session(session)])
+    );
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 2);
+    for record in &written.records {
+        let stopped = record.revoked_at.expect("the revoke stamped this record");
+        assert!(
+            stopped >= before && stopped <= after,
+            "the stamp is the clock reading the revoke took"
+        );
+    }
+}
+
+#[test]
+fn a_scoped_revoke_stops_that_one_grant_and_leaves_the_other_standing() {
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let session = SessionId::new();
+    let _ = granted_token(&store, "ada", TokenScope::HostWide);
+    let _ = granted_token(&store, "ada", TokenScope::Session(session));
+
+    let before = SystemTime::now();
+    let answer = answer_token_request(
+        Some(&store),
+        RouterRequestKind::RevokeToken {
+            identity: "ada".to_string(),
+            scope: Some(TokenScope::Session(session)),
+        },
+    );
+    let after = SystemTime::now();
+
+    assert_eq!(
+        answer,
+        RouterResult::Revoked(vec![TokenScope::Session(session)])
+    );
+    let written = TokenStore::read(&store).expect("the store reads back");
+    assert_eq!(written.records.len(), 2);
+    assert_eq!(written.records[0].scope, TokenScope::HostWide);
+    assert_eq!(
+        written.records[0].revoked_at, None,
+        "the host-wide grant still stands"
+    );
+    assert_eq!(written.records[1].scope, TokenScope::Session(session));
+    let stopped = written.records[1]
+        .revoked_at
+        .expect("the revoke stamped the session grant");
+    assert!(
+        stopped >= before && stopped <= after,
+        "the stamp is the clock reading the revoke took"
+    );
+}
+
+#[test]
+fn revoking_an_identity_that_holds_nothing_stops_nothing_and_writes_nothing() {
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let _ = granted_token(&store, "ada", TokenScope::HostWide);
+    let before = spaced_out(&store);
+
+    let answer = answer_token_request(
+        Some(&store),
+        RouterRequestKind::RevokeToken {
+            identity: "grace".to_string(),
+            scope: None,
+        },
+    );
+
+    assert_eq!(answer, RouterResult::Revoked(Vec::new()));
+    assert_eq!(
+        std::fs::read(&store).expect("the store file is still there"),
+        before,
+        "a revoke that stopped nothing wrote nothing"
+    );
+}
+
+#[test]
+fn listing_answers_every_grant_without_its_hash_and_narrows_to_one_scope() {
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    let session = SessionId::new();
+    let other = SessionId::new();
+    let _ = granted_token(&store, "ada", TokenScope::HostWide);
+    let _ = granted_token(&store, "ada", TokenScope::Session(session));
+    let _ = granted_token(&store, "grace", TokenScope::Session(other));
+    let written = TokenStore::read(&store).expect("the store reads back");
+    let listed = |identity: &str, scope: &TokenScope| {
+        let record = written
+            .records
+            .iter()
+            .find(|record| record.identity == identity && record.scope == *scope)
+            .expect("the store holds this grant");
+        TokenEntry {
+            identity: record.identity.clone(),
+            scope: record.scope.clone(),
+            issued_at: record.issued_at,
+            expires_at: record.expires_at,
+            last_used_at: record.last_used_at,
+            revoked_at: record.revoked_at,
+        }
+    };
+
+    let every = answer_token_request(Some(&store), RouterRequestKind::ListTokens { scope: None });
+
+    assert_eq!(
+        every,
+        RouterResult::Tokens(vec![
+            listed("ada", &TokenScope::HostWide),
+            listed("ada", &TokenScope::Session(session)),
+            listed("grace", &TokenScope::Session(other)),
+        ])
+    );
+    let encoded = serde_json::to_string(&every).expect("the answer encodes");
+    for record in &written.records {
+        assert!(
+            !encoded.contains(&record.hash),
+            "a listed grant carries no hash"
+        );
+    }
+
+    let narrowed = answer_token_request(
+        Some(&store),
+        RouterRequestKind::ListTokens {
+            scope: Some(TokenScope::Session(session)),
+        },
+    );
+
+    assert_eq!(
+        narrowed,
+        RouterResult::Tokens(vec![
+            listed("ada", &TokenScope::HostWide),
+            listed("ada", &TokenScope::Session(session)),
+        ]),
+        "one session lists every grant that reaches it, so ada's host-wide grant is listed \
+         beside her grant on that session, and grace's grant on another session is not"
+    );
+}
+
+#[test]
+fn a_store_holding_junk_refuses_every_token_request_and_changes_nothing() {
+    // One unreadable file refuses all three, so a grant can never write a
+    // fresh store over records the router could not read.
+    const JUNK: &[u8] = b"not a token store";
+    let home = test_runtime_dir();
+    let store = store_path(home.path());
+    std::fs::create_dir_all(store.parent().expect("the store sits in a directory"))
+        .expect("the store's directory is made");
+    std::fs::write(&store, JUNK).expect("the junk is written");
+    let error = TokenStore::read(&store).expect_err("junk is not a readable store");
+    let refusal = token_refusal(&error.to_string());
+
+    for kind in every_token_request(SessionId::new()) {
+        let name = kind.name();
+        assert_eq!(
+            answer_token_request(Some(&store), kind),
+            refusal,
+            "{name} is refused"
+        );
+        assert_eq!(
+            std::fs::read(&store).expect("the store file is still there"),
+            JUNK,
+            "{name} changed no byte of the store"
+        );
+    }
+}
+
+#[test]
+fn a_machine_with_no_data_directory_refuses_every_token_request() {
+    let refusal = token_refusal(
+        "this machine has no data directory, so no remote access token can be stored",
+    );
+
+    for kind in every_token_request(SessionId::new()) {
+        let name = kind.name();
+        assert_eq!(
+            answer_token_request(None, kind),
+            refusal,
+            "{name} is refused"
+        );
+    }
+}
+
+#[test]
+fn a_session_server_on_this_build_is_served() {
+    let report = SessionServerReady {
+        protocol_version: ROUTER_PROTOCOL_VERSION,
+        socket: "/tmp/koshi-test.sock".to_string(),
+    };
+
+    let accepted = accept_ready(Some(report.clone())).expect("this build's report is served");
+
+    assert_eq!(accepted, report);
+}
+
+#[test]
+fn a_session_server_that_printed_nothing_is_refused_as_no_bound_socket() {
+    let refusal = accept_ready(None).expect_err("nothing readable is refused");
+
+    assert_eq!(refusal, "the session did not report a bound socket");
+}
+
+#[test]
+fn a_session_server_from_another_build_is_refused_naming_both_versions() {
+    // The router spawns the koshi binary now on disk, so a binary swapped
+    // under a running router reports a control-plane version this router does
+    // not speak.
+    let refusal = accept_ready(Some(SessionServerReady {
+        protocol_version: ROUTER_PROTOCOL_VERSION + 1,
+        socket: "/tmp/koshi-test.sock".to_string(),
+    }))
+    .expect_err("another build is refused");
+
+    assert_eq!(
+        refusal,
+        format!(
+            "the koshi binary on disk speaks control-plane protocol version {} and this running \
+             router speaks {ROUTER_PROTOCOL_VERSION}, so they are different builds; the router \
+             serves its own build until it restarts, which it does once no session is left \
+             running",
+            ROUTER_PROTOCOL_VERSION + 1
+        )
+    );
 }

@@ -12,9 +12,12 @@ use thiserror::Error;
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
-/// and an endpoint file the caller cannot read
+/// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)).
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), and a
+/// remote access token store the caller cannot read or write
+/// ([`TokenStoreUnreadable`](IpcError::TokenStoreUnreadable),
+/// [`TokenStoreWrite`](IpcError::TokenStoreWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
 /// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)). It happens during the
@@ -71,6 +74,15 @@ pub enum IpcError {
     /// caller will ever find this session's socket.
     #[error("endpoint file {path} could not be written: {detail}")]
     EndpointFileWrite { path: String, detail: String },
+    /// A remote access token store that exists but could not be used:
+    /// reading it failed, its bytes are not a readable store, or its format
+    /// number is not the one this build reads.
+    #[error("token store {path} is unreadable: {detail}")]
+    TokenStoreUnreadable { path: String, detail: String },
+    /// Writing the remote access token store failed, so the grant or the
+    /// revocation the caller made never reached the disk.
+    #[error("token store {path} could not be written: {detail}")]
+    TokenStoreWrite { path: String, detail: String },
 }
 
 impl DomainError for IpcError {
@@ -87,7 +99,9 @@ impl DomainError for IpcError {
             | IpcError::NoListener { .. }
             | IpcError::SocketBusy { .. }
             | IpcError::EndpointFileMissing { .. }
-            | IpcError::EndpointFileUnreadable { .. } => Severity::ClientFatal,
+            | IpcError::EndpointFileUnreadable { .. }
+            | IpcError::TokenStoreUnreadable { .. }
+            | IpcError::TokenStoreWrite { .. } => Severity::ClientFatal,
             IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }

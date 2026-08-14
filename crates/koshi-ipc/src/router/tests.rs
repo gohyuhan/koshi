@@ -41,6 +41,18 @@ fn session_info() -> SessionInfo {
     }
 }
 
+/// One remote access grant, at fixed values, so its encoding is byte-stable.
+fn token_entry() -> TokenEntry {
+    TokenEntry {
+        identity: "build-box".to_string(),
+        scope: TokenScope::HostWide,
+        issued_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        expires_at: None,
+        last_used_at: None,
+        revoked_at: None,
+    }
+}
+
 /// Encode `message` as the exact bytes that go on the wire.
 fn encode<T: Serialize>(message: &T) -> String {
     serde_json::to_string(message).expect("message encodes")
@@ -56,7 +68,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // pair that does not. The version moves once per release cycle, not once
     // per change, so a shape edit inside an unreleased cycle leaves it alone.
     //
-    // Shape as of control-plane protocol version 2. Round-trip tests cannot
+    // Shape as of control-plane protocol version 3. Round-trip tests cannot
     // catch this: one build encoding and decoding its own structs always
     // agrees with itself.
     assert_eq!(
@@ -137,6 +149,64 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         }),
         r#"{"request_id":5,"kind":"Restart"}"#
     );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 6,
+            kind: RouterRequestKind::GrantToken {
+                identity: "build-box".to_string(),
+                scope: TokenScope::HostWide,
+                expires_in: Some(Duration::from_secs(3600)),
+            },
+        }),
+        r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":"HostWide","expires_in":{"secs":3600,"nanos":0}}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 6,
+            kind: RouterRequestKind::GrantToken {
+                identity: "build-box".to_string(),
+                scope: TokenScope::Session(SessionId::from_uuid(fixed_uuid())),
+                expires_in: None,
+            },
+        }),
+        r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"expires_in":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 7,
+            kind: RouterRequestKind::RevokeToken {
+                identity: "build-box".to_string(),
+                scope: None,
+            },
+        }),
+        r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 7,
+            kind: RouterRequestKind::RevokeToken {
+                identity: "build-box".to_string(),
+                scope: Some(TokenScope::HostWide),
+            },
+        }),
+        r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":"HostWide"}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 8,
+            kind: RouterRequestKind::ListTokens { scope: None },
+        }),
+        r#"{"request_id":8,"kind":{"ListTokens":{"scope":null}}}"#
+    );
+    assert_eq!(
+        encode(&RouterRequest {
+            request_id: 8,
+            kind: RouterRequestKind::ListTokens {
+                scope: Some(TokenScope::Session(SessionId::from_uuid(fixed_uuid()))),
+            },
+        }),
+        r#"{"request_id":8,"kind":{"ListTokens":{"scope":{"Session":"00000000-0000-0000-0000-000000000001"}}}}"#
+    );
 
     assert_eq!(
         encode(&RouterResponse {
@@ -146,7 +216,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 version: "0.9.9".to_string(),
             },
         }),
-        r#"{"request_id":1,"result":{"Hello":{"protocol_version":2,"version":"0.9.9"}}}"#
+        r#"{"request_id":1,"result":{"Hello":{"protocol_version":3,"version":"0.9.9"}}}"#
     );
     assert_eq!(
         encode(&RouterResponse {
@@ -178,6 +248,33 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     );
     assert_eq!(
         encode(&RouterResponse {
+            request_id: Some(6),
+            result: RouterResult::Granted {
+                token: token(),
+                replaced: true,
+            },
+        }),
+        r#"{"request_id":6,"result":{"Granted":{"token":"k7QxSecret","replaced":true}}}"#
+    );
+    assert_eq!(
+        encode(&RouterResponse {
+            request_id: Some(7),
+            result: RouterResult::Revoked(vec![
+                TokenScope::HostWide,
+                TokenScope::Session(SessionId::from_uuid(fixed_uuid())),
+            ]),
+        }),
+        r#"{"request_id":7,"result":{"Revoked":["HostWide",{"Session":"00000000-0000-0000-0000-000000000001"}]}}"#
+    );
+    assert_eq!(
+        encode(&RouterResponse {
+            request_id: Some(8),
+            result: RouterResult::Tokens(vec![token_entry()]),
+        }),
+        r#"{"request_id":8,"result":{"Tokens":[{"identity":"build-box","scope":"HostWide","issued_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null}]}}"#
+    );
+    assert_eq!(
+        encode(&RouterResponse {
             request_id: None,
             result: RouterResult::Error(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,
@@ -197,10 +294,11 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
-fn this_build_speaks_control_plane_versions_one_to_two() {
-    // Version 2 is this build's own, adding Restart. The floor stays 1, the
-    // version 0.2.0 speaks, so those callers are still served.
-    assert_eq!(ROUTER_PROTOCOL_VERSION, 2);
+fn this_build_speaks_control_plane_versions_one_to_three() {
+    // Version 3 is this build's own, adding the three remote access token
+    // kinds. The floor stays 1, the version 0.2.0 speaks, so those callers are
+    // still served.
+    assert_eq!(ROUTER_PROTOCOL_VERSION, 3);
     assert_eq!(MIN_ROUTER_PROTOCOL_VERSION, 1);
 }
 
@@ -233,6 +331,146 @@ fn every_request_kind_names_itself_without_its_payload() {
     );
     assert_eq!(RouterRequestKind::ListSessions.name(), "ListSessions");
     assert_eq!(RouterRequestKind::Restart.name(), "Restart");
+    assert_eq!(
+        RouterRequestKind::GrantToken {
+            identity: "build-box".to_string(),
+            scope: TokenScope::HostWide,
+            expires_in: None,
+        }
+        .name(),
+        "GrantToken"
+    );
+    assert_eq!(
+        RouterRequestKind::RevokeToken {
+            identity: "build-box".to_string(),
+            scope: None,
+        }
+        .name(),
+        "RevokeToken"
+    );
+    assert_eq!(
+        RouterRequestKind::ListTokens { scope: None }.name(),
+        "ListTokens"
+    );
+}
+
+/// Every answer this build writes names itself, and both wire lists hold one
+/// entry per variant of their enum. A variant added without its `VARIANTS`
+/// entry would arrive as unknown on the far side, so the two are pinned
+/// together here.
+#[test]
+fn every_answer_names_itself_and_both_wire_lists_are_complete() {
+    let kinds = [
+        RouterRequestKind::Hello {
+            min_protocol_version: 1,
+            max_protocol_version: 1,
+            token: token(),
+        },
+        RouterRequestKind::CreateSession {
+            profile: None,
+            cwd: None,
+            allow_other_users: None,
+        },
+        RouterRequestKind::AttachLookup {
+            selector: SessionSelector::Name("quiet-lake".to_string()),
+        },
+        RouterRequestKind::ListSessions,
+        RouterRequestKind::Restart,
+        RouterRequestKind::GrantToken {
+            identity: "build-box".to_string(),
+            scope: TokenScope::HostWide,
+            expires_in: None,
+        },
+        RouterRequestKind::RevokeToken {
+            identity: "build-box".to_string(),
+            scope: None,
+        },
+        RouterRequestKind::ListTokens { scope: None },
+    ];
+    let results = [
+        (
+            RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                version: "0.9.9".to_string(),
+            },
+            "Hello",
+        ),
+        (RouterResult::Created(address()), "Created"),
+        (RouterResult::Found(address()), "Found"),
+        (RouterResult::Sessions(vec![session_info()]), "Sessions"),
+        (RouterResult::Restarting, "Restarting"),
+        (
+            RouterResult::Granted {
+                token: token(),
+                replaced: true,
+            },
+            "Granted",
+        ),
+        (RouterResult::Revoked(vec![TokenScope::HostWide]), "Revoked"),
+        (RouterResult::Tokens(vec![token_entry()]), "Tokens"),
+        (
+            RouterResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::MalformedRequest,
+                message: "the request could not be read".to_string(),
+            }),
+            "Error",
+        ),
+    ];
+
+    for kind in &kinds {
+        let name = kind.wire_name();
+        assert!(
+            RouterRequestKind::VARIANTS.contains(&name),
+            "{name} is written but missing from VARIANTS"
+        );
+    }
+    assert_eq!(RouterRequestKind::VARIANTS.len(), kinds.len());
+
+    for (result, name) in &results {
+        assert_eq!(result.wire_name(), *name);
+        assert!(
+            RouterResult::VARIANTS.contains(name),
+            "{name} is written but missing from VARIANTS"
+        );
+    }
+    assert_eq!(RouterResult::VARIANTS.len(), results.len());
+}
+
+#[test]
+fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
+    let decoded: IncomingRouterRequest =
+        serde_json::from_str(r#"{"request_id":9,"kind":{"RehomeToken":{"identity":"build-box"}}}"#)
+            .expect("a kind this build does not have still reads");
+
+    assert_eq!(
+        decoded,
+        RouterRequest {
+            request_id: 9,
+            kind: MaybeKnown::Unknown {
+                name: "RehomeToken".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn printing_a_granted_answer_reveals_no_secret() {
+    let printed = format!(
+        "{:?}",
+        RouterResult::Granted {
+            token: token(),
+            replaced: false,
+        }
+    );
+
+    assert!(
+        printed.contains("***"),
+        "the printed answer redacts the secret, got: {printed}"
+    );
+    assert!(
+        !printed.contains("k7QxSecret"),
+        "the printed answer carries no secret, got: {printed}"
+    );
 }
 
 #[test]

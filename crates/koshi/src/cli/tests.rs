@@ -803,6 +803,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "serve-router",
         "serve-session",
         "server-version",
+        "share",
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",

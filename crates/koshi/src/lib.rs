@@ -19,6 +19,10 @@ pub mod config;
 /// Local config path, explanation, validation, and migration commands.
 pub mod config_command;
 
+/// The `koshi share` commands: grant, revoke and list the remote access
+/// tokens this machine has handed out.
+pub mod share;
+
 /// Answering the discovery queries across every running koshi: probe each
 /// advertised session, sweep the ones that are gone, build listing rows.
 pub mod discovery;

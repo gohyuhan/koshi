@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionRef;
@@ -125,6 +126,40 @@ pub fn parse_session_ref(value: &str) -> Result<SessionRef, String> {
     })
 }
 
+/// How long a granted token works, counted from the moment the grant is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expiry {
+    /// The token stops working this long after it is granted.
+    After(Duration),
+    /// The token never stops working on its own.
+    Never,
+}
+
+/// Parse an expiry argument: the word `never`, or a decimal count followed by
+/// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
+///
+/// The count times its unit is a checked multiply, so a span too large for
+/// `u64` seconds is a bad value.
+pub fn parse_expiry(value: &str) -> Result<Expiry, String> {
+    const EXPECTED: &str = "expected a length such as 30s, 15m, 24h or 7d, or the word never";
+
+    if value == "never" {
+        return Ok(Expiry::Never);
+    }
+    let mut characters = value.chars();
+    let unit = characters.next_back().ok_or(EXPECTED)?;
+    let unit_seconds: u64 = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return Err(EXPECTED.to_string()),
+    };
+    let count: u64 = characters.as_str().parse().map_err(|_| EXPECTED)?;
+    let seconds = count.checked_mul(unit_seconds).ok_or(EXPECTED)?;
+    Ok(Expiry::After(Duration::from_secs(seconds)))
+}
+
 /// Parse a `--tab` flag value: an id when the value reads as one, else a
 /// display name.
 fn parse_tab_ref(value: &str) -> Result<TabRef, String> {
@@ -169,7 +204,9 @@ pub enum FormatArg {
 /// answers are rendered by [`crate::output`]. `actions` introspects the action
 /// registry through its `list`/`explain` subcommands, and `keys` introspects
 /// the keymap through its own subcommand tree. `config` validates and migrates
-/// files locally. `version` prints this program's own build, and
+/// files locally. `share` reaches the router over the control plane; the
+/// router is the only writer of the remote access token store. `version`
+/// prints this program's own build, and
 /// `server-version` asks each running koshi server for the build it runs;
 /// both carry `--format` and render through [`crate::output`]. `plugin`
 /// remains bare until its argument surface is built.
@@ -373,6 +410,12 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Grant, revoke and list remote access tokens.
+    Share {
+        /// What to do with the tokens.
+        #[command(subcommand)]
+        command: ShareCommand,
+    },
     /// Print diagnostics for a bug report.
     Debug {
         /// Which dump to print.
@@ -553,6 +596,48 @@ pub enum ConfigCommand {
     Check,
     /// Validate then migrate every known config file.
     Migrate,
+}
+
+/// The `koshi share` subcommands: the remote access tokens this machine has
+/// granted. Every verb asks the router, which owns the token store.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum ShareCommand {
+    /// Hand one identity a fresh token and print it once.
+    Grant {
+        /// Who the token is handed to, in the words you type here.
+        #[arg(value_name = "IDENTITY")]
+        identity: String,
+        /// The one session the token reaches, by id or name. Without this
+        /// flag the token reaches every session on this machine.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
+        /// How long the token works: a length such as `30s`, `15m`, `24h` or
+        /// `7d`, or the word `never`.
+        #[arg(long, value_parser = parse_expiry, value_name = "DURATION", default_value = "24h")]
+        expires: Expiry,
+    },
+    /// Stop the tokens one identity holds.
+    Revoke {
+        /// Whose tokens stop working.
+        #[arg(value_name = "IDENTITY")]
+        identity: String,
+        /// The one grant that stops working, named by the session it reaches,
+        /// by id or name. Without this flag every grant that identity holds
+        /// stops working.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
+    },
+    /// List the grants this machine has made.
+    List {
+        /// List only the grants that reach this one session, by id or name.
+        /// A grant that reaches every session on this machine is listed here
+        /// too.
+        #[arg(long, value_parser = parse_session_ref, value_name = "SESSION")]
+        session: Option<SessionRef>,
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
 }
 
 /// The `koshi debug` subcommands: read-only dumps for a bug report.
@@ -900,6 +985,7 @@ impl CliCommand {
             | CliCommand::Detach { .. }
             | CliCommand::Doctor
             | CliCommand::Config { .. }
+            | CliCommand::Share { .. }
             | CliCommand::Debug { .. }
             | CliCommand::Plugin
             | CliCommand::Update

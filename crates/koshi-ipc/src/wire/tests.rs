@@ -413,6 +413,16 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
         },
         RouterRequestKind::ListSessions,
         RouterRequestKind::Restart,
+        RouterRequestKind::GrantToken {
+            identity: String::new(),
+            scope: crate::remote_tokens::TokenScope::HostWide,
+            expires_in: None,
+        },
+        RouterRequestKind::RevokeToken {
+            identity: String::new(),
+            scope: None,
+        },
+        RouterRequestKind::ListTokens { scope: None },
     ]
 }
 
@@ -433,6 +443,12 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::Found(address),
         RouterResult::Sessions(Vec::new()),
         RouterResult::Restarting,
+        RouterResult::Granted {
+            token: ConnectionToken::new("t"),
+            replaced: false,
+        },
+        RouterResult::Revoked(Vec::new()),
+        RouterResult::Tokens(Vec::new()),
         RouterResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,
             message: String::new(),
