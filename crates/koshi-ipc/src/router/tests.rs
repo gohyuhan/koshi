@@ -414,6 +414,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
             RouterResult::RemoteStatus {
                 address: Some("0.0.0.0:7654".to_string()),
                 enabled: true,
+                listening: false,
                 fingerprint: Some("ab".repeat(32)),
             },
             "RemoteStatus",

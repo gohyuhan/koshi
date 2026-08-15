@@ -2,6 +2,9 @@
 //! connections one address may open inside a window, that an address crossing
 //! its limit is logged once rather than once per attempt, that a window ends
 //! on its own, and that the table cannot grow past the count it is bounded at.
+//!
+//! Also [`Occasional`], which writes a repeated warning once per window, and
+//! [`EndReport`], which reports a bridged connection ended once.
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -32,8 +35,7 @@ fn an_address_inside_its_limit_is_served_every_time() {
 
 #[test]
 fn crossing_the_limit_is_logged_once_and_then_dropped_in_silence() {
-    // The whole point of the table: an address hammering the port writes one
-    // line into the log, not one line per attempt.
+    // One log line per address per window, not one per attempt.
     let mut table = RateTable::new();
     let now = Instant::now();
 
@@ -94,8 +96,7 @@ fn each_address_is_counted_on_its_own() {
 
 #[test]
 fn the_table_never_holds_more_addresses_than_it_is_bounded_at() {
-    // Every address gets one attempt, so nothing here is over its limit and
-    // only the bound can be what keeps the table down.
+    // Every address gets one attempt, so only the bound keeps the table down.
     let mut table = RateTable::new();
     let now = Instant::now();
 
@@ -144,10 +145,74 @@ fn a_full_table_drops_the_address_whose_window_opened_first() {
 }
 
 #[test]
+fn a_repeated_warning_is_written_once_per_window() {
+    // Shared by the attempt table, the admission window and the accept loop.
+    let mut warning = Occasional::new();
+    let opened = Instant::now();
+
+    assert!(warning.due(opened), "the first refusal says so");
+    for step in 0..50 {
+        assert!(
+            !warning.due(later(opened, step % LOG_WINDOW.as_secs())),
+            "refusal {step} inside the same window is silent"
+        );
+    }
+
+    let after = later(opened, LOG_WINDOW.as_secs() + 1);
+    assert!(warning.due(after), "a limit still refusing says so again");
+    assert!(!warning.due(after), "and then goes quiet again");
+}
+
+#[test]
+fn a_warning_that_has_never_been_written_is_due_at_once() {
+    // No line has been written, so there is no window to be inside of.
+    let mut warning = Occasional::new();
+    assert!(warning.due(Instant::now()));
+}
+
+#[test]
+fn a_bridged_connection_is_reported_ended_once_however_many_directions_get_there() {
+    // Both directions end the connection and either may end first.
+    let (events_tx, events_rx) = mpsc::channel();
+    let ended = EndReport::new(events_tx, 7);
+
+    ended.once();
+    ended.once();
+    ended.once();
+
+    let reported = events_rx.try_recv().expect("the first report arrives");
+    let RouterEvent::Admission(AdmissionAsk::Ended { id }) = reported else {
+        panic!("a bridged connection ending is an Ended admission");
+    };
+    assert_eq!(id, 7);
+    assert!(
+        events_rx.try_recv().is_err(),
+        "and nothing follows it, however many directions reported"
+    );
+}
+
+#[test]
+fn a_connection_reported_ended_by_the_direction_that_finished_first_needs_no_second() {
+    // One direction reporting is enough; the other may still be blocked.
+    let (events_tx, events_rx) = mpsc::channel();
+    let ended = Arc::new(EndReport::new(events_tx, 3));
+
+    let inbound = Arc::clone(&ended);
+    std::thread::spawn(move || inbound.once())
+        .join()
+        .expect("the direction that finished first reports");
+
+    let reported = events_rx.recv().expect("the report arrives");
+    let RouterEvent::Admission(AdmissionAsk::Ended { id }) = reported else {
+        panic!("a bridged connection ending is an Ended admission");
+    };
+    assert_eq!(id, 3, "without waiting for the other direction");
+}
+
+#[test]
 fn the_admission_window_holds_only_what_it_is_bounded_at() {
-    // The attempt limit is per address, so a flood from many addresses reaches
-    // this bound instead. Every place inside the window is taken, and the next
-    // caller is turned away.
+    // Every place inside the window is taken, and the next caller is turned
+    // away.
     let counted = Arc::new(AtomicUsize::new(0));
     let mut inside: Vec<InAdmission> = Vec::new();
 
@@ -171,7 +236,7 @@ fn a_place_in_the_admission_window_is_given_back_however_the_caller_left() {
         .collect();
     assert!(InAdmission::enter(&counted).is_none());
 
-    // One caller leaves — admitted, refused or hung up, it is the same drop.
+    // One caller leaves: admitted, refused and hung up are the same drop.
     inside.pop();
     assert_eq!(counted.load(Ordering::Acquire), MAX_IN_ADMISSION - 1);
 

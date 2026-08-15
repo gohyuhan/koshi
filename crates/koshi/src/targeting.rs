@@ -151,16 +151,15 @@ pub fn submit_remote(
     new_pane_direction: Direction,
 ) -> Result<CommandResult, CliError> {
     let named = remote_client::resolve_server(server)?;
-    // The opening connection saves the record every dial after it presents, so
-    // a server reached for the first time asks for its secret once and the
-    // overviews below reuse what it saved.
-    let (mut link, saved) = remote_client::connect_saved(&named, None)?;
+    // This connection saves the record the dials below present.
+    let (mut link, saved) =
+        remote_client::connect_saved(&named, None, Some(remote_client::REPLY_WAIT))?;
     let rows = remote_client::list_remote_sessions(&mut link)?;
-    // The overviews dial their own connections, so this one is finished with.
+    // The dials below open their own connections.
     drop(link);
 
     let arg = ServerArg::Saved(saved);
-    let found = remote_census(&arg, rows);
+    let found = remote_census(&arg, rows_to_ask(command.target_session(), rows));
 
     let overview = pick_session(
         command.target_session(),
@@ -185,12 +184,29 @@ pub fn submit_remote(
     remote_client::submit_remote(&arg, session, action)
 }
 
+/// Which of a server's `rows` the census must ask, given the `--session` flag.
+///
+/// [`SessionRef::Id`] keeps the one row carrying that id, and no rows when
+/// none does. Every other selector — a name, a pane, a tab, a client, or no
+/// flag at all — keeps every row.
+///
+/// Example — with `--session session-<uuid>` against a server listing eight
+/// sessions, one row comes back, so [`remote_census`] makes one dial.
+fn rows_to_ask(session: Option<&SessionRef>, rows: Vec<RemoteSessionRow>) -> Vec<RemoteSessionRow> {
+    match session {
+        Some(SessionRef::Id(id)) => rows.into_iter().filter(|row| row.id == *id).collect(),
+        _ => rows,
+    }
+}
+
 /// Ask each session in `rows` on the machine `arg` names to describe itself,
 /// as the census the targeting rules read.
 ///
-/// A session the server listed but could not describe says so on stderr and is
-/// counted as unasked, so a "not found" or a count rule over this census
-/// reports the gap instead of reading as the whole picture.
+/// One dial per row. Callers narrow `rows` with [`rows_to_ask`] first.
+///
+/// A session the server listed but could not describe is named on stderr and
+/// counted in `Discovered::unasked`. The sessions that answered are sorted by
+/// name, then by id.
 fn remote_census(arg: &ServerArg, rows: Vec<RemoteSessionRow>) -> Discovered {
     let mut found = Discovered::default();
     for row in rows {
@@ -472,8 +488,8 @@ pub fn tab_by_ref(found: &Discovered, tab_ref: &TabRef) -> Result<TabId, CliErro
     }
 }
 
-/// A routing refusal, shaped like a session's own rejection so the reason
-/// and hint print the same way and exit with the same code.
+/// A routing refusal, carrying `reason` and `help` as
+/// [`CliError::CommandRejected`].
 fn rejected(reason: RejectReason, help: String) -> CliError {
     CliError::CommandRejected {
         reason,

@@ -75,7 +75,7 @@ use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 use koshi_link::ipc_client;
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
 
-use crate::remote_listener::{self, AdmissionAsk, Admitted};
+use crate::remote_listener::{self, AdmissionAsk, Admitted, Occasional};
 
 #[cfg(test)]
 mod tests;
@@ -196,6 +196,13 @@ struct LiveRemote {
     id: u64,
 }
 
+/// How many remote connections this machine holds admitted at once.
+///
+/// Each one keeps a socket handle in [`RemoteState::live`] and a thread in the
+/// listener. A connection arriving over this count is refused in the sentence
+/// every refusal carries, and nothing is registered for it.
+pub(crate) const MAX_LIVE_REMOTE: usize = 128;
+
 /// What the router holds for remote clients: where the listener binds, whether
 /// it is open, and the connections it has admitted.
 ///
@@ -209,25 +216,24 @@ struct RemoteState {
     /// Whether the listener is open.
     listening: bool,
     /// The remote connections this machine has admitted, whether they have
-    /// attached to a session or not.
+    /// attached to a session or not. Never longer than [`MAX_LIVE_REMOTE`].
     live: Vec<LiveRemote>,
     /// The number the next admitted connection is registered under.
     next_id: u64,
+    /// The warning written when the list is full.
+    said_full: Occasional,
 }
 
 impl RemoteState {
     /// End every admitted connection a secret in `hashes` opened, and drop it
     /// from the list.
     ///
-    /// The connection's socket is shut down in both directions, so the thread
-    /// reading it stops at once and no further frame reaches that client. A
-    /// connection that has attached ends its two bridge threads the same way.
-    /// Dropping the record here is what makes a later attach on that
-    /// connection refuse rather than bridge.
+    /// Each connection's socket is shut down in both directions, ending the
+    /// thread reading it and its two bridge threads when it has attached. A
+    /// later attach on a dropped record is refused.
     ///
-    /// The list is walked on a revoke and on a grant that replaces a standing
-    /// one. An expiry walks nothing: a client that is already attached keeps
-    /// working until it leaves.
+    /// Called on a revoke and on a grant that replaces a standing one. An
+    /// expiry calls nothing.
     fn cut(&mut self, hashes: &[String]) {
         self.live.retain(|live| {
             if !hashes.contains(&live.hash) {
@@ -325,6 +331,7 @@ pub fn run_router(
         listening: false,
         live: Vec::new(),
         next_id: 0,
+        said_full: Occasional::new(),
     };
     open_remote_listener(&mut remote, &events_tx);
 
@@ -439,12 +446,17 @@ fn open_remote_listener(remote: &mut RemoteState, events_tx: &Sender<RouterEvent
             return;
         }
     };
-    if let Err(error) = remote_listener::start(address.clone(), cert, events_tx.clone()) {
-        tracing::warn!(
-            "the remote listener could not open {address}: {error}; local clients are unaffected"
-        );
-        return;
-    }
+    let bound = match remote_listener::bind(address.clone(), &cert) {
+        Ok(bound) => bound,
+        Err(error) => {
+            tracing::warn!(
+                "the remote listener could not open {address}: {error}; local clients are \
+                 unaffected"
+            );
+            return;
+        }
+    };
+    bound.serve(events_tx.clone());
     remote.listening = true;
 }
 
@@ -801,18 +813,30 @@ fn serve_admission(
 /// it is registered under.
 ///
 /// A secret that reaches something registers the connection against that
-/// secret's hash, so a revoke ends it from here on however far it goes: a
-/// connection that lists and never attaches is cut with the ones that did.
-/// The registration is dropped when the listener reports the connection ended.
+/// secret's hash, whether or not it goes on to attach. The registration is
+/// dropped when the listener reports the connection ended.
 ///
-/// The store is written back, since admitting stamps that record's last-used
-/// time. A store that cannot be read or written admits nothing.
+/// A list already holding [`MAX_LIVE_REMOTE`] admits nothing more. That count
+/// is read before the secret is, so a caller arriving at a full list does the
+/// same work as one presenting a wrong secret.
+///
+/// The store is written back, stamping that record's last-used time. A store
+/// that cannot be read or written admits nothing.
 fn admit_token(
     token_store: Option<&Path>,
     remote: &mut RemoteState,
     token: &ConnectionToken,
     stream: TcpStream,
 ) -> Option<Admitted> {
+    if remote.live.len() >= MAX_LIVE_REMOTE {
+        if remote.said_full.due(Instant::now()) {
+            tracing::warn!(
+                "{MAX_LIVE_REMOTE} remote connections are already admitted; \
+                 refusing the ones that arrive until some of them end"
+            );
+        }
+        return None;
+    }
     let Ok((path, mut store)) = open_store(token_store) else {
         return None;
     };
@@ -848,16 +872,13 @@ fn remote_rows(registry: &Registry, scope: &TokenScope) -> Vec<RemoteSessionRow>
 /// The endpoint file of the session an admitted client asked for, when the
 /// connection numbered `id` still stands and its scope covers that session.
 ///
-/// A revoke drops the connection's registration, so an attach that arrives
-/// after one answers `None` and is refused rather than bridged. That check
-/// reads no name the caller sent.
+/// Checks in this order, reading no caller-supplied name until the last step:
+/// the connection numbered `id` is still registered, `selector` names a session
+/// in the router's own in-memory list, and `scope` covers that session. No
+/// socket is opened, nothing is waited for, and no file is touched.
 ///
-/// The selector is resolved against the router's own list, in memory: no
-/// socket is opened, nothing is waited for, and no file is touched before the
-/// admitted scope has been proven to cover the session named. A connection
-/// that has been cut, a selector naming no session, and a session the scope
-/// does not cover all answer `None`, which the listener refuses in the same
-/// words, so the three cases cost the same work and read the same.
+/// `None` for all three failures: a connection a revoke dropped, a selector
+/// naming no session, and a session the scope does not cover.
 fn locate_remote(
     runtime_dir: &Path,
     registry: &Registry,
@@ -877,25 +898,34 @@ fn locate_remote(
 }
 
 /// What this machine's remote access is set to: the address `koshi.kdl` names,
-/// whether the operator has switched remote access on, and the fingerprint of
-/// the certificate this machine presents once it has one.
+/// whether the operator has switched remote access on, whether this router is
+/// holding the port right now, and the fingerprint of the certificate this
+/// machine presents once it has one.
+///
+/// `enabled` and `listening` are separate answers: an operator who said yes on
+/// a machine whose address something else holds reads `enabled: true` and
+/// `listening: false`.
 fn remote_status(remote: &RemoteState) -> RouterResult {
     let dir = remote.data_dir.as_deref();
     RouterResult::RemoteStatus {
         address: remote.address.clone(),
         enabled: dir.is_some_and(remote_enabled),
+        listening: remote.listening,
         fingerprint: dir
             .and_then(|dir| CertFile::read(&CertFile::path(dir)).ok())
             .map(|cert| tls::fingerprint(&cert.cert_der)),
     }
 }
 
-/// Switch remote access on: record the operator's yes, make this machine's
-/// certificate when it has none, and open the listener when it is not open.
+/// Switch remote access on, in four steps: make this machine's certificate when
+/// it has none, take the port when it is not already held, write the record that
+/// reopens it on the next start, then serve.
 ///
-/// The record is written first, so a start after this one opens the listener
-/// even if this call cannot. An address that is already being listened on is
-/// left alone and answered with the fingerprint it presents.
+/// A port that cannot be taken writes no record. A record that cannot be written
+/// gives the port back. Serving is last and cannot fail.
+///
+/// An address already being listened on skips the bind and the serve, and is
+/// answered with the fingerprint it presents.
 fn enable_remote(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) -> RouterResult {
     let Some(address) = remote.address.clone() else {
         return refused(
@@ -909,23 +939,39 @@ fn enable_remote(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) -> R
                 .to_string(),
         );
     };
+    let (cert, fingerprint) = match load_or_make_cert(&data_dir) {
+        Ok(made) => made,
+        Err(error) => return refused(error.to_string()),
+    };
+
+    // The port is taken before the answer is written down, so an address this
+    // machine cannot take leaves nothing behind: the next start finds no
+    // record and opens nothing, which is what the operator was just told.
+    let bound = if remote.listening {
+        None
+    } else {
+        match remote_listener::bind(address.clone(), &cert) {
+            Ok(bound) => Some(bound),
+            Err(error) => {
+                return refused(format!(
+                    "the remote listener could not open {address}: {error}"
+                ))
+            }
+        }
+    };
+
     let record = EnabledFile {
         format: ENABLED_FILE_FORMAT,
         enabled_at: SystemTime::now(),
     };
     if let Err(error) = record.write(&EnabledFile::path(&data_dir)) {
+        // Dropping the bound port gives it back.
+        drop(bound);
         return refused(error.to_string());
     }
-    let (cert, fingerprint) = match load_or_make_cert(&data_dir) {
-        Ok(made) => made,
-        Err(error) => return refused(error.to_string()),
-    };
-    if !remote.listening {
-        if let Err(error) = remote_listener::start(address.clone(), cert, events_tx.clone()) {
-            return refused(format!(
-                "the remote listener could not open {address}: {error}"
-            ));
-        }
+
+    if let Some(bound) = bound {
+        bound.serve(events_tx.clone());
         remote.listening = true;
     }
     RouterResult::RemoteEnabled {
@@ -1395,8 +1441,8 @@ fn spawn_session_server(
     session_server_command(runtime_dir, id, name, profile, cwd, allow_other_users)?.spawn()
 }
 
-/// The line a freshly spawned session server printed, or the reason to refuse
-/// the session.
+/// The line a freshly spawned session server printed, or the refusal to answer
+/// with.
 ///
 /// `None` is a session server that printed nothing readable before the wait
 /// ran out. A report naming another control-plane protocol version comes from

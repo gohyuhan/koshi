@@ -20,11 +20,13 @@
 //! admitted, these frames stop. The next bytes on the stream are the session
 //! server's own answer frames, carried through unparsed.
 //!
-//! Every refusal carries [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED),
-//! one sentence for every case, so a caller cannot tell a wrong secret from a
-//! session it holds no grant for.
+//! How long the halves [`open`](crate::remote_wire::open) hands back may block
+//! is the caller's choice, made when it dials.
+//!
+//! Every refusal carries the same sentence,
+//! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -58,18 +60,13 @@ pub const REMOTE_HELLO_MAX_LEN: u32 = 4096;
 /// expired one, a session that does not exist, and a session the secret holds
 /// no grant for all read the same.
 ///
-/// A doorway version that does not overlap is the one refusal that says more,
-/// and it says nothing about secrets or sessions — see
-/// [`version_refusal`].
+/// A doorway version that does not overlap carries [`version_refusal`]
+/// instead.
 pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 
 /// The refusal a caller gets when no doorway version suits both ends, naming
-/// both ranges and which end is which.
-///
-/// This one refusal is not [`REMOTE_REFUSED`]. The uniform sentence exists so
-/// that a wrong secret cannot be told apart from a session the secret does not
-/// reach; a version has nothing to do with either, and a caller that cannot be
-/// told the versions has no way to learn which end to upgrade.
+/// both ranges and which end is which. The one refusal that is not
+/// [`REMOTE_REFUSED`].
 ///
 /// Example — a caller speaking 2 to 3 against a build speaking 1 to 1 reads
 /// `"the caller speaks remote doorway 2 to 3, this koshi speaks 1 to 1"`.
@@ -150,9 +147,14 @@ pub enum RemoteServerFrame {
 ///
 /// `timeout` bounds everything after the name lookup: the connect, the TLS
 /// handshake, the Hello and the answer share one deadline, so a server that
-/// sends its answer one byte at a time cannot stretch the dial past it. The
-/// deadline is taken off both halves before they come back, so what the caller
-/// sends and reads after the answer waits as long as it takes.
+/// sends its answer one byte at a time cannot stretch the dial past it.
+///
+/// `reply_wait` says how long the halves that come back may block, which is
+/// the caller's business and not this function's:
+///
+/// - `None` — they block for as long as it takes.
+/// - `Some(wait)` — every read and write on them finishes inside `wait`,
+///   counted from when the answer arrives.
 ///
 /// Returns the two framed halves, the sha256 of the certificate the server
 /// presented as 64 lowercase hex characters, and the answer.
@@ -167,12 +169,14 @@ pub fn open(
     pinned: Option<&str>,
     hello: &RemoteClientFrame,
     timeout: Duration,
+    reply_wait: Option<Duration>,
 ) -> Result<(FrameReader, FrameWriter, String, RemoteServerFrame), IpcError> {
     let (mut reader, mut writer, presented) = tls::dial(address, pinned, timeout)?;
     let exchanged = write_message(&mut writer, hello)
         .and_then(|()| read_message::<RemoteServerFrame>(&mut reader));
-    reader.set_deadline(None);
-    writer.set_deadline(None);
+    let after = reply_wait.map(|wait| Instant::now() + wait);
+    reader.set_deadline(after);
+    writer.set_deadline(after);
     let answer = exchanged?;
     let (reader, writer) = frame_halves(Box::new(reader), Box::new(writer));
     Ok((reader, writer, presented, answer))

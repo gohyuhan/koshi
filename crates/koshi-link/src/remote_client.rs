@@ -39,7 +39,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
 };
-use koshi_ipc::remote_servers::{store_path, SavedServer, ServerStore};
+use koshi_ipc::remote_servers::{store_path, Lookup, SavedServer, ServerStore};
 use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
@@ -57,6 +57,25 @@ pub const SECRET_VARIABLE: &str = "KOSHI_REMOTE_SECRET";
 /// How long one dial has to open: the name lookup aside, the connect, the TLS
 /// handshake and the secret exchange share it.
 pub const DIAL_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the frames that join a client to a session on another machine have
+/// to arrive: the Attach, the session's Hello carried back through the bridge,
+/// and the answer that names the client.
+///
+/// The deadline is taken off once the client is joined.
+pub const JOIN_WAIT: Duration = Duration::from_secs(20);
+
+/// How long one command sent to a session on another machine has to come back,
+/// counted from the moment the connection opens.
+///
+/// The dial before it has [`DIAL_WAIT`] of its own, so one request takes at
+/// most `DIAL_WAIT + REPLY_WAIT`. An attached client passes `None` instead and
+/// waits as long as it takes.
+pub const REPLY_WAIT: Duration = Duration::from_secs(20);
+
+/// How many saved servers [`reach_all`] asks at once, one thread each. Records
+/// past this count are not asked; [`reach_all`] names how many on stderr.
+pub const MAX_REACHED_AT_ONCE: usize = 16;
 
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,13 +97,20 @@ impl ServerArg {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
-            Self::Saved(record) => record
-                .name
-                .clone()
-                .unwrap_or_else(|| record.address.clone()),
+            Self::Saved(record) => label_of(record),
             Self::New { address } => address.clone(),
         }
     }
+}
+
+/// How one saved server is named in a message: the name the user chose when
+/// they chose one, else the address it listens on. Either way it is a word
+/// `koshi remote` takes.
+fn label_of(record: &SavedServer) -> String {
+    record
+        .name
+        .clone()
+        .unwrap_or_else(|| record.address.clone())
 }
 
 /// An open connection to a server, past the secret exchange.
@@ -146,38 +172,107 @@ fn store_failed(error: IpcError) -> CliError {
 /// Example — `work` matches the record the user named `work`, and
 /// `laptop.local:7654` with no matching record is [`ServerArg::New`].
 ///
+/// A selector that matches more than one record is refused rather than taken
+/// for a server this machine has not seen: that would dial with no pinned
+/// certificate and save whichever one was presented.
+///
 /// # Errors
 /// [`CliError::InvalidArgs`] when `arg` matches no record and is not an
-/// address, so there is nothing to dial.
+/// address, so there is nothing to dial, and when it matches more than one.
 pub fn resolve_server(arg: &str) -> Result<ServerArg, CliError> {
     let (_, store) = read_store()?;
-    if let Some(record) = store.find(arg) {
-        return Ok(ServerArg::Saved(record.clone()));
-    }
-    if looks_like_address(arg) {
-        return Ok(ServerArg::New {
+    server_from(store.find(arg), arg)
+}
+
+/// Which server `arg` names, given what the store said about it.
+///
+/// [`Lookup::Saved`] dials with that record's pinned fingerprint;
+/// [`Lookup::NotSaved`] with an address shape dials with none.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when `arg` names nothing and is not an address,
+/// and when it names more than one saved server.
+fn server_from(found: Lookup<'_>, arg: &str) -> Result<ServerArg, CliError> {
+    match found {
+        Lookup::Saved(record) => Ok(ServerArg::Saved(record.clone())),
+        Lookup::Ambiguous => Err(CliError::InvalidArgs {
+            detail: format!(
+                "{arg} is the name of one saved server and the address of another; \
+                 run `koshi remote list` and name the one you mean"
+            ),
+        }),
+        Lookup::NotSaved if looks_like_address(arg) => Ok(ServerArg::New {
             address: arg.to_string(),
-        });
+        }),
+        Lookup::NotSaved => Err(CliError::InvalidArgs {
+            detail: format!("no saved server is named {arg}; run `koshi remote list`"),
+        }),
     }
-    Err(CliError::InvalidArgs {
-        detail: format!("no saved server is named {arg}; run `koshi remote list`"),
-    })
 }
 
 /// Whether `arg` has the `host:port` shape: text before the last colon, and a
 /// port number after it.
-fn looks_like_address(arg: &str) -> bool {
+///
+/// Example — `laptop.local:7654` and `[::1]:22` are addresses; `work`,
+/// `laptop.local` and `laptop.local:door` are not.
+#[must_use]
+pub fn looks_like_address(arg: &str) -> bool {
     match arg.rsplit_once(':') {
         Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
         None => false,
     }
 }
 
+/// Refuse a saved name that has the `host:port` shape.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] naming the shape.
+pub fn check_name_shape(name: &str) -> Result<(), CliError> {
+    if looks_like_address(name) {
+        return Err(CliError::InvalidArgs {
+            detail: format!(
+                "{name} is the shape of an address, and a saved name must not be: \
+                 a lookup would take it for the server listening there. Pick a plain name."
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a saved name that cannot be given to the server at `address`.
+///
+/// Two names are refused: one with the `host:port` shape
+/// ([`check_name_shape`]), and one another record already answers to
+/// ([`ServerStore::name_free_for`]). Reads the store.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when `name` has the `host:port` shape, and when
+/// another address already holds it.
+pub fn check_save_as(name: &str, address: &str) -> Result<(), CliError> {
+    check_name_shape(name)?;
+    let (_, store) = read_store()?;
+    if !store.name_free_for(name, address) {
+        let taken = store
+            .records
+            .iter()
+            .find(|record| record.name.as_deref() == Some(name))
+            .map(|record| record.address.clone())
+            .unwrap_or_default();
+        return Err(CliError::InvalidArgs {
+            detail: format!(
+                "the name {name} already belongs to {taken}; run `koshi remote forget {name}` \
+                 first, or pick another name"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// The secret to present to the server at `address`.
 ///
-/// [`SECRET_VARIABLE`] is read first. With it unset, the terminal is asked
-/// for the secret and what is typed is not printed. A secret is never taken
-/// from a command-line argument.
+/// [`SECRET_VARIABLE`] is read first. With it unset, the terminal is asked for
+/// the secret and what is typed is not printed. Surrounding whitespace is
+/// trimmed.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when nothing was given, and when the terminal
@@ -200,8 +295,8 @@ pub fn secret_for(address: &str) -> Result<ConnectionToken, CliError> {
 /// what is typed.
 ///
 /// The terminal is put in raw mode while the secret is typed. A terminal that
-/// cannot be put in raw mode — stdin is a pipe or a file, and the machine has
-/// no terminal to fall back on — reads one plain line instead.
+/// cannot be put in raw mode reads one plain line instead, which the terminal
+/// echoes.
 fn read_secret(prompt: &str) -> Result<String, CliError> {
     print!("{prompt}");
     io::stdout().flush().map_err(prompt_failed)?;
@@ -218,10 +313,9 @@ fn read_secret(prompt: &str) -> Result<String, CliError> {
 
 /// Read from stdin until the Enter key, with none of it printed.
 ///
-/// Backspace — `0x7f` on Unix, `0x08` on Windows — removes the last
-/// character. `Ctrl-C` ends the entry with nothing typed, because raw mode
-/// delivers it as a byte rather than a signal. End of stream ends the entry
-/// where it stands.
+/// Ends at `\r`, `\n` or `0x04`. Backspace — `0x7f` or `0x08` — removes the
+/// last byte. `0x03` returns an empty string. End of stream ends the entry
+/// where it stands. Invalid UTF-8 is replaced.
 fn read_hidden_line() -> io::Result<String> {
     let mut stdin = io::stdin().lock();
     let mut typed: Vec<u8> = Vec::new();
@@ -269,6 +363,7 @@ pub fn connect(
     secret: &ConnectionToken,
     pinned: Option<&str>,
     timeout: Duration,
+    reply_wait: Option<Duration>,
 ) -> Result<RemoteLink, CliError> {
     let hello = RemoteClientFrame::Hello {
         min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
@@ -278,11 +373,8 @@ pub fn connect(
         token: secret.clone(),
     };
     let (reader, writer, fingerprint, answer) =
-        remote_wire::open(address, pinned, &hello, timeout).map_err(talk_failed)?;
+        remote_wire::open(address, pinned, &hello, timeout, reply_wait).map_err(talk_failed)?;
     match answer {
-        // The server settles the doorway version out of the range the Hello
-        // named, so anything outside that range is a server this build cannot
-        // trust to mean what it says.
         RemoteServerFrame::Welcome { remote_version }
             if (MIN_REMOTE_PROTOCOL_VERSION..=REMOTE_PROTOCOL_VERSION)
                 .contains(&remote_version) =>
@@ -310,36 +402,52 @@ pub fn connect(
 /// Open a connection to the server `arg` names, saving what the next
 /// connection needs.
 ///
-/// A saved server presents the secret and the fingerprint its record holds,
-/// and the record's last-used time is stamped once the connection opens. That
-/// stamp is for display, so a store that will not take it leaves a log line
-/// and the connection stands. A
-/// server reached for the first time asks for its secret ([`secret_for`]),
-/// pins whatever certificate it presents, and is saved under `save_as` once
-/// it admits the connection, so nothing is retyped next time.
+/// A saved server presents the secret and the fingerprint its record holds, and
+/// its last-used time is stamped once the connection opens. A store that will
+/// not take that stamp leaves a log line and the connection stands.
+///
+/// A server reached for the first time asks for its secret ([`secret_for`]),
+/// pins whatever certificate it presents, and is saved under `save_as` once it
+/// admits the connection. A store that will not take that record fails the
+/// call.
+///
+/// `save_as` names a server this machine has not connected to. Given for a
+/// server that is already saved, it is refused.
+///
+/// `reply_wait` is passed straight to [`connect`].
 ///
 /// The saved record comes back alongside the connection.
 ///
 /// # Errors
-/// Whatever [`connect`] reports, and [`CliError::IpcUnavailable`] when a
-/// server reached for the first time could not be saved — its secret and its
-/// pinned fingerprint are what the next connection needs.
+/// [`CliError::InvalidArgs`] when `save_as` names a server that is already
+/// saved, and when the name cannot be given to that address. Whatever
+/// [`connect`] reports, and [`CliError::IpcUnavailable`] when a server reached
+/// for the first time could not be saved.
 pub fn connect_saved(
     arg: &ServerArg,
     save_as: Option<&str>,
+    reply_wait: Option<Duration>,
 ) -> Result<(RemoteLink, SavedServer), CliError> {
     match arg {
         ServerArg::Saved(record) => {
+            if let Some(name) = save_as {
+                return Err(CliError::InvalidArgs {
+                    detail: format!(
+                        "{} is already saved, so --save-as {name} would change nothing; \
+                         run `koshi remote forget {}` first to save it under another name",
+                        label_of(record),
+                        label_of(record)
+                    ),
+                });
+            }
             let link = connect(
                 &record.address,
                 &record.secret,
                 Some(&record.fingerprint),
                 DIAL_WAIT,
+                reply_wait,
             )?;
             let now = SystemTime::now();
-            // The last-used time is what `koshi remote list` shows and nothing
-            // reads to decide anything, so a store that will not take it does
-            // not cost the caller the connection that just opened.
             match read_store() {
                 Ok((path, mut store)) => {
                     store.touch(&record.address, now);
@@ -354,8 +462,11 @@ pub fn connect_saved(
             Ok((link, used))
         }
         ServerArg::New { address } => {
+            if let Some(name) = save_as {
+                check_save_as(name, address)?;
+            }
             let secret = secret_for(address)?;
-            let link = connect(address, &secret, None, DIAL_WAIT)?;
+            let link = connect(address, &secret, None, DIAL_WAIT, reply_wait)?;
             let now = SystemTime::now();
             let saved = SavedServer {
                 name: save_as.map(str::to_string),
@@ -366,7 +477,11 @@ pub fn connect_saved(
                 last_used_at: Some(now),
             };
             let (path, mut store) = read_store()?;
-            store.save(saved.clone());
+            store
+                .save(saved.clone())
+                .map_err(|taken| CliError::InvalidArgs {
+                    detail: taken.to_string(),
+                })?;
             store.write(&path).map_err(store_failed)?;
             Ok((link, saved))
         }
@@ -397,11 +512,10 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
 
 /// Ask to attach to `selector` and hand the connection's two halves back.
 ///
-/// The bytes after this belong to that session's own server: the machine
-/// serving it presents the session's endpoint token on this caller's behalf
-/// and sends the Hello with the versions this build named. So the next typed
-/// frame the caller reads is that session server's Hello answer, exactly as
-/// if the caller had sent the Hello itself.
+/// The bytes after this belong to that session's own server. The machine
+/// serving it sends the session-plane Hello carrying that session's endpoint
+/// token and the versions this build named, so the next frame the caller reads
+/// is that session server's Hello answer.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the request could not be sent.
@@ -421,11 +535,8 @@ pub fn attach_remote(
 /// Submit `command` to the session `session` on the server `arg` names, and
 /// hand back the dispatcher's result.
 ///
-/// The command's source is [`CommandSource::external_cli`], the same source a
-/// `koshi` command typed outside any pane carries locally, so the session
-/// resolves defaults through its own acting client. A pane-creating command
-/// carrying no working directory keeps none: the directory this process runs
-/// in names nothing on the machine serving the session.
+/// The command's source is [`CommandSource::external_cli`] carrying `session`.
+/// A pane-creating command carrying no working directory keeps none.
 ///
 /// # Errors
 /// Whatever [`connect_saved`] reports, and [`CliError::IpcUnavailable`] when
@@ -455,9 +566,7 @@ pub fn submit_remote(
 /// Ask the session `session` on the server `arg` names to describe itself in
 /// full: tabs, panes, and attached clients.
 ///
-/// This is the request a local listing sends, over the remote connection
-/// instead of a local socket, so the routing layer resolves names, counts and
-/// explicit targets against that machine unchanged.
+/// Sends [`IpcRequestKind::Discovery`] over one remote connection of its own.
 ///
 /// # Errors
 /// Whatever [`connect_saved`] reports, and [`CliError::IpcUnavailable`] when
@@ -485,7 +594,7 @@ fn one_request(
     session: SessionId,
     request: IpcRequest,
 ) -> Result<IpcResult, CliError> {
-    let (link, _) = connect_saved(arg, None)?;
+    let (link, _) = connect_saved(arg, None, Some(REPLY_WAIT))?;
     let (mut reader, mut writer) = attach_remote(link, SessionSelector::Id(session))?;
 
     let hello_reply: IncomingResponse = reader.recv().map_err(talk_failed)?;
@@ -506,16 +615,18 @@ fn one_request(
 /// `timeout` whatever the servers do.
 ///
 /// `timeout` is one deadline over the whole call, not a budget each server
-/// gets. Each saved record is asked on its own thread, and this returns with
-/// the servers heard from by the deadline. A thread still waiting on a name
-/// lookup, a connect, or a server that sends its answer one byte at a time is
-/// left to finish on its own; it writes no file, so it never touches the
-/// store.
+/// gets. Each record is asked on its own thread, and this returns with the
+/// servers heard from by the deadline. A thread still running at the deadline
+/// is never joined; it writes no file.
 ///
-/// A server that answered and did not admit the saved secret comes back as
-/// [`Reach::Refused`]. A server not heard from is [`Reach::Unreachable`], and
-/// one still unanswered at the deadline is left out of the answer entirely. A
-/// store that cannot be read reads as no saved servers.
+/// At most [`MAX_REACHED_AT_ONCE`] records are asked. The rest are named on
+/// stderr and left out.
+///
+/// A server that answered and did not admit the saved secret is
+/// [`Reach::Refused`]. A server that could not be reached is
+/// [`Reach::Unreachable`]. A server still unanswered at the deadline is left
+/// out of the answer entirely. A store that cannot be read reads as no saved
+/// servers.
 #[must_use]
 pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     let deadline = Instant::now() + timeout;
@@ -523,9 +634,17 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
         return Vec::new();
     };
 
+    let saved = store.records.len();
+    if saved > MAX_REACHED_AT_ONCE {
+        eprintln!(
+            "koshi: asking the first {MAX_REACHED_AT_ONCE} of {saved} saved servers; \
+             name one with `koshi attach --remote <server>` to reach the rest"
+        );
+    }
+
     let (send, receive) = mpsc::channel();
     let mut asked = 0usize;
-    for record in store.records {
+    for record in store.records.into_iter().take(MAX_REACHED_AT_ONCE) {
         let send = send.clone();
         let started = std::thread::Builder::new()
             .name("koshi-remote-reach".to_string())
@@ -552,10 +671,10 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
     heard
 }
 
-/// Ask one saved server for its sessions, with `deadline` bounding the dial.
+/// Ask one saved server for its sessions.
 ///
-/// Nothing here writes the store: the thread running it may outlive the
-/// command that started it.
+/// The time left until `deadline` is given to the dial and again to the reply,
+/// so this returns up to twice that after `deadline` passes. Writes no file.
 fn probe(record: &SavedServer, deadline: Instant) -> Reach {
     let server = record
         .name
@@ -567,6 +686,7 @@ fn probe(record: &SavedServer, deadline: Instant) -> Reach {
         &record.secret,
         Some(&record.fingerprint),
         left,
+        Some(left),
     ) {
         Ok(link) => link,
         Err(CliError::Runtime { .. }) => return Reach::Refused { server },
@@ -579,10 +699,12 @@ fn probe(record: &SavedServer, deadline: Instant) -> Reach {
     }
 }
 
-/// The server sent a frame the request cannot produce — a protocol violation,
-/// not an outcome.
+/// The server sent a frame this request cannot produce.
 fn unexpected_answer(server: &str) -> CliError {
     CliError::IpcUnavailable {
         detail: format!("{server} answered with a frame this request cannot produce"),
     }
 }
+
+#[cfg(test)]
+mod tests;

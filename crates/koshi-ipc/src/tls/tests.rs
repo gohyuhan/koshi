@@ -394,6 +394,7 @@ fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
         None,
         &an_opening_frame(),
         OPENING_WINDOW,
+        None,
     )
     .expect_err("a drip never fills the answer");
     let waited = started.elapsed();
@@ -410,7 +411,7 @@ fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
 }
 
 #[test]
-fn a_read_after_the_opening_exchange_waits_as_long_as_it_takes() {
+fn a_caller_that_asked_to_wait_reads_however_long_the_server_takes() {
     let (config, _) = fresh_server();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let address = listener.local_addr().expect("read the bound address");
@@ -443,6 +444,7 @@ fn a_read_after_the_opening_exchange_waits_as_long_as_it_takes() {
         None,
         &an_opening_frame(),
         OPENING_WINDOW,
+        None,
     )
     .expect("the opening exchange finishes");
     assert_eq!(
@@ -460,4 +462,135 @@ fn a_read_after_the_opening_exchange_waits_as_long_as_it_takes() {
 
     let opened = server.join().expect("the server thread finished");
     assert_eq!(opened, an_opening_frame());
+}
+
+#[test]
+fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
+    // What a one-shot command needs. The server admits the connection and then
+    // says nothing more; without the bound the read never returns and the
+    // command has nothing to print and no reason to stop.
+    let (config, _) = fresh_server();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept the client");
+        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
+        let mut conn = rustls::Connection::Server(conn);
+        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
+            .expect("the loopback handshake finishes");
+        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
+        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
+        let _: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
+        outgoing
+            .send(&RemoteServerFrame::Welcome {
+                remote_version: REMOTE_PROTOCOL_VERSION,
+            })
+            .expect("answer the opening frame");
+        // Admitted, and then nothing. Held open so the client is reading a
+        // live connection rather than a closed one.
+        std::thread::sleep(PAUSE_AFTER_THE_ANSWER * 4);
+    });
+
+    let bounded = PAUSE_AFTER_THE_ANSWER / 2;
+    let (mut incoming, _outgoing, _presented, answer) = open(
+        &address.to_string(),
+        None,
+        &an_opening_frame(),
+        OPENING_WINDOW,
+        Some(bounded),
+    )
+    .expect("the opening exchange finishes");
+    assert_eq!(
+        answer,
+        RemoteServerFrame::Welcome {
+            remote_version: REMOTE_PROTOCOL_VERSION
+        }
+    );
+
+    let started = Instant::now();
+    let failure = incoming
+        .recv::<RemoteServerFrame>()
+        .expect_err("a server that says nothing more is not waited for");
+    let waited = started.elapsed();
+
+    assert!(
+        waited < PAUSE_AFTER_THE_ANSWER * 3,
+        "the read ended on the bound it was given, taking {waited:?}"
+    );
+    assert!(
+        !matches!(failure, IpcError::MalformedFrame { .. }),
+        "the read ran out of time, and did not misread a frame: {failure}"
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_it() {
+    // The seam this pins: `open` hands back boxed halves, and the deadline has
+    // to survive that box and still be removable through it. A caller that
+    // could not remove it would hold a clock over frames that arrive when a
+    // person types; a caller whose deadline the box swallowed would wait for
+    // good on a server that admits a connection and then says nothing.
+    let (config, _) = fresh_server();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+    let row = one_row();
+    let served = row.clone();
+
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept the client");
+        let conn = ServerConnection::new(Arc::new(config)).expect("a server connection");
+        let mut conn = rustls::Connection::Server(conn);
+        handshake(&mut conn, &mut sock, Instant::now() + LOOPBACK_WAIT)
+            .expect("the loopback handshake finishes");
+        let (reader, writer) = split_tls(conn, sock).expect("split the loopback stream");
+        let (mut incoming, mut outgoing) = frame_halves(Box::new(reader), Box::new(writer));
+        let _: RemoteClientFrame = incoming.recv().expect("the client's opening frame");
+        outgoing
+            .send(&RemoteServerFrame::Welcome {
+                remote_version: REMOTE_PROTOCOL_VERSION,
+            })
+            .expect("answer the opening frame");
+        std::thread::sleep(PAUSE_AFTER_THE_ANSWER);
+        outgoing
+            .send(&RemoteServerFrame::Sessions { rows: vec![served] })
+            .expect("send the frame after the pause");
+    });
+
+    let bounded = PAUSE_AFTER_THE_ANSWER / 2;
+    let (mut incoming, mut outgoing, _presented, answer) = open(
+        &address.to_string(),
+        None,
+        &an_opening_frame(),
+        OPENING_WINDOW,
+        Some(bounded),
+    )
+    .expect("the opening exchange finishes");
+    assert_eq!(
+        answer,
+        RemoteServerFrame::Welcome {
+            remote_version: REMOTE_PROTOCOL_VERSION
+        }
+    );
+
+    // The deadline came through the box: the server is still pausing, so this
+    // read gives up rather than waiting it out.
+    incoming
+        .recv::<RemoteServerFrame>()
+        .expect_err("the dialled deadline holds through the boxed half");
+
+    // And it can be taken off through the box: the same server, the same
+    // pause, and now the frame is waited for.
+    incoming.set_deadline(None);
+    outgoing.set_deadline(None);
+    assert_eq!(
+        incoming
+            .recv::<RemoteServerFrame>()
+            .expect("with no deadline the frame after the pause arrives"),
+        RemoteServerFrame::Sessions { rows: vec![row] }
+    );
+
+    let _ = server.join();
 }

@@ -51,11 +51,10 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
 /// highest is below this one is refused with
 /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
-/// The floor is 1, the version 0.2.0 speaks, because the router is born in
-/// 0.2.0 and no earlier build has one.
+/// The floor is 1, the version 0.2.0 speaks. No build before 0.2.0 has a
+/// router.
 ///
-/// Raising this floor drops support for every build below it, so it moves
-/// only on a stated decision to end that support.
+/// Raising this floor drops support for every build below it.
 pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.min;
 
 /// Which session a request means: the id, or the generated display name.
@@ -246,8 +245,8 @@ pub struct SessionAddress {
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouterResult {
-    /// Answers [`RouterRequestKind::Hello`]: the connection is open, because
-    /// the ranges overlap and the token matched.
+    /// Answers [`RouterRequestKind::Hello`]: the ranges overlap and the token
+    /// matched, so the connection is open.
     Hello {
         /// The version both sides use on this connection: the highest they
         /// both speak.
@@ -290,8 +289,13 @@ pub enum RouterResult {
         /// Where remote clients would be served, as `host:port`, or `None`
         /// when `koshi.kdl` names no listen address.
         address: Option<String>,
-        /// Whether the operator has switched remote access on.
+        /// Whether the operator has switched remote access on. This is the
+        /// answer they gave, which outlives any one run.
         enabled: bool,
+        /// Whether this router is holding the port right now. `enabled` with
+        /// this `false` means the answer was given and the port could not be
+        /// taken this start — something else is on the address.
+        listening: bool,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters, or `None` when no certificate has been generated.
         fingerprint: Option<String>,

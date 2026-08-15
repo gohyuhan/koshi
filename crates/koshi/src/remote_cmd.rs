@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use koshi_ipc::remote_servers::{store_path, ServerStore};
+use koshi_ipc::remote_servers::{store_path, Lookup, SavedServer, ServerStore};
 
 use crate::cli::RemoteCommand;
 use crate::output;
@@ -31,25 +31,40 @@ pub fn run(command: &RemoteCommand) -> Result<(), CliError> {
             Ok(())
         }
         RemoteCommand::Forget { server } => {
+            named(&store, server)?;
             let address = store.forget(server).ok_or_else(|| not_saved(server))?;
             store.write(&path).map_err(store_failed)?;
             print!("{}", output::render_remote_forget(&address));
             Ok(())
         }
         RemoteCommand::SetSecret { server } => {
-            // The address is read before the secret is asked for, so the
-            // prompt names the machine the secret belongs to.
-            let address = store
-                .find(server)
-                .ok_or_else(|| not_saved(server))?
-                .address
-                .clone();
+            // Read first: the prompt names this address.
+            let address = named(&store, server)?.address.clone();
             let secret = remote_client::secret_for(&address)?;
             store.set_secret(server, secret);
             store.write(&path).map_err(store_failed)?;
             print!("{}", output::render_remote_secret(&address));
             Ok(())
         }
+    }
+}
+
+/// The one server `server` names.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when nothing is saved under that word, and a
+/// different [`CliError::InvalidArgs`] when more than one record answers to
+/// it.
+fn named<'a>(store: &'a ServerStore, server: &str) -> Result<&'a SavedServer, CliError> {
+    match store.find(server) {
+        Lookup::Saved(record) => Ok(record),
+        Lookup::NotSaved => Err(not_saved(server)),
+        Lookup::Ambiguous => Err(CliError::InvalidArgs {
+            detail: format!(
+                "{server} is the name of one saved server and the address of another; \
+                 run `koshi remote list` and name the one you mean"
+            ),
+        }),
     }
 }
 

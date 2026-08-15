@@ -221,6 +221,18 @@ impl Write for TlsWriter {
     }
 }
 
+impl crate::transport::Deadlined for TlsReader {
+    fn set_deadline(&mut self, at: Option<Instant>) {
+        TlsReader::set_deadline(self, at);
+    }
+}
+
+impl crate::transport::Deadlined for TlsWriter {
+    fn set_deadline(&mut self, at: Option<Instant>) {
+        TlsWriter::set_deadline(self, at);
+    }
+}
+
 /// A socket that gives every read and write the time left until one deadline.
 ///
 /// The handshake hands this to rustls in place of the socket, and rustls reads

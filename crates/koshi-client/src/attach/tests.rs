@@ -99,22 +99,39 @@ fn no_running_session_leaves_nothing_to_attach_to() {
 #[test]
 fn one_running_session_is_the_answer_without_reading_a_line() {
     let rows = vec![session_row("solo")];
-    assert_eq!(
-        pick(&rows, "").expect("one row needs no picking"),
-        rows[0].id.to_string()
-    );
+    assert_eq!(pick(&rows, "").expect("one row needs no picking"), 0);
 }
 
 #[test]
 fn the_typed_number_picks_that_row() {
     let rows = vec![session_row("a"), session_row("b"), session_row("c")];
-    assert_eq!(
-        pick(&rows, "2").expect("2 is in range"),
-        rows[1].id.to_string()
-    );
+    assert_eq!(pick(&rows, "2").expect("2 is in range"), 1);
     assert_eq!(
         pick(&rows, "2\n").expect("the read line keeps its newline"),
-        rows[1].id.to_string()
+        1
+    );
+}
+
+#[test]
+fn two_rows_carrying_one_session_id_are_told_apart_by_their_place() {
+    // Two rows, one session id: the answer is the place, not the id.
+    let shared = SessionId::new();
+    let rows = vec![
+        SessionRow {
+            id: shared,
+            name: String::from("desk web"),
+        },
+        SessionRow {
+            id: shared,
+            name: String::from("desk-ip web"),
+        },
+    ];
+
+    assert_eq!(pick(&rows, "1").expect("1 is in range"), 0);
+    assert_eq!(
+        pick(&rows, "2").expect("2 is in range"),
+        1,
+        "the second row is reachable even though it shares the first row's id"
     );
 }
 

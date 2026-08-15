@@ -460,7 +460,13 @@ struct Joined {
 fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<SessionAddress, CliError> {
     let selector = match selector {
         Some(selector) => selector.to_string(),
-        None => choose(runtime_dir, Vec::new())?,
+        // No remote rows are offered, so every place is a local one.
+        None => match choose(runtime_dir, Vec::new())? {
+            Picked::Local(id) => id,
+            Picked::Remote(at) => {
+                unreachable!("a listing offered no remote rows and settled on place {at}")
+            }
+        },
     };
     lookup(runtime_dir, &selector)
 }
@@ -505,9 +511,9 @@ pub fn run_remote(
     selector: Option<&str>,
 ) -> Result<(), CliError> {
     let arg = remote_client::resolve_server(server)?;
-    // The opening connection saves the record every later dial presents, so a
-    // switch and a restart never ask for the secret again.
-    let (mut link, saved) = remote_client::connect_saved(&arg, save_as)?;
+    // This connection carries one listing. The attachment below dials its own.
+    let (mut link, saved) =
+        remote_client::connect_saved(&arg, save_as, Some(remote_client::REPLY_WAIT))?;
     let target = match selector {
         Some(selector) => selector_of(selector),
         None => choose_remote(server, &remote_client::list_remote_sessions(&mut link)?)?,
@@ -537,13 +543,15 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
             name: format!("{server} {}", row.name),
         })
         .collect();
-    let picked = choose(&runtime_dir, offered)?;
-    let Some((server, row)) = reached.iter().find(|(_, row)| row.id.to_string() == picked) else {
-        let address = lookup(&runtime_dir, &picked)?;
-        return attach_home(
-            &Home::Local { runtime_dir },
-            SessionSelector::Id(address.id),
-        );
+    let (server, row) = match choose(&runtime_dir, offered)? {
+        Picked::Local(id) => {
+            let address = lookup(&runtime_dir, &id)?;
+            return attach_home(
+                &Home::Local { runtime_dir },
+                SessionSelector::Id(address.id),
+            );
+        }
+        Picked::Remote(at) => &reached[at],
     };
     attach_home(
         &Home::Remote {
@@ -604,7 +612,8 @@ fn choose_remote(server: &str, rows: &[RemoteSessionRow]) -> Result<SessionSelec
     } else {
         String::new()
     };
-    Ok(selector_of(&pick(&listed, &line)?))
+    let at = pick(&listed, &line)?;
+    Ok(SessionSelector::Id(listed[at].id))
 }
 
 /// Ask the session this CLI runs inside to move its own client to another
@@ -1024,13 +1033,18 @@ fn dial_remote(
     target: &SessionSelector,
     resume: Option<ClientId>,
 ) -> Result<Joined, CliError> {
-    let (link, saved) = remote_client::connect_saved(server, None)?;
+    // The join is held to JOIN_WAIT; the clock comes off once it is joined.
+    let (link, saved) = remote_client::connect_saved(server, None, Some(remote_client::JOIN_WAIT))?;
     let (mut reader, mut writer) = remote_client::attach_remote(link, target.clone())?;
     settle_forwarded_hello(&mut reader, target)?;
     writer
         .send(&attach_request(resume))
         .map_err(talk::talk_failed)?;
     let (client_id, session_id) = take_attached(reader.recv().map_err(talk::talk_failed)?)?;
+
+    // Joined: both halves block for as long as it takes from here.
+    reader.set_deadline(None);
+    writer.set_deadline(None);
     Ok(Joined {
         reader,
         writer,
@@ -1046,8 +1060,8 @@ fn dial_remote(
 /// Two senders write this one frame: the serving machine writes a refusal when
 /// the secret it admitted does not reach `target`, and otherwise the session
 /// server's own answer arrives unread through the bridge. The frame is held as
-/// its JSON text and read as a refusal first, since the two shapes never decode
-/// as each other.
+/// its JSON text and decoded as a refusal first, then as an
+/// [`IncomingResponse`].
 fn settle_forwarded_hello(
     reader: &mut FrameReader,
     target: &SessionSelector,
@@ -1146,12 +1160,17 @@ fn come_back(
 /// A session that is listening but could not answer leaves both "nothing is
 /// running" and "this is the only one" unprovable, so a list of under two local
 /// rows reports that session instead of settling on either.
-fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<String, CliError> {
+///
+/// The answer names where the picked row sat. The local rows come first and
+/// `remote` follows, so a place past the local count is
+/// [`Picked::Remote`] at that many places into `remote`.
+fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<Picked, CliError> {
     let found = discovery::fetch_all(runtime_dir);
     let mut rows = discovery::session_rows(&found.sessions);
     if rows.len() < 2 && !found.is_complete() {
         return Err(found.unanswered("cannot tell which session to attach to"));
     }
+    let local = rows.len();
     rows.extend(remote);
     // Only a list longer than one row has anything to pick, so only that asks.
     let line = if rows.len() > 1 {
@@ -1159,7 +1178,20 @@ fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<String, CliErro
     } else {
         String::new()
     };
-    pick(&rows, &line)
+    let at = pick(&rows, &line)?;
+    Ok(match at.checked_sub(local) {
+        Some(remote_at) => Picked::Remote(remote_at),
+        None => Picked::Local(rows[at].id.to_string()),
+    })
+}
+
+/// Which row a listing settled on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Picked {
+    /// A session running for this user on this machine, named by its id.
+    Local(String),
+    /// A session on a saved server: where in the listing's `remote` rows it sat.
+    Remote(usize),
 }
 
 /// Print one numbered line per session — number, name, id — and read back the
@@ -1184,23 +1216,25 @@ fn ask(rows: &[SessionRow]) -> Result<String, CliError> {
     Ok(line)
 }
 
-/// The session id a listing settles on: the only row's id when the listing has
-/// one row, and otherwise the id of the row the number on `line` names.
+/// Where in `rows` a listing settles: place `0` when the listing has one row,
+/// and otherwise the place the number on `line` names.
 ///
-/// `line` is read only when the listing has more than one row. A listing with
-/// no rows has nothing to attach to; a number outside the printed range, and a
-/// line that is not a number, both name the range that was expected.
-fn pick(rows: &[SessionRow], line: &str) -> Result<String, CliError> {
+/// `line` is read only when the listing has more than one row. Empty `rows` is
+/// [`CliError::NoSessions`]; a number outside `1..=rows.len()`, and a line that
+/// is not a number, are [`CliError::InvalidArgs`] naming the range.
+fn pick(rows: &[SessionRow], line: &str) -> Result<usize, CliError> {
     match rows {
         [] => Err(CliError::NoSessions),
-        [only] => Ok(only.id.to_string()),
+        [_] => Ok(0),
         many => {
             let typed = line.trim();
             typed
                 .parse::<usize>()
                 .ok()
-                .and_then(|number| many.get(number.checked_sub(1)?))
-                .map(|row| row.id.to_string())
+                .and_then(|number| {
+                    let at = number.checked_sub(1)?;
+                    (at < many.len()).then_some(at)
+                })
                 .ok_or_else(|| CliError::InvalidArgs {
                     detail: format!(
                         "`{typed}` is not one of the listed sessions; \
@@ -1459,9 +1493,8 @@ fn spawn_frame_reader(
 /// under. The pile the loop holds is where folding happens, in [`hold`].
 ///
 /// A request over the frame cap — a paste of more text than one frame carries —
-/// is refused with nothing written, so that request alone is dropped and the
-/// next one goes out. Any other failed write ends the thread; the frame reader
-/// meets the same broken connection and ends the loop.
+/// is refused with nothing written, and that request alone is dropped; the next
+/// one goes out. Any other failed write ends the thread.
 fn spawn_uplink_writer(mut writer: FrameWriter) -> mpsc::Sender<IpcRequest> {
     let (requests_tx, requests_rx) = mpsc::channel::<IpcRequest>();
     let _ = thread::Builder::new()

@@ -153,59 +153,197 @@ impl ServerStore {
             .map_err(|error| write_failed(error.to_string()))
     }
 
-    /// The server `arg` names: the record whose name is `arg`, or when no
-    /// name matches, the record whose address is `arg`.
+    /// The server `arg` names.
+    ///
+    /// A selector matching more than one record is [`Lookup::Ambiguous`], never
+    /// [`Lookup::NotSaved`].
     #[must_use]
-    pub fn find(&self, arg: &str) -> Option<&SavedServer> {
-        self.index_of(arg).map(|index| &self.records[index])
+    pub fn find(&self, arg: &str) -> Lookup<'_> {
+        match self.index_of(arg) {
+            Match::One(index) => Lookup::Saved(&self.records[index]),
+            Match::None => Lookup::NotSaved,
+            Match::Many => Lookup::Ambiguous,
+        }
     }
 
     /// Save `server`, taking the place of whatever record already holds that
     /// address.
     ///
+    /// One address is one machine, so saving an address again replaces its
+    /// record: the secret and the pinned fingerprint are the new ones.
+    ///
+    /// Keeps three rules:
+    ///
+    /// 1. one address appears once — the replace above,
+    /// 2. one name appears once,
+    /// 3. no name is another record's address.
+    ///
+    /// Rules 2 and 3 refuse. Rule 3 is checked in both directions: `server`'s
+    /// name against every other record's address, and `server`'s address
+    /// against every other record's name.
+    ///
     /// The store is not written; the caller does that.
-    pub fn save(&mut self, server: SavedServer) {
+    ///
+    /// # Errors
+    /// [`NameTaken`] carrying the word and the address of the record that
+    /// already answers to it.
+    pub fn save(&mut self, server: SavedServer) -> Result<(), NameTaken> {
+        if let Some(name) = server.name.as_deref() {
+            // Rules 2 and 3: another record answering to this word by its own
+            // name or its own address.
+            if let Some(holder) = self
+                .records
+                .iter()
+                .filter(|record| record.address != server.address)
+                .find(|record| record.name.as_deref() == Some(name) || record.address == name)
+            {
+                return Err(NameTaken {
+                    name: name.to_string(),
+                    address: holder.address.clone(),
+                });
+            }
+        }
+        // Rule 3, the other direction: this record's address against every
+        // other record's name.
+        if let Some(holder) = self
+            .records
+            .iter()
+            .filter(|record| record.address != server.address)
+            .find(|record| record.name.as_deref() == Some(server.address.as_str()))
+        {
+            return Err(NameTaken {
+                name: server.address.clone(),
+                address: holder.address.clone(),
+            });
+        }
         self.records
             .retain(|record| record.address != server.address);
         self.records.push(server);
+        Ok(())
     }
 
-    /// Drop the server `arg` names, returning its address, or `None` when no
-    /// record matches.
+    /// Whether `name` is free to give to the server at `address`.
+    ///
+    /// True when no record other than the one at `address` answers to `name`,
+    /// by its own name or by its own address. The record at `address` may keep
+    /// a name it already holds.
+    #[must_use]
+    pub fn name_free_for(&self, name: &str, address: &str) -> bool {
+        !self
+            .records
+            .iter()
+            .filter(|record| record.address != address)
+            .any(|record| record.name.as_deref() == Some(name) || record.address == name)
+    }
+
+    /// Drop the server `arg` names, returning its address.
+    ///
+    /// `None` when no record answers to `arg`, and `None` when more than one
+    /// does; nothing is removed in either case. [`ServerStore::find`] tells the
+    /// two apart.
     ///
     /// The store is not written; the caller does that.
     pub fn forget(&mut self, arg: &str) -> Option<String> {
-        let index = self.index_of(arg)?;
+        let Match::One(index) = self.index_of(arg) else {
+            return None;
+        };
         Some(self.records.remove(index).address)
     }
 
-    /// Put `secret` on the server `arg` names, returning its address, or
-    /// `None` when no record matches.
+    /// Put `secret` on the server `arg` names, returning its address.
+    ///
+    /// `None` when no record answers to `arg`, and `None` when more than one
+    /// does; no secret is written in either case.
     ///
     /// The store is not written; the caller does that.
     pub fn set_secret(&mut self, arg: &str, secret: ConnectionToken) -> Option<String> {
-        let index = self.index_of(arg)?;
+        let Match::One(index) = self.index_of(arg) else {
+            return None;
+        };
         self.records[index].secret = secret;
         Some(self.records[index].address.clone())
     }
 
-    /// Stamp the last-used time of the server `arg` names with `now`. No
-    /// record matching `arg` changes nothing.
+    /// Stamp the last-used time of the server `arg` names with `now`.
+    ///
+    /// Nothing changes when no record answers to `arg`, and nothing changes
+    /// when more than one does.
     ///
     /// The store is not written; the caller does that.
     pub fn touch(&mut self, arg: &str, now: SystemTime) {
-        if let Some(index) = self.index_of(arg) {
+        if let Match::One(index) = self.index_of(arg) {
             self.records[index].last_used_at = Some(now);
         }
     }
 
-    /// Where in `records` the server `arg` names sits: the record whose name
-    /// is `arg`, or when no name matches, the record whose address is `arg`.
-    fn index_of(&self, arg: &str) -> Option<usize> {
-        self.records
+    /// Where in `records` the server `arg` names sits: [`Match::One`] with its
+    /// index, [`Match::None`] when no record answers to it, and
+    /// [`Match::Many`] when more than one does.
+    ///
+    /// `arg` is matched against every record's name and every record's
+    /// address. Two matches are [`Match::Many`], never a pick.
+    /// [`ServerStore::save`] refuses every way a store this build wrote could
+    /// hold such a pair; a hand-written file can.
+    ///
+    /// Example — with a record named `work` at `desk.local:7654` and another
+    /// at `laptop.local:7654`, `work` and both addresses each name one record.
+    /// With two records both named `work`, `work` names neither.
+    fn index_of(&self, arg: &str) -> Match {
+        let mut matched = self
+            .records
             .iter()
-            .position(|record| record.name.as_deref() == Some(arg))
-            .or_else(|| self.records.iter().position(|record| record.address == arg))
+            .enumerate()
+            .filter(|(_, record)| record.name.as_deref() == Some(arg) || record.address == arg)
+            .map(|(index, _)| index);
+        let Some(only) = matched.next() else {
+            return Match::None;
+        };
+        if matched.next().is_some() {
+            return Match::Many;
+        }
+        Match::One(only)
+    }
+}
+
+/// What a selector found in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup<'a> {
+    /// One record answers to it.
+    Saved(&'a SavedServer),
+    /// No record answers to it.
+    NotSaved,
+    /// More than one record answers to it.
+    Ambiguous,
+}
+
+/// How many records a selector matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Match {
+    /// Exactly one, at this index.
+    One(usize),
+    /// None.
+    None,
+    /// More than one.
+    Many,
+}
+
+/// A name another machine already answers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameTaken {
+    /// The name that is already in use.
+    pub name: String,
+    /// The address of the record already holding it.
+    pub address: String,
+}
+
+impl std::fmt::Display for NameTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the name {} already belongs to {}; run `koshi remote forget {}` first, \
+             or pick another name",
+            self.name, self.address, self.name
+        )
     }
 }
 

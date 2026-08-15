@@ -7,37 +7,33 @@
 //! presents that session's endpoint token on the client's behalf, and carries
 //! the bytes both ways without reading them.
 //!
-//! Admission runs on the router's dispatcher, which owns the token store and
-//! the session list. Carrying a connection's traffic never reaches the
-//! dispatcher, so one remote client's typing cannot hold up a local koshi
-//! command.
+//! The dispatcher answers three questions per connection: what a secret
+//! reaches, which sessions a scope reaches, and where one named session
+//! listens. Carrying a connection's traffic never reaches the dispatcher.
 //!
-//! A secret that is admitted registers the connection with the router, and it
-//! stays registered until this listener reports it ended. So a revoke ends the
-//! connection at once, whether it has attached to a session or is still
-//! sitting on the Welcome.
+//! An admitted secret registers the connection with the router, and it stays
+//! registered until this listener reports it ended. A revoke shuts a registered
+//! connection's socket, attached or not. The router holds at most
+//! [`MAX_LIVE_REMOTE`](crate::router::MAX_LIVE_REMOTE) registrations and
+//! refuses the connections that arrive over that count.
 //!
-//! Every blocking step before the Welcome shares one deadline,
-//! [`ADMISSION_WINDOW`]. Each single read and write inside those steps is
-//! given the time left on that deadline when it starts, so the total an
-//! unauthenticated caller can hold a connection thread is bounded whatever
-//! pace it sends its bytes at.
+//! Every blocking step before the Welcome finishes inside `ADMISSION_WINDOW`,
+//! counted from the moment the connection's thread starts. Each single read and
+//! write inside those steps is given the time left on that deadline when it
+//! starts. After the Welcome both halves lose their deadline.
 //!
-//! Every refusal is [`REMOTE_REFUSED`] and closes the connection. A wrong
-//! secret, a revoked secret, a session that does not exist, and a session the
-//! secret holds no grant for read the same and cost the same work: no name a
-//! caller sent reaches a socket connect, a wait, or a file until the admitted
-//! scope has been proven to cover it.
+//! Every refusal is
+//! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) and closes the
+//! connection. A wrong secret, a revoked secret, a session that does not exist,
+//! and a session the secret holds no grant for produce the same bytes and the
+//! same work: no caller-supplied name reaches a socket connect, a wait, or a
+//! file until the admitted scope has been proven to cover it. Order is
+//! `admit` → `resolve` → `covers` → open.
 //!
-//! `koshi share` needs nothing here. This listener carries the three remote
-//! frames and then one session server's own bytes; no path from it reaches
-//! the router's control plane, which is where share is answered. Whether a
-//! client is local or remote is decided by which listener accepted it, never
-//! by anything the client says about itself. The matching check inside a pane
-//! is deliberately not built: a remote guest's pane shell is a local process,
-//! and every check available there is defeated by unsetting `KOSHI_CLIENT_ID`
-//! or by typing in a pane the owner opened. That is a guardrail, not a
-//! boundary.
+//! This listener carries the three remote frames and then one session server's
+//! own bytes. No path from it reaches the router's control plane, so
+//! `koshi share` is unreachable over a remote connection. A client counts as
+//! remote when this listener accepted it, never by anything the client sends.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -83,28 +79,30 @@ const MAX_ENTRIES: usize = 1024;
 /// How many connections may be inside the admission window at once, across
 /// every address.
 ///
-/// The attempt limit is counted per address, so a flood from many addresses
-/// slips past it and costs one thread each. This bounds that: a connection is
-/// counted from the moment it is accepted until its secret is admitted or it
-/// goes away, and one arriving over the bound is closed without a handshake.
-/// An admitted connection is not counted, so a flood cannot shut out the
-/// clients already attached, and the grants the operator issued are what
-/// bounds those.
+/// A connection is counted from the moment it is accepted until its secret is
+/// admitted or it goes away. One arriving over this count is closed without a
+/// handshake. An admitted connection is not counted here; it counts against
+/// [`MAX_LIVE_REMOTE`](crate::router::MAX_LIVE_REMOTE) instead.
 const MAX_IN_ADMISSION: usize = 64;
 
-/// How long the accept loop pauses after a failed accept before trying again,
-/// so a persistent accept error cannot spin a core.
+/// How long the accept loop pauses after a failed accept before trying again.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// One thing the listener needs the router's dispatcher to decide, since the
-/// dispatcher owns the token store and the session list.
+/// How often one repeated warning about this port is written at most.
+pub(crate) const LOG_WINDOW: Duration = Duration::from_secs(60);
+
+/// How long a refusal has to reach the caller it answers, counted from the
+/// write.
+const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
+
+/// One question a connection thread puts to the router's dispatcher.
 pub(crate) enum AdmissionAsk {
     /// What a presented secret reaches. A secret that reaches something
-    /// registers this connection, so a revoke can end it from here on.
+    /// registers this connection with the router.
     Admit {
         /// The secret the caller presented.
         token: ConnectionToken,
-        /// The connection's socket, kept so a revoke can end it.
+        /// The connection's socket. A revoke shuts it.
         stream: TcpStream,
         /// Where the answer goes. `None` refuses the connection.
         reply: Sender<Option<Admitted>>,
@@ -128,7 +126,7 @@ pub(crate) enum AdmissionAsk {
         /// Where the answer goes. `None` refuses the attach.
         reply: Sender<Option<PathBuf>>,
     },
-    /// One admitted connection has ended, so it leaves the router's list.
+    /// One admitted connection has ended. It leaves the router's list.
     Ended {
         /// The number that connection was registered under.
         id: u64,
@@ -144,35 +142,54 @@ pub(crate) struct Admitted {
     pub id: u64,
 }
 
-/// Open the TLS port at `address`, presenting `cert`.
+/// A TLS port this machine holds and is not yet serving on.
 ///
-/// Binding happens here, so the caller learns of an address it cannot bind and
-/// carries on: a remote setting that does not work never stops koshi and never
-/// stops local clients. With the port bound, one thread accepts connections and
-/// gives each its own thread, and `admissions` carries every question those
-/// threads need the router's dispatcher to answer.
+/// Dropping this without calling [`Bound::serve`] gives the port back.
+pub(crate) struct Bound {
+    /// Sends the accept loop what it needs to start. Dropping this without
+    /// sending ends the waiting thread, which gives the port back.
+    go: Sender<Sender<RouterEvent>>,
+}
+
+/// Take the TLS port at `address`, presenting `cert`, without serving on it
+/// yet.
+///
+/// Builds the TLS configuration, binds `address`, and starts the accept thread.
+/// That thread holds the port and accepts nobody until [`Bound::serve`] sends it
+/// somewhere to put its questions, or until the sender is dropped, which ends it
+/// and releases the port.
 ///
 /// # Errors
 /// The certificate that could not be turned into a TLS configuration, or the
 /// address that could not be bound.
-pub(crate) fn start(
-    address: String,
-    cert: CertFile,
-    admissions: Sender<RouterEvent>,
-) -> io::Result<()> {
-    let tls = Arc::new(server_config(&cert)?);
+pub(crate) fn bind(address: String, cert: &CertFile) -> io::Result<Bound> {
+    let tls = Arc::new(server_config(cert)?);
     let listener = TcpListener::bind(&address)?;
+    let (go, wait) = mpsc::channel::<Sender<RouterEvent>>();
     std::thread::Builder::new()
         .name("koshi-remote-accept".to_string())
-        .spawn(move || accept_loop(&listener, &tls, &admissions))?;
-    Ok(())
+        .spawn(move || {
+            let Ok(admissions) = wait.recv() else {
+                return;
+            };
+            accept_loop(&listener, &tls, &admissions);
+        })?;
+    Ok(Bound { go })
 }
 
-/// The TLS configuration this machine serves with: its own certificate, its
+impl Bound {
+    /// Start serving on this port. The thread [`bind`] started begins accepting
+    /// connections and gives each its own thread; `admissions` carries those
+    /// threads' questions to the router's dispatcher.
+    ///
+    /// Cannot fail.
+    pub(crate) fn serve(self, admissions: Sender<RouterEvent>) {
+        let _ = self.go.send(admissions);
+    }
+}
+
+/// The TLS configuration this machine serves with: `cert`'s certificate and
 /// private key, and no client certificate asked for.
-///
-/// Identity is the secret a caller presents in its opening frame, so the
-/// handshake asks the caller for nothing.
 fn server_config(cert: &CertFile) -> io::Result<ServerConfig> {
     let chain = vec![CertificateDer::from(cert.cert_der.clone())];
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der.clone()));
@@ -182,23 +199,62 @@ fn server_config(cert: &CertFile) -> io::Result<ServerConfig> {
         .map_err(|error| io::Error::other(error.to_string()))
 }
 
+/// One repeated warning, written at most once inside [`LOG_WINDOW`].
+pub(crate) struct Occasional {
+    /// When the last line was written, or `None` when none has been.
+    said_at: Option<Instant>,
+}
+
+impl Occasional {
+    /// A warning that has not been written yet.
+    pub(crate) fn new() -> Occasional {
+        Occasional { said_at: None }
+    }
+
+    /// Whether to write the line at `now`. True when no line has been written,
+    /// and when the last one was written [`LOG_WINDOW`] or longer ago. Writing
+    /// is the caller's; this only answers.
+    ///
+    /// Example — with [`LOG_WINDOW`] at 60 seconds, ten thousand calls spread
+    /// over five minutes answer true five times.
+    pub(crate) fn due(&mut self, now: Instant) -> bool {
+        if self
+            .said_at
+            .is_some_and(|said| now.duration_since(said) < LOG_WINDOW)
+        {
+            return false;
+        }
+        self.said_at = Some(now);
+        true
+    }
+}
+
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened too many. A failed accept pauses briefly and
-/// retries.
+/// address that has opened too many. A failed accept is reported, pauses
+/// briefly, and retries.
 fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sender<RouterEvent>) {
     let mut attempts = RateTable::new();
     let in_admission = Arc::new(AtomicUsize::new(0));
-    let mut said_full = false;
+    let mut refused_full = Occasional::new();
+    let mut failed_accept = Occasional::new();
     loop {
         let (sock, peer) = match listener.accept() {
             Ok(accepted) => accepted,
-            Err(_) => {
+            Err(error) => {
+                if failed_accept.due(Instant::now()) {
+                    tracing::warn!(
+                        %error,
+                        "the remote port could not accept a connection; \
+                         retrying every {ACCEPT_RETRY_DELAY:?}"
+                    );
+                }
                 std::thread::sleep(ACCEPT_RETRY_DELAY);
                 continue;
             }
         };
+        let now = Instant::now();
         let ip = peer.ip();
-        match attempts.allow(ip, Instant::now()) {
+        match attempts.allow(ip, now) {
             Attempt::Serve => {}
             Attempt::DropAndSay => {
                 tracing::warn!(
@@ -215,8 +271,7 @@ fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sen
             }
         }
         let Some(counted) = InAdmission::enter(&in_admission) else {
-            if !said_full {
-                said_full = true;
+            if refused_full.due(now) {
                 tracing::warn!(
                     "{MAX_IN_ADMISSION} remote connections are waiting to present a secret; \
                      closing the ones that arrive until some of them finish"
@@ -225,7 +280,6 @@ fn accept_loop(listener: &TcpListener, tls: &Arc<ServerConfig>, admissions: &Sen
             drop(sock);
             continue;
         };
-        said_full = false;
         let tls = Arc::clone(tls);
         let admissions = admissions.clone();
         let _ = std::thread::Builder::new()
@@ -272,8 +326,7 @@ enum Attempt {
     /// attempt over the limit in this window.
     DropAndSay,
     /// Drop it without logging. This address crossed its limit earlier in the
-    /// same window, and one line per attempt would be the flood the limit
-    /// exists to keep out of the log.
+    /// same window.
     DropInSilence,
 }
 
@@ -285,13 +338,11 @@ struct Window {
     opened: Instant,
 }
 
-/// How many connections each address has opened lately, so a flood is a log
-/// line rather than a flood.
+/// How many connections each address has opened lately.
 ///
-/// The table is bounded at [`MAX_ENTRIES`]. Every check first drops the
-/// addresses whose window has passed; a check that still finds the table full
-/// drops the address whose window opened first. So the table cannot grow past
-/// that count however many addresses connect.
+/// Bounded at [`MAX_ENTRIES`]. Every check first drops the addresses whose
+/// window has passed; a check that still finds the table full drops the address
+/// whose window opened first.
 struct RateTable {
     /// One window per address.
     entries: HashMap<IpAddr, Window>,
@@ -308,8 +359,8 @@ impl RateTable {
     /// Count one connection from `ip` at `now` and say what to do with it.
     ///
     /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPTS`] — every later attempt in that window is dropped in
-    /// silence, so a caller hammering the port cannot write the log full.
+    /// [`MAX_ATTEMPTS`]. Every later attempt in that window is dropped in
+    /// silence.
     ///
     /// Example — with [`MAX_ATTEMPTS`] at 10, attempts 1 to 10 from one
     /// address are [`Attempt::Serve`], attempt 11 is [`Attempt::DropAndSay`],
@@ -359,13 +410,12 @@ enum Opening {
 /// from the moment this thread starts. Once the caller is admitted the socket
 /// timeouts are cleared, since an admitted client may sit as long as it likes.
 ///
-/// Admission registers the connection with the router, so a revoke ends it
-/// whether it has attached or not. The registration is dropped when the
-/// connection finishes, whichever step it finished at.
+/// Admission registers the connection with the router, attached or not. The
+/// registration is dropped when the connection finishes, whichever step it
+/// finished at.
 ///
-/// `counted` holds this connection's place in the admission window. It is
-/// dropped the moment the secret is admitted, so an attached client never
-/// counts against the callers still waiting to present one.
+/// `counted` holds this connection's place in the admission window and is
+/// dropped the moment the secret is admitted.
 ///
 /// On Unix the thread blocks SIGPIPE on its own signal mask; a write to a peer
 /// that hung up returns an error whatever the process-wide disposition is.
@@ -415,10 +465,8 @@ fn serve_remote(
     };
     let ((min_remote, max_remote), versions, token) = opening;
 
-    // The version is settled before the secret is looked at, the same order the
-    // local planes use. A refusal here names both ranges: it says nothing about
-    // secrets or sessions, and a caller told only the uniform sentence would
-    // have no way to learn which end to upgrade.
+    // The version is settled before the secret is looked at. This refusal names
+    // both ranges instead of carrying REMOTE_REFUSED.
     let Some(remote_version) = agreed_version(
         min_remote,
         max_remote,
@@ -447,12 +495,10 @@ fn serve_remote(
         return;
     };
 
-    // The caller is admitted, so it leaves the admission window and stops
-    // counting against the connections waiting to present a secret.
+    // The caller leaves the admission window.
     drop(counted);
 
-    // Nothing it does from here is on a clock either: the halves stop setting
-    // the timeouts, and the last ones they set are cleared.
+    // Both halves and the socket lose their deadlines.
     reader.set_deadline(None);
     writer.set_deadline(None);
     let _ = control.set_read_timeout(None);
@@ -501,9 +547,9 @@ fn serve_admitted(
 ///
 /// A list is answered and the next frame is read, so one connection may list
 /// and then attach. `Some` is the endpoint file of the session an admitted
-/// attach reached, and the bytes after that attach belong to that session's
-/// server. `None` means the connection is finished: it hung up, it sent
-/// something this loop does not serve, or its attach was refused.
+/// attach reached; the bytes after that attach belong to that session's server.
+/// `None` means the connection is finished: it hung up, it sent something this
+/// loop does not serve, or its attach was refused.
 fn admitted_frames(
     reader: &mut TlsReader,
     writer: &mut TlsWriter,
@@ -553,17 +599,19 @@ fn admitted_frames(
 /// Open the local connection to an admitted client's session and carry the
 /// bytes both ways.
 ///
-/// The router presents the session's endpoint token on the client's behalf,
-/// since a caller on another machine cannot read that file. The session
-/// server's answer to that Hello, and everything after it, travels back
-/// through the bridge unread.
+/// The router sends the session-plane Hello carrying the session's endpoint
+/// token and the client's version range. The session server's answer to that
+/// Hello, and everything after it, travels back through the bridge unread.
 ///
 /// Two threads carry the two directions. Whichever ends first shuts the TCP
-/// socket down in both directions, which ends the thread reading the TLS
-/// stream at once, and closes the local connection's read direction, which on
-/// Unix ends the thread reading the session at once. A Windows named pipe
-/// carries no read direction to shut on its own, so there that thread ends at
-/// the session server's next message or when it hangs up.
+/// socket in both directions, ending the thread reading the TLS stream at once,
+/// and closes the local connection's read direction. On Unix that ends the
+/// thread reading the session at once. A Windows named pipe carries no read
+/// direction to shut, so there that thread ends at the session server's next
+/// message or when it hangs up.
+///
+/// The connection is reported ended once, by whichever direction finishes
+/// first.
 fn bridge_to_session(
     reader: TlsReader,
     mut writer: TlsWriter,
@@ -603,12 +651,14 @@ fn bridge_to_session(
         return;
     }
     let (mut from_session, mut to_session) = local.split_raw();
+    let ended = Arc::new(EndReport::new(admissions.clone(), id));
 
     let Ok(inbound_control) = control.try_clone() else {
-        report_ended(admissions, id);
+        ended.once();
         return;
     };
     let mut inbound = reader;
+    let inbound_ended = Arc::clone(&ended);
     let started = std::thread::Builder::new()
         .name("koshi-remote-in".to_string())
         .spawn(move || {
@@ -617,21 +667,21 @@ fn bridge_to_session(
             let _ = io::copy(&mut inbound, &mut to_session);
             closer.close();
             let _ = inbound_control.shutdown(Shutdown::Both);
+            inbound_ended.once();
         });
     if started.is_err() {
-        report_ended(admissions, id);
+        ended.once();
         return;
     }
 
     let mut outbound = writer;
-    let reporter = admissions.clone();
-    // The thread gets its own handle and this one stays here, so a thread that
-    // does not start can still end the direction that did.
+    // This handle stays here; the thread takes its own clone.
     let Ok(outbound_control) = control.try_clone() else {
         let _ = control.shutdown(Shutdown::Both);
-        report_ended(admissions, id);
+        ended.once();
         return;
     };
+    let outbound_ended = Arc::clone(&ended);
     let started = std::thread::Builder::new()
         .name("koshi-remote-out".to_string())
         .spawn(move || {
@@ -639,27 +689,55 @@ fn bridge_to_session(
             crate::router::block_sigpipe_on_this_thread();
             let _ = io::copy(&mut from_session, &mut outbound);
             let _ = outbound_control.shutdown(Shutdown::Both);
-            report_ended(&reporter, id);
+            outbound_ended.once();
         });
     if started.is_err() {
-        // The other direction is already carrying this client's bytes into the
-        // session. Shutting the socket ends it, so the connection cannot
-        // outlive the registration a revoke cuts it by.
+        // Shutting the socket ends the inbound direction, which is already
+        // running.
         let _ = control.shutdown(Shutdown::Both);
-        report_ended(admissions, id);
+        ended.once();
     }
 }
 
-/// Report that one admitted connection has ended, so it leaves the router's
-/// list of live remote connections.
+/// Report that one admitted connection has ended. It leaves the router's list
+/// of live remote connections.
 fn report_ended(admissions: &Sender<RouterEvent>, id: u64) {
     let _ = admissions.send(RouterEvent::Admission(AdmissionAsk::Ended { id }));
 }
 
+/// Reports one bridged connection ended. The first [`EndReport::once`] sends;
+/// every later one does nothing.
+struct EndReport {
+    /// Where the report goes.
+    admissions: Sender<RouterEvent>,
+    /// The number the connection is registered under.
+    id: u64,
+    /// Set by the first report. Every later one does nothing.
+    reported: std::sync::atomic::AtomicBool,
+}
+
+impl EndReport {
+    /// A report for the connection registered under `id`, not yet made.
+    fn new(admissions: Sender<RouterEvent>, id: u64) -> EndReport {
+        EndReport {
+            admissions,
+            id,
+            reported: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Report the connection ended, unless something already has.
+    fn once(&self) {
+        if self.reported.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        report_ended(&self.admissions, self.id);
+    }
+}
+
 /// Put one question on the dispatcher's queue and wait for its answer.
 ///
-/// `None` means the dispatcher is gone — the router is exiting — so the caller
-/// closes its connection.
+/// `None` when the dispatcher is gone or hung up without answering.
 fn ask<T>(
     admissions: &Sender<RouterEvent>,
     build: impl FnOnce(Sender<T>) -> AdmissionAsk,
@@ -669,13 +747,12 @@ fn ask<T>(
     answer.recv().ok()
 }
 
-/// Answer one refusal, in the one sentence every refusal carries.
+/// Write one [`REMOTE_REFUSED`] frame, replacing whatever deadline `writer`
+/// holds with [`REFUSAL_WINDOW`] counted from now.
 ///
-/// The writing half holds the deadline while the caller has not been admitted,
-/// so the write ends inside [`ADMISSION_WINDOW`] however slowly the caller
-/// takes the bytes. A write that fails changes nothing: the caller closes the
-/// connection either way.
+/// A write that fails is dropped.
 fn refuse(writer: &mut TlsWriter) {
+    writer.set_deadline(Some(Instant::now() + REFUSAL_WINDOW));
     let _ = send_frame(
         writer,
         &RemoteServerFrame::Refused {
@@ -687,9 +764,9 @@ fn refuse(writer: &mut TlsWriter) {
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.
 ///
 /// The length is checked against `max_len` before the payload buffer is
-/// allocated, so a caller naming a huge length is dropped at the cost of
-/// reading four bytes. Before the caller is admitted `max_len` is
-/// [`REMOTE_HELLO_MAX_LEN`]; after it, the frame cap the rest of koshi uses.
+/// allocated. Callers pass [`REMOTE_HELLO_MAX_LEN`] before admission and
+/// [`MAX_FRAME_LEN`] after it. A length over `max_len` is [`Opening::Closed`]
+/// and reads no payload.
 fn read_client_frame<R: Read>(reader: &mut R, max_len: u32) -> Opening {
     let mut length = [0u8; 4];
     if reader.read_exact(&mut length).is_err() {

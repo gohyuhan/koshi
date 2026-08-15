@@ -537,6 +537,7 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::RemoteStatus {
             address: None,
             enabled: false,
+            listening: false,
             fingerprint: None,
         },
         RouterResult::RemoteEnabled {

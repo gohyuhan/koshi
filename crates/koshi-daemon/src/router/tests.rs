@@ -3,7 +3,7 @@
 //! server is started, so the name walk, selector resolution, removal, the
 //! idle-exit rule, the lock handover, the answer to a restart request, and the
 //! three remote access token requests are exercised on their own. Starting a
-//! real router and a real session server needs whole processes, so that is
+//! real router and a real session server needs whole processes; that is
 //! covered by the integration tests instead.
 //!
 //! The remote access cut goes further than that: it opens the real TLS
@@ -120,8 +120,7 @@ fn a_selector_resolves_by_id() {
 
 #[test]
 fn a_selector_resolves_by_the_whole_name_only() {
-    // A name is what a caller types, so a prefix of one must not resolve —
-    // `koshi attach S-quiet` would otherwise land on `S-quiet-lake`.
+    // `S-quiet` is a prefix of `S-quiet-lake` and resolves to nothing.
     let wanted = SessionId::new();
     let registry = registry_of(&[(wanted, "S-quiet-lake"), (SessionId::new(), "S-loud-river")]);
 
@@ -285,9 +284,7 @@ fn removing_a_session_takes_its_resume_file_with_it() {
 
 #[test]
 fn the_rebuild_removes_a_resume_file_no_session_claims() {
-    // The new image never started, so nothing deleted the file and no endpoint
-    // file is left to walk it from. Without this the file stays on the disk for
-    // as long as the machine does.
+    // A resume file older than the window, with no endpoint file beside it.
     let dead = SessionId::new();
     let runtime_dir = test_runtime_dir();
     let resume_file = aged_resume_file(runtime_dir.path(), dead, PAST_THE_WINDOW);
@@ -471,6 +468,7 @@ fn no_remote() -> RemoteState {
         listening: false,
         live: Vec::new(),
         next_id: 0,
+        said_full: Occasional::new(),
     }
 }
 
@@ -1621,11 +1619,32 @@ fn free_loopback_address() -> String {
 fn open_test_listener(cert: &CertFile, events_tx: &Sender<RouterEvent>) -> String {
     for _ in 0..ADDRESS_TRIES {
         let address = free_loopback_address();
-        if remote_listener::start(address.clone(), cert.clone(), events_tx.clone()).is_ok() {
+        let opened = remote_listener::bind(address.clone(), cert);
+        if let Ok(bound) = opened {
+            bound.serve(events_tx.clone());
             return address;
         }
     }
     panic!("no loopback port could be bound in {ADDRESS_TRIES} tries");
+}
+
+/// Switch remote access on at a free loopback port, trying up to
+/// [`ADDRESS_TRIES`] ports.
+///
+/// Sets `remote.address` to each port it tries and leaves it at the one that
+/// worked.
+fn enable_remote_on_a_free_port(
+    remote: &mut RemoteState,
+    events_tx: &Sender<RouterEvent>,
+) -> RouterResult {
+    for _ in 0..ADDRESS_TRIES {
+        remote.address = Some(free_loopback_address());
+        let answer = enable_remote(remote, events_tx);
+        if matches!(answer, RouterResult::RemoteEnabled { .. }) {
+            return answer;
+        }
+    }
+    panic!("no loopback port could be enabled in {ADDRESS_TRIES} tries");
 }
 
 /// A stand-in session server behind the bridge, serving at `addr`: accept the
@@ -1711,6 +1730,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
             listening: true,
             live: Vec::new(),
             next_id: 0,
+            said_full: Occasional::new(),
         };
         dispatch(
             &held_runtime,
@@ -1725,7 +1745,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     });
 
     // One connection attaches, so the router carries its session's bytes.
-    let attaching = remote_client::connect(&address, &secret, Some(&fingerprint), DIAL_WAIT)
+    let attaching = remote_client::connect(&address, &secret, Some(&fingerprint), DIAL_WAIT, None)
         .expect("the secret is admitted");
     let (mut bridged, _bridged_writer) =
         remote_client::attach_remote(attaching, SessionSelector::Id(session))
@@ -1735,8 +1755,9 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
 
     // The other lists the sessions and then sits on the connection, exactly
     // as a client waiting for its user to pick one does.
-    let mut listing = remote_client::connect(&address, &secret, Some(&fingerprint), DIAL_WAIT)
-        .expect("the secret is admitted");
+    let mut listing =
+        remote_client::connect(&address, &secret, Some(&fingerprint), DIAL_WAIT, None)
+            .expect("the secret is admitted");
     let rows = remote_client::list_remote_sessions(&mut listing).expect("the sessions are listed");
     assert_eq!(
         rows.iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -1849,10 +1870,8 @@ fn an_attach_that_arrives_after_the_cut_is_refused_rather_than_bridged() {
 #[test]
 fn a_caller_speaking_no_doorway_version_this_build_has_is_told_both_ranges() {
     // The version is settled before the secret is looked at, so this needs no
-    // grant and no dispatcher. The refusal deliberately says more than the
-    // uniform one: it names no secret and no session, and a caller told only
-    // "this server did not admit the connection" could not learn which end to
-    // upgrade.
+    // grant and no dispatcher. This refusal names both ranges instead of
+    // carrying REMOTE_REFUSED.
     let runtime_dir = test_runtime_dir();
     let data_dir = runtime_dir.path().join("data");
     let (cert, fingerprint) = load_or_make_cert(&data_dir).expect("this machine's certificate");
@@ -1869,7 +1888,7 @@ fn a_caller_speaking_no_doorway_version_this_build_has_is_told_both_ranges() {
         token: ConnectionToken::generate(),
     };
     let (_reader, _writer, _presented, answer) =
-        remote_wire::open(&address, Some(&fingerprint), &hello, DIAL_WAIT)
+        remote_wire::open(&address, Some(&fingerprint), &hello, DIAL_WAIT, None)
             .expect("the server answers the opening frame");
 
     let RemoteServerFrame::Refused { message } = answer else {
@@ -1923,6 +1942,7 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
             listening: true,
             live: Vec::new(),
             next_id: 0,
+            said_full: Occasional::new(),
         };
         dispatch(
             &held_runtime,
@@ -1945,7 +1965,7 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
         token: secret.clone(),
     };
     let (_reader, _writer, _presented, answer) =
-        remote_wire::open(&address, Some(&fingerprint), &hello, DIAL_WAIT)
+        remote_wire::open(&address, Some(&fingerprint), &hello, DIAL_WAIT, None)
             .expect("the server answers the opening frame");
 
     assert_eq!(
@@ -1957,4 +1977,254 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
     );
 
     drop(loop_thread);
+}
+
+#[test]
+fn a_full_list_of_admitted_connections_admits_nothing_more() {
+    // One valid secret, admitted MAX_LIVE_REMOTE times, then refused.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let token_path = store_path(&data_dir);
+
+    let mut store = TokenStore::new();
+    let (secret, _) = store.grant(
+        "alice".to_string(),
+        TokenScope::HostWide,
+        SystemTime::now(),
+        None,
+    );
+    store
+        .write(&token_path)
+        .expect("the token store is written");
+
+    let mut remote = no_remote();
+    let mut held = Vec::new();
+    for place in 0..MAX_LIVE_REMOTE {
+        let (near, far) = loopback_pair();
+        held.push(far);
+        assert!(
+            admit_token(Some(&token_path), &mut remote, &secret, near).is_some(),
+            "place {place} of {MAX_LIVE_REMOTE} is free"
+        );
+    }
+    assert_eq!(remote.live.len(), MAX_LIVE_REMOTE);
+
+    let (near, _far) = loopback_pair();
+    assert!(
+        admit_token(Some(&token_path), &mut remote, &secret, near).is_none(),
+        "a good secret arriving at a full list is refused"
+    );
+    assert_eq!(
+        remote.live.len(),
+        MAX_LIVE_REMOTE,
+        "and nothing was registered for it"
+    );
+}
+
+#[test]
+fn a_connection_that_ends_makes_room_for_the_next_one() {
+    // An `Ended` report drops a registration and frees its place.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let token_path = store_path(&data_dir);
+
+    let mut store = TokenStore::new();
+    let (secret, _) = store.grant(
+        "alice".to_string(),
+        TokenScope::HostWide,
+        SystemTime::now(),
+        None,
+    );
+    store
+        .write(&token_path)
+        .expect("the token store is written");
+
+    let mut remote = no_remote();
+    let mut held = Vec::new();
+    let mut first = None;
+    for _ in 0..MAX_LIVE_REMOTE {
+        let (near, far) = loopback_pair();
+        held.push(far);
+        let admitted = admit_token(Some(&token_path), &mut remote, &secret, near)
+            .expect("the list starts empty");
+        first.get_or_insert(admitted.id);
+    }
+    let (near, _far) = loopback_pair();
+    assert!(admit_token(Some(&token_path), &mut remote, &secret, near).is_none());
+
+    // What `AdmissionAsk::Ended` does to the list.
+    let ended = first.expect("a full list has a first connection");
+    remote.live.retain(|live| live.id != ended);
+
+    let (near, _far) = loopback_pair();
+    assert!(
+        admit_token(Some(&token_path), &mut remote, &secret, near).is_some(),
+        "the place it left is free"
+    );
+}
+
+#[test]
+fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
+    // The operator says yes, the address is already held by something else,
+    // and the answer must not survive: a record written here would open the
+    // port on the next start with nobody asked again, while the operator was
+    // just told it did not work.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+
+    // Hold the address so the router cannot take it.
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("hold a loopback address");
+    let address = occupied.local_addr().expect("read the held address");
+
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: Some(address.to_string()),
+        data_dir: Some(data_dir.clone()),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    let answer = enable_remote(&mut remote, &events_tx);
+
+    assert!(
+        matches!(answer, RouterResult::Error(_)),
+        "an address that cannot be taken is refused, and got {answer:?}"
+    );
+    assert!(
+        !remote.listening,
+        "nothing is being served on an address that was never taken"
+    );
+    assert!(
+        !remote_enabled(&data_dir),
+        "no record of the answer survives, so the next start opens nothing"
+    );
+    assert!(
+        !EnabledFile::path(&data_dir).exists(),
+        "and the record was never written at all"
+    );
+
+    drop(occupied);
+}
+
+#[test]
+fn taking_the_address_writes_the_record_and_serves_on_it() {
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: None,
+        data_dir: Some(data_dir.clone()),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    let answer = enable_remote_on_a_free_port(&mut remote, &events_tx);
+
+    let RouterResult::RemoteEnabled {
+        address: served, ..
+    } = answer
+    else {
+        panic!("an address that can be taken is enabled, and got {answer:?}");
+    };
+    assert_eq!(served, remote.address.clone().expect("the address it took"));
+    assert!(remote.listening, "the port is being served");
+    assert!(
+        remote_enabled(&data_dir),
+        "the answer is written down, so the next start opens the port again"
+    );
+}
+
+#[test]
+fn the_status_separates_the_answer_given_from_the_port_being_open() {
+    // A machine whose address is held by something else has said yes and has
+    // no port. Reporting only the answer would hand out a connect line for an
+    // address nothing replies on.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    EnabledFile {
+        format: ENABLED_FILE_FORMAT,
+        enabled_at: SystemTime::now(),
+    }
+    .write(&EnabledFile::path(&data_dir))
+    .expect("the answer is written");
+
+    let remote = RemoteState {
+        address: Some("127.0.0.1:7654".to_string()),
+        data_dir: Some(data_dir),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    let RouterResult::RemoteStatus {
+        enabled, listening, ..
+    } = remote_status(&remote)
+    else {
+        panic!("a status request is answered with a status");
+    };
+    assert!(enabled, "the operator did say yes");
+    assert!(!listening, "and this run is holding no port");
+}
+
+#[test]
+fn a_listener_that_cannot_start_serving_writes_no_record_of_the_answer() {
+    // Taking the port and starting its thread both happen before the record is
+    // written, and serving cannot fail after it. So there is no ordering left
+    // in which the record outlives a listener that never opened, which the
+    // next start would read as an answer nobody gave again.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("hold a loopback address");
+    let address = occupied.local_addr().expect("read the held address");
+
+    let (events_tx, _events_rx) = mpsc::channel();
+    let mut remote = RemoteState {
+        address: Some(address.to_string()),
+        data_dir: Some(data_dir.clone()),
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+
+    assert!(matches!(
+        enable_remote(&mut remote, &events_tx),
+        RouterResult::Error(_)
+    ));
+    assert!(!EnabledFile::path(&data_dir).exists());
+    assert!(!remote.listening);
+
+    drop(occupied);
+}
+
+#[test]
+fn a_bound_port_that_is_never_served_is_given_back() {
+    // The record write sits between taking the port and serving on it, and a
+    // write that fails drops the port. This is what makes that drop real: the
+    // same address binds again straight after.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let (cert, _) = load_or_make_cert(&data_dir).expect("this machine's certificate");
+    let address = free_loopback_address();
+
+    let bound = remote_listener::bind(address.clone(), &cert).expect("the port is taken");
+    drop(bound);
+
+    // The thread the bind started ends when its sender goes away, and the port
+    // goes with it.
+    let mut freed = false;
+    for _ in 0..50 {
+        if TcpListener::bind(&address).is_ok() {
+            freed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(freed, "a port that was never served is free again");
 }

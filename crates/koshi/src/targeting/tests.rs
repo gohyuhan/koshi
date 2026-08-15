@@ -798,3 +798,59 @@ fn a_session_id_scopes_to_that_session_alone() {
     server.join().expect("stand-in session exits");
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
+
+/// One row a remote server offers, named `name` at `id`.
+fn remote_row(id: SessionId, name: &str) -> RemoteSessionRow {
+    RemoteSessionRow {
+        id,
+        name: name.to_string(),
+    }
+}
+
+#[test]
+fn an_explicit_session_id_asks_that_one_remote_session_and_no_other() {
+    // An explicit id keeps one row out of three.
+    let wanted = SessionId::new();
+    let rows = vec![
+        remote_row(SessionId::new(), "S-first"),
+        remote_row(wanted, "S-wanted"),
+        remote_row(SessionId::new(), "S-third"),
+    ];
+
+    let asked = rows_to_ask(Some(&SessionRef::Id(wanted)), rows);
+
+    assert_eq!(asked.len(), 1, "one dial, not three");
+    assert_eq!(asked[0].id, wanted);
+}
+
+#[test]
+fn a_session_name_asks_every_remote_session() {
+    // A name keeps every row.
+    let rows = vec![
+        remote_row(SessionId::new(), "S-first"),
+        remote_row(SessionId::new(), "S-second"),
+    ];
+
+    let asked = rows_to_ask(Some(&SessionRef::Name("S-first".to_string())), rows.clone());
+
+    assert_eq!(asked, rows, "a name needs the whole picture");
+}
+
+#[test]
+fn no_session_flag_asks_every_remote_session() {
+    // No flag keeps every row.
+    let rows = vec![
+        remote_row(SessionId::new(), "S-first"),
+        remote_row(SessionId::new(), "S-second"),
+    ];
+
+    assert_eq!(rows_to_ask(None, rows.clone()), rows);
+}
+
+#[test]
+fn an_explicit_id_no_remote_session_carries_asks_nothing() {
+    // An id no row carries keeps no rows.
+    let rows = vec![remote_row(SessionId::new(), "S-first")];
+
+    assert!(rows_to_ask(Some(&SessionRef::Id(SessionId::new())), rows).is_empty());
+}

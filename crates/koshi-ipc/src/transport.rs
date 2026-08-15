@@ -40,6 +40,7 @@ use std::os::unix::net::UnixStream;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
 use interprocess::local_socket::{self as socket, ConnectOptions, ListenerOptions};
@@ -299,15 +300,48 @@ impl Connection {
     }
 }
 
+/// A stream half that can be told when its reads and writes must give up.
+///
+/// A half with no clock of its own — a local socket, whose peer is a process
+/// on this machine — takes the deadline and ignores it.
+pub trait Deadlined: Send {
+    /// Every read and write after this finishes by `at`, or blocks for as long
+    /// as it takes when `at` is `None`.
+    fn set_deadline(&mut self, at: Option<Instant>);
+}
+
+impl Deadlined for socket::RecvHalf {
+    /// Ignored: the peer is a process on this machine, admitted by position,
+    /// and it is not held to a clock.
+    fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+impl Deadlined for socket::SendHalf {
+    /// Ignored, for the same reason [`socket::RecvHalf`]'s is.
+    fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+/// The reading half of a stream, with a deadline it may be given later.
+pub trait DeadlinedRead: Read + Deadlined {}
+impl<T: Read + Deadlined> DeadlinedRead for T {}
+
+/// The writing half of a stream, with a deadline it may be given later.
+pub trait DeadlinedWrite: Write + Deadlined {}
+impl<T: Write + Deadlined> DeadlinedWrite for T {}
+
 /// Wrap a byte-stream pair as the two halves of a framed connection, so a
 /// stream that is not a local socket speaks the same frame shape a
 /// [`Connection`] does.
 ///
 /// The reader starts open: no [`ReadCloser`] reaches these halves.
+///
+/// Each half keeps whatever deadline it already carries, and
+/// [`FrameReader::set_deadline`] and [`FrameWriter::set_deadline`] reach it
+/// through the box.
 #[must_use]
 pub fn frame_halves(
-    reader: Box<dyn Read + Send>,
-    writer: Box<dyn Write + Send>,
+    reader: Box<dyn DeadlinedRead>,
+    writer: Box<dyn DeadlinedWrite>,
 ) -> (FrameReader, FrameWriter) {
     (
         FrameReader {
@@ -320,10 +354,20 @@ pub fn frame_halves(
 
 /// The reading half of a split [`Connection`]. Sends nothing.
 pub struct FrameReader {
-    half: Box<dyn Read + Send>,
+    half: Box<dyn DeadlinedRead>,
     /// Set by [`ReadCloser::close`]. Every read after it reports
     /// [`IpcError::Disconnected`] without touching the socket.
     closed: Arc<AtomicBool>,
+}
+
+impl FrameReader {
+    /// Give this half a deadline, or `None` to take its deadline away.
+    ///
+    /// Example — an attached client holds a deadline through the frames that
+    /// join it to a session, and none afterwards.
+    pub fn set_deadline(&mut self, at: Option<Instant>) {
+        self.half.set_deadline(at);
+    }
 }
 
 impl std::fmt::Debug for FrameReader {
@@ -369,11 +413,10 @@ impl ReadCloser {
     /// writing direction stays open, so a reply the connection still owes its
     /// peer goes out.
     ///
-    /// On Unix a read the reader is already blocked in ends as well, because
-    /// the socket's read direction is shut. A Windows named pipe has no
-    /// half-close: a read already waiting on the pipe ends when its peer sends
-    /// the next frame or hangs up, and every read after that one reports end of
-    /// stream.
+    /// On Unix a read the reader is already blocked in ends as well: the
+    /// socket's read direction is shut. A Windows named pipe has no half-close,
+    /// so a read already waiting on the pipe ends when its peer sends the next
+    /// frame or hangs up; every read after that one reports end of stream.
     ///
     /// Closing an already-closed read direction changes nothing.
     pub fn close(&self) {
@@ -393,7 +436,15 @@ fn duplicate_socket(stream: &socket::Stream) -> Result<UnixStream, IpcError> {
 
 /// The writing half of a split [`Connection`]. Reads nothing.
 pub struct FrameWriter {
-    half: Box<dyn Write + Send>,
+    half: Box<dyn DeadlinedWrite>,
+}
+
+impl FrameWriter {
+    /// Give this half a deadline, or `None` to take its deadline away. The
+    /// same rule [`FrameReader::set_deadline`] states.
+    pub fn set_deadline(&mut self, at: Option<Instant>) {
+        self.half.set_deadline(at);
+    }
 }
 
 impl std::fmt::Debug for FrameWriter {
@@ -579,11 +630,9 @@ fn no_listener_error(error: &io::Error) -> bool {
 /// [`IpcError::Disconnected`]; everything else keeps its text as
 /// [`IpcError::Transport`].
 ///
-/// [`NotConnected`](io::ErrorKind::NotConnected) is in that first set because
-/// macOS reports a read from a socket whose peer has closed as `ENOTCONN`,
-/// where Linux reports end of stream. Without it the same peer going away
-/// reads as `ipc peer disconnected` or as `Socket is not connected (os error
-/// 57)` depending on which side wins the race.
+/// [`NotConnected`](io::ErrorKind::NotConnected) is in that first set: macOS
+/// reports a read from a socket whose peer has closed as `ENOTCONN`, where
+/// Linux reports end of stream.
 fn io_failure(error: io::Error) -> IpcError {
     match error.kind() {
         io::ErrorKind::UnexpectedEof
