@@ -1,9 +1,11 @@
 //! Tests for [`IpcError`]: its `Display` wording and its [`DomainError`]
-//! classification — link, refused-frame, socket-address-check, and
-//! endpoint-file-read errors client-fatal, a failed endpoint-file write
-//! session-fatal, a malformed frame recoverable.
+//! classification — link, refused-frame, socket-address-check,
+//! endpoint-file-read and remote access file errors client-fatal, a failed
+//! endpoint-file write session-fatal, a malformed frame recoverable. The
+//! wording tests also cover which remote access file a failure names and the
+//! changed-certificate refusal.
 
-use super::IpcError;
+use super::{IpcError, RemoteFile};
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 
 #[test]
@@ -112,6 +114,62 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
 }
 
 #[test]
+fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
+    // Each of the three reads as its own thing, so a saved-servers failure on
+    // the dialling machine never reads as a token store failure on the
+    // serving one.
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::SavedServers,
+            path: "/home/alice/.local/share/koshi/remote/servers".to_string(),
+            detail: "expected value at line 1 column 1".to_string(),
+        }
+        .to_string(),
+        "the saved servers file at /home/alice/.local/share/koshi/remote/servers is unreadable: \
+         expected value at line 1 column 1"
+    );
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::Certificate,
+            path: "/var/lib/koshi/remote/cert".to_string(),
+            detail: "format 2 is not the 1 this build reads".to_string(),
+        }
+        .to_string(),
+        "the remote access certificate at /var/lib/koshi/remote/cert is unreadable: \
+         format 2 is not the 1 this build reads"
+    );
+    assert_eq!(
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::RemoteAccessMark,
+            path: "/var/lib/koshi/remote/enabled".to_string(),
+            detail: "permission denied".to_string(),
+        }
+        .to_string(),
+        "the remote access record at /var/lib/koshi/remote/enabled could not be written: \
+         permission denied"
+    );
+}
+
+#[test]
+fn a_changed_certificate_names_both_fingerprints_and_the_way_out() {
+    let err = IpcError::CertificateChanged {
+        address: "laptop.local:7654".to_string(),
+        pinned: "aa".repeat(32),
+        presented: "bb".repeat(32),
+    };
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "the certificate of laptop.local:7654 changed: pinned {}, presented {}. \
+             if the server was reinstalled on purpose, run \
+             `koshi remote forget laptop.local:7654` and connect again.",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        )
+    );
+}
+
+#[test]
 fn every_ipc_error_is_in_the_ipc_domain() {
     assert_eq!(
         IpcError::Transport {
@@ -177,6 +235,33 @@ fn every_ipc_error_is_in_the_ipc_domain() {
         .category(),
         DomainCategory::Ipc
     );
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::SavedServers,
+            path: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::Certificate,
+            path: String::new(),
+            detail: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
+    assert_eq!(
+        IpcError::CertificateChanged {
+            address: String::new(),
+            pinned: String::new(),
+            presented: String::new()
+        }
+        .category(),
+        DomainCategory::Ipc
+    );
 }
 
 #[test]
@@ -230,6 +315,39 @@ fn socket_address_check_failures_are_client_fatal() {
     assert_eq!(
         IpcError::SocketBusy {
             addr: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+}
+
+#[test]
+fn remote_access_failures_are_client_fatal() {
+    // A remote access file that will not read or write stops the command that
+    // needed it, the same as the token store beside it.
+    assert_eq!(
+        IpcError::RemoteFileUnreadable {
+            file: RemoteFile::SavedServers,
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::RemoteFileWrite {
+            file: RemoteFile::RemoteAccessMark,
+            path: String::new(),
+            detail: String::new()
+        }
+        .severity(),
+        Severity::ClientFatal
+    );
+    assert_eq!(
+        IpcError::CertificateChanged {
+            address: String::new(),
+            pinned: String::new(),
+            presented: String::new()
         }
         .severity(),
         Severity::ClientFatal

@@ -506,6 +506,8 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
             scope: None,
         },
         RouterRequestKind::ListTokens { scope: None },
+        RouterRequestKind::RemoteStatus,
+        RouterRequestKind::EnableRemote,
     ]
 }
 
@@ -532,6 +534,15 @@ fn sample_router_results() -> Vec<RouterResult> {
         },
         RouterResult::Revoked(Vec::new()),
         RouterResult::Tokens(Vec::new()),
+        RouterResult::RemoteStatus {
+            address: None,
+            enabled: false,
+            fingerprint: None,
+        },
+        RouterResult::RemoteEnabled {
+            address: String::new(),
+            fingerprint: String::new(),
+        },
         RouterResult::Error(crate::protocol::IpcErrorPayload {
             code: crate::protocol::IpcErrorCode::BadToken,
             message: String::new(),

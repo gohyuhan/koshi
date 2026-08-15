@@ -98,6 +98,58 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
     released: None,
 };
 
+/// The remote doorway: what a client on another machine and this machine's TLS
+/// listener speak before any session is reached.
+///
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. It is
+/// its own surface because the two ends are different machines, which upgrade
+/// on their own schedules — the session protocol they settle after the door
+/// opens is a separate agreement with a separate number.
+pub const REMOTE_PROTOCOL: Surface = Surface {
+    name: "remote doorway",
+    min: 1,
+    max: 1,
+    released: None,
+};
+
+/// The saved server file: the servers a dialling machine has connected to,
+/// with the secret and the pinned certificate fingerprint for each.
+///
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. It sits
+/// on the dialling machine, so an upgraded koshi reads what an older one
+/// saved.
+pub const SAVED_SERVER_FORMAT: Surface = Surface {
+    name: "saved server file format",
+    min: 1,
+    max: 1,
+    released: None,
+};
+
+/// The remote certificate file: the certificate and private key this machine
+/// generated for its remote listener.
+///
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. The
+/// certificate outlives the build that made it, so a later build reads it.
+pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
+    name: "remote certificate file format",
+    min: 1,
+    max: 1,
+    released: None,
+};
+
+/// The remote access record: the file saying the operator switched remote
+/// access on for this machine.
+///
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. The
+/// record outlives the build that wrote it, so a later build reads it and
+/// keeps the port open.
+pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
+    name: "remote access record format",
+    min: 1,
+    max: 1,
+    released: None,
+};
+
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
@@ -131,6 +183,10 @@ pub const SURFACES: &[Surface] = &[
     CONTROL_PROTOCOL,
     SUPERVISOR_PROTOCOL,
     TOKEN_STORE_FORMAT,
+    REMOTE_PROTOCOL,
+    SAVED_SERVER_FORMAT,
+    REMOTE_CERTIFICATE_FORMAT,
+    REMOTE_ACCESS_MARK_FORMAT,
     RESUME_FORMAT,
     CONFIG_SCHEMA,
 ];

@@ -6,17 +6,37 @@ use super::*;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::{TokenEntry, TokenScope};
 
+/// What this machine's remote access leaves a fresh grant able to do, which
+/// decides the block a `share grant` closes with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteReady {
+    /// `koshi.kdl` names no address to serve remote clients on.
+    NoAddress,
+    /// The address is set and the operator left remote access switched off.
+    Off,
+    /// Remote access is on, and this is where it serves.
+    On {
+        /// Where remote clients are served, as `host:port`.
+        address: String,
+    },
+}
+
 /// Render a `share grant` answer: the block printed once, holding the secret
 /// itself.
 ///
 /// `replaced` opens the block with the grant that stopped working, so the
 /// operator learns the old token is dead before reading the new one.
+///
+/// `ready` closes the block: with remote access on, the command that connects
+/// from another machine, and otherwise what is missing before this token can
+/// connect at all. The secret never appears inside that command.
 #[must_use]
 pub fn render_share_grant(
     token: &ConnectionToken,
     identity: &str,
     scope: &TokenScope,
     replaced: bool,
+    ready: &RemoteReady,
 ) -> String {
     let mut rendered = String::new();
     if replaced {
@@ -28,10 +48,22 @@ pub fn render_share_grant(
     rendered.push_str("anyone holding this token can run anything you can.\n");
     rendered.push_str(token.expose());
     rendered.push('\n');
-    rendered.push_str(
-        "remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n",
-    );
+    match ready {
+        RemoteReady::NoAddress => rendered.push_str(
+            "no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, \
+             then run `koshi share grant` again.\n",
+        ),
+        RemoteReady::Off => rendered
+            .push_str("remote access stays off; this token cannot be used to connect yet.\n"),
+        RemoteReady::On { address } => {
+            rendered.push_str("connect from another machine:\n");
+            rendered.push_str(&format!(
+                "  koshi attach --remote {address} --save-as {identity} [SESSION]\n"
+            ));
+            rendered
+                .push_str("set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n");
+        }
+    }
     rendered
 }
 

@@ -1,17 +1,23 @@
-//! Bytes carried as one base64 string.
+//! Bytes written as text, two ways.
 //!
-//! A `Vec<u8>` field marked `#[serde(with = "crate::bytes")]` travels as a
-//! JSON string: base64 as RFC 4648 section 4 spells it, over the alphabet
-//! `A`-`Z`, `a`-`z`, `0`-`9`, `+` and `/`, padded with `=` to a multiple of
-//! four characters. Decoding refuses anything else — wrong padding, a character
-//! the alphabet does not allow where it stands, or a last character carrying
-//! unused bits that are not zero.
+//! **Base64, for a field on the wire.** A `Vec<u8>` field marked
+//! `#[serde(with = "crate::bytes")]` travels as a JSON string: base64 as RFC
+//! 4648 section 4 spells it, over the alphabet `A`-`Z`, `a`-`z`, `0`-`9`, `+`
+//! and `/`, padded with `=` to a multiple of four characters. Decoding refuses
+//! anything else — wrong padding, a character the alphabet does not allow
+//! where it stands, or a last character carrying unused bits that are not
+//! zero.
 //!
 //! Example — the two bytes `[104, 105]`:
 //!
 //! ```text
 //! "bytes":"aGk="
 //! ```
+//!
+//! **Hex, for a secret and for a fingerprint.** [`hex()`](crate::bytes::hex) writes bytes as
+//! lowercase hex, which is what every secret, hash and certificate
+//! fingerprint koshi holds is written as. Example — the two bytes
+//! `[104, 105]` become `"6869"`.
 
 use std::fmt;
 
@@ -19,6 +25,20 @@ use base64::engine::general_purpose::STANDARD;
 use base64::{DecodeError, Engine as _};
 use serde::de::{Error, Visitor};
 use serde::{Deserializer, Serializer};
+
+/// Write `bytes` as lowercase hex, two characters per byte.
+///
+/// Example — `[104, 105]` becomes `"6869"`.
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
+}
 
 /// Write `bytes` as one base64 string.
 ///

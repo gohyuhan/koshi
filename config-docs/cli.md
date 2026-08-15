@@ -191,6 +191,13 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>\|never]` | Grant an identity a remote access token |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
+| `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi remote list [--format table\|json]` | List the servers this machine has saved |
+| `koshi remote forget <SERVER>` | Drop one saved server |
+| `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
+
+The first three run on the machine holding the sessions. The last four run on
+the machine connecting to it.
 
 An absent `--session` reads one way on `grant` and another way on `revoke`.
 `koshi share grant alice` gives alice one token that reaches every session on
@@ -244,8 +251,28 @@ is refused by the router, because the expiry lands further ahead than this
 machine's clock can represent.
 
 A grant prints its token once, so copy it from that one printing. Anyone
-holding the token can run anything the granting user can. This build has no
-remote listener, so a granted token cannot be used to connect yet.
+holding the token can run anything the granting user can.
+
+A listen address in `koshi.kdl` sets the address; it does not open the port.
+With an address set and remote access still off, `koshi share grant` says so
+and offers to switch it on:
+
+```text
+remote access is off.
+turn it on and open 0.0.0.0:7654? [y/N]
+```
+
+A typed `y` opens the port, and it opens again on every start after that. Any
+other answer leaves it shut and still prints the token. With no address in
+`koshi.kdl` there is nothing to offer, and the grant says the token cannot be
+used to connect yet.
+
+`koshi share revoke alice` ends the connections alice's tokens opened, at once.
+Her connection stops and no further frame reaches her; her next command is not
+merely refused. Granting alice again on the same scope ends the old
+connection the same way, since the replaced token stopped working. A token that
+runs out on its own is different: it stops a new connection from opening and
+never interrupts one already attached.
 
 The `koshi share list` columns read:
 
@@ -260,6 +287,66 @@ The `koshi share list` columns read:
 
 In table cells a time prints as whole seconds since the Unix epoch, and an
 absent value prints as `-`.
+
+### Connecting to another machine
+
+`--remote` names the machine an invocation talks to, by the `host:port` it
+listens on or the name it was saved under. Everything after that — how a
+session is named, how a missing name is resolved, what is refused — runs
+against that machine unchanged.
+
+The first connection to a server names its address, and `--save-as` gives it a
+short name:
+
+```text
+koshi attach --remote laptop.local:7654 --save-as work web
+```
+
+After that the name stands in for the address, and nothing is retyped:
+
+```text
+koshi attach --remote work web
+```
+
+The secret never appears on a command line. koshi reads it from the
+environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
+the terminal without printing what is typed. Every argument after the program
+name is readable by other users of the machine, so no flag takes a secret.
+
+On the first connection koshi records the fingerprint of the certificate the
+server presented — the sha256 of it, as 64 lowercase hex characters — and
+pins it. A later connection presenting a different certificate is always
+refused, and the refusal names the address and both fingerprints. When the
+server really was reinstalled, run `koshi remote forget <SERVER>` and connect
+again to pin the new one.
+
+A first connection saves the address, the secret, the pinned fingerprint, and
+the name given by `--save-as`. The store lives on the connecting machine and is
+readable only by its owner. `koshi remote list` prints the name, address,
+fingerprint and last-used time of each saved server, and never a secret. Once
+the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
+replaces the saved one; it reads the new secret the same way a connection does.
+
+Bare `koshi attach` lists the sessions on every reachable saved server beside
+this machine's own, each row naming the server it belongs to. The remote check
+waits two seconds in total, not two seconds per server, so one unreachable
+machine cannot slow the list. A server not heard from inside that wait is left
+out. A server that answers and refuses the saved secret is not hidden — it
+prints the command that replaces that secret:
+
+```text
+work: the saved secret was refused; run `koshi remote set-secret work`
+```
+
+`--remote` never creates a session, and it takes `attach` or an action verb.
+Bare `koshi --remote work` names nothing to run, and `koshi share --remote
+work` is not carried to the other machine; both are refused:
+
+```text
+--remote needs a command, such as `koshi attach --remote <server>`
+```
+
+Tokens are granted only from the machine holding the sessions.
 
 ## Versions
 

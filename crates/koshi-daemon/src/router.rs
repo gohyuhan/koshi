@@ -29,11 +29,19 @@
 //! With no session left, the dispatcher waits one idle window for a request
 //! and exits when none arrives. A caller that needs the router again starts
 //! it: connect, and on failure spawn the router and retry.
+//!
+//! The router also opens the machine's TLS port for remote clients, when
+//! `koshi.kdl` names an address and the operator has switched remote access
+//! on. The remote listener holds those connections and asks the dispatcher
+//! what each caller's secret reaches; the dispatcher keeps the socket of every
+//! connection it admitted, so a revoked or replaced secret ends its
+//! connections at once.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::net::{Shutdown, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -42,23 +50,32 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use fs4::{FileExt, TryLockError};
+use koshi_config::layer::merge_server;
+use koshi_config::types::ServerConfig;
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{remove_socket_file, resume_path, socket_addr, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::plane::{self, Next};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
-use koshi_ipc::remote_tokens::{store_path, TokenScope, TokenStore};
+use koshi_ipc::remote_state::{
+    remote_enabled, CertFile, EnabledFile, CERT_FILE_FORMAT, ENABLED_FILE_FORMAT,
+};
+use koshi_ipc::remote_tokens::{hash_token, store_path, TokenRecord, TokenScope, TokenStore};
+use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
     router_endpoint_path, router_lock_path, router_socket_addr, ControlPlane, RouterHandshake,
     RouterRequestKind, RouterResponse, RouterResult, SessionAddress, SessionSelector,
     SessionServerReady, ROUTER_PROTOCOL_VERSION,
 };
+use koshi_ipc::tls;
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
 use koshi_link::ipc_client;
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
+
+use crate::remote_listener::{self, AdmissionAsk, Admitted};
 
 #[cfg(test)]
 mod tests;
@@ -149,7 +166,7 @@ struct SessionEntry {
 }
 
 /// One thing for the dispatcher to do.
-enum RouterEvent {
+pub(crate) enum RouterEvent {
     /// A request read off a connection, with the channel its answer goes back
     /// on.
     Request {
@@ -163,6 +180,63 @@ enum RouterEvent {
     /// The `Restarting` reply has been written to its connection, so the
     /// router may now restart.
     RestartDelivered,
+    /// A question from a remote connection the listener is holding.
+    Admission(AdmissionAsk),
+}
+
+/// One remote connection this machine has admitted, and the grant that
+/// admitted it.
+struct LiveRemote {
+    /// The sha256 of the secret that admitted this connection.
+    hash: String,
+    /// The connection's socket, held so a revoke can end it.
+    stream: TcpStream,
+    /// The number this connection is registered under, which the listener
+    /// reports when the connection ends.
+    id: u64,
+}
+
+/// What the router holds for remote clients: where the listener binds, whether
+/// it is open, and the connections it has admitted.
+///
+/// Owned by the dispatcher loop alone, as the session list is.
+struct RemoteState {
+    /// The address `koshi.kdl` names, or `None` when it names none.
+    address: Option<String>,
+    /// The koshi data directory holding the certificate and the record of the
+    /// operator's yes, or `None` when this machine has none.
+    data_dir: Option<PathBuf>,
+    /// Whether the listener is open.
+    listening: bool,
+    /// The remote connections this machine has admitted, whether they have
+    /// attached to a session or not.
+    live: Vec<LiveRemote>,
+    /// The number the next admitted connection is registered under.
+    next_id: u64,
+}
+
+impl RemoteState {
+    /// End every admitted connection a secret in `hashes` opened, and drop it
+    /// from the list.
+    ///
+    /// The connection's socket is shut down in both directions, so the thread
+    /// reading it stops at once and no further frame reaches that client. A
+    /// connection that has attached ends its two bridge threads the same way.
+    /// Dropping the record here is what makes a later attach on that
+    /// connection refuse rather than bridge.
+    ///
+    /// The list is walked on a revoke and on a grant that replaces a standing
+    /// one. An expiry walks nothing: a client that is already attached keeps
+    /// working until it leaves.
+    fn cut(&mut self, hashes: &[String]) {
+        self.live.retain(|live| {
+            if !hashes.contains(&live.hash) {
+                return true;
+            }
+            let _ = live.stream.shutdown(Shutdown::Both);
+            false
+        });
+    }
 }
 
 /// Why the dispatcher loop ended.
@@ -203,7 +277,8 @@ pub fn run_router(
     // Where this machine's remote access tokens live, resolved once here. A
     // machine with no resolvable data directory has no store, so it holds no
     // remote access token.
-    let token_store = koshi_paths::data_dir().map(|dir| store_path(&dir));
+    let data_dir = koshi_paths::data_dir();
+    let token_store = data_dir.as_deref().map(store_path);
 
     let lock_file = OpenOptions::new()
         .create(true)
@@ -240,6 +315,19 @@ pub fn run_router(
     let shutting_down = Arc::new(AtomicBool::new(false));
     let accept_thread = start_accept_thread(listener, token, events_tx.clone(), &shutting_down)?;
 
+    let mut remote = RemoteState {
+        address: merge_server(
+            ServerConfig::default(),
+            koshi_link::config::load_app_layer().into_iter().collect(),
+        )
+        .remote_listen,
+        data_dir,
+        listening: false,
+        live: Vec::new(),
+        next_id: 0,
+    };
+    open_remote_listener(&mut remote, &events_tx);
+
     #[cfg(unix)]
     for (id, entry) in &registry {
         if entry.pid != 0 {
@@ -256,6 +344,7 @@ pub fn run_router(
             &events_rx,
             ROUTER_IDLE_EXIT,
             &mut registry,
+            &mut remote,
         ) {
             RouterExit::Idle => break,
             RouterExit::Restart => {
@@ -319,13 +408,85 @@ fn take_lock(lock_file: &File, wait_for_lock: bool) -> std::io::Result<bool> {
     }
 }
 
+/// Open the remote listener when `koshi.kdl` names an address and the operator
+/// has switched remote access on.
+///
+/// An address alone opens nothing. The port opens the first time the operator
+/// answers yes to the offer `koshi share grant` makes, and on every start after
+/// that, which is what the record beside the certificate remembers.
+///
+/// A certificate that cannot be made and an address that cannot be bound are
+/// both reported and nothing else changes: local clients are served whatever
+/// the remote setting does.
+fn open_remote_listener(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) {
+    let Some(address) = remote.address.clone() else {
+        return;
+    };
+    let Some(data_dir) = remote.data_dir.clone().filter(|dir| remote_enabled(dir)) else {
+        tracing::info!(
+            "remote listen address {address} is set, but remote access was never switched on; \
+             run `koshi share grant` to switch it on"
+        );
+        return;
+    };
+    let cert = match load_or_make_cert(&data_dir) {
+        Ok((cert, _)) => cert,
+        Err(error) => {
+            tracing::warn!(
+                "the remote listener could not open {address}: {error}; local clients are \
+                 unaffected"
+            );
+            return;
+        }
+    };
+    if let Err(error) = remote_listener::start(address.clone(), cert, events_tx.clone()) {
+        tracing::warn!(
+            "the remote listener could not open {address}: {error}; local clients are unaffected"
+        );
+        return;
+    }
+    remote.listening = true;
+}
+
+/// This machine's certificate and its fingerprint, generating one when there is
+/// none to read.
+///
+/// The certificate koshi generates names `koshi`. What that name says does not
+/// matter: a dialling client pins the fingerprint of the certificate it was
+/// shown and checks nothing else about it.
+///
+/// # Errors
+/// [`IpcError::TokenStoreWrite`] naming what failed, for a certificate that
+/// could not be generated or could not be written.
+fn load_or_make_cert(data_dir: &Path) -> Result<(CertFile, String), IpcError> {
+    let path = CertFile::path(data_dir);
+    if let Ok(file) = CertFile::read(&path) {
+        let fingerprint = tls::fingerprint(&file.cert_der);
+        return Ok((file, fingerprint));
+    }
+    let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()]).map_err(|error| {
+        IpcError::TokenStoreWrite {
+            path: path.display().to_string(),
+            detail: format!("the certificate could not be generated: {error}"),
+        }
+    })?;
+    let file = CertFile {
+        format: CERT_FILE_FORMAT,
+        cert_der: made.cert.der().to_vec(),
+        key_der: made.signing_key.serialize_der(),
+    };
+    file.write(&path)?;
+    let fingerprint = tls::fingerprint(&file.cert_der);
+    Ok((file, fingerprint))
+}
+
 /// Block SIGPIPE on the calling thread's signal mask.
 ///
 /// The blocked signal stays pending and is discarded when the thread ends; a
 /// write to a hung-up peer returns an `EPIPE` error under every process-wide
 /// disposition.
 #[cfg(unix)]
-fn block_sigpipe_on_this_thread() {
+pub(crate) fn block_sigpipe_on_this_thread() {
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
         libc::sigemptyset(&mut set);
@@ -504,7 +665,9 @@ fn ask_dispatcher(
 ///
 /// `events_tx` is the loop's own sender, handed to each session's reaper
 /// thread so a child's exit reaches here. `token_store` is the remote access
-/// token store every token request is answered against.
+/// token store every token request is answered against, and `remote` is what
+/// the router holds for remote clients.
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     runtime_dir: &Path,
     exe: &Path,
@@ -513,6 +676,7 @@ fn dispatch(
     events_rx: &Receiver<RouterEvent>,
     idle_exit: Duration,
     registry: &mut Registry,
+    remote: &mut RemoteState,
 ) -> RouterExit {
     loop {
         let received = if registry.is_empty() {
@@ -530,12 +694,16 @@ fn dispatch(
                     exe,
                     token_store,
                     registry,
+                    remote,
                     events_tx,
                     kind,
                 ));
             }
             RouterEvent::ChildExited(id) => unregister(runtime_dir, registry, id),
             RouterEvent::RestartDelivered => return RouterExit::Restart,
+            RouterEvent::Admission(ask) => {
+                serve_admission(runtime_dir, token_store, registry, remote, ask);
+            }
         }
     }
 }
@@ -549,6 +717,7 @@ fn serve_request(
     exe: &Path,
     token_store: Option<&Path>,
     registry: &mut Registry,
+    remote: &mut RemoteState,
     events_tx: &Sender<RouterEvent>,
     kind: RouterRequestKind,
 ) -> RouterResult {
@@ -577,11 +746,191 @@ fn serve_request(
             identity,
             scope,
             expires_in,
-        } => grant_token(token_store, identity, scope, expires_in),
+        } => grant_token(token_store, remote, identity, scope, expires_in),
         RouterRequestKind::RevokeToken { identity, scope } => {
-            revoke_token(token_store, &identity, scope.as_ref())
+            revoke_token(token_store, remote, &identity, scope.as_ref())
         }
         RouterRequestKind::ListTokens { scope } => list_tokens(token_store, scope.as_ref()),
+        RouterRequestKind::RemoteStatus => remote_status(remote),
+        RouterRequestKind::EnableRemote => enable_remote(remote, events_tx),
+    }
+}
+
+/// Answer one question from a remote connection the listener is holding.
+///
+/// The dispatcher answers one at a time, so the token store keeps its one
+/// writer and the list of carried connections has a single owner.
+fn serve_admission(
+    runtime_dir: &Path,
+    token_store: Option<&Path>,
+    registry: &Registry,
+    remote: &mut RemoteState,
+    ask: AdmissionAsk,
+) {
+    match ask {
+        AdmissionAsk::Admit {
+            token,
+            stream,
+            reply,
+        } => {
+            let _ = reply.send(admit_token(token_store, remote, &token, stream));
+        }
+        AdmissionAsk::Rows { scope, reply } => {
+            let _ = reply.send(remote_rows(registry, &scope));
+        }
+        AdmissionAsk::Locate {
+            scope,
+            id,
+            selector,
+            reply,
+        } => {
+            let _ = reply.send(locate_remote(
+                runtime_dir,
+                registry,
+                remote,
+                &scope,
+                id,
+                &selector,
+            ));
+        }
+        AdmissionAsk::Ended { id } => remote.live.retain(|live| live.id != id),
+    }
+}
+
+/// What a presented secret reaches, and the number the connection presenting
+/// it is registered under.
+///
+/// A secret that reaches something registers the connection against that
+/// secret's hash, so a revoke ends it from here on however far it goes: a
+/// connection that lists and never attaches is cut with the ones that did.
+/// The registration is dropped when the listener reports the connection ended.
+///
+/// The store is written back, since admitting stamps that record's last-used
+/// time. A store that cannot be read or written admits nothing.
+fn admit_token(
+    token_store: Option<&Path>,
+    remote: &mut RemoteState,
+    token: &ConnectionToken,
+    stream: TcpStream,
+) -> Option<Admitted> {
+    let Ok((path, mut store)) = open_store(token_store) else {
+        return None;
+    };
+    let scope = store.admit(token, SystemTime::now())?;
+    store.write(path).ok()?;
+    let id = remote.next_id;
+    remote.next_id += 1;
+    remote.live.push(LiveRemote {
+        hash: hash_token(token),
+        stream,
+        id,
+    });
+    Some(Admitted { scope, id })
+}
+
+/// The sessions an admitted scope reaches, in name then id order.
+///
+/// A host-wide scope reaches every session in the list; a session scope
+/// reaches that one session. Nothing outside the router's own list is read.
+fn remote_rows(registry: &Registry, scope: &TokenScope) -> Vec<RemoteSessionRow> {
+    let mut rows: Vec<RemoteSessionRow> = registry
+        .iter()
+        .filter(|(id, _)| scope.covers(**id))
+        .map(|(id, entry)| RemoteSessionRow {
+            id: *id,
+            name: entry.name.clone(),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    rows
+}
+
+/// The endpoint file of the session an admitted client asked for, when the
+/// connection numbered `id` still stands and its scope covers that session.
+///
+/// A revoke drops the connection's registration, so an attach that arrives
+/// after one answers `None` and is refused rather than bridged. That check
+/// reads no name the caller sent.
+///
+/// The selector is resolved against the router's own list, in memory: no
+/// socket is opened, nothing is waited for, and no file is touched before the
+/// admitted scope has been proven to cover the session named. A connection
+/// that has been cut, a selector naming no session, and a session the scope
+/// does not cover all answer `None`, which the listener refuses in the same
+/// words, so the three cases cost the same work and read the same.
+fn locate_remote(
+    runtime_dir: &Path,
+    registry: &Registry,
+    remote: &RemoteState,
+    scope: &TokenScope,
+    id: u64,
+    selector: &SessionSelector,
+) -> Option<PathBuf> {
+    if !remote.live.iter().any(|live| live.id == id) {
+        return None;
+    }
+    let session = resolve(registry, selector)?;
+    if !scope.covers(session) {
+        return None;
+    }
+    Some(EndpointFile::path(runtime_dir, session))
+}
+
+/// What this machine's remote access is set to: the address `koshi.kdl` names,
+/// whether the operator has switched remote access on, and the fingerprint of
+/// the certificate this machine presents once it has one.
+fn remote_status(remote: &RemoteState) -> RouterResult {
+    let dir = remote.data_dir.as_deref();
+    RouterResult::RemoteStatus {
+        address: remote.address.clone(),
+        enabled: dir.is_some_and(remote_enabled),
+        fingerprint: dir
+            .and_then(|dir| CertFile::read(&CertFile::path(dir)).ok())
+            .map(|cert| tls::fingerprint(&cert.cert_der)),
+    }
+}
+
+/// Switch remote access on: record the operator's yes, make this machine's
+/// certificate when it has none, and open the listener when it is not open.
+///
+/// The record is written first, so a start after this one opens the listener
+/// even if this call cannot. An address that is already being listened on is
+/// left alone and answered with the fingerprint it presents.
+fn enable_remote(remote: &mut RemoteState, events_tx: &Sender<RouterEvent>) -> RouterResult {
+    let Some(address) = remote.address.clone() else {
+        return refused(
+            "no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl"
+                .to_string(),
+        );
+    };
+    let Some(data_dir) = remote.data_dir.clone() else {
+        return refused(
+            "this machine has no data directory, so remote access cannot be switched on"
+                .to_string(),
+        );
+    };
+    let record = EnabledFile {
+        format: ENABLED_FILE_FORMAT,
+        enabled_at: SystemTime::now(),
+    };
+    if let Err(error) = record.write(&EnabledFile::path(&data_dir)) {
+        return refused(error.to_string());
+    }
+    let (cert, fingerprint) = match load_or_make_cert(&data_dir) {
+        Ok(made) => made,
+        Err(error) => return refused(error.to_string()),
+    };
+    if !remote.listening {
+        if let Err(error) = remote_listener::start(address.clone(), cert, events_tx.clone()) {
+            return refused(format!(
+                "the remote listener could not open {address}: {error}"
+            ));
+        }
+        remote.listening = true;
+    }
+    RouterResult::RemoteEnabled {
+        address,
+        fingerprint,
     }
 }
 
@@ -604,14 +953,26 @@ fn open_store(token_store: Option<&Path>) -> Result<(&Path, TokenStore), RouterR
     }
 }
 
+/// Whether `record` still works at `now`: nobody revoked it, and it either
+/// never expires or expires after `now`.
+fn still_stands(record: &TokenRecord, now: SystemTime) -> bool {
+    record.revoked_at.is_none() && record.expires_at.is_none_or(|expiry| expiry > now)
+}
+
 /// Hand `identity` a fresh secret on `scope` and write the store back.
 ///
 /// The clock is read once, and both the issue time and the expiry are stamped
 /// from that one reading. `expires_in` is added to the issue time with a
 /// checked add: a span the clock cannot represent is refused before anything
 /// is written, so the store file is left as it stood.
+///
+/// A grant takes the place of whatever `identity` held on `scope`, so every
+/// connection the replaced secret admitted is ended once the new record is
+/// written. The hashes are taken before the replace, since the records holding
+/// them are gone after it.
 fn grant_token(
     token_store: Option<&Path>,
+    remote: &mut RemoteState,
     identity: String,
     scope: TokenScope,
     expires_in: Option<Duration>,
@@ -633,17 +994,32 @@ fn grant_token(
             }
         },
     };
+    let replacing: Vec<String> = store
+        .records
+        .iter()
+        .filter(|record| {
+            record.identity == identity && record.scope == scope && still_stands(record, issued_at)
+        })
+        .map(|record| record.hash.clone())
+        .collect();
     let (token, replaced) = store.grant(identity, scope, issued_at, expires_at);
     if let Err(error) = store.write(path) {
         return refused(error.to_string());
     }
+    remote.cut(&replacing);
     RouterResult::Granted { token, replaced }
 }
 
 /// Stop the grants `identity` holds, narrowed to one scope when `scope` is
 /// given, and write the store back when this call stopped anything.
+///
+/// Every connection those grants admitted ends once the store is written, so a
+/// revoke ends the connection rather than refusing its next command. A
+/// connection that never attached ends with the rest. The hashes are taken
+/// before the revoke, since the records carry their stopped time afterwards.
 fn revoke_token(
     token_store: Option<&Path>,
+    remote: &mut RemoteState,
     identity: &str,
     scope: Option<&TokenScope>,
 ) -> RouterResult {
@@ -651,6 +1027,16 @@ fn revoke_token(
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
+    let stopping: Vec<String> = store
+        .records
+        .iter()
+        .filter(|record| {
+            record.identity == identity
+                && record.revoked_at.is_none()
+                && scope.is_none_or(|wanted| *wanted == record.scope)
+        })
+        .map(|record| record.hash.clone())
+        .collect();
     let stopped = store.revoke(identity, scope, SystemTime::now());
     if stopped.is_empty() {
         return RouterResult::Revoked(stopped);
@@ -658,6 +1044,7 @@ fn revoke_token(
     if let Err(error) = store.write(path) {
         return refused(error.to_string());
     }
+    remote.cut(&stopping);
     RouterResult::Revoked(stopped)
 }
 

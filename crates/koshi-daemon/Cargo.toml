@@ -20,6 +20,8 @@ serde_json = "1.0.150"
 tracing = "0.1.44"
 
 koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
+rcgen = { version = "0.14.9", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "logging"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.188"

@@ -23,6 +23,13 @@
 //! hands out a [`ReadCloser`](crate::transport::ReadCloser): the handle another
 //! thread holds to end the reading side of a connection while the thread
 //! serving it is blocked reading. The writing side is left alone.
+//!
+//! The frame shape is not tied to the local socket.
+//! [`frame_halves`](crate::transport::frame_halves) puts it on any other pair
+//! of byte streams, such as the two halves of a TLS stream, and
+//! [`Connection::split_raw`](crate::transport::Connection::split_raw) hands
+//! back a local socket's two halves with no frame shape read off them, for
+//! carrying somebody else's frames through.
 
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -271,21 +278,61 @@ impl Connection {
         let (recv_half, send_half) = self.stream.split();
         (
             FrameReader {
-                half: recv_half,
+                half: Box::new(recv_half),
                 closed: self.read_closed,
             },
-            FrameWriter { half: send_half },
+            FrameWriter {
+                half: Box::new(send_half),
+            },
         )
+    }
+
+    /// Split the connection into its reading and its writing half, with no
+    /// framing: each half carries the bytes as they arrive and as they are
+    /// written.
+    ///
+    /// The connection is consumed.
+    #[must_use]
+    pub fn split_raw(self) -> (RawReader, RawWriter) {
+        let (recv_half, send_half) = self.stream.split();
+        (RawReader(recv_half), RawWriter(send_half))
     }
 }
 
+/// Wrap a byte-stream pair as the two halves of a framed connection, so a
+/// stream that is not a local socket speaks the same frame shape a
+/// [`Connection`] does.
+///
+/// The reader starts open: no [`ReadCloser`] reaches these halves.
+#[must_use]
+pub fn frame_halves(
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+) -> (FrameReader, FrameWriter) {
+    (
+        FrameReader {
+            half: reader,
+            closed: Arc::new(AtomicBool::new(false)),
+        },
+        FrameWriter { half: writer },
+    )
+}
+
 /// The reading half of a split [`Connection`]. Sends nothing.
-#[derive(Debug)]
 pub struct FrameReader {
-    half: socket::RecvHalf,
+    half: Box<dyn Read + Send>,
     /// Set by [`ReadCloser::close`]. Every read after it reports
     /// [`IpcError::Disconnected`] without touching the socket.
     closed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for FrameReader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameReader")
+            .field("closed", &self.closed.load(Ordering::SeqCst))
+            .finish()
+    }
 }
 
 impl FrameReader {
@@ -345,9 +392,14 @@ fn duplicate_socket(stream: &socket::Stream) -> Result<UnixStream, IpcError> {
 }
 
 /// The writing half of a split [`Connection`]. Reads nothing.
-#[derive(Debug)]
 pub struct FrameWriter {
-    half: socket::SendHalf,
+    half: Box<dyn Write + Send>,
+}
+
+impl std::fmt::Debug for FrameWriter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("FrameWriter").finish()
+    }
 }
 
 impl FrameWriter {
@@ -355,6 +407,32 @@ impl FrameWriter {
     /// the OS.
     pub fn send<T: Serialize>(&mut self, message: &T) -> Result<(), IpcError> {
         write_message(&mut self.half, message)
+    }
+}
+
+/// The reading half of a [`Connection::split_raw`]: the bytes as they arrive,
+/// with no frame shape read off them.
+#[derive(Debug)]
+pub struct RawReader(socket::RecvHalf);
+
+impl Read for RawReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buffer)
+    }
+}
+
+/// The writing half of a [`Connection::split_raw`]: the bytes go out as
+/// given, with no frame shape written around them.
+#[derive(Debug)]
+pub struct RawWriter(socket::SendHalf);
+
+impl Write for RawWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
     }
 }
 
@@ -389,7 +467,10 @@ impl Write for FrameBuffer {
 /// the JSON bytes. The whole frame goes out in one `write_all`. A message
 /// past [`MAX_FRAME_LEN`] is refused with nothing written, and its encoding
 /// stops at the byte that crossed the cap.
-fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> Result<(), IpcError> {
+pub(crate) fn write_message<T: Serialize>(
+    writer: &mut impl Write,
+    message: &T,
+) -> Result<(), IpcError> {
     let mut frame = FrameBuffer {
         bytes: vec![0u8; 4],
         overflow: None,
@@ -412,7 +493,7 @@ fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> Result<(
 
 /// Read one frame and decode its JSON payload as `T`. The length prefix is
 /// checked against [`MAX_FRAME_LEN`] before the payload buffer is allocated.
-fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, IpcError> {
+pub(crate) fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, IpcError> {
     let mut header = [0u8; 4];
     reader.read_exact(&mut header).map_err(io_failure)?;
     let len = u32::from_be_bytes(header);

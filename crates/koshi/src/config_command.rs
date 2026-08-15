@@ -69,6 +69,13 @@ const FIELDS: &[FieldHelp] = &[
         "Directory the shared session sockets live in.",
     ),
     field(
+        "koshi.remote-listen",
+        "koshi.kdl",
+        "unset",
+        "Address the remote listener binds to. Setting it opens nothing; \
+         `koshi share grant` asks before the port opens.",
+    ),
+    field(
         "koshi.auto-close-session",
         "koshi.kdl",
         "#false",

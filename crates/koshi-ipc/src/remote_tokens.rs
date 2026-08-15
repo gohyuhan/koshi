@@ -333,6 +333,33 @@ impl TokenStore {
         }
     }
 
+    /// What `token` reaches at `now`, without naming a session.
+    ///
+    /// The presented secret is hashed once, then every record is walked and
+    /// each hash compared through its last byte. The walk is deliberately
+    /// exhaustive: it never stops at the first match and never reads a record
+    /// out of a map, so how long the answer takes does not say which record
+    /// matched, or whether any did. Returns the scope of the last live record
+    /// holding that hash, and `None` when no record does. Admitting stamps
+    /// that record's last-used time with `now`, so the caller writes the
+    /// store back.
+    ///
+    /// The caller checks the scope against the session it wants with
+    /// [`TokenScope::covers`].
+    pub fn admit(&mut self, token: &ConnectionToken, now: SystemTime) -> Option<TokenScope> {
+        let presented = hash_token(token);
+        let mut admitted = None;
+        for (index, record) in self.records.iter().enumerate() {
+            let same_hash: bool = record.hash.as_bytes().ct_eq(presented.as_bytes()).into();
+            if same_hash && record.is_live(now) {
+                admitted = Some(index);
+            }
+        }
+        let index = admitted?;
+        self.records[index].last_used_at = Some(now);
+        Some(self.records[index].scope.clone())
+    }
+
     /// Every grant without its hash, narrowed to the grants that reach one
     /// scope when `scope` is given.
     ///
@@ -376,14 +403,7 @@ pub fn store_path(data_dir: &Path) -> PathBuf {
 /// The sha256 of `token`'s secret, as 64 lowercase hex characters.
 #[must_use]
 pub fn hash_token(token: &ConnectionToken) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(token.expose().as_bytes());
-    let mut hash = String::with_capacity(digest.len() * 2);
-    for &byte in digest.iter() {
-        hash.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        hash.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    hash
+    crate::bytes::hex(&Sha256::digest(token.expose().as_bytes()))
 }
 
 #[cfg(test)]

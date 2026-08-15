@@ -162,6 +162,13 @@ pub enum RouterRequestKind {
         /// the host-wide grants alone.
         scope: Option<TokenScope>,
     },
+    /// Report where this machine would serve remote clients, and whether the
+    /// operator has switched remote access on.
+    RemoteStatus,
+    /// Switch remote access on: generate this machine's certificate when it
+    /// has none, open the listener, and record the operator's answer so the
+    /// listener opens on every start after this one.
+    EnableRemote,
 }
 
 impl RouterRequestKind {
@@ -194,6 +201,8 @@ impl RouterRequestKind {
             RouterRequestKind::GrantToken { .. } => "GrantToken",
             RouterRequestKind::RevokeToken { .. } => "RevokeToken",
             RouterRequestKind::ListTokens { .. } => "ListTokens",
+            RouterRequestKind::RemoteStatus => "RemoteStatus",
+            RouterRequestKind::EnableRemote => "EnableRemote",
         }
     }
 }
@@ -275,6 +284,26 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::ListTokens`]: one entry per grant,
     /// narrowed by the request's scope.
     Tokens(Vec<TokenEntry>),
+    /// Answers [`RouterRequestKind::RemoteStatus`]: what this machine's
+    /// remote access is set to.
+    RemoteStatus {
+        /// Where remote clients would be served, as `host:port`, or `None`
+        /// when `koshi.kdl` names no listen address.
+        address: Option<String>,
+        /// Whether the operator has switched remote access on.
+        enabled: bool,
+        /// The fingerprint of this machine's certificate, as 64 lowercase
+        /// hex characters, or `None` when no certificate has been generated.
+        fingerprint: Option<String>,
+    },
+    /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
+    RemoteEnabled {
+        /// Where remote clients are served, as `host:port`.
+        address: String,
+        /// The fingerprint of this machine's certificate, as 64 lowercase
+        /// hex characters. The dialling side pins it.
+        fingerprint: String,
+    },
     /// The request was refused.
     Error(IpcErrorPayload),
 }
@@ -438,6 +467,8 @@ impl WireVariants for RouterRequestKind {
         "GrantToken",
         "RevokeToken",
         "ListTokens",
+        "RemoteStatus",
+        "EnableRemote",
     ];
 }
 
@@ -459,6 +490,8 @@ impl WireVariants for RouterResult {
         "Granted",
         "Revoked",
         "Tokens",
+        "RemoteStatus",
+        "RemoteEnabled",
         "Error",
     ];
 }
@@ -474,6 +507,8 @@ impl WireName for RouterResult {
             RouterResult::Granted { .. } => "Granted",
             RouterResult::Revoked(_) => "Revoked",
             RouterResult::Tokens(_) => "Tokens",
+            RouterResult::RemoteStatus { .. } => "RemoteStatus",
+            RouterResult::RemoteEnabled { .. } => "RemoteEnabled",
             RouterResult::Error(_) => "Error",
         }
     }

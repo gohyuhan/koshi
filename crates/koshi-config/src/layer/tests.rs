@@ -147,6 +147,52 @@ fn a_later_layer_wins_on_the_shared_sessions_directory() {
 }
 
 #[test]
+fn a_machine_names_no_listen_address_unless_the_file_names_one() {
+    // The built-in default, so a machine with no `koshi.kdl` names no address
+    // and the remote listener has nothing to bind.
+    let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
+    assert_eq!(server.remote_listen, None);
+}
+
+#[test]
+fn remote_listen_folds_onto_the_session_side_only() {
+    let layer = PartialKoshiConfig {
+        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        ..Default::default()
+    };
+
+    // The session owns the address, so it is the side that changes.
+    let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
+    assert_eq!(server.remote_listen, Some("127.0.0.1:7654".to_string()));
+    assert_eq!(
+        server,
+        ServerConfig {
+            remote_listen: Some("127.0.0.1:7654".to_string()),
+            ..ServerConfig::default()
+        }
+    );
+
+    // A viewer folds the same file and is untouched by it.
+    let client = merge_client(ClientConfig::default(), vec![layer]);
+    assert_eq!(client, ClientConfig::default());
+}
+
+#[test]
+fn a_later_layer_wins_on_the_listen_address() {
+    let user = PartialKoshiConfig {
+        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        ..Default::default()
+    };
+    let session = PartialKoshiConfig {
+        remote_listen: Some(Some("0.0.0.0:9000".to_string())),
+        ..Default::default()
+    };
+
+    let server = merge_server(ServerConfig::default(), vec![user, session]);
+    assert_eq!(server.remote_listen, Some("0.0.0.0:9000".to_string()));
+}
+
+#[test]
 fn a_session_stays_open_unless_the_file_closes_it() {
     // The built-in default, so a session with no `koshi.kdl` survives the
     // client that leaves it and can be attached to again.

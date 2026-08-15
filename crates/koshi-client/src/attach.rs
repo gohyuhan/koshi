@@ -1,26 +1,42 @@
-//! The attached client: join a running session over its control socket and
-//! become a second window onto it.
+//! The attached client: join a running session and become a second window onto
+//! it.
 //!
-//! The body here joins a session by id. The value after `koshi attach` is
-//! resolved to one before it: the router turns that value into a session's
-//! address, starting a router first when none runs, and with no value the
-//! sessions running for this user are offered and the one picked becomes that
-//! value. The session's endpoint file holds the token the Hello presents; the
-//! Hello and the Attach are written back to back, so joining costs one round
-//! trip.
+//! A session runs in one of two homes, and the home is picked before the first
+//! connection opens. A session on this machine is joined over its control
+//! socket: the router turns the value after `koshi attach` into that session's
+//! address, starting a router first when none runs, and the session's endpoint
+//! file holds the token the Hello presents. The Hello and the Attach are
+//! written back to back, so joining costs one round trip.
+//!
+//! A session on another machine is joined over TLS through the server serving
+//! it: `koshi attach --remote <server> [session]` presents the secret that
+//! server saved, the certificate pinned on the first connection is the only one
+//! accepted, and the server resolves the session against the sessions that
+//! secret reaches. The server presents that session's endpoint token and writes
+//! the Hello on this client's behalf, since a caller on another machine cannot
+//! read that file. From the Attach on, both homes speak the same frames on the
+//! same loop.
+//!
+//! With no value at all, `koshi attach` offers the sessions running for this
+//! user beside the sessions on every saved server that answered inside one
+//! deadline, and the one picked names both the session and its home.
 //!
 //! Everything that can refuse the join happens before the terminal changes
-//! mode: a refused lookup, a refused Hello, a refused Attach. Once the session
-//! answers `Attached`, the terminal enters raw mode and the alternate screen
+//! mode: a refused lookup, a refused secret, a session the secret does not
+//! reach, a refused Hello, a refused Attach. Once the session answers
+//! `Attached`, the terminal enters raw mode and the alternate screen
 //! behind a cleanup guard, so every way out
 //! — a detach, the session ending, a dead session server, or a panic — leaves
 //! the outer terminal as it was found.
 //!
 //! A session replacing its own process image is not a way out. The session says
-//! so before it goes; this client leaves the terminal in every mode it is in,
-//! reads that session's endpoint file until it names a new connection token,
-//! and joins the new socket as the same client. The session's first frame there
-//! paints the same panes back, so the screen does not flicker.
+//! so before it goes; this client leaves the terminal in every mode it is in
+//! and comes back as the same client. On this machine it reads that session's
+//! endpoint file until it names a new connection token and joins the new
+//! socket; on a server it dials that server again, so the certificate, the
+//! secret and the scope are checked again. The session's first frame there
+//! paints the same panes back, so the screen does not flicker. A session that
+//! moves this client to another session comes back the same way.
 //!
 //! From there the connection carries traffic both ways. The session composes
 //! this terminal's own frame — at this terminal's size and scroll position —
@@ -53,7 +69,7 @@
 use std::io;
 use std::io::Write;
 use std::mem::take;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -65,6 +81,7 @@ use ratatui::crossterm::terminal::{enable_raw_mode, size, EnterAlternateScreen};
 use ratatui::crossterm::tty::IsTty;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use serde_json::value::RawValue;
 
 use crate::input::KeyOutcome;
 use crate::mouse::MouseAction;
@@ -88,6 +105,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, EventFilterSpec, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
     WireMouseAction,
 };
+use koshi_ipc::remote_wire::{RemoteServerFrame, RemoteSessionRow};
 use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, SessionSelector};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
@@ -103,6 +121,7 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
+use koshi_link::remote_client::{self, Reach, ServerArg};
 use koshi_link::router_client::router_request;
 use koshi_link::talk;
 
@@ -125,6 +144,21 @@ const FIRST_LOOP_REQUEST_ID: u64 = 3;
 /// pauses between reads of that session's endpoint file. It bounds how long the
 /// user's terminal sits still after the swap finishes.
 const RESTART_POLL: Duration = Duration::from_millis(25);
+
+/// How long the wait for a session on a server that is replacing its own
+/// process image pauses between dials. Each dial runs the whole admission —
+/// TLS, the secret, and the scope check — so it is paced wider than the read of
+/// a local endpoint file.
+const REMOTE_RESTART_POLL: Duration = Duration::from_millis(250);
+
+/// How long a bare `koshi attach` waits for the saved servers to answer with
+/// their sessions. It is one deadline over all of them at once, so an
+/// unreachable machine costs this much and no more.
+const REACH_WAIT: Duration = Duration::from_secs(2);
+
+/// The number the first connection of one attachment carries. Coming back after
+/// the session replaces its own process image counts up from here.
+const FIRST_CONNECTION: u64 = 0;
 
 /// The most decided-but-unwritten mouse actions this client holds, and the most
 /// unanswered border moves it remembers. Both cap the memory a session that
@@ -379,6 +413,43 @@ impl Uplink {
     }
 }
 
+/// Where the session this client joins runs.
+///
+/// One home is picked before the first connection opens and holds for every
+/// connection after it, so a switch and a restart re-enter the session the same
+/// way the first join entered it.
+enum Home {
+    /// A session on this machine, joined through the endpoint file it
+    /// advertises under `runtime_dir`.
+    Local {
+        /// This user's runtime directory, holding one endpoint file per
+        /// session.
+        runtime_dir: PathBuf,
+    },
+    /// A session on another machine, joined through the server serving it.
+    Remote {
+        /// The saved record every dial presents: the address, the secret, and
+        /// the certificate fingerprint pinned on the first connection.
+        server: ServerArg,
+    },
+}
+
+/// One open connection into a session, past the join.
+struct Joined {
+    /// The frames the session sends.
+    reader: FrameReader,
+    /// The frames this client sends.
+    writer: FrameWriter,
+    /// The client the server minted for this terminal.
+    client_id: ClientId,
+    /// The session the server says that client joined.
+    session_id: SessionId,
+    /// The token this connection was opened under: on this machine the
+    /// session's endpoint token, which changes every time that session binds a
+    /// new socket, and on a server the secret that server admitted.
+    token: ConnectionToken,
+}
+
 /// Resolve what the user typed to one running session, and report where it
 /// listens.
 ///
@@ -389,7 +460,7 @@ impl Uplink {
 fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<SessionAddress, CliError> {
     let selector = match selector {
         Some(selector) => selector.to_string(),
-        None => choose(runtime_dir)?,
+        None => choose(runtime_dir, Vec::new())?,
     };
     lookup(runtime_dir, &selector)
 }
@@ -402,15 +473,148 @@ fn resolve_session(runtime_dir: &Path, selector: Option<&str>) -> Result<Session
 /// than one is printed as a numbered list to answer on stdin.
 pub fn run(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
-    let address = resolve_session(&runtime_dir, selector)?;
-    attach_session(&runtime_dir, address.id)
+    let Some(selector) = selector else {
+        return attach_picked(runtime_dir);
+    };
+    let address = lookup(&runtime_dir, selector)?;
+    attach_home(
+        &Home::Local { runtime_dir },
+        SessionSelector::Id(address.id),
+    )
+}
+
+/// Join a session on the machine `server` names in this terminal.
+///
+/// `server` is either the name this machine saved that server under or the
+/// `host:port` it listens on. `save_as` is the name to save a server reached
+/// for the first time under, so later commands name it instead of its address.
+///
+/// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
+/// and the server resolves it against the sessions this machine's secret
+/// reaches. `None` lists those sessions instead: one is taken straight away,
+/// and more than one is printed as a numbered list to answer on stdin. Nothing
+/// here creates a session.
+///
+/// # Errors
+/// [`CliError::Runtime`] when the server does not admit the secret, when the
+/// certificate it presents is not the pinned one, and when nothing this secret
+/// reaches is running on it.
+pub fn run_remote(
+    server: &str,
+    save_as: Option<&str>,
+    selector: Option<&str>,
+) -> Result<(), CliError> {
+    let arg = remote_client::resolve_server(server)?;
+    // The opening connection saves the record every later dial presents, so a
+    // switch and a restart never ask for the secret again.
+    let (mut link, saved) = remote_client::connect_saved(&arg, save_as)?;
+    let target = match selector {
+        Some(selector) => selector_of(selector),
+        None => choose_remote(server, &remote_client::list_remote_sessions(&mut link)?)?,
+    };
+    // The attachment dials its own connection, so this one is finished with.
+    drop(link);
+    attach_home(
+        &Home::Remote {
+            server: ServerArg::Saved(saved),
+        },
+        target,
+    )
+}
+
+/// Join the session a bare `koshi attach` picks, from this user's own sessions
+/// and the sessions on every saved server that answered.
+///
+/// A saved server that answered and did not admit its secret prints one line
+/// naming the command that replaces that secret. A server not heard from inside
+/// [`REACH_WAIT`] is left off the list.
+fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
+    let reached = reachable_rows();
+    let offered = reached
+        .iter()
+        .map(|(server, row)| SessionRow {
+            id: row.id,
+            name: format!("{server} {}", row.name),
+        })
+        .collect();
+    let picked = choose(&runtime_dir, offered)?;
+    let Some((server, row)) = reached.iter().find(|(_, row)| row.id.to_string() == picked) else {
+        let address = lookup(&runtime_dir, &picked)?;
+        return attach_home(
+            &Home::Local { runtime_dir },
+            SessionSelector::Id(address.id),
+        );
+    };
+    attach_home(
+        &Home::Remote {
+            server: remote_client::resolve_server(server)?,
+        },
+        SessionSelector::Id(row.id),
+    )
+}
+
+/// The sessions on every saved server that answered inside [`REACH_WAIT`], each
+/// beside the name of the server serving it.
+///
+/// A refused secret prints the command that replaces it, since that server is
+/// there and only its secret is stale. A server not heard from is left out.
+fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
+    let mut offered = Vec::new();
+    for reach in remote_client::reach_all(REACH_WAIT) {
+        match reach {
+            Reach::Reached { server, rows } => {
+                offered.extend(rows.into_iter().map(|row| (server.clone(), row)));
+            }
+            Reach::Refused { server } => println!(
+                "{server}: the saved secret was refused; \
+                 run `koshi remote set-secret {server}`"
+            ),
+            Reach::Unreachable => {}
+        }
+    }
+    offered
+}
+
+/// The session a `koshi attach --remote <server>` with no session named joins,
+/// picked from the sessions that server's secret reaches.
+///
+/// One row is the answer on its own; more than one is printed and the number
+/// typed on stdin picks the row. This runs before the terminal enters raw mode,
+/// so the prompt is a plain stdin read.
+///
+/// # Errors
+/// [`CliError::Runtime`] when the secret reaches no running session on that
+/// server.
+fn choose_remote(server: &str, rows: &[RemoteSessionRow]) -> Result<SessionSelector, CliError> {
+    if rows.is_empty() {
+        return Err(CliError::Runtime {
+            detail: format!("no session is reachable on {server}"),
+        });
+    }
+    let listed: Vec<SessionRow> = rows
+        .iter()
+        .map(|row| SessionRow {
+            id: row.id,
+            name: row.name.clone(),
+        })
+        .collect();
+    // Only a list longer than one row has anything to pick, so only that asks.
+    let line = if listed.len() > 1 {
+        ask(&listed)?
+    } else {
+        String::new()
+    };
+    Ok(selector_of(&pick(&listed, &line)?))
 }
 
 /// Ask the session this CLI runs inside to move its own client to another
 /// session.
 ///
-/// `selector` names the session to move to, resolved exactly as [`run`]
-/// resolves it. The session moves the client this terminal already holds.
+/// `selector` names the session to move to: a `session-<uuid>` id, a bare
+/// UUID, or a session display name, and `None` picks one from the sessions
+/// running for this user. A session on another machine is never offered, since
+/// this session cannot move a client into one. The session moves the client
+/// this terminal already holds.
 pub fn switch_in_session(
     context: &InSessionContext,
     selector: Option<&str>,
@@ -435,31 +639,50 @@ pub fn switch_in_session(
 /// cause and how to reattach, and exits non-zero; the other endings print what
 /// happened and exit zero.
 pub(crate) fn attach_session(runtime_dir: &Path, session_id: SessionId) -> Result<(), CliError> {
-    let mut session_id = session_id;
-    while let Some(next) = attach_once(runtime_dir, session_id)? {
-        session_id = next;
+    attach_home(
+        &Home::Local {
+            runtime_dir: runtime_dir.to_path_buf(),
+        },
+        SessionSelector::Id(session_id),
+    )
+}
+
+/// Join the session `target` names in `home` and run until nothing moves this
+/// client on.
+///
+/// A session that moves this client to another one is attached to next, in the
+/// same home: a client on a server dials that server again for it, so the
+/// certificate, the secret and the scope are all checked again before the next
+/// session paints anything.
+fn attach_home(home: &Home, target: SessionSelector) -> Result<(), CliError> {
+    let mut target = target;
+    while let Some(next) = attach_once(home, &target)? {
+        target = SessionSelector::Id(next);
     }
     Ok(())
 }
 
-/// Join the session `session_id` names and run one attachment of it, handing
-/// back the session to attach to next when this one moved the client on.
+/// Join the session `target` names in `home` and run one attachment of it,
+/// handing back the session to attach to next when this one moved the client
+/// on.
 ///
 /// The terminal enters raw mode and the alternate screen behind a cleanup
 /// guard this call owns, and leaves both before it returns, so the terminal is
 /// restored between one session and the next.
 ///
 /// A session that replaces its own process image is handled inside this one
-/// attachment: the client comes back on the session's new socket as the same
-/// client, and the terminal keeps every mode it is in, so nothing on the screen
+/// attachment: the client comes back as the same client — on the session's new
+/// socket on this machine, and through a fresh dial of the server otherwise —
+/// and the terminal keeps every mode it is in, so nothing on the screen
 /// flickers.
-fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
-    let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
-    let mut connection = ipc_client::connect(&endpoint, session_id)?;
-    let (client_id, session_id) = join(&mut connection, &endpoint.token, None)?;
-    // The token this client attached under. A session server mints a fresh one
-    // every time it binds, so this is what tells its new socket from its old.
-    let mut token = endpoint.token;
+fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId>, CliError> {
+    let Joined {
+        reader,
+        writer,
+        client_id,
+        session_id,
+        token,
+    } = dial(home, target)?;
 
     // The session accepted the client, so the terminal may change mode now.
     // The hooks undo every mode this function sets, and the panic hook shares
@@ -510,12 +733,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
     // broken connection reaches the loop as the failed read its own reader
     // writes here, so the loop ends on that frame, not on the channel closing.
     let (incoming_tx, incoming_rx) = mpsc::channel();
-    let (reader, writer) = connection.split();
-    // Which connection the loop is reading. Coming back after the session
-    // replaces its own process image counts up, and the loop drops every frame
-    // that does not carry this number.
-    let mut current_connection: u64 = 0;
-    spawn_frame_reader(reader, current_connection, incoming_tx.clone());
+    spawn_frame_reader(reader, FIRST_CONNECTION, incoming_tx.clone());
 
     // Standard input that is not a terminal has no keys to read, which is what
     // `koshi attach` started with its input redirected has. It runs as a viewer
@@ -548,6 +766,58 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
         next_request_id: FIRST_LOOP_REQUEST_ID,
     };
     let mut screen = Screen::new(terminal);
+
+    let ending = run_attachment(
+        home,
+        session_id,
+        client_id,
+        token,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        incoming_tx,
+        incoming_rx,
+    );
+
+    // Restore the terminal before anything is printed, so the message lands on
+    // the shell's own screen rather than the alternate one, and nothing follows
+    // it. Dropping the screen drops the ratatui terminal it holds, which shows
+    // the cursor a painted frame hid, and that cursor belongs on the alternate
+    // screen; dropping the client then runs the cleanup guard it holds, which
+    // leaves that screen.
+    drop(screen);
+    drop(client);
+    report(home, ending, session_id)
+}
+
+/// Run one attachment: paint every frame the session sends, send this
+/// terminal's keys, mouse and resizes back, and report how the stream ended.
+///
+/// One loop serves both homes. Everything transport-shaped is already settled
+/// by the time it starts: the connection arrives as the two halves behind
+/// `uplink` and `incoming_rx`, and a session replacing its own process image
+/// comes back through [`come_back`], which re-enters `home` the way that home
+/// is entered.
+///
+/// `token` is the token the open connection was opened under, which
+/// [`come_back`] reads and stamps with the token of the connection this client
+/// comes back on.
+#[allow(clippy::too_many_arguments)]
+fn run_attachment<B: Backend>(
+    home: &Home,
+    session_id: SessionId,
+    client_id: ClientId,
+    mut token: ConnectionToken,
+    client: &mut Client,
+    screen: &mut Screen<B>,
+    uplink: &mut Uplink,
+    incoming_tx: mpsc::Sender<Incoming>,
+    incoming_rx: mpsc::Receiver<Incoming>,
+) -> Ending {
+    // Which connection the loop is reading. Coming back after the session
+    // replaces its own process image counts up, and the loop drops every frame
+    // that does not carry this number.
+    let mut current_connection: u64 = FIRST_CONNECTION;
     let mut last_frame: Option<MouseFrame> = None;
     // What the viewer has decided and not yet written. The pass that decided it
     // ends by writing all of it, so this holds one pass's worth: the events that
@@ -560,7 +830,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
     // ask for a second time.
     let mut sent: Vec<SentBorderMove> = Vec::new();
 
-    let ending = loop {
+    loop {
         let now = Instant::now();
         let received = match earliest(client.next_key_wakeup(now), client.next_mouse_wakeup(now)) {
             Some(timeout) => match incoming_rx.recv_timeout(timeout) {
@@ -597,7 +867,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
                     }
                     match frame {
                         Ok(SessionEvent::Painted { frame }) => {
-                            last_frame = Some(screen.draw(&mut client, frame));
+                            last_frame = Some(screen.draw(client, frame));
                         }
                         Ok(SessionEvent::MouseAnswer {
                             request_id,
@@ -605,7 +875,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
                         }) => {
                             if let Some(frame) = last_frame.as_ref() {
                                 apply_answer(
-                                    &mut client,
+                                    client,
                                     frame,
                                     &mut sent,
                                     request_id,
@@ -649,10 +919,10 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
                     // the first paint there is no frame to place it against.
                     RuntimeEvent::MouseInput { mouse, .. } => {
                         if let Some(frame) = last_frame.as_ref() {
-                            handle_mouse_event(&mut client, frame, mouse, &mut pending);
+                            handle_mouse_event(client, frame, mouse, &mut pending);
                         }
                     }
-                    event => handle_input(&mut client, &mut uplink, event),
+                    event => handle_input(client, uplink, event),
                 },
             }
         }
@@ -668,12 +938,9 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
             // The last request on this connection. The queue is written in
             // order, so it leaves behind every key already on it.
             uplink.send(IpcRequestKind::Leaving);
-            let Some((rejoined, connection)) = rejoin(runtime_dir, session_id, client_id, &token)
-            else {
+            let Some((reader, writer)) = come_back(home, session_id, client_id, &mut token) else {
                 break ending;
             };
-            token = rejoined.token;
-            let (reader, writer) = connection.split();
             current_connection += 1;
             spawn_frame_reader(reader, current_connection, incoming_tx.clone());
             // Dropping the queue the old connection's writer thread reads from
@@ -686,7 +953,7 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
             sent.clear();
             continue;
         }
-        fire_expired_key_sequence(&mut client, &mut uplink, Instant::now());
+        fire_expired_key_sequence(client, uplink, Instant::now());
         // A selection drag held past a pane's edge keeps scrolling while the
         // pointer sits still, so the clock drives it. Asking on every iteration
         // is what re-arms the timer at each firing.
@@ -699,41 +966,193 @@ fn attach_once(runtime_dir: &Path, session_id: SessionId) -> Result<Option<Sessi
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
         screen.refresh(
-            &client,
+            client,
             last_frame.as_ref().map(|frame| frame.client.active_tab),
         );
-        flush_round(&mut uplink, &mut sent, &mut pending);
-    };
-
-    // Restore the terminal before anything is printed, so the message lands on
-    // the shell's own screen rather than the alternate one, and nothing follows
-    // it. Dropping the screen drops the ratatui terminal it holds, which shows
-    // the cursor a painted frame hid, and that cursor belongs on the alternate
-    // screen; dropping the client then runs the cleanup guard it holds, which
-    // leaves that screen.
-    drop(screen);
-    drop(client);
-    report(ending, session_id)
+        flush_round(uplink, &mut sent, &mut pending);
+    }
 }
 
-/// The session a bare `koshi attach` joins, picked from the sessions running for
-/// this user.
+/// Open one connection into the session `target` names in `home` and join it as
+/// a client.
 ///
-/// The rows are the ones `koshi list-sessions` prints, from the same sweep of
-/// the runtime directory, so nothing here probes anything that listing does
-/// not and nothing remote is involved. One row is the answer on its own; more
-/// than one is printed and the number typed on stdin picks the row. This runs
-/// before the terminal enters raw mode, so the prompt is a plain stdin read.
+/// On this machine the session's endpoint file names the socket and holds the
+/// token the Hello presents, and a display name is resolved by the router
+/// first. On a server the whole admission runs — TLS with the pinned
+/// certificate, the secret, and the scope check on the session asked for — and
+/// the server resolves the name against the sessions that secret reaches.
+fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
+    match home {
+        Home::Local { runtime_dir } => {
+            // The router turns a display name into a session's address before
+            // this terminal joins it, and every dial after the first names the
+            // session by id.
+            let session_id = match target {
+                SessionSelector::Id(session_id) => *session_id,
+                SessionSelector::Name(name) => lookup(runtime_dir, name)?.id,
+            };
+            let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
+            let mut connection = ipc_client::connect(&endpoint, session_id)?;
+            let (client_id, session_id) = join(&mut connection, &endpoint.token, None)?;
+            let (reader, writer) = connection.split();
+            Ok(Joined {
+                reader,
+                writer,
+                client_id,
+                session_id,
+                token: endpoint.token,
+            })
+        }
+        Home::Remote { server } => dial_remote(server, target, None),
+    }
+}
+
+/// Dial `server`, ask it for the session `target` names, and join that session
+/// as a client.
+///
+/// The serving machine presents that session's endpoint token and writes the
+/// Hello on this client's behalf, so the first frame read back is the session
+/// server's answer to that Hello. The Attach after it is this client's own, and
+/// `resume` names the client record to come back as.
+///
+/// # Errors
+/// [`CliError::Runtime`] when the server does not admit the secret, when the
+/// certificate it presents is not the pinned one, and when the admitted secret
+/// does not reach `target`.
+fn dial_remote(
+    server: &ServerArg,
+    target: &SessionSelector,
+    resume: Option<ClientId>,
+) -> Result<Joined, CliError> {
+    let (link, saved) = remote_client::connect_saved(server, None)?;
+    let (mut reader, mut writer) = remote_client::attach_remote(link, target.clone())?;
+    settle_forwarded_hello(&mut reader, target)?;
+    writer
+        .send(&attach_request(resume))
+        .map_err(talk::talk_failed)?;
+    let (client_id, session_id) = take_attached(reader.recv().map_err(talk::talk_failed)?)?;
+    Ok(Joined {
+        reader,
+        writer,
+        client_id,
+        session_id,
+        token: saved.secret,
+    })
+}
+
+/// Read the answer to the Hello the serving machine wrote on this client's
+/// behalf, and settle the protocol version from it.
+///
+/// Two senders write this one frame: the serving machine writes a refusal when
+/// the secret it admitted does not reach `target`, and otherwise the session
+/// server's own answer arrives unread through the bridge. The frame is held as
+/// its JSON text and read as a refusal first, since the two shapes never decode
+/// as each other.
+fn settle_forwarded_hello(
+    reader: &mut FrameReader,
+    target: &SessionSelector,
+) -> Result<(), CliError> {
+    let frame: Box<RawValue> = reader.recv().map_err(talk::talk_failed)?;
+    if let Ok(RemoteServerFrame::Refused { .. }) = serde_json::from_str(frame.get()) {
+        return Err(CliError::Runtime {
+            detail: format!(
+                "the token this server saved does not reach session {}",
+                target_name(target)
+            ),
+        });
+    }
+    let reply: IncomingResponse =
+        serde_json::from_str(frame.get()).map_err(|error| CliError::IpcUnavailable {
+            detail: format!("the server answered with a frame this attach cannot read: {error}"),
+        })?;
+    settle_version(reply)
+}
+
+/// How a selector reads in a message: the id itself, or the display name.
+fn target_name(target: &SessionSelector) -> String {
+    match target {
+        SessionSelector::Id(session_id) => session_id.to_string(),
+        SessionSelector::Name(name) => name.clone(),
+    }
+}
+
+/// Come back into `session_id` after it said it is replacing its own process
+/// image, and hand back the two halves of the connection this client comes back
+/// on.
+///
+/// On this machine [`rejoin`] waits for the session's new socket, and `token`
+/// is stamped with the token that socket was advertised under. On a server the
+/// whole dial runs again — no endpoint file for that session exists on this
+/// machine — until the serving machine reaches the restarted session or
+/// [`RESTART_WINDOW`] passes. Each dial is paced by [`REMOTE_RESTART_POLL`],
+/// and the pause comes first, so the dial meets the session's new image rather
+/// than the one it is replacing.
+///
+/// `None` for every way the client cannot come back, including a session that
+/// no longer holds this client's record. The caller reports each of them as the
+/// session ending unexpectedly.
+fn come_back(
+    home: &Home,
+    session_id: SessionId,
+    client_id: ClientId,
+    token: &mut ConnectionToken,
+) -> Option<(FrameReader, FrameWriter)> {
+    match home {
+        Home::Local { runtime_dir } => {
+            let (endpoint, connection) = rejoin(runtime_dir, session_id, client_id, token)?;
+            *token = endpoint.token;
+            Some(connection.split())
+        }
+        Home::Remote { server } => {
+            let deadline = Instant::now() + RESTART_WINDOW;
+            loop {
+                thread::sleep(REMOTE_RESTART_POLL);
+                match dial_remote(server, &SessionSelector::Id(session_id), Some(client_id)) {
+                    Ok(joined) if joined.client_id != client_id => {
+                        tracing::warn!(
+                            %session_id,
+                            "the restarted session no longer held this client and minted a new one"
+                        );
+                        return None;
+                    }
+                    Ok(joined) => {
+                        *token = joined.token;
+                        return Some((joined.reader, joined.writer));
+                    }
+                    Err(error) => {
+                        if Instant::now() >= deadline {
+                            tracing::warn!(%error, "could not reach the restarted session");
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The session a listing settles on, picked from the sessions running for this
+/// user and the rows in `remote`.
+///
+/// The local rows are the ones `koshi list-sessions` prints, from the same sweep
+/// of the runtime directory, so nothing here probes anything that listing does
+/// not. `remote` holds one row per session on a saved server that answered,
+/// already named after that server; a picker for a session switch passes none,
+/// since a session on another machine is not one this session can move a client
+/// to. One row is the answer on its own; more than one is printed and the number
+/// typed on stdin picks the row. This runs before the terminal enters raw mode,
+/// so the prompt is a plain stdin read.
 ///
 /// A session that is listening but could not answer leaves both "nothing is
-/// running" and "this is the only one" unprovable, so a list of under two rows
-/// reports that session instead of settling on either.
-fn choose(runtime_dir: &Path) -> Result<String, CliError> {
+/// running" and "this is the only one" unprovable, so a list of under two local
+/// rows reports that session instead of settling on either.
+fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<String, CliError> {
     let found = discovery::fetch_all(runtime_dir);
-    let rows = discovery::session_rows(&found.sessions);
+    let mut rows = discovery::session_rows(&found.sessions);
     if rows.len() < 2 && !found.is_complete() {
         return Err(found.unanswered("cannot tell which session to attach to"));
     }
+    rows.extend(remote);
     // Only a list longer than one row has anything to pick, so only that asks.
     let line = if rows.len() > 1 {
         ask(&rows)?
@@ -799,10 +1218,7 @@ fn pick(rows: &[SessionRow], line: &str) -> Result<String, CliError> {
 /// A value that reads as a session id (`session-<uuid>` or a bare UUID) is
 /// that id; anything else is a display name for the router to match.
 fn lookup(runtime_dir: &Path, selector: &str) -> Result<SessionAddress, CliError> {
-    let selector = match parse_prefixed_uuid(selector, "session") {
-        Ok(uuid) => SessionSelector::Id(SessionId::from_uuid(uuid)),
-        Err(_) => SessionSelector::Name(selector.to_string()),
-    };
+    let selector = selector_of(selector);
     match router_request(runtime_dir, RouterRequestKind::AttachLookup { selector })? {
         RouterResult::Found(address) => Ok(address),
         RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
@@ -814,6 +1230,16 @@ fn lookup(runtime_dir: &Path, selector: &str) -> Result<SessionAddress, CliError
                 other.wire_name()
             ),
         }),
+    }
+}
+
+/// What the user typed, as the selector both the router and a remote server
+/// resolve: a `session-<uuid>` id or a bare UUID is that id, and anything else
+/// is a display name for the far side to match.
+fn selector_of(selector: &str) -> SessionSelector {
+    match parse_prefixed_uuid(selector, "session") {
+        Ok(uuid) => SessionSelector::Id(SessionId::from_uuid(uuid)),
+        Err(_) => SessionSelector::Name(selector.to_string()),
     }
 }
 
@@ -839,28 +1265,47 @@ fn join(
         request_id: 1,
         kind: IpcRequestKind::hello(token.clone()),
     };
-    let attach = IpcRequest {
+    connection.send(&hello).map_err(talk::talk_failed)?;
+    connection
+        .send(&attach_request(resume))
+        .map_err(talk::talk_failed)?;
+
+    settle_version(connection.recv().map_err(talk::talk_failed)?)?;
+    take_attached(connection.recv().map_err(talk::talk_failed)?)
+}
+
+/// The Attach this client writes, numbered 2: the request that follows the
+/// Hello on every connection into a session.
+///
+/// `resume` names the client record to come back as, and is `None` on a first
+/// join.
+fn attach_request(resume: Option<ClientId>) -> IpcRequest {
+    IpcRequest {
         request_id: 2,
         kind: IpcRequestKind::Attach {
             viewport: viewport(),
             filter: EventFilterSpec::All,
             resume,
         },
-    };
-    connection.send(&hello).map_err(talk::talk_failed)?;
-    connection.send(&attach).map_err(talk::talk_failed)?;
+    }
+}
 
-    let hello_reply: IncomingResponse = connection.recv().map_err(talk::talk_failed)?;
-    match talk::SESSION.take_result(hello_reply)? {
+/// Check the protocol version a Hello answer settled on against the range this
+/// build asked for.
+fn settle_version(reply: IncomingResponse) -> Result<(), CliError> {
+    match talk::SESSION.take_result(reply)? {
         IpcResult::Hello {
             protocol_version, ..
-        } => talk::SESSION.settled_version(protocol_version)?,
-        IpcResult::Error(refusal) => return Err(talk::refused(&refusal)),
-        other => return Err(talk::SESSION.unexpected_reply(&other)),
+        } => talk::SESSION.settled_version(protocol_version),
+        IpcResult::Error(refusal) => Err(talk::refused(&refusal)),
+        other => Err(talk::SESSION.unexpected_reply(&other)),
     }
+}
 
-    let attach_reply: IncomingResponse = connection.recv().map_err(talk::talk_failed)?;
-    match talk::SESSION.take_result(attach_reply)? {
+/// The client the server minted for this terminal and the session it says that
+/// client joined, out of an Attach answer.
+fn take_attached(reply: IncomingResponse) -> Result<(ClientId, SessionId), CliError> {
+    match talk::SESSION.take_result(reply)? {
         IpcResult::Attached {
             client_id,
             session_id,
@@ -1523,9 +1968,16 @@ fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
 /// reattach, and exits non-zero; a switch names the session and prints
 /// nothing.
 ///
+/// The way back names the machine the session runs on, so a session on another
+/// machine names that server rather than this one.
+///
 /// A restart reaches here only when the client could not come back on the
 /// session's new socket, so it names the same cause and the same way back.
-fn report(ending: Ending, session_id: SessionId) -> Result<Option<SessionId>, CliError> {
+fn report(
+    home: &Home,
+    ending: Ending,
+    session_id: SessionId,
+) -> Result<Option<SessionId>, CliError> {
     match ending {
         Ending::Detached => {
             println!("detached from session {session_id}");
@@ -1536,13 +1988,25 @@ fn report(ending: Ending, session_id: SessionId) -> Result<Option<SessionId>, Cl
             Ok(None)
         }
         Ending::Switch(target) => Ok(Some(target)),
-        Ending::Died | Ending::Restarting => Err(CliError::Runtime {
-            detail: format!(
-                "the session ended unexpectedly\n  \
-                 run `koshi list-sessions`; if session {session_id} is still listed, \
-                 reattach with `koshi attach {session_id}`"
-            ),
-        }),
+        Ending::Died | Ending::Restarting => {
+            let way_back = match home {
+                Home::Local { .. } => format!(
+                    "run `koshi list-sessions`; if session {session_id} is still listed, \
+                     reattach with `koshi attach {session_id}`"
+                ),
+                Home::Remote { server } => {
+                    let server = server.label();
+                    format!(
+                        "run `koshi list-sessions --remote {server}`; if session {session_id} \
+                         is still listed, reattach with \
+                         `koshi attach --remote {server} {session_id}`"
+                    )
+                }
+            };
+            Err(CliError::Runtime {
+                detail: format!("the session ended unexpectedly\n  {way_back}"),
+            })
+        }
         // Nothing is left to read a message, so this ending is logged rather
         // than printed. The session drops this client when the connection
         // closes behind it.

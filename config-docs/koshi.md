@@ -13,7 +13,7 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 the whole app file for that launch.
 
 Settings use blocks. `theme`, `allow-beta-features`, `allow-other-users`,
-`shared-sessions-dir` and `auto-close-session` are top-level.
+`remote-listen`, `shared-sessions-dir` and `auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -251,12 +251,27 @@ This only says where the sockets go. Nobody else reaches them until
 |---|---|---|---|
 | `shared-sessions-dir` | string — directory the shared session sockets live in | `/tmp/koshi`, `%ProgramData%\koshi` on Windows | ≥ 0.3.0 |
 
+## `remote-listen`
+
+`remote-listen "0.0.0.0:7654"` names the address the remote listener binds, and
+does nothing else: writing this line opens no port and makes this machine
+reachable by nobody. The port opens the first time you run `koshi share grant`
+and answer yes to the offer it makes, and on every start after that.
+
+`allow-other-users` is a separate switch, about other users logged in to this
+same machine. Neither key turns the other on.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `remote-listen` | string — host:port the remote TLS listener binds | unset — nothing binds | ≥ 0.3.0 |
+
 ## Full example
 
-This shows every app setting. Fixed values match defaults. `default-shell` and
-`shared-sessions-dir` are commented because they have no fixed default:
-`default-shell` comes from `$SHELL` or `%COMSPEC%`, and the shared sessions
-directory is `/tmp/koshi` on Linux and macOS, `%ProgramData%\koshi` on Windows.
+This shows every app setting. Fixed values match defaults. `default-shell`,
+`remote-listen` and `shared-sessions-dir` are commented because they have no
+fixed default: `default-shell` comes from `$SHELL` or `%COMSPEC%`,
+`remote-listen` is unset, and the shared sessions directory is `/tmp/koshi` on
+Linux and macOS, `%ProgramData%\koshi` on Windows.
 
 ```kdl
 // koshi.kdl — the complete default configuration.
@@ -265,6 +280,7 @@ version 1
 theme "default"
 allow-beta-features #false
 allow-other-users #false
+// remote-listen "0.0.0.0:7654"  // sets the address; opens no port on its own
 // shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
 

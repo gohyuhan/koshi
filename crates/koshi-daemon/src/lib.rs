@@ -25,6 +25,11 @@
 /// terminal, and outlives a session server that replaces its own image.
 pub mod pty_supervisor;
 
+/// The TLS port this machine serves remote clients on: the router opens it,
+/// admits a caller by the secret it presents, and carries that caller's bytes
+/// to and from one session server.
+pub(crate) mod remote_listener;
+
 /// The router process: it owns the list of running sessions, starts and
 /// reaps one session server per session, and tells callers where to reach
 /// them.

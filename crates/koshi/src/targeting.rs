@@ -23,18 +23,26 @@
 //!
 //! The probing itself is [`koshi_link::discovery`]'s, the same code the listing
 //! verbs use, so a session that is gone is swept here too.
+//!
+//! A `--remote` flag swaps out where the census comes from and nothing else:
+//! the sessions on the named machine stand in for this machine's, and the same
+//! precedence, the same count rule and the same refusals run over them.
 
 use std::path::Path;
 
+use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_ipc::remote_wire::RemoteSessionRow;
 
 use crate::cli::{CliCommand, ResolvedTargets, SessionRef, TabRef};
 use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
+use koshi_link::remote_client::{self, ServerArg};
 
 /// Where one invocation goes: over the current pane's own session socket, or
 /// to another running session as an external command.
@@ -118,6 +126,89 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
         Some(context) if context.session_id == session => Ok(Route::InSession(targets)),
         _ => Ok(Route::External { session, targets }),
     }
+}
+
+/// Send `command` to the machine `server` names and hand back the
+/// dispatcher's result.
+///
+/// `server` is the name this machine saved that server under, or the
+/// `host:port` it listens on. The sessions that server's secret reaches stand
+/// in for this machine's census, so the explicit `--session`/`--tab`/`--pane`/
+/// `--client` flags and the count rule pick the target there exactly as they
+/// do here. Nothing on this side of the connection is consulted: an identity
+/// in the pane environment names a session on this machine, which the named
+/// machine knows nothing about.
+///
+/// Nothing here creates a session. A server whose secret reaches no running
+/// session refuses with [`CliError::NoSessions`], the same refusal an external
+/// command gets on a machine with nothing running.
+///
+/// `new_pane_direction` is this CLI's own `layout.new-pane-direction` setting,
+/// put on a pane-opening verb that was given no `--direction`.
+pub fn submit_remote(
+    server: &str,
+    command: &CliCommand,
+    new_pane_direction: Direction,
+) -> Result<CommandResult, CliError> {
+    let named = remote_client::resolve_server(server)?;
+    // The opening connection saves the record every dial after it presents, so
+    // a server reached for the first time asks for its secret once and the
+    // overviews below reuse what it saved.
+    let (mut link, saved) = remote_client::connect_saved(&named, None)?;
+    let rows = remote_client::list_remote_sessions(&mut link)?;
+    // The overviews dial their own connections, so this one is finished with.
+    drop(link);
+
+    let arg = ServerArg::Saved(saved);
+    let found = remote_census(&arg, rows);
+
+    let overview = pick_session(
+        command.target_session(),
+        command.target_pane(),
+        command.target_tab(),
+        command.target_client(),
+        &found,
+    )?;
+    let tab = command
+        .target_tab()
+        .map(|tab_ref| resolve_tab(overview, tab_ref))
+        .transpose()?;
+    let session = overview.session.id;
+    let targets = ResolvedTargets {
+        session: Some(session),
+        tab,
+    };
+
+    let (_, action) = command
+        .to_action(&targets, new_pane_direction)
+        .expect("only an action verb reaches the remote dispatch");
+    remote_client::submit_remote(&arg, session, action)
+}
+
+/// Ask each session in `rows` on the machine `arg` names to describe itself,
+/// as the census the targeting rules read.
+///
+/// A session the server listed but could not describe says so on stderr and is
+/// counted as unasked, so a "not found" or a count rule over this census
+/// reports the gap instead of reading as the whole picture.
+fn remote_census(arg: &ServerArg, rows: Vec<RemoteSessionRow>) -> Discovered {
+    let mut found = Discovered::default();
+    for row in rows {
+        match remote_client::fetch_remote_overview(arg, row.id) {
+            Ok(overview) => found.sessions.push(overview),
+            Err(error) => {
+                eprintln!("koshi: session {} did not answer: {error}", row.id);
+                found.unasked += 1;
+            }
+        }
+    }
+    found.sessions.sort_by(|a, b| {
+        a.session
+            .name
+            .cmp(&b.session.name)
+            .then(a.session.id.cmp(&b.session.id))
+    });
+    found
 }
 
 /// Pick the one running session an external command targets. Precedence:

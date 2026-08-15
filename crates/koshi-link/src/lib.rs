@@ -19,8 +19,10 @@
 //! - **The sockets.** [`ipc_client`] talks to one session on its own control
 //!   socket, [`router_client`] talks to the router on the router's, and
 //!   [`talk`] holds the parts of an exchange that are the same for either
-//!   peer. [`in_session`] answers whether this program is running inside a
-//!   pane, from the `KOSHI_*` variables the pane's shell was given.
+//!   peer. [`remote_client`] talks to another machine over TLS, on the
+//!   address that machine listens on. [`in_session`] answers whether this
+//!   program is running inside a pane, from the `KOSHI_*` variables the
+//!   pane's shell was given.
 //!
 //! [`error`] is the failure both halves report, and the one a koshi program
 //! turns into an exit code.
@@ -42,6 +44,10 @@ pub mod in_session;
 /// The client side of a session's control socket: connect to a session's
 /// advertised endpoint, submit a command, and read back its result.
 pub mod ipc_client;
+
+/// The dialling side of remote access: resolve a saved server, present its
+/// secret over TLS, and reach the sessions on the machine serving them.
+pub mod remote_client;
 
 /// The client side of the router socket: ask the router something, starting
 /// one first when none is running.

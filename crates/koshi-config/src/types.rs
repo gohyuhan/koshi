@@ -66,6 +66,9 @@ pub struct ServerConfig {
     pub allow_beta_features: bool,
     /// Whether other users of this machine may reach this session's socket.
     pub allow_other_users: bool,
+    /// The TCP address the remote listener binds, such as `"0.0.0.0:7654"`.
+    /// Setting it opens nothing; `koshi share grant` switches remote access on.
+    pub remote_listen: Option<String>,
     /// The directory the session sockets other users reach live in. `None`
     /// takes the platform's machine-wide directory, `/tmp/koshi` on Unix and
     /// `%ProgramData%\koshi` on Windows.
@@ -84,6 +87,7 @@ impl Default for ServerConfig {
             logging: LoggingConfig::default(),
             allow_beta_features: false,
             allow_other_users: false,
+            remote_listen: None,
             shared_sessions_dir: None,
             auto_close_session: false,
         }

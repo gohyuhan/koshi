@@ -198,6 +198,57 @@ fn a_repeated_allow_other_users_line_keeps_the_first_and_warns() {
 }
 
 #[test]
+fn remote_listen_records_the_address_it_names() {
+    assert_eq!(
+        parse("remote-listen \"127.0.0.1:7654\"").remote_listen,
+        Some(Some("127.0.0.1:7654".to_string()))
+    );
+}
+
+#[test]
+fn an_absent_remote_listen_sets_no_layer() {
+    // Absent leaves the field unset, so this machine names no address and the
+    // remote listener has nothing to bind.
+    assert_eq!(parse("").remote_listen, None);
+}
+
+#[test]
+fn a_non_string_remote_listen_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("remote-listen 7654");
+    assert_eq!(layer.remote_listen, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `remote-listen`: expected a string".to_string()]
+    );
+}
+
+#[test]
+fn a_blank_remote_listen_is_skipped_with_a_warning() {
+    // An empty value names no address at all, so it is skipped and this
+    // machine stays unreachable.
+    let (layer, warnings) = parse_with_warnings("remote-listen \"\"");
+    assert_eq!(layer.remote_listen, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `remote-listen`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_remote_listen_line_keeps_the_first_and_warns() {
+    let (layer, warnings) =
+        parse_with_warnings("remote-listen \"127.0.0.1:7654\"\nremote-listen \"0.0.0.0:9000\"");
+    assert_eq!(
+        layer.remote_listen,
+        Some(Some("127.0.0.1:7654".to_string()))
+    );
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `remote-listen` section".to_string()]
+    );
+}
+
+#[test]
 fn shared_sessions_dir_records_the_directory_it_names() {
     assert_eq!(
         parse("shared-sessions-dir \"/var/run/koshi\"").shared_sessions_dir,

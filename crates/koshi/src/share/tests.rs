@@ -182,26 +182,83 @@ fn a_listing_takes_the_json_format_flag() {
 }
 
 #[test]
-fn a_grant_block_warns_shows_the_secret_and_says_it_cannot_connect() {
+fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
     let token = ConnectionToken::new("f00d");
-    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false);
+    let rendered = output::render_share_grant(
+        &token,
+        "alice",
+        &TokenScope::HostWide,
+        false,
+        &RemoteReady::NoAddress,
+    );
 
     assert_eq!(
         rendered,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n"
+         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         run `koshi share grant` again.\n"
     );
     assert_eq!(rendered.matches("f00d").count(), 1);
     assert!(!rendered.contains("://"));
 }
 
 #[test]
+fn a_grant_block_with_remote_access_left_off_says_the_token_cannot_connect_yet() {
+    let token = ConnectionToken::new("f00d");
+    let rendered = output::render_share_grant(
+        &token,
+        "alice",
+        &TokenScope::HostWide,
+        false,
+        &RemoteReady::Off,
+    );
+
+    assert_eq!(
+        rendered,
+        "anyone holding this token can run anything you can.\n\
+         f00d\n\
+         remote access stays off; this token cannot be used to connect yet.\n"
+    );
+}
+
+#[test]
+fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
+    let token = ConnectionToken::new("f00d");
+    let rendered = output::render_share_grant(
+        &token,
+        "alice",
+        &TokenScope::HostWide,
+        false,
+        &RemoteReady::On {
+            address: "laptop.local:7654".to_string(),
+        },
+    );
+
+    assert_eq!(
+        rendered,
+        "anyone holding this token can run anything you can.\n\
+         f00d\n\
+         connect from another machine:\n\
+         \x20 koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+    // The secret is printed once, on its own line, and never inside the
+    // command a reader would paste into a shell.
+    assert_eq!(rendered.matches("f00d").count(), 1);
+    assert!(!rendered.contains("--remote laptop.local:7654 f00d"));
+}
+
+#[test]
 fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
     let token = ConnectionToken::new("f00d");
-    let rendered =
-        output::render_share_grant(&token, "alice", &TokenScope::Session(fixed_session()), true);
+    let rendered = output::render_share_grant(
+        &token,
+        "alice",
+        &TokenScope::Session(fixed_session()),
+        true,
+        &RemoteReady::NoAddress,
+    );
 
     assert_eq!(
         rendered,
@@ -209,8 +266,8 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n"
+         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         run `koshi share grant` again.\n"
     );
 }
 

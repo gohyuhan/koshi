@@ -1,18 +1,19 @@
 //! Rendering for CLI answers: created ids from applied commands, discovery
 //! (`list-*`, `inspect`), action introspection (`actions list`, `actions
 //! explain`), keymap introspection (the `keys` queries), the `debug`
-//! dumps, the two version answers (`version`, `server-version`), and the
-//! three `share` answers. Read-only queries print as aligned columns
-//! (`--format table`, the default) or JSON (`--format json`).
+//! dumps, the two version answers (`version`, `server-version`), the three
+//! `share` answers, and the three `remote` answers. Read-only queries print as
+//! aligned columns (`--format table`, the default) or JSON (`--format json`).
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
 //! lines; `debug dump-state` renders one named table per record kind; `debug
 //! dump-layout` renders an indented tree, two spaces per level. `version`
 //! prints the one line `--version` prints, and `server-version` renders one
-//! table row per koshi server. `share list` renders one table row per grant;
-//! `share grant` and `share revoke` report one outcome as plain lines and
-//! carry no `--format` flag. JSON output is
+//! table row per koshi server. `share list` renders one table row per grant
+//! and `remote list` one per saved server; `share grant`, `share revoke`,
+//! `remote forget` and `remote set-secret` report one outcome as plain lines
+//! and carry no `--format` flag. JSON output is
 //! the serde form of the rendered structs — the [`koshi_link::discovery`] listing
 //! rows, the [`koshi_core::discovery`] records an `inspect` reports, and this
 //! module's own summary/detail structs — a JSON array for a list, a JSON
@@ -99,6 +100,7 @@ mod command;
 mod entities;
 mod keys;
 mod layout;
+mod remote;
 mod share;
 mod version;
 
@@ -107,6 +109,7 @@ pub use command::*;
 pub use entities::*;
 pub use keys::*;
 pub use layout::*;
+pub use remote::*;
 pub use share::*;
 pub use version::*;
 

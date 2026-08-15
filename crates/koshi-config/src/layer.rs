@@ -178,6 +178,10 @@ pub struct PartialKoshiConfig {
     pub allow_beta_features: Option<bool>,
     /// Other-users gate override.
     pub allow_other_users: Option<bool>,
+    /// Remote listen address override. The outer `Option` is whether this
+    /// layer sets the field; the inner `Option` is the value (`None` = no
+    /// address, so nothing binds).
+    pub remote_listen: Option<Option<String>>,
     /// Shared sessions directory override. The outer `Option` is whether this
     /// layer sets the field; the inner `Option` is the value (`None` = the
     /// platform's machine-wide directory).
@@ -204,6 +208,7 @@ impl PartialKoshiConfig {
         }
         merge_field(&mut config.allow_beta_features, self.allow_beta_features);
         merge_field(&mut config.allow_other_users, self.allow_other_users);
+        merge_field(&mut config.remote_listen, self.remote_listen);
         merge_field(&mut config.shared_sessions_dir, self.shared_sessions_dir);
         merge_field(&mut config.auto_close_session, self.auto_close_session);
     }

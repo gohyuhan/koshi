@@ -83,6 +83,58 @@ pub enum IpcError {
     /// revocation the caller made never reached the disk.
     #[error("token store {path} could not be written: {detail}")]
     TokenStoreWrite { path: String, detail: String },
+    /// A remote access file that exists but could not be used: reading it
+    /// failed, its bytes are not readable, or its format number is not the
+    /// one this build reads.
+    #[error("the {file} at {path} is unreadable: {detail}")]
+    RemoteFileUnreadable {
+        file: RemoteFile,
+        path: String,
+        detail: String,
+    },
+    /// Writing a remote access file failed, so what the caller changed never
+    /// reached the disk.
+    #[error("the {file} at {path} could not be written: {detail}")]
+    RemoteFileWrite {
+        file: RemoteFile,
+        path: String,
+        detail: String,
+    },
+    /// The server at `address` presented a different certificate than the one
+    /// pinned the first time it was dialled.
+    #[error(
+        "the certificate of {address} changed: pinned {pinned}, presented {presented}. \
+         if the server was reinstalled on purpose, run `koshi remote forget {address}` \
+         and connect again."
+    )]
+    CertificateChanged {
+        address: String,
+        pinned: String,
+        presented: String,
+    },
+}
+
+/// Which remote access file an [`IpcError::RemoteFileUnreadable`] or
+/// [`IpcError::RemoteFileWrite`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteFile {
+    /// The servers this user has dialled and saved, on the dialling machine.
+    SavedServers,
+    /// This machine's own certificate for the remote listener.
+    Certificate,
+    /// The record that remote access was switched on for this machine.
+    RemoteAccessMark,
+}
+
+impl std::fmt::Display for RemoteFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::SavedServers => "saved servers file",
+            Self::Certificate => "remote access certificate",
+            Self::RemoteAccessMark => "remote access record",
+        };
+        f.write_str(name)
+    }
 }
 
 impl DomainError for IpcError {
@@ -101,7 +153,10 @@ impl DomainError for IpcError {
             | IpcError::EndpointFileMissing { .. }
             | IpcError::EndpointFileUnreadable { .. }
             | IpcError::TokenStoreUnreadable { .. }
-            | IpcError::TokenStoreWrite { .. } => Severity::ClientFatal,
+            | IpcError::TokenStoreWrite { .. }
+            | IpcError::RemoteFileUnreadable { .. }
+            | IpcError::RemoteFileWrite { .. }
+            | IpcError::CertificateChanged { .. } => Severity::ClientFatal,
             IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
         }
