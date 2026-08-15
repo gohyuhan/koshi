@@ -497,12 +497,19 @@ fn no_listener_error(error: &io::Error) -> bool {
 /// Classify an IO failure: the kinds that mean "the peer is gone" become
 /// [`IpcError::Disconnected`]; everything else keeps its text as
 /// [`IpcError::Transport`].
+///
+/// [`NotConnected`](io::ErrorKind::NotConnected) is in that first set because
+/// macOS reports a read from a socket whose peer has closed as `ENOTCONN`,
+/// where Linux reports end of stream. Without it the same peer going away
+/// reads as `ipc peer disconnected` or as `Socket is not connected (os error
+/// 57)` depending on which side wins the race.
 fn io_failure(error: io::Error) -> IpcError {
     match error.kind() {
         io::ErrorKind::UnexpectedEof
         | io::ErrorKind::BrokenPipe
         | io::ErrorKind::ConnectionReset
-        | io::ErrorKind::ConnectionAborted => IpcError::Disconnected,
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::NotConnected => IpcError::Disconnected,
         _ => IpcError::Transport {
             detail: error.to_string(),
         },

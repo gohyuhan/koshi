@@ -10,6 +10,7 @@ use koshi_core::action::{core_action_seeds, ActionHandlerRef};
 use std::path::Path;
 
 use super::*;
+use uuid::Uuid;
 
 fn parse(argv: &[&str]) -> Cli {
     Cli::try_parse_from(argv).expect("argv must parse")
@@ -1036,7 +1037,7 @@ fn new_pane_without_a_direction_flag_follows_the_config_file() {
         "version 1\nlayout {\n    new-pane-direction \"down\"\n}\n",
     )
     .expect("the fixture parses");
-    let configured = crate::config::new_pane_direction(Some(file.layer));
+    let configured = koshi_link::config::new_pane_direction(Some(file.layer));
     assert_eq!(configured, Direction::Down, "the file's own value");
 
     let (_, mapped) = action_of_for(&["koshi", "new-pane"], configured);
@@ -1078,7 +1079,10 @@ fn an_explicit_direction_flag_wins_over_the_config_file() {
 /// leaves the built-in `Right`.
 #[test]
 fn no_config_file_leaves_the_built_in_split_direction() {
-    assert_eq!(crate::config::new_pane_direction(None), Direction::Right);
+    assert_eq!(
+        koshi_link::config::new_pane_direction(None),
+        Direction::Right
+    );
 
     let (_, mapped) = action_of(&["koshi", "new-pane"]);
     let Command::NewPane(args) = mapped else {

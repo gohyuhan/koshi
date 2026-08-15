@@ -318,5 +318,25 @@ impl Handshake {
     }
 }
 
+impl crate::plane::Gate for Handshake {
+    type Kind = IpcRequestKind;
+
+    fn agreed(&self) -> Option<u32> {
+        Handshake::agreed(self)
+    }
+
+    fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
+        Handshake::refuse_unknown(self, name)
+    }
+
+    fn check(&mut self, kind: &IpcRequestKind) -> Result<(), IpcErrorPayload> {
+        Handshake::check(self, kind)
+    }
+
+    fn is_hello(kind: &IpcRequestKind) -> bool {
+        matches!(kind, IpcRequestKind::Hello { .. })
+    }
+}
+
 #[cfg(test)]
 mod tests;

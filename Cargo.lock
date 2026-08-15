@@ -774,9 +774,11 @@ dependencies = [
  "koshi-client",
  "koshi-config",
  "koshi-core",
+ "koshi-daemon",
  "koshi-input",
  "koshi-ipc",
  "koshi-layout",
+ "koshi-link",
  "koshi-observability",
  "koshi-paths",
  "koshi-pty",
@@ -814,11 +816,22 @@ version = "0.2.0"
 dependencies = [
  "koshi-config",
  "koshi-core",
+ "koshi-input",
+ "koshi-ipc",
  "koshi-layout",
+ "koshi-link",
  "koshi-observability",
+ "koshi-paths",
+ "koshi-pty",
  "koshi-renderer",
+ "koshi-runtime",
+ "koshi-terminal",
+ "koshi-test-support",
  "ratatui",
+ "serde_json",
+ "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -842,14 +855,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "koshi-error"
+name = "koshi-daemon"
 version = "0.2.0"
 dependencies = [
+ "clap",
+ "fs4",
  "koshi",
  "koshi-config",
  "koshi-core",
  "koshi-ipc",
+ "koshi-link",
+ "koshi-observability",
+ "koshi-paths",
+ "koshi-pty",
+ "koshi-renderer",
+ "koshi-runtime",
+ "koshi-storage",
+ "koshi-terminal",
+ "koshi-test-support",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "koshi-error"
+version = "0.2.0"
+dependencies = [
+ "koshi-config",
+ "koshi-core",
+ "koshi-ipc",
  "koshi-layout",
+ "koshi-link",
  "koshi-plugin-host",
  "koshi-pty",
  "koshi-storage",
@@ -898,6 +938,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "koshi-link"
+version = "0.2.0"
+dependencies = [
+ "koshi-beta",
+ "koshi-config",
+ "koshi-core",
+ "koshi-ipc",
+ "koshi-layout",
+ "koshi-observability",
+ "koshi-paths",
+ "koshi-renderer",
+ "koshi-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

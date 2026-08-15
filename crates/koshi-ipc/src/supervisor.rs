@@ -36,21 +36,24 @@
 
 use std::path::{Path, PathBuf};
 
+use koshi_core::compat::SUPERVISOR_PROTOCOL;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::handshake::{GateWords, VersionGate};
 use crate::protocol::{ConnectionToken, IpcErrorPayload};
-use crate::wire::{MaybeKnown, WireName, WireVariants};
+use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
 /// The highest supervisor-link protocol version this build speaks, and the one
 /// it uses when the peer speaks it too.
 ///
-/// Bumps once per release cycle, in the commit that first changes a wire shape
-/// after a release — not once per change. Version 1 is the first one: the link
-/// is born with the supervisor.
-pub const SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::SUPERVISOR_PROTOCOL`].
+///
+/// Version 1 is the first one: the link is born with the supervisor, after the
+/// last release, so no released build speaks it yet.
+pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.max;
 
 /// The lowest supervisor-link protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -59,7 +62,7 @@ pub const SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
 /// The floor is 1, the version the link is born speaking. Raising it drops
 /// support for every build below it, so it moves only on a stated decision to
 /// end that support.
-pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
+pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.min;
 
 /// One message from a session server to its supervisor.
 ///
@@ -70,15 +73,7 @@ pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
 /// [`SupervisorRequestKind`]. The supervisor uses
 /// [`IncomingSupervisorRequest`], where a kind this build does not have
 /// arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupervisorRequest<K = SupervisorRequestKind> {
-    /// Caller-chosen id, repeated in the response that answers this request.
-    /// Unique among the requests in flight on one link.
-    pub request_id: u64,
-    /// What is being asked.
-    pub kind: K,
-}
+pub type SupervisorRequest<K = SupervisorRequestKind> = Envelope<K>;
 
 /// A supervisor request as the supervisor reads it: the kind may name
 /// something this build does not have.
@@ -210,15 +205,7 @@ impl SupervisorRequestKind {
 /// [`SupervisorResult`]. A session server reads it inside
 /// [`IncomingSupervisorMessage`], where a result this build does not have
 /// arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupervisorResponse<R = SupervisorResult> {
-    /// The `request_id` of the request being answered, or `None` when the
-    /// bytes received were too malformed to read one.
-    pub request_id: Option<u64>,
-    /// The answer itself.
-    pub result: R,
-}
+pub type SupervisorResponse<R = SupervisorResult> = Answer<R>;
 
 /// One pane the supervisor holds, as [`ListPanes`](SupervisorRequestKind::ListPanes)
 /// reports it.

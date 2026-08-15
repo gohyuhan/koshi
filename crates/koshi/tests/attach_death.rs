@@ -382,7 +382,7 @@ fn wait_for_server(runtime_dir: &Path, session_id: SessionId) {
 fn wait_for_attached(runtime_dir: &Path, session_id: SessionId, client: &mut RunningClient) {
     let deadline = Instant::now() + WAIT;
     loop {
-        let overview = koshi::ipc_client::fetch_overview(runtime_dir, session_id)
+        let overview = koshi_link::ipc_client::fetch_overview(runtime_dir, session_id)
             .expect("the session server describes itself");
         if overview.clients.len() == 1 {
             return;

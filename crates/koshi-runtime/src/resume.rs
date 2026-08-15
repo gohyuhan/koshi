@@ -35,10 +35,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 /// The resume-file format this build writes.
-pub const RESUME_FORMAT: u32 = 2;
+///
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::RESUME_FORMAT`]. Named by its full
+/// path here, since this constant carries the same name.
+pub const RESUME_FORMAT: u32 = koshi_core::compat::RESUME_FORMAT.max;
 
 /// The oldest resume-file format this build reads.
-pub const RESUME_FORMAT_MIN: u32 = 1;
+pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.min;
 
 /// One live pane, as the header names it: what the next image needs to take
 /// the pane back, or to shut it down when the body is unreadable.

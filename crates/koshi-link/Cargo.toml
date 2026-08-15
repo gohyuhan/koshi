@@ -1,0 +1,24 @@
+[package]
+name = "koshi-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+koshi-beta = { version = "0.2.0", path = "../koshi-beta" }
+koshi-config = { version = "0.2.0", path = "../koshi-config" }
+koshi-core = { version = "0.2.0", path = "../koshi-core" }
+koshi-ipc = { version = "0.2.0", path = "../koshi-ipc" }
+koshi-layout = { version = "0.2.0", path = "../koshi-layout" }
+koshi-observability = { version = "0.2.0", path = "../koshi-observability" }
+koshi-paths = { version = "0.2.0", path = "../koshi-paths" }
+koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
+koshi-runtime = { version = "0.2.0", path = "../koshi-runtime" }
+serde = "1.0.228"
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+uuid = "1.23.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"

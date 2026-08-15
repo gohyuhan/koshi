@@ -783,11 +783,11 @@ fn this_users_own_session_is_found_once_over_the_shared_directory() {
     // nothing: this user's own session is never asked for the empty token it
     // would refuse.
     assert_eq!(
-        koshi::ipc_client::foreign_sessions(&shared_dir, runtime_dir.path()),
+        koshi_link::ipc_client::foreign_sessions(&shared_dir, runtime_dir.path()),
         Vec::new()
     );
 
-    let found = koshi::discovery::fetch_all(runtime_dir.path());
+    let found = koshi_link::discovery::fetch_all(runtime_dir.path());
     assert_eq!(found.unasked, 0);
     let listed: Vec<SessionId> = found
         .sessions

@@ -684,3 +684,11 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
     let alt = default_prefix_labels(Leader::Mods(ModFlags::ALT));
     assert_eq!(alt.len(), 3);
 }
+
+#[test]
+fn this_build_writes_config_schema_version_one() {
+    // The value lives in the versioned-surface table now, one crate away, so
+    // this pins what a config file written today says. Changing it without a
+    // migration means an older koshi cannot read the file back.
+    assert_eq!(SCHEMA_VERSION, 1);
+}

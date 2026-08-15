@@ -3,29 +3,29 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use koshi::attach;
 use koshi::cli::{
     parse_session_ref, ActionsCommand, Cli, CliCommand, DebugCommand, FormatArg, InspectTarget,
     KeysCommand, ResolvedTargets, SessionRef, TabRef,
 };
-use koshi::config;
 use koshi::config_command;
-use koshi::discovery;
-use koshi::error::CliError;
-use koshi::in_session::InSessionContext;
-use koshi::ipc_client;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
-use koshi::pty_supervisor;
-use koshi::router;
 use koshi::session_control;
-use koshi::session_server::{self, ResumeSupport};
 use koshi::share;
 use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi::version;
+use koshi_client::attach;
 use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
+use koshi_daemon::pty_supervisor;
+use koshi_daemon::router;
+use koshi_daemon::session_server::{self, ResumeSupport};
 use koshi_ipc::protocol::ConnectionToken;
+use koshi_link::config;
+use koshi_link::discovery;
+use koshi_link::error::CliError;
+use koshi_link::in_session::InSessionContext;
+use koshi_link::ipc_client;
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -230,7 +230,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // Offer a newer release before entering raw mode, so the prompt is a
         // plain stdin read; failures never block the launch.
         updater::maybe_prompt_startup_update();
-        return koshi::app::run(cli.profile.as_deref());
+        return koshi_client::app::run(cli.profile.as_deref());
     }
 
     // Session verbs read the in-session identity first, so a broken pane

@@ -31,9 +31,11 @@ use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempPath};
 use ureq::Agent;
 
-use crate::error::CliError;
-use crate::ipc_client::{self, restart_running_session, running_session_version, SessionRestart};
-use crate::router_client::{restart_running_router, running_router_version};
+use koshi_link::error::CliError;
+use koshi_link::ipc_client::{
+    self, restart_running_session, running_session_version, SessionRestart,
+};
+use koshi_link::router_client::{restart_running_router, running_router_version};
 
 /// This build's version, from the crate version bumped before each release.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

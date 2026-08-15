@@ -27,9 +27,9 @@ use koshi_core::command::{
     ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
+use koshi_core::ids::parse_prefixed_uuid;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ShellKind, SpawnSpec};
-use uuid::Uuid;
 
 /// A parsed `koshi` invocation.
 #[derive(Debug, PartialEq, Eq, Parser)]
@@ -804,7 +804,7 @@ impl CliCommand {
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
-    /// [`config::new_pane_direction`](crate::config::new_pane_direction). A
+    /// [`config::new_pane_direction`](koshi_link::config::new_pane_direction). A
     /// pane-opening verb given no `--direction` splits toward it, so the
     /// command that reaches the session already names a side.
     ///
@@ -1099,14 +1099,6 @@ fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
 /// Parse an entity id as koshi prints it (`<prefix>-<uuid>`) or as a bare
 /// UUID. A mismatched prefix does not strip, so an id of the wrong kind is
 /// rejected rather than silently accepted.
-pub(crate) fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, String> {
-    let bare = value
-        .strip_prefix(prefix)
-        .and_then(|rest| rest.strip_prefix('-'))
-        .unwrap_or(value);
-    Uuid::parse_str(bare).map_err(|_| format!("expected `{prefix}-<uuid>` or a bare UUID"))
-}
-
 /// Parse a session id argument into a [`SessionId`].
 fn parse_session_id(value: &str) -> Result<SessionId, String> {
     parse_prefixed_uuid(value, "session").map(SessionId::from_uuid)

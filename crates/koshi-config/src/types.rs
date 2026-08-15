@@ -32,7 +32,10 @@ use crate::key_sequence::parse_sequence;
 /// The config schema version written to and read from disk. Bumped when the
 /// on-disk shape changes, so an older file can be recognized by its version
 /// number and migrated forward to the current shape.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::CONFIG_SCHEMA`].
+pub const SCHEMA_VERSION: u32 = koshi_core::compat::CONFIG_SCHEMA.max;
 
 /// The name of the built-in theme, whose colors are compiled into koshi. It is
 /// the theme in effect when `koshi.kdl` names no theme, names this one, or

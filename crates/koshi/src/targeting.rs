@@ -21,7 +21,7 @@
 //! picking one. An ambiguous name names every id that matched it, so the
 //! refusal itself carries the ids to retry with.
 //!
-//! The probing itself is [`crate::discovery`]'s, the same code the listing
+//! The probing itself is [`koshi_link::discovery`]'s, the same code the listing
 //! verbs use, so a session that is gone is swept here too.
 
 use std::path::Path;
@@ -31,10 +31,10 @@ use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 
 use crate::cli::{CliCommand, ResolvedTargets, SessionRef, TabRef};
-use crate::discovery::{self, Discovered};
-use crate::error::CliError;
-use crate::in_session::InSessionContext;
-use crate::ipc_client;
+use koshi_link::discovery::{self, Discovered};
+use koshi_link::error::CliError;
+use koshi_link::in_session::InSessionContext;
+use koshi_link::ipc_client;
 
 /// Where one invocation goes: over the current pane's own session socket, or
 /// to another running session as an external command.

@@ -5,14 +5,13 @@ use std::path::Path;
 use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
-use koshi_ipc::router::{RouterRequestKind, RouterResult};
-use koshi_ipc::wire::WireName;
 
-use crate::cli::{parse_prefixed_uuid, SessionRef};
-use crate::discovery::{self, Discovered};
-use crate::error::CliError;
-use crate::ipc_client;
-use crate::router_client::router_request;
+use crate::cli::SessionRef;
+use koshi_core::ids::parse_prefixed_uuid;
+use koshi_link::discovery::{self, Discovered};
+use koshi_link::error::CliError;
+use koshi_link::ipc_client;
+use koshi_link::router_client::request_new_session;
 
 /// The `koshi --headless` entry point: asks for a session with nothing
 /// attached to it. Forwards to `request_new_session`.
@@ -25,40 +24,6 @@ pub fn request_headless_session(
     allow_other_users: Option<bool>,
 ) -> Result<SessionId, CliError> {
     request_new_session(runtime_dir, profile, allow_other_users)
-}
-
-/// Ask the router to make a new session and hand back its id. Starts a router
-/// first when none is running.
-///
-/// The session's first shell opens in the directory this command was run in.
-/// A directory that cannot be read is sent as `None`, and the session server
-/// keeps the directory it inherited.
-///
-/// `allow_other_users` `Some(true)` lets the other users of this machine reach
-/// the new session whatever its `koshi.kdl` says; `None` leaves that answer to
-/// the file.
-pub(crate) fn request_new_session(
-    runtime_dir: &Path,
-    profile: Option<&str>,
-    allow_other_users: Option<bool>,
-) -> Result<SessionId, CliError> {
-    let kind = RouterRequestKind::CreateSession {
-        profile: profile.map(str::to_string),
-        cwd: std::env::current_dir().ok(),
-        allow_other_users,
-    };
-    match router_request(runtime_dir, kind)? {
-        RouterResult::Created(address) => Ok(address.id),
-        RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
-            detail: refusal.message,
-        }),
-        other => Err(CliError::IpcUnavailable {
-            detail: format!(
-                "the router answered a create session with {}",
-                other.wire_name()
-            ),
-        }),
-    }
 }
 
 /// End the session named by `session`, or the only running session when

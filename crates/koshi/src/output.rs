@@ -13,7 +13,7 @@
 //! table row per koshi server. `share list` renders one table row per grant;
 //! `share grant` and `share revoke` report one outcome as plain lines and
 //! carry no `--format` flag. JSON output is
-//! the serde form of the rendered structs — the [`crate::discovery`] listing
+//! the serde form of the rendered structs — the [`koshi_link::discovery`] listing
 //! rows, the [`koshi_core::discovery`] records an `inspect` reports, and this
 //! module's own summary/detail structs — a JSON array for a list, a JSON
 //! object for a single item, and the stable scripting surface. In table cells
@@ -34,7 +34,7 @@ use koshi_core::geometry::Size;
 use serde::Serialize;
 
 use crate::cli::{FormatArg, ScopeArg};
-use crate::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
+use koshi_link::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
 
 /// The pretty-printed JSON form of `value`, ending in a newline.
 fn json<T: Serialize>(value: &T) -> String {
