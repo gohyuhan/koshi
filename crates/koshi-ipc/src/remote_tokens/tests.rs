@@ -773,6 +773,39 @@ fn a_store_holding_no_records_reads_back_as_a_store_holding_no_records() {
 }
 
 #[test]
+fn a_live_secret_is_admitted_with_the_scope_it_was_granted_on() {
+    let session = SessionId::new();
+    let (mut store, token) = granted(TokenScope::Session(session), None);
+
+    assert_eq!(
+        store.admit(&token, moment(200)),
+        Some(TokenScope::Session(session))
+    );
+    assert_eq!(store.records[0].last_used_at, Some(moment(200)));
+    assert!(TokenScope::Session(session).covers(session));
+    assert!(!TokenScope::Session(session).covers(SessionId::new()));
+}
+
+#[test]
+fn a_secret_no_record_holds_is_admitted_by_nothing() {
+    let (mut store, _token) = granted(TokenScope::HostWide, None);
+
+    assert_eq!(store.admit(&ConnectionToken::generate(), moment(200)), None);
+    assert_eq!(store.records[0].last_used_at, None);
+}
+
+#[test]
+fn a_revoked_secret_and_an_expired_one_are_admitted_by_nothing() {
+    let (mut store, token) = granted(TokenScope::HostWide, None);
+    store.revoke("ada", None, moment(150));
+    assert_eq!(store.admit(&token, moment(200)), None);
+
+    let (mut store, token) = granted(TokenScope::HostWide, Some(moment(150)));
+    assert_eq!(store.admit(&token, moment(150)), None);
+    assert_eq!(store.admit(&token, moment(149)), Some(TokenScope::HostWide));
+}
+
+#[test]
 fn this_build_writes_token_store_format_one() {
     // The value lives in the versioned-surface table now, one crate away, so
     // this pins what a store written today says. Changing it means every older

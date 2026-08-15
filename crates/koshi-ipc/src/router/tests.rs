@@ -386,6 +386,8 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
             scope: None,
         },
         RouterRequestKind::ListTokens { scope: None },
+        RouterRequestKind::RemoteStatus,
+        RouterRequestKind::EnableRemote,
     ];
     let results = [
         (
@@ -408,6 +410,22 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         ),
         (RouterResult::Revoked(vec![TokenScope::HostWide]), "Revoked"),
         (RouterResult::Tokens(vec![token_entry()]), "Tokens"),
+        (
+            RouterResult::RemoteStatus {
+                address: Some("0.0.0.0:7654".to_string()),
+                enabled: true,
+                listening: false,
+                fingerprint: Some("ab".repeat(32)),
+            },
+            "RemoteStatus",
+        ),
+        (
+            RouterResult::RemoteEnabled {
+                address: "0.0.0.0:7654".to_string(),
+                fingerprint: "ab".repeat(32),
+            },
+            "RemoteEnabled",
+        ),
         (
             RouterResult::Error(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,

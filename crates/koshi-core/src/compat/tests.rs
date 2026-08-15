@@ -166,7 +166,10 @@ fn the_control_plane_speaks_two_and_still_serves_the_released_one() {
 }
 
 #[test]
-fn the_surfaces_no_release_carries_are_the_three_born_after_the_last_tag() {
+fn every_surface_no_release_carries_is_one_born_after_the_last_tag() {
+    // Naming them one by one is the point: a surface added to the table lands
+    // here too, so somebody states in this list that the new one really has
+    // never shipped.
     let unreleased: Vec<&str> = SURFACES
         .iter()
         .filter(|surface| surface.released.is_none())
@@ -178,6 +181,10 @@ fn the_surfaces_no_release_carries_are_the_three_born_after_the_last_tag() {
         [
             "supervisor link",
             "token store format",
+            "remote doorway",
+            "saved server file format",
+            "remote certificate file format",
+            "remote access record format",
             "resume file format"
         ]
     );

@@ -4,8 +4,9 @@
 //! A bare `koshi` launches the interactive app: it spawns a new session and
 //! attaches this terminal to it. The root `--headless` flag spawns the session
 //! and attaches nothing. Every verb is a subcommand, `attach` and `detach`
-//! included. Parsing yields typed values only; no command here talks to a
-//! runtime.
+//! included. The root `--remote` flag reaches every subcommand and names the
+//! machine that invocation runs against. Parsing yields typed values only; no
+//! command here talks to a runtime.
 //!
 //! Action subcommands carry typed arguments and map to the core command
 //! vocabulary through [`CliCommand::to_action`](crate::cli::CliCommand::to_action),
@@ -55,17 +56,22 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
+    /// Run this invocation against the machine SERVER names — the name it was
+    /// saved under, or the `host:port` it listens on — instead of this one.
+    #[arg(long, global = true, value_name = "SERVER")]
+    pub remote: Option<String>,
+
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 }
 
 impl Cli {
-    /// True for the bare `koshi` invocation — no subcommand and no
-    /// `--headless` — which launches the interactive app.
+    /// True for the bare `koshi` invocation — no subcommand, no `--headless`
+    /// and no `--remote` — which launches the interactive app.
     #[must_use]
     pub fn is_interactive_launch(&self) -> bool {
-        !self.headless && self.command.is_none()
+        !self.headless && self.command.is_none() && self.remote.is_none()
     }
 }
 
@@ -205,7 +211,9 @@ pub enum FormatArg {
 /// registry through its `list`/`explain` subcommands, and `keys` introspects
 /// the keymap through its own subcommand tree. `config` validates and migrates
 /// files locally. `share` reaches the router over the control plane; the
-/// router is the only writer of the remote access token store. `version`
+/// router is the only writer of the remote access token store. `remote`
+/// reads and writes the servers this machine has saved, and reaches no
+/// network. `version`
 /// prints this program's own build, and
 /// `server-version` asks each running koshi server for the build it runs;
 /// both carry `--format` and render through [`crate::output`]. `plugin`
@@ -230,6 +238,10 @@ pub enum CliCommand {
         /// sessions running for this user.
         #[arg(value_name = "SESSION")]
         session: Option<String>,
+        /// Save a server reached for the first time under this name, so later
+        /// commands name it instead of its address.
+        #[arg(long, requires = "remote", value_name = "NAME")]
+        save_as: Option<String>,
     },
     /// Detach one client, or with `--all` every client of a session. The
     /// session keeps running and its panes are untouched.
@@ -415,6 +427,12 @@ pub enum CliCommand {
         /// What to do with the tokens.
         #[command(subcommand)]
         command: ShareCommand,
+    },
+    /// List, forget and re-secret the servers this machine has saved.
+    Remote {
+        /// What to do with the saved servers.
+        #[command(subcommand)]
+        command: RemoteCommand,
     },
     /// Print diagnostics for a bug report.
     Debug {
@@ -637,6 +655,33 @@ pub enum ShareCommand {
         /// Output format.
         #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
         format: FormatArg,
+    },
+}
+
+/// The `koshi remote` subcommands: the servers this machine has connected to,
+/// saved on this machine. Every verb reads or writes that store; none of them
+/// prints a saved secret.
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+pub enum RemoteCommand {
+    /// List the servers this machine has saved.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
+    /// Drop one saved server, so nothing on this machine holds its secret.
+    Forget {
+        /// Server to drop, by the name it was saved under or its address.
+        #[arg(value_name = "SERVER")]
+        server: String,
+    },
+    /// Replace the secret of one saved server, after the machine serving it
+    /// granted a fresh one.
+    SetSecret {
+        /// Server whose secret is replaced, by the name it was saved under or
+        /// its address.
+        #[arg(value_name = "SERVER")]
+        server: String,
     },
 }
 
@@ -986,6 +1031,7 @@ impl CliCommand {
             | CliCommand::Doctor
             | CliCommand::Config { .. }
             | CliCommand::Share { .. }
+            | CliCommand::Remote { .. }
             | CliCommand::Debug { .. }
             | CliCommand::Plugin
             | CliCommand::Update

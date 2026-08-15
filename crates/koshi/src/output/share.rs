@@ -6,11 +6,36 @@ use super::*;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::{TokenEntry, TokenScope};
 
-/// Render a `share grant` answer: the block printed once, holding the secret
-/// itself.
+/// What this machine's remote access leaves a fresh grant able to do, which
+/// decides the block a `share grant` closes with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteReady {
+    /// `koshi.kdl` names no address to serve remote clients on.
+    NoAddress,
+    /// The address is set and the operator left remote access switched off.
+    Off,
+    /// This machine's remote access could not be read. The reason is written to
+    /// stderr as it happens.
+    Unknown,
+    /// Remote access is switched on and the port is not open.
+    Blocked {
+        /// The address that could not be taken, as `host:port`.
+        address: String,
+    },
+    /// Remote access is on, and this is where it serves.
+    On {
+        /// Where remote clients are served, as `host:port`.
+        address: String,
+    },
+}
+
+/// Render the secret a `share grant` minted: the block printed once, holding
+/// the secret itself.
 ///
-/// `replaced` opens the block with the grant that stopped working, so the
-/// operator learns the old token is dead before reading the new one.
+/// Carries no connect instructions; those are [`render_remote_ready`].
+///
+/// `replaced` opens the block with the line naming the grant that stopped
+/// working.
 #[must_use]
 pub fn render_share_grant(
     token: &ConnectionToken,
@@ -28,11 +53,56 @@ pub fn render_share_grant(
     rendered.push_str("anyone holding this token can run anything you can.\n");
     rendered.push_str(token.expose());
     rendered.push('\n');
-    rendered.push_str(
-        "remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n",
-    );
     rendered
+}
+
+/// Render what a fresh grant can reach: the block that follows the secret,
+/// once this machine's remote access has answered for itself.
+///
+/// One block per [`RemoteReady`] case. [`RemoteReady::On`] renders the command
+/// that connects, carrying the address, and `--save-as {identity}` when
+/// `identity` is one word without the `host:port` shape. The secret never
+/// appears in it.
+#[must_use]
+pub fn render_remote_ready(identity: &str, ready: &RemoteReady) -> String {
+    match ready {
+        RemoteReady::NoAddress => "no remote listen address is set; add \
+             `remote-listen \"<host:port>\"` to koshi.kdl, then run `koshi share grant` again.\n"
+            .to_string(),
+        RemoteReady::Off => {
+            "remote access stays off; this token cannot be used to connect yet.\n".to_string()
+        }
+        RemoteReady::Unknown => "this machine's remote access could not be read, so whether this \
+             token can connect is unknown; run `koshi share grant` again, or check the reason \
+             printed above.\n"
+            .to_string(),
+        RemoteReady::Blocked { address } => format!(
+            "remote access is on, and nothing is listening on {address}: another program holds \
+             it. Free that address, then run `koshi share grant` again to open the port. This \
+             token cannot be used to connect until then.\n"
+        ),
+        RemoteReady::On { address } => format!(
+            "connect from another machine:\n  \
+             koshi attach --remote {address}{} [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n",
+            save_as_offer(identity)
+        ),
+    }
+}
+
+/// The ` --save-as <identity>` the connect command carries, or an empty string
+/// when `identity` has the `host:port` shape or is not a single word.
+///
+/// Example — `alice` gives `" --save-as alice"`; `desk:22` and `ada lovelace`
+/// each give `""`.
+fn save_as_offer(identity: &str) -> String {
+    if koshi_link::remote_client::check_name_shape(identity).is_err() {
+        return String::new();
+    }
+    if identity.split_whitespace().count() != 1 {
+        return String::new();
+    }
+    format!(" --save-as {identity}")
 }
 
 /// Render a `share revoke` answer: one line per grant that stopped working,

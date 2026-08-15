@@ -182,26 +182,67 @@ fn a_listing_takes_the_json_format_flag() {
 }
 
 #[test]
-fn a_grant_block_warns_shows_the_secret_and_says_it_cannot_connect() {
+fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
     let token = ConnectionToken::new("f00d");
-    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false);
+    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
+        + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
 
     assert_eq!(
         rendered,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n"
+         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         run `koshi share grant` again.\n"
     );
     assert_eq!(rendered.matches("f00d").count(), 1);
     assert!(!rendered.contains("://"));
 }
 
 #[test]
+fn a_grant_block_with_remote_access_left_off_says_the_token_cannot_connect_yet() {
+    let token = ConnectionToken::new("f00d");
+    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
+        + &output::render_remote_ready("alice", &RemoteReady::Off);
+
+    assert_eq!(
+        rendered,
+        "anyone holding this token can run anything you can.\n\
+         f00d\n\
+         remote access stays off; this token cannot be used to connect yet.\n"
+    );
+}
+
+#[test]
+fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
+    let token = ConnectionToken::new("f00d");
+    let rendered = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false)
+        + &output::render_remote_ready(
+            "alice",
+            &RemoteReady::On {
+                address: "laptop.local:7654".to_string(),
+            },
+        );
+
+    assert_eq!(
+        rendered,
+        "anyone holding this token can run anything you can.\n\
+         f00d\n\
+         connect from another machine:\n\
+         \x20 koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+    // The secret is printed once, on its own line, and never inside the
+    // command a reader would paste into a shell.
+    assert_eq!(rendered.matches("f00d").count(), 1);
+    assert!(!rendered.contains("--remote laptop.local:7654 f00d"));
+}
+
+#[test]
 fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
     let token = ConnectionToken::new("f00d");
     let rendered =
-        output::render_share_grant(&token, "alice", &TokenScope::Session(fixed_session()), true);
+        output::render_share_grant(&token, "alice", &TokenScope::Session(fixed_session()), true)
+            + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
 
     assert_eq!(
         rendered,
@@ -209,8 +250,8 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access is not configured on this machine, so this token cannot be used to \
-         connect yet.\n"
+         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         run `koshi share grant` again.\n"
     );
 }
 
@@ -313,4 +354,249 @@ fn an_empty_listing_is_the_header_row_alone_and_an_empty_json_array() {
         "identity  scope  issued  expires  last_used  revoked\n"
     );
     assert_eq!(output::render_share_list(&[], FormatArg::Json), "[]\n");
+}
+
+#[test]
+fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
+    // The block renders whole on its own, and names nothing about connecting.
+    let token = ConnectionToken::new("f00d");
+    let secret_block = output::render_share_grant(&token, "alice", &TokenScope::HostWide, false);
+
+    assert_eq!(
+        secret_block,
+        "anyone holding this token can run anything you can.\n\
+         f00d\n"
+    );
+    assert!(
+        !secret_block.contains("connect"),
+        "the secret block promises nothing about reaching anything"
+    );
+    assert_eq!(secret_block.matches("f00d").count(), 1);
+}
+
+#[test]
+fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
+    // `desk:22` has the `host:port` shape, so the flag is left off.
+    let rendered = output::render_remote_ready(
+        "desk:22",
+        &RemoteReady::On {
+            address: "laptop.local:7654".to_string(),
+        },
+    );
+
+    assert_eq!(
+        rendered,
+        "connect from another machine:\n  \
+         koshi attach --remote laptop.local:7654 [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
+    // Two words, so the flag is left off.
+    let rendered = output::render_remote_ready(
+        "ada lovelace",
+        &RemoteReady::On {
+            address: "laptop.local:7654".to_string(),
+        },
+    );
+
+    assert!(
+        !rendered.contains("--save-as"),
+        "a name that cannot be typed as one word is not offered: {rendered}"
+    );
+}
+
+#[test]
+fn a_plain_identity_is_still_offered_as_the_saved_name() {
+    let rendered = output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            address: "laptop.local:7654".to_string(),
+        },
+    );
+
+    assert_eq!(
+        rendered,
+        "connect from another machine:\n  \
+         koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
+    // `ready_or_unknown` maps a failed request to `Unknown`, and passes every
+    // answer through unchanged.
+    let failed = ready_or_unknown(Err(CliError::IpcUnavailable {
+        detail: "the router is not running".to_string(),
+    }));
+    assert_eq!(failed, RemoteReady::Unknown);
+
+    let answered = ready_or_unknown(Ok(RemoteReady::On {
+        address: "laptop.local:7654".to_string(),
+    }));
+    assert_eq!(
+        answered,
+        RemoteReady::On {
+            address: "laptop.local:7654".to_string()
+        },
+        "an answer is passed through as it stands"
+    );
+
+    let off = ready_or_unknown(Ok(RemoteReady::Off));
+    assert_eq!(
+        off,
+        RemoteReady::Off,
+        "including a machine that really is off"
+    );
+}
+
+#[test]
+fn remote_access_that_could_not_be_read_says_so_rather_than_saying_it_is_off() {
+    // `Unknown` renders its own block, not the `Off` one.
+    let rendered = output::render_remote_ready("alice", &RemoteReady::Unknown);
+
+    assert_eq!(
+        rendered,
+        "this machine's remote access could not be read, so whether this token can \
+         connect is unknown; run `koshi share grant` again, or check the reason \
+         printed above.\n"
+    );
+    assert!(
+        !rendered.contains("stays off"),
+        "an unread state is not the same as switched off: {rendered}"
+    );
+}
+
+#[test]
+fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
+    let rendered = output::render_remote_ready(
+        "alice",
+        &RemoteReady::Blocked {
+            address: "laptop.local:7654".to_string(),
+        },
+    );
+
+    assert_eq!(
+        rendered,
+        "remote access is on, and nothing is listening on laptop.local:7654: another program \
+         holds it. Free that address, then run `koshi share grant` again to open the port. This \
+         token cannot be used to connect until then.\n"
+    );
+}
+
+/// What one sink has been told so far.
+#[derive(Default)]
+struct Written {
+    /// Every byte written, in order.
+    bytes: Vec<u8>,
+    /// How many of them had been written when `flush` was last called, or
+    /// `None` when it never was.
+    flushed: Option<usize>,
+}
+
+/// A sink the test can read while `write_grant` is still writing to it, and
+/// which remembers where its flushes fell.
+#[derive(Clone)]
+struct Recorder(std::rc::Rc<std::cell::RefCell<Written>>);
+
+impl Recorder {
+    fn new() -> Recorder {
+        Recorder(std::rc::Rc::new(
+            std::cell::RefCell::new(Written::default()),
+        ))
+    }
+
+    /// Everything written so far, as text.
+    fn text(&self) -> String {
+        String::from_utf8(self.0.borrow().bytes.clone()).expect("the bytes written so far")
+    }
+
+    /// Everything that had been flushed by the last flush, as text. Empty when
+    /// nothing has been flushed.
+    fn flushed_text(&self) -> String {
+        let written = self.0.borrow();
+        let upto = written.flushed.unwrap_or(0);
+        String::from_utf8(written.bytes[..upto].to_vec()).expect("the bytes flushed so far")
+    }
+}
+
+impl std::io::Write for Recorder {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut written = self.0.borrow_mut();
+        written.flushed = Some(written.bytes.len());
+        Ok(())
+    }
+}
+
+#[test]
+fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
+    // Read from inside the closure: the secret is in `out` before `ready`
+    // runs.
+    let token = ConnectionToken::new("f00d");
+    let mut out = Recorder::new();
+    let seen = out.clone();
+    let asked_after = std::cell::RefCell::new(String::new());
+
+    write_grant(
+        &mut out,
+        &token,
+        "alice",
+        &TokenScope::HostWide,
+        false,
+        || {
+            *asked_after.borrow_mut() = seen.text();
+            RemoteReady::Off
+        },
+    )
+    .expect("writing to a buffer");
+
+    assert!(
+        asked_after.borrow().contains("f00d"),
+        "the secret was already written when the offer ran, and got: {:?}",
+        asked_after.borrow()
+    );
+    assert_eq!(
+        out.text(),
+        "anyone holding this token can run anything you can.\n\
+         f00d\n\
+         remote access stays off; this token cannot be used to connect yet.\n"
+    );
+}
+
+#[test]
+fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
+    // Read from inside the closure: the whole secret block has been flushed,
+    // not only written.
+    let token = ConnectionToken::new("f00d");
+    let mut out = Recorder::new();
+    let seen = out.clone();
+    let flushed_when_asked = std::cell::RefCell::new(String::new());
+
+    write_grant(
+        &mut out,
+        &token,
+        "alice",
+        &TokenScope::HostWide,
+        false,
+        || {
+            *flushed_when_asked.borrow_mut() = seen.flushed_text();
+            RemoteReady::Off
+        },
+    )
+    .expect("writing to a buffer");
+
+    assert_eq!(
+        *flushed_when_asked.borrow(),
+        "anyone holding this token can run anything you can.\n\
+         f00d\n",
+        "the whole secret block was flushed before the offer ran"
+    );
 }

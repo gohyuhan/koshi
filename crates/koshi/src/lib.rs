@@ -35,6 +35,10 @@ pub mod output;
 /// Process-level session commands that work without an attached pane.
 pub mod session_control;
 
+/// The `koshi remote` commands: list, forget and re-secret the servers this
+/// machine has saved.
+pub mod remote_cmd;
+
 /// The `koshi share` commands: grant, revoke and list the remote access
 /// tokens this machine has handed out.
 pub mod share;

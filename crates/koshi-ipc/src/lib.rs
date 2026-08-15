@@ -21,9 +21,18 @@ pub mod layout;
 /// framing faults, the unknown request kind, and the Hello.
 pub mod plane;
 pub mod protocol;
+/// The servers a dialling user has connected to: the address, the secret, the
+/// pinned certificate fingerprint, and the name the user chose for each.
+pub mod remote_servers;
+/// The certificate this machine presents to remote clients, and the record
+/// that the operator switched remote access on.
+pub mod remote_state;
 /// The machine's remote access tokens: what a grant records, where it is
 /// stored, and what a presented token reaches.
 pub mod remote_tokens;
+/// What a remote client and the machine serving it say to each other before
+/// any session is reached.
+pub mod remote_wire;
 /// The control-plane protocol: the messages that create, find, list and kill
 /// sessions, the handshake that opens a router connection, and the fixed
 /// names the router serves under.
@@ -32,6 +41,9 @@ pub mod router;
 /// process holding its panes with, the events that process sends back, the
 /// handshake that opens the link, and the address it listens on.
 pub mod supervisor;
+/// The TLS stream a remote client and the machine serving it talk over, and
+/// the certificate pinning that recognises a server on the second connection.
+pub mod tls;
 /// Transport layer.
 pub mod transport;
 /// Shared types.

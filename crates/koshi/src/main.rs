@@ -10,6 +10,7 @@ use koshi::cli::{
 use koshi::config_command;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
+use koshi::remote_cmd;
 use koshi::session_control;
 use koshi::share;
 use koshi::targeting::{self, Route};
@@ -54,8 +55,9 @@ fn main() -> ExitCode {
 /// a session's control socket as commands. Inside a pane they go to the pane's own
 /// session; outside one, the routing layer picks the target session from the
 /// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
-/// the only running session. A verb the socket does not serve yet reports
-/// IPC unavailable.
+/// the only running session. `--remote` names another machine and picks the
+/// target from that machine's sessions instead, by the same rules. A verb the
+/// socket does not serve yet reports IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
     // An entry point marked `#[beta_feature]` reads a process-wide flag and
     // takes no gate argument, so the flag is set before any verb dispatches:
@@ -63,6 +65,34 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // interactive launch alike.
     let app = config::load_app_layer();
     config::apply_beta_gate(app.clone());
+
+    // This CLI is a client, so it reads its own `layout.new-pane-direction`
+    // out of `koshi.kdl` and puts it on the pane-opening verbs that were given
+    // no `--direction`. The session holds no split direction to fall back on.
+    let new_pane_direction = config::new_pane_direction(app);
+
+    // The action verbs travel a socket as commands; the remaining verbs
+    // (discovery listings, lifecycle) have their own serving layers. The
+    // probe with default targets only asks "is this an action verb" — the
+    // real command is built after routing resolves the targets.
+    let is_action = cli.command.as_ref().is_some_and(|command| {
+        command
+            .to_action(&ResolvedTargets::default(), new_pane_direction)
+            .is_some()
+    });
+
+    // `--remote` names the machine an invocation runs against, so it needs an
+    // invocation that can run there: `attach`, or an action verb dispatched to
+    // that machine. Every other verb answers from this machine alone, a bare
+    // `koshi --remote <server>` names nothing to run, and `--headless` would
+    // create a session here rather than there.
+    if cli.remote.is_some() && !is_action && !matches!(cli.command, Some(CliCommand::Attach { .. }))
+    {
+        return Err(CliError::InvalidArgs {
+            detail: "--remote needs a command, such as `koshi attach --remote <server>`"
+                .to_string(),
+        });
+    }
 
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` introspects the static action table, so it renders locally
@@ -85,6 +115,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // reads no pane environment and behaves the same inside a pane and
         // outside one.
         return share::run(command);
+    }
+
+    if let Some(CliCommand::Remote { command }) = &cli.command {
+        // Every remote verb reads or writes the saved-server store on this
+        // machine, so it opens no connection and asks no running koshi.
+        return remote_cmd::run(command);
     }
 
     if let Some(CliCommand::ServeRouter {
@@ -241,7 +277,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // the routing layer. Typed inside a pane it moves that pane's client to
     // the named session; typed outside one it joins that session in this
     // terminal.
-    if let Some(CliCommand::Attach { session }) = &cli.command {
+    if let Some(CliCommand::Attach { session, save_as }) = &cli.command {
+        // `--remote` names the machine, so a pane identity on this one decides
+        // nothing: the session is resolved and joined on the named machine.
+        if let Some(server) = &cli.remote {
+            return attach::run_remote(server, save_as.as_deref(), session.as_deref());
+        }
         return match in_session.as_ref() {
             Some(context) => {
                 finish_command(attach::switch_in_session(context, session.as_deref())?)
@@ -279,20 +320,6 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         };
     }
 
-    // This CLI is a client, so it reads its own `layout.new-pane-direction`
-    // out of `koshi.kdl` and puts it on the pane-opening verbs that were given
-    // no `--direction`. The session holds no split direction to fall back on.
-    let new_pane_direction = config::new_pane_direction(app);
-
-    // The action verbs travel a socket as commands; the remaining verbs
-    // (discovery listings, lifecycle) have their own serving layers. The
-    // probe with default targets only asks "is this an action verb" — the
-    // real command is built after routing resolves the targets.
-    let is_action = cli.command.as_ref().is_some_and(|command| {
-        command
-            .to_action(&ResolvedTargets::default(), new_pane_direction)
-            .is_some()
-    });
     if !is_action {
         return Err(CliError::IpcUnavailable {
             detail: "this command is not served over the control socket yet".to_string(),
@@ -303,20 +330,25 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         .as_ref()
         .expect("an action verb is always a parsed subcommand");
 
-    let result = match targeting::route(cli_command, in_session.as_ref())? {
-        Route::InSession(targets) => {
-            let context = in_session.expect("an in-session route needs the pane identity");
-            let (_, command) = cli_command
-                .to_action(&targets, new_pane_direction)
-                .expect("checked to be an action verb above");
-            ipc_client::submit_in_session(&context, command)?
-        }
-        Route::External { session, targets } => {
-            let (_, command) = cli_command
-                .to_action(&targets, new_pane_direction)
-                .expect("checked to be an action verb above");
-            ipc_client::submit_external(session, command)?
-        }
+    // `--remote` names the machine, so the pane identity on this one decides
+    // nothing: the target is picked from the sessions on the named machine.
+    let result = match &cli.remote {
+        Some(server) => targeting::submit_remote(server, cli_command, new_pane_direction)?,
+        None => match targeting::route(cli_command, in_session.as_ref())? {
+            Route::InSession(targets) => {
+                let context = in_session.expect("an in-session route needs the pane identity");
+                let (_, command) = cli_command
+                    .to_action(&targets, new_pane_direction)
+                    .expect("checked to be an action verb above");
+                ipc_client::submit_in_session(&context, command)?
+            }
+            Route::External { session, targets } => {
+                let (_, command) = cli_command
+                    .to_action(&targets, new_pane_direction)
+                    .expect("checked to be an action verb above");
+                ipc_client::submit_external(session, command)?
+            }
+        },
     };
 
     finish_command(result)

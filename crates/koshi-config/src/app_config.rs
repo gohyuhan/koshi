@@ -71,6 +71,7 @@ const SECTIONS: &[&str] = &[
     "logging",
     "allow-beta-features",
     "allow-other-users",
+    "remote-listen",
     "shared-sessions-dir",
     "auto-close-session",
 ];
@@ -158,6 +159,15 @@ pub fn parse_app_config(path: &Path, source: &str) -> Result<AppConfigFile, Conf
                 Ok(allowed) => partial.allow_other_users = Some(allowed),
                 Err(detail) => {
                     warnings.push(format!("ignored `allow-other-users`: {detail}"));
+                }
+            },
+            // `remote-listen` is `Option<Option<String>>`: the outer layer
+            // marks the field set, the inner carries the address. A blank
+            // value names no address, so it is ignored with a warning.
+            "remote-listen" => match value_nonempty_string(node) {
+                Ok(address) => partial.remote_listen = Some(Some(address)),
+                Err(detail) => {
+                    warnings.push(format!("ignored `remote-listen`: {detail}"));
                 }
             },
             // `shared-sessions-dir` is `Option<Option<PathBuf>>`: the outer

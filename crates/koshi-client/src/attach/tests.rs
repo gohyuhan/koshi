@@ -30,7 +30,10 @@ use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameTab, PaintedFrame};
-use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload, IpcResponse, PROTOCOL_VERSION};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, PROTOCOL_VERSION,
+};
+use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::router::{router_endpoint_path, router_socket_addr, RouterRequest, RouterResponse};
 use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
 use koshi_layout::mode::LayoutMode;
@@ -96,22 +99,39 @@ fn no_running_session_leaves_nothing_to_attach_to() {
 #[test]
 fn one_running_session_is_the_answer_without_reading_a_line() {
     let rows = vec![session_row("solo")];
-    assert_eq!(
-        pick(&rows, "").expect("one row needs no picking"),
-        rows[0].id.to_string()
-    );
+    assert_eq!(pick(&rows, "").expect("one row needs no picking"), 0);
 }
 
 #[test]
 fn the_typed_number_picks_that_row() {
     let rows = vec![session_row("a"), session_row("b"), session_row("c")];
-    assert_eq!(
-        pick(&rows, "2").expect("2 is in range"),
-        rows[1].id.to_string()
-    );
+    assert_eq!(pick(&rows, "2").expect("2 is in range"), 1);
     assert_eq!(
         pick(&rows, "2\n").expect("the read line keeps its newline"),
-        rows[1].id.to_string()
+        1
+    );
+}
+
+#[test]
+fn two_rows_carrying_one_session_id_are_told_apart_by_their_place() {
+    // Two rows, one session id: the answer is the place, not the id.
+    let shared = SessionId::new();
+    let rows = vec![
+        SessionRow {
+            id: shared,
+            name: String::from("desk web"),
+        },
+        SessionRow {
+            id: shared,
+            name: String::from("desk-ip web"),
+        },
+    ];
+
+    assert_eq!(pick(&rows, "1").expect("1 is in range"), 0);
+    assert_eq!(
+        pick(&rows, "2").expect("2 is in range"),
+        1,
+        "the second row is reachable even though it shares the first row's id"
     );
 }
 
@@ -320,10 +340,32 @@ fn a_mouse_answer_keeps_the_stream_reading() {
     assert_eq!(classify(&Ok(frame)), None);
 }
 
+/// A session on this machine, which is the home every report test below uses
+/// unless it names the remote one.
+fn local_home() -> Home {
+    Home::Local {
+        runtime_dir: PathBuf::from("/tmp/koshi-test"),
+    }
+}
+
+/// A session on another machine, reached through a saved server named `work`.
+fn remote_home() -> Home {
+    Home::Remote {
+        server: ServerArg::Saved(SavedServer {
+            name: Some("work".to_string()),
+            address: "laptop.local:7654".to_string(),
+            secret: ConnectionToken::generate(),
+            fingerprint: "00".repeat(32),
+            added_at: SystemTime::UNIX_EPOCH,
+            last_used_at: None,
+        }),
+    }
+}
+
 #[test]
 fn a_death_reports_the_cause_and_how_to_reattach() {
     let session_id = SessionId::new();
-    let error = report(Ending::Died, session_id).expect_err("a death is an error");
+    let error = report(&local_home(), Ending::Died, session_id).expect_err("a death is an error");
     assert_eq!(
         error.to_string(),
         format!(
@@ -336,14 +378,52 @@ fn a_death_reports_the_cause_and_how_to_reattach() {
 }
 
 #[test]
+fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
+    // The local way back would send the user to their own machine, where the
+    // session never ran, so the message names the saved server instead.
+    let session_id = SessionId::new();
+    let error = report(&remote_home(), Ending::Died, session_id).expect_err("a death is an error");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the session ended unexpectedly\n  \
+             run `koshi list-sessions --remote work`; if session {session_id} is still listed, \
+             reattach with `koshi attach --remote work {session_id}`"
+        )
+    );
+    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+}
+
+#[test]
+fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
+    let session_id = SessionId::new();
+    let home = Home::Remote {
+        server: ServerArg::New {
+            address: "laptop.local:7654".to_string(),
+        },
+    };
+    let error = report(&home, Ending::Died, session_id).expect_err("a death is an error");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the session ended unexpectedly\n  \
+             run `koshi list-sessions --remote laptop.local:7654`; if session {session_id} \
+             is still listed, reattach with \
+             `koshi attach --remote laptop.local:7654 {session_id}`"
+        )
+    );
+}
+
+#[test]
 fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
     let session_id = SessionId::new();
     assert_eq!(
-        report(Ending::Detached, session_id).expect("a detach is a success"),
+        report(&local_home(), Ending::Detached, session_id).expect("a detach is a success"),
         None
     );
     assert_eq!(
-        report(Ending::SessionEnded, session_id).expect("a session ending is a success"),
+        report(&local_home(), Ending::SessionEnded, session_id)
+            .expect("a session ending is a success"),
         None
     );
 }
@@ -352,7 +432,8 @@ fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
 fn a_switch_names_the_session_to_join_next() {
     let target = SessionId::new();
     assert_eq!(
-        report(Ending::Switch(target), SessionId::new()).expect("a switch is a success"),
+        report(&local_home(), Ending::Switch(target), SessionId::new())
+            .expect("a switch is a success"),
         Some(target)
     );
 }
@@ -621,8 +702,8 @@ fn another_local_users_restarting_session_is_not_waited_for() {
 #[test]
 fn a_restart_this_client_cannot_come_back_from_reports_the_death_it_reports_today() {
     let session_id = SessionId::new();
-    let error =
-        report(Ending::Restarting, session_id).expect_err("a restart with no way back is an error");
+    let error = report(&local_home(), Ending::Restarting, session_id)
+        .expect_err("a restart with no way back is an error");
     assert_eq!(
         error.to_string(),
         format!(

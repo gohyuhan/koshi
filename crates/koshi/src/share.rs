@@ -6,14 +6,24 @@
 //! session a grant reaches; the session is resolved here, through the same
 //! targeting the discovery queries use, so a name that matches no running
 //! session or two of them is refused before anything is asked of the router.
+//!
+//! A grant also asks the router where this machine serves remote clients. With
+//! an address set and remote access switched off, the grant offers to switch
+//! it on and opens the port on a yes, so one command hands out a token and
+//! makes it usable. The token is minted first and the offer follows it, so a
+//! grant that fails never opens a port. The secret is printed whatever the
+//! offer does, since a granted token is live and its secret is readable once.
 
+use std::io::{self, Write};
 use std::path::Path;
 
+use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
 use koshi_ipc::wire::WireName;
 
 use crate::cli::{Expiry, SessionRef, ShareCommand};
+use crate::output::RemoteReady;
 use crate::{output, targeting};
 use koshi_link::error::CliError;
 use koshi_link::{ipc_client, router_client};
@@ -48,11 +58,13 @@ pub fn run(command: &ShareCommand) -> Result<(), CliError> {
             };
             match router_client::router_request(&runtime_dir, kind)? {
                 RouterResult::Granted { token, replaced } => {
-                    print!(
-                        "{}",
-                        output::render_share_grant(&token, identity, &scope, replaced)
-                    );
-                    Ok(())
+                    let mut out = io::stdout();
+                    write_grant(&mut out, &token, identity, &scope, replaced, || {
+                        ready_or_unknown(remote_ready(&runtime_dir))
+                    })
+                    .map_err(|error| CliError::Runtime {
+                        detail: format!("the grant could not be printed: {error}"),
+                    })
                 }
                 other => Err(refusal(&other)),
             }
@@ -85,6 +97,109 @@ pub fn run(command: &ShareCommand) -> Result<(), CliError> {
             }
         }
     }
+}
+
+/// Write a grant to `out`: the secret first, then what it can reach.
+///
+/// Writes the secret block, flushes `out`, calls `ready`, then writes what
+/// `ready` returned. `ready` may prompt and may fail; nothing it does happens
+/// before the flush.
+///
+/// # Errors
+/// Whatever `out` reports.
+fn write_grant<W: Write>(
+    out: &mut W,
+    token: &ConnectionToken,
+    identity: &str,
+    scope: &TokenScope,
+    replaced: bool,
+    ready: impl FnOnce() -> RemoteReady,
+) -> io::Result<()> {
+    write!(
+        out,
+        "{}",
+        output::render_share_grant(token, identity, scope, replaced)
+    )?;
+    out.flush()?;
+    let ready = ready();
+    write!(out, "{}", output::render_remote_ready(identity, &ready))
+}
+
+/// What a grant closes with, given what asking the router produced.
+///
+/// `Ok` passes the answer through. `Err` writes the error to stderr and returns
+/// [`RemoteReady::Unknown`], never [`RemoteReady::Off`].
+fn ready_or_unknown(asked: Result<RemoteReady, CliError>) -> RemoteReady {
+    match asked {
+        Ok(ready) => ready,
+        Err(error) => {
+            eprintln!("remote access was left as it is: {error}");
+            RemoteReady::Unknown
+        }
+    }
+}
+
+/// What a fresh grant can reach, and the offer that changes the answer.
+///
+/// Asks the router for the listen address, whether remote access is switched
+/// on, and whether the port is held right now, then:
+///
+/// - no address — [`RemoteReady::NoAddress`], nothing asked;
+/// - on and listening — [`RemoteReady::On`], nothing asked;
+/// - otherwise prompts, and a yes sends [`RouterRequestKind::EnableRemote`].
+///
+/// A yes that opens the port is [`RemoteReady::On`]. A no is
+/// [`RemoteReady::Off`] when remote access was off, and
+/// [`RemoteReady::Blocked`] when it was on. A refused enable is
+/// [`RemoteReady::Blocked`].
+fn remote_ready(runtime_dir: &Path) -> Result<RemoteReady, CliError> {
+    let status = router_client::router_request(runtime_dir, RouterRequestKind::RemoteStatus)?;
+    let (address, enabled, listening) = match status {
+        RouterResult::RemoteStatus {
+            address,
+            enabled,
+            listening,
+            ..
+        } => (address, enabled, listening),
+        other => return Err(refusal(&other)),
+    };
+    let Some(address) = address else {
+        return Ok(RemoteReady::NoAddress);
+    };
+    if enabled && listening {
+        return Ok(RemoteReady::On { address });
+    }
+    let question = if enabled {
+        println!("remote access is on, and nothing is listening on {address}.");
+        format!("try to open {address} now? [y/N] ")
+    } else {
+        println!("remote access is off.");
+        format!("turn it on and open {address}? [y/N] ")
+    };
+    if !prompt_yes(&question) {
+        return Ok(if enabled {
+            RemoteReady::Blocked { address }
+        } else {
+            RemoteReady::Off
+        });
+    }
+    match router_client::router_request(runtime_dir, RouterRequestKind::EnableRemote)? {
+        RouterResult::RemoteEnabled { address, .. } => Ok(RemoteReady::On { address }),
+        RouterResult::Error(_) => Ok(RemoteReady::Blocked { address }),
+        other => Err(refusal(&other)),
+    }
+}
+
+/// Print `prompt` and read one line, answering true only for a typed yes. A
+/// terminal that cannot be read answers no.
+fn prompt_yes(prompt: &str) -> bool {
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
 /// The scope a `--session` flag names: `None` when the flag is absent, else

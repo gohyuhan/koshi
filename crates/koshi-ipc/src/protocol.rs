@@ -104,16 +104,10 @@ impl ConnectionToken {
     /// Every generated token has this one length.
     #[must_use]
     pub fn generate() -> Self {
-        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes)
             .expect("every supported platform provides the system random source");
-        let mut secret = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            secret.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-            secret.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-        }
-        ConnectionToken(secret)
+        ConnectionToken(crate::bytes::hex(&bytes))
     }
 
     /// The secret itself, for writing it to the endpoint file.

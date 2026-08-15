@@ -54,6 +54,7 @@ fn bare_koshi_is_the_interactive_launch() {
             headless: false,
             allow_other_users: false,
             profile: None,
+            remote: None,
             command: None,
         }
     );
@@ -76,6 +77,7 @@ fn headless_creates_a_session_without_the_interactive_launch() {
             headless: true,
             allow_other_users: false,
             profile: None,
+            remote: None,
             command: None,
         }
     );
@@ -91,6 +93,7 @@ fn headless_takes_the_other_users_flag_beside_it() {
             headless: true,
             allow_other_users: true,
             profile: None,
+            remote: None,
             command: None,
         }
     );
@@ -115,7 +118,11 @@ fn attach_without_a_session_picks_one_at_runtime() {
             headless: false,
             allow_other_users: false,
             profile: None,
-            command: Some(CliCommand::Attach { session: None }),
+            remote: None,
+            command: Some(CliCommand::Attach {
+                session: None,
+                save_as: None,
+            }),
         }
     );
 }
@@ -126,9 +133,57 @@ fn attach_takes_the_session_as_a_positional() {
     assert_eq!(
         parse(&["koshi", "attach", &session]).command,
         Some(CliCommand::Attach {
-            session: Some(session)
+            session: Some(session),
+            save_as: None,
         })
     );
+}
+
+#[test]
+fn attach_takes_a_server_and_the_name_to_save_it_under() {
+    let cli = parse(&[
+        "koshi",
+        "attach",
+        "--remote",
+        "laptop.local:7654",
+        "--save-as",
+        "work",
+        "web",
+    ]);
+    assert_eq!(cli.remote, Some("laptop.local:7654".to_string()));
+    assert_eq!(
+        cli.command,
+        Some(CliCommand::Attach {
+            session: Some("web".to_string()),
+            save_as: Some("work".to_string()),
+        })
+    );
+}
+
+#[test]
+fn a_name_to_save_a_server_under_without_a_server_is_a_usage_error() {
+    // The name only ever labels a server `--remote` reached, so there is
+    // nothing for it to label on its own.
+    let error = parse_err(&["koshi", "attach", "--save-as", "work"]);
+
+    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn the_server_flag_reaches_the_action_verbs_and_the_bare_invocation() {
+    assert_eq!(
+        parse(&["koshi", "new-pane", "--remote", "work"]).remote,
+        Some("work".to_string())
+    );
+    assert_eq!(
+        parse(&["koshi", "close-pane", "--remote", "work"]).remote,
+        Some("work".to_string())
+    );
+    // A bare invocation parses here and is refused at dispatch, which has
+    // nothing to run on the named machine.
+    let bare = parse(&["koshi", "--remote", "work"]);
+    assert_eq!(bare.remote, Some("work".to_string()));
+    assert_eq!(bare.command, None);
 }
 
 #[test]
@@ -140,6 +195,7 @@ fn bare_detach_names_no_target_and_no_session() {
             headless: false,
             allow_other_users: false,
             profile: None,
+            remote: None,
             command: Some(CliCommand::Detach {
                 target: None,
                 all: false,
@@ -797,6 +853,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "next-tab",
         "plugin",
         "previous-tab",
+        "remote",
         "resize-pane",
         "resume-support",
         "run",
@@ -968,7 +1025,10 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          --size <SIZE>\n          \
          Signed number of cells the border moves; defaults to 1\n          \n          \
          [default: 1]\n\n      \
-         --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n  \
+         --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n      \
+         --remote <SERVER>\n          \
+         Run this invocation against the machine SERVER names — the name it was saved under, \
+         or the `host:port` it listens on — instead of this one\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
     );
 }
@@ -1920,7 +1980,8 @@ fn attach_accepts_an_empty_session_id() {
     assert_eq!(
         parse(&["koshi", "attach", ""]).command,
         Some(CliCommand::Attach {
-            session: Some(String::new())
+            session: Some(String::new()),
+            save_as: None,
         })
     );
 }
@@ -1930,7 +1991,8 @@ fn attach_accepts_a_unicode_session_id() {
     assert_eq!(
         parse(&["koshi", "attach", "café-上海"]).command,
         Some(CliCommand::Attach {
-            session: Some("café-上海".to_string())
+            session: Some("café-上海".to_string()),
+            save_as: None,
         })
     );
 }

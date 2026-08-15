@@ -17,6 +17,7 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 getrandom = "0.4.3"
 base64 = "0.22.1"
 sha2 = "0.11.0"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "logging"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.188"
@@ -26,5 +27,6 @@ widestring = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 
 [dev-dependencies]
+rcgen = { version = "0.14.9", default-features = false, features = ["ring"] }
 tempfile = "3.27.0"
 uuid = "1.24.0"
