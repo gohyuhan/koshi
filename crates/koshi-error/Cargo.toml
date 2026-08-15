@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
-koshi = { version = "0.2.0", path = "../koshi" }
+koshi-link = { version = "0.2.0", path = "../koshi-link" }
 koshi-config = { version = "0.2.0", path = "../koshi-config" }
 koshi-core = { version = "0.2.0", path = "../koshi-core" }
 koshi-ipc = { version = "0.2.0", path = "../koshi-ipc" }

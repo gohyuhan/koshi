@@ -1,11 +1,13 @@
 //! Tests for reading a message whose variant this build may not have.
 
+use koshi_core::ids::PaneId;
 use serde::Serialize;
 
 use super::*;
 use crate::event::SessionEvent;
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
+use crate::supervisor::{SupervisorEvent, SupervisorRequestKind, SupervisorResult};
 
 /// A stand-in for a build that has fewer variants than its peer: it knows
 /// `Keep` and `Bare`, and nothing else.
@@ -233,6 +235,87 @@ fn every_wire_enum_lists_the_variants_it_writes() {
     assert_listed(sample_events());
     assert_listed(sample_router_kinds());
     assert_listed(sample_router_results());
+    assert_listed(sample_supervisor_kinds());
+    assert_listed(sample_supervisor_results());
+    assert_listed(sample_supervisor_events());
+}
+
+/// One value per [`SupervisorRequestKind`] variant.
+fn sample_supervisor_kinds() -> Vec<SupervisorRequestKind> {
+    use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
+
+    let size = PtySize { cols: 80, rows: 24 };
+
+    vec![
+        SupervisorRequestKind::Hello {
+            min_protocol_version: 1,
+            max_protocol_version: 1,
+            token: ConnectionToken::new("t"),
+        },
+        SupervisorRequestKind::Spawn {
+            pane_id: PaneId::new(),
+            spec: SpawnSpec {
+                program: std::path::PathBuf::from("/bin/sh"),
+                args: Vec::new(),
+                cwd: None,
+                env: std::collections::BTreeMap::new(),
+                shell_kind: ShellKind::Bash,
+            },
+            size,
+        },
+        SupervisorRequestKind::Resize {
+            pane_id: PaneId::new(),
+            size,
+        },
+        SupervisorRequestKind::Write {
+            pane_id: PaneId::new(),
+            bytes: Vec::new(),
+        },
+        SupervisorRequestKind::Kill {
+            pane_id: PaneId::new(),
+            kill_policy: KillPolicy::Force,
+        },
+        SupervisorRequestKind::LiveCwd {
+            pane_id: PaneId::new(),
+        },
+        SupervisorRequestKind::ListPanes,
+        SupervisorRequestKind::PauseOutput,
+        SupervisorRequestKind::ResumeOutput,
+        SupervisorRequestKind::Shutdown,
+    ]
+}
+
+/// One value per [`SupervisorResult`] variant.
+fn sample_supervisor_results() -> Vec<SupervisorResult> {
+    vec![
+        SupervisorResult::Hello {
+            protocol_version: 1,
+        },
+        SupervisorResult::Spawned { pid: 1 },
+        SupervisorResult::Panes(Vec::new()),
+        SupervisorResult::Cwd(None),
+        SupervisorResult::Done,
+        SupervisorResult::Error(crate::protocol::IpcErrorPayload {
+            code: crate::protocol::IpcErrorCode::BadToken,
+            message: String::new(),
+        }),
+    ]
+}
+
+/// One value per [`SupervisorEvent`] variant.
+fn sample_supervisor_events() -> Vec<SupervisorEvent> {
+    use koshi_core::process::ExitStatus;
+
+    vec![
+        SupervisorEvent::Output {
+            pane_id: PaneId::new(),
+            bytes: Vec::new(),
+        },
+        SupervisorEvent::Exited {
+            pane_id: PaneId::new(),
+            status: ExitStatus::Signaled(9),
+        },
+    ]
 }
 
 /// One value per [`IpcRequestKind`] variant. The match in

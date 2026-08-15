@@ -29,6 +29,7 @@
 //! file that names such a session on Windows.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,15 @@ pub fn shared_socket_addr(shared_user_dir: &Path, session: SessionId) -> String 
 /// walks a directory for resume files matches on this, so the name is built and
 /// recognised from one place.
 pub const RESUME_SUFFIX: &str = ".resume";
+
+/// How long a session replacing its own image has to come back.
+///
+/// Three sides read it, so it lives beside the resume file it is about. The
+/// session server writes that file and swaps; the router leaves a session
+/// whose file is younger than this alone, and removes the session when it is
+/// older; an attached client waits this long for the new socket before it
+/// gives up and reports the session gone.
+pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
 
 /// Where the resume file for `session` lives: `session-<uuid>.resume`,
 /// directly beside that session's endpoint file inside `runtime_dir`.

@@ -166,6 +166,42 @@ fn end_of_stream_inside_a_payload_reads_as_disconnected() {
     };
 }
 
+/// Every IO kind that means the peer is gone reads as one error, so a caller
+/// reports one sentence whichever kind the operating system chose.
+///
+/// macOS answers a read from a socket whose peer has closed with `ENOTCONN`
+/// where Linux answers end of stream. Before `NotConnected` joined the set,
+/// the same peer going away read as `ipc peer disconnected` or as `Socket is
+/// not connected (os error 57)` depending on which side won the race.
+#[test]
+fn every_peer_is_gone_io_kind_reads_as_disconnected() {
+    for kind in [
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::BrokenPipe,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::NotConnected,
+    ] {
+        let err = io_failure(io::Error::new(kind, "the peer is gone"));
+        let IpcError::Disconnected = err else {
+            panic!("{kind:?} should read as disconnected, got {err}");
+        };
+    }
+}
+
+#[test]
+fn an_io_kind_that_is_not_the_peer_going_away_keeps_its_own_words() {
+    let err = io_failure(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "permission denied",
+    ));
+
+    let IpcError::Transport { detail } = err else {
+        panic!("wrong error: {err}");
+    };
+    assert_eq!(detail, "permission denied");
+}
+
 // --- address mapping ---
 
 #[cfg(unix)]

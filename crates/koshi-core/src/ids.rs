@@ -269,5 +269,26 @@ impl fmt::Display for SubscriberId {
     }
 }
 
+/// Read an id a person typed, in either spelling koshi accepts: the prefixed
+/// form an id prints as, or the bare uuid inside it.
+///
+/// `prefix` is the word before the hyphen, e.g. `"session"`. The error names
+/// both spellings, so a mistyped id says what was expected.
+///
+/// Example — `parse_prefixed_uuid("session-01a0…", "session")` and
+/// `parse_prefixed_uuid("01a0…", "session")` both read the same uuid, and
+/// `parse_prefixed_uuid("pane-01a0…", "session")` fails with
+/// ``expected `session-<uuid>` or a bare UUID``.
+///
+/// # Errors
+/// Returns the sentence above when the text is neither spelling.
+pub fn parse_prefixed_uuid(value: &str, prefix: &str) -> Result<Uuid, String> {
+    let bare = value
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(value);
+    Uuid::parse_str(bare).map_err(|_| format!("expected `{prefix}-<uuid>` or a bare UUID"))
+}
+
 #[cfg(test)]
 mod tests;

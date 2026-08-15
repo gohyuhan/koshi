@@ -771,3 +771,11 @@ fn a_store_holding_no_records_reads_back_as_a_store_holding_no_records() {
     assert_eq!(store.records, Vec::new());
     assert_eq!(store.entries(None), Vec::new());
 }
+
+#[test]
+fn this_build_writes_token_store_format_one() {
+    // The value lives in the versioned-surface table now, one crate away, so
+    // this pins what a store written today says. Changing it means every older
+    // koshi stops reading this machine's grants.
+    assert_eq!(TOKEN_STORE_FORMAT, 1);
+}

@@ -216,7 +216,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 version: "0.9.9".to_string(),
             },
         }),
-        r#"{"request_id":1,"result":{"Hello":{"protocol_version":3,"version":"0.9.9"}}}"#
+        r#"{"request_id":1,"result":{"Hello":{"protocol_version":2,"version":"0.9.9"}}}"#
     );
     assert_eq!(
         encode(&RouterResponse {
@@ -294,11 +294,11 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
-fn this_build_speaks_control_plane_versions_one_to_three() {
-    // Version 3 is this build's own, adding the three remote access token
-    // kinds. The floor stays 1, the version 0.2.0 speaks, so those callers are
-    // still served.
-    assert_eq!(ROUTER_PROTOCOL_VERSION, 3);
+fn this_build_speaks_control_plane_versions_one_to_two() {
+    // Version 2 is this build's own: a session the router does not have is
+    // refused with NotFound, where version 1 sent MalformedRequest. The floor
+    // stays 1, the version 0.2.0 speaks, so those callers are still served.
+    assert_eq!(ROUTER_PROTOCOL_VERSION, 2);
     assert_eq!(MIN_ROUTER_PROTOCOL_VERSION, 1);
 }
 

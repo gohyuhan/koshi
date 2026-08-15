@@ -11,7 +11,17 @@
 //! is focused*, and each viewer looks up what "focused" looks like in its own
 //! theme. Two viewers of one session can paint it two different ways at once.
 
+/// The bare `koshi` launch, and the terminal I/O every attached client uses.
+pub mod app;
+
+/// The attached client: join a running session over its control socket and
+/// read its event stream. A switch re-attaches the same terminal to the named
+/// session; a detach, the session ending, or a broken connection ends the
+/// client.
+pub mod attach;
+
 pub mod input;
+
 pub mod mouse;
 pub mod theme;
 

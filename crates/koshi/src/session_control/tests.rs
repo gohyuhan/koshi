@@ -21,6 +21,7 @@ use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
 
 use super::*;
+use koshi_ipc::router::{RouterRequestKind, RouterResult};
 
 /// The answer an accepted session Hello earns.
 fn hello_accepted() -> IpcResult {

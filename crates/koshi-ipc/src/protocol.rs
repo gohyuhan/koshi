@@ -16,6 +16,7 @@
 use std::fmt;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult};
+use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -27,22 +28,19 @@ use subtle::ConstantTimeEq;
 
 use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
-use crate::wire::{MaybeKnown, WireName, WireVariants};
+use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
 /// The highest protocol version this build speaks, and the one it uses when
 /// the peer speaks it too.
 ///
-/// Bumps when an existing wire field changes its type or its meaning, in the
-/// same commit as that change: the first such change after a release sets
-/// this to the released value plus one, and the value then holds until the
-/// next release. A field added or removed with both sides still decoding
-/// cleanly does not bump it.
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::SESSION_PROTOCOL`].
 ///
 /// Versions 3 and 4 were bumped for pure additions, under an older reading
-/// that bumped on every change. The rule above resets the number to the last
-/// released value — v0.1.0 is the only released build and speaks 1 — so 0.2.0
-/// speaks 2.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// that bumped on every change. Folding those non-qualifying bumps back to the
+/// last released value — v0.1.0 is the only released build and speaks 1 —
+/// leaves 0.2.0 speaking 2.
+pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.max;
 
 /// The lowest protocol version this build speaks. A peer whose highest is
 /// below this one is refused with
@@ -54,7 +52,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 ///
 /// Raising this floor drops support for every build below it, so it moves
 /// only on a stated decision to end that support.
-pub const MIN_PROTOCOL_VERSION: u32 = 2;
+pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.min;
 
 /// The version two peers use, given the range each speaks: the highest both
 /// have. `None` when the ranges do not overlap.
@@ -161,15 +159,7 @@ impl fmt::Display for ConnectionToken {
 /// `K` is the request kind. A sender uses `IpcRequest`, where `K` is
 /// [`IpcRequestKind`]. A server uses [`IncomingRequest`], where a kind this
 /// build does not have arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IpcRequest<K = IpcRequestKind> {
-    /// Caller-chosen id, repeated in the response that answers this request.
-    /// Unique among the requests in flight on one connection.
-    pub request_id: u64,
-    /// What is being asked.
-    pub kind: K,
-}
+pub type IpcRequest<K = IpcRequestKind> = Envelope<K>;
 
 /// A request as a server reads it: the kind may name something this build does
 /// not have.
@@ -391,17 +381,7 @@ pub enum EventFilterSpec {
 /// `R` is the answer. A server uses `IpcResponse`, where `R` is
 /// [`IpcResult`]. A caller uses [`IncomingResponse`], where a result this
 /// build does not have arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IpcResponse<R = IpcResult> {
-    /// The `request_id` of the request being answered, or `None` when the
-    /// bytes received were too malformed to read one — a caller that sent
-    /// request 7 and reads `None` knows the answer belongs to no request of
-    /// its own.
-    pub request_id: Option<u64>,
-    /// The answer itself.
-    pub result: R,
-}
+pub type IpcResponse<R = IpcResult> = Answer<R>;
 
 /// A response as a caller reads it: the result may name something this build
 /// does not have.
@@ -483,6 +463,9 @@ pub enum IpcErrorCode {
     UnsupportedKind,
     /// The bytes received are not a request this build can read.
     MalformedRequest,
+    /// The caller named a target this build does not have. The message names
+    /// it.
+    NotFound,
     /// A request arrived before [`IpcRequestKind::Hello`] opened the
     /// connection.
     HelloRequired,
@@ -494,6 +477,28 @@ pub enum IpcErrorCode {
     /// [`message`](IpcErrorPayload::message) beside it still reads.
     #[default]
     Unknown,
+}
+
+/// The session protocol, as a serve loop sees it: what a session server
+/// answers on its own session's control socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionPlane;
+
+impl crate::plane::Plane for SessionPlane {
+    type Kind = IpcRequestKind;
+    type Result = IpcResult;
+    type Gate = crate::handshake::Handshake;
+
+    fn refusal(payload: IpcErrorPayload) -> IpcResult {
+        IpcResult::Error(payload)
+    }
+
+    fn hello(agreed: u32, build: &str) -> IpcResult {
+        IpcResult::Hello {
+            protocol_version: agreed,
+            version: build.to_string(),
+        }
+    }
 }
 
 impl WireVariants for IpcRequestKind {

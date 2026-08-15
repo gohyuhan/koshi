@@ -36,7 +36,11 @@ use crate::protocol::ConnectionToken;
 
 /// The format number this build writes into every store, and the only one it
 /// reads back.
-pub const TOKEN_STORE_FORMAT: u32 = 1;
+///
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::TOKEN_STORE_FORMAT`]. Named by
+/// its full path here, since this constant carries the same name.
+pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.max;
 
 /// How far one grant reaches.
 ///

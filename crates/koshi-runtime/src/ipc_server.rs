@@ -24,14 +24,11 @@
 //! setting is read again for each of that user's requests, so turning it off
 //! closes their connections.
 //!
-//! A request kind this build does not have is answered `UnsupportedKind` by
-//! name, and the connection keeps serving.
-//!
-//! A connection fault stays on its connection: a malformed-but-aligned
-//! frame is answered with `MalformedRequest` and the connection keeps
-//! serving, while an oversize frame — whose payload cannot be skipped, so
-//! the stream's framing is lost — closes that one connection. Neither
-//! reaches the session, any pane, or any other connection.
+//! The decisions every koshi server makes the same way — a request kind this
+//! build does not have, a malformed-but-aligned frame, an oversize frame, and
+//! the Hello — belong to [`plane::next_request`], which this loop reads its
+//! requests through. None of them reaches the session, any pane, or any other
+//! connection.
 //!
 //! A `Leaving` request ends the connection it arrives on: the thread serving it
 //! stops reading and the connection closes. Requests arrive in the order the
@@ -64,9 +61,10 @@ use koshi_ipc::endpoint::{
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::handshake::{Handshake, Peer};
+use koshi_ipc::plane::{self, Next};
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
-    IpcResult,
+    IpcResult, SessionPlane,
 };
 use koshi_ipc::transport::{Connection, Listener, ReadCloser};
 use koshi_ipc::validate::{
@@ -82,6 +80,10 @@ use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 /// again, so a persistent accept error (say, the process is out of file
 /// descriptors) cannot spin a core.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// The version of the binary this session server is, reported in its Hello
+/// answer.
+const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Reads the `allow-other-users` setting from the configuration again and
 /// reports whether it is on. Called for each connection from another local
@@ -580,11 +582,14 @@ fn accept_loop(
     }
 }
 
-/// Serve one connection until its peer hangs up or a fault closes it: a
-/// [`Handshake`] gates every request, `SubmitCommand`, `Attach`, `Discovery`,
-/// `Layout` and `Restart` cross to the dispatcher over the inbox and answer
-/// with its reply, and a malformed-but-aligned frame is answered with
-/// [`IpcErrorCode::MalformedRequest`] while the connection keeps serving.
+/// Serve one connection until its peer hangs up or a fault closes it.
+///
+/// [`plane::next_request`] makes every decision that is the same on every
+/// koshi protocol — the framing faults, a request kind this build does not
+/// have, and the Hello — and reads `live_setting` before any of its answers go
+/// out. What is left is this session's own vocabulary: `SubmitCommand`,
+/// `Attach`, `Discovery`, `Layout` and `Restart` cross to the dispatcher over
+/// the inbox and answer with its reply.
 ///
 /// A `Restart` the dispatcher refuses is answered with
 /// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
@@ -596,8 +601,9 @@ fn accept_loop(
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
-/// started the session. It is read before each request is served, so turning
-/// the setting off closes the connection.
+/// started the session. It is read once a request has arrived and before any
+/// answer goes out, so turning the setting off closes the connection with
+/// nothing written.
 ///
 /// A `Leaving` request ends the connection with no answer.
 ///
@@ -614,196 +620,155 @@ fn serve_connection(
     served: &ServedConnection,
 ) {
     let mut gate = Handshake::new(token, peer);
+    // The setting can change while this connection is open, so it is read
+    // again for each request rather than trusted from the accept that let the
+    // peer in. `None` is a connection from the user who started the session,
+    // whose admission cannot be withdrawn.
+    let admission = live_setting.clone();
+    let admitted = move || match &admission {
+        None => true,
+        Some(still_on) => still_on(),
+    };
     loop {
-        let request: IncomingRequest = match connection.recv() {
-            Ok(request) => request,
-            Err(IpcError::MalformedFrame { .. }) => {
-                // The frame was read whole, so the stream is still aligned;
-                // only its bytes were unreadable. `request_id: None` tells
-                // the caller the answer belongs to no request of its own.
-                let refusal = IpcResponse {
-                    request_id: None,
-                    result: IpcResult::Error(IpcErrorPayload {
-                        code: IpcErrorCode::MalformedRequest,
-                        message: "the bytes received are not a request this build can read"
-                            .to_string(),
-                    }),
-                };
-                if connection.send(&refusal).is_err() {
-                    return;
-                }
-                continue;
-            }
-            // An oversize frame's payload was never read, so the stream's
-            // framing is lost; disconnects and transport faults have no
-            // stream left. All close this one connection.
-            Err(_) => return,
+        let (request_id, kind) = match plane::next_request::<SessionPlane>(
+            &mut connection,
+            &mut gate,
+            BUILD_VERSION,
+            &admitted,
+        ) {
+            Next::Answered => continue,
+            Next::Stop => return,
+            Next::Dispatch { request_id, kind } => (Some(request_id), kind),
         };
 
-        // The setting can change while this connection is open, so it is read
-        // again rather than trusted from the accept that let the peer in.
-        if live_setting.as_ref().is_some_and(|still_on| !still_on()) {
-            return;
-        }
-
-        let request_id = Some(request.request_id);
-        // A kind this build does not have comes from a newer koshi. It is
-        // refused by name and the connection keeps serving, so one unfamiliar
-        // request does not cost the caller its other verbs.
-        let kind = match request.kind {
-            MaybeKnown::Known(kind) => kind,
-            MaybeKnown::Unknown { name } => {
-                let refusal = IpcResponse {
-                    request_id,
-                    result: IpcResult::Error(gate.refuse_unknown(&name)),
-                };
-                if connection.send(&refusal).is_err() {
-                    return;
-                }
-                continue;
+        let response = match kind {
+            // Answered before dispatch, so it never reaches this match.
+            IpcRequestKind::Hello { .. } => {
+                unreachable!("Hello is answered by the connection thread before dispatch")
             }
-        };
-
-        let response = match gate.check(&kind) {
-            Err(refusal) => IpcResponse {
-                request_id,
-                result: IpcResult::Error(refusal),
-            },
-            Ok(()) => match kind {
-                IpcRequestKind::Hello { .. } => IpcResponse {
-                    request_id,
-                    result: IpcResult::Hello {
-                        protocol_version: gate
-                            .agreed()
-                            .expect("an accepted Hello settles the connection's version"),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                    },
-                },
-                IpcRequestKind::SubmitCommand(envelope) => {
-                    let answer =
-                        ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::Ipc {
-                            envelope: *envelope,
-                            reply,
-                        });
-                    match answer {
-                        Some(result) => IpcResponse {
-                            request_id,
-                            result: IpcResult::CommandResult(result),
-                        },
-                        None => return,
-                    }
-                }
-                IpcRequestKind::Attach {
-                    viewport,
-                    filter,
-                    resume,
-                } => {
-                    let answer =
-                        ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
-                            resume,
-                            viewport,
-                            filter: filter.into(),
-                            attached_at: SystemTime::now(),
-                            reply,
-                        });
-                    // No running session, or no dispatcher left to mint the
-                    // client: the process is past its last session, so the
-                    // socket is as good as gone.
-                    let Some(Some(accepted)) = answer else {
-                        return;
-                    };
-                    let attached = IpcResponse {
+            IpcRequestKind::SubmitCommand(envelope) => {
+                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::Ipc {
+                    envelope: *envelope,
+                    reply,
+                });
+                match answer {
+                    Some(result) => IpcResponse {
                         request_id,
-                        result: IpcResult::Attached {
-                            client_id: accepted.client_id,
-                            session_id: accepted.session_id,
-                            structure: accepted.structure,
-                        },
-                    };
-                    if connection.send(&attached).is_err() {
-                        served.intake.hand_over(
-                            inbox_tx,
-                            RuntimeEvent::ClientDetached {
-                                client_id: accepted.client_id,
-                            },
-                        );
-                        return;
-                    }
-                    // The reply is written; from here the connection carries
-                    // the client's event stream and the client's own input.
-                    stream_events(
-                        connection,
-                        accepted.client_id,
-                        accepted.events,
-                        accepted.ending_notice,
+                        result: IpcResult::CommandResult(result),
+                    },
+                    None => return,
+                }
+            }
+            IpcRequestKind::Attach {
+                viewport,
+                filter,
+                resume,
+            } => {
+                let answer =
+                    ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
+                        resume,
+                        viewport,
+                        filter: filter.into(),
+                        attached_at: SystemTime::now(),
+                        reply,
+                    });
+                // No running session, or no dispatcher left to mint the
+                // client: the process is past its last session, so the
+                // socket is as good as gone.
+                let Some(Some(accepted)) = answer else {
+                    return;
+                };
+                let attached = IpcResponse {
+                    request_id,
+                    result: IpcResult::Attached {
+                        client_id: accepted.client_id,
+                        session_id: accepted.session_id,
+                        structure: accepted.structure,
+                    },
+                };
+                if connection.send(&attached).is_err() {
+                    served.intake.hand_over(
                         inbox_tx,
-                        live_setting,
-                        served,
+                        RuntimeEvent::ClientDetached {
+                            client_id: accepted.client_id,
+                        },
                     );
                     return;
                 }
-                // A key press, a resize, a paste and a mouse round belong on an
-                // attached client's connection, which the `Attach` arm above
-                // hands to `stream_events`. On this control path they name no
-                // client, so they close the connection.
-                IpcRequestKind::KeyPress { .. }
-                | IpcRequestKind::Resize { .. }
-                | IpcRequestKind::Paste { .. }
-                | IpcRequestKind::Mouse(_) => return,
-                IpcRequestKind::Discovery => {
-                    let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                        RuntimeEvent::IpcDiscovery { reply }
-                    });
-                    match answer {
-                        Some(Some(overview)) => IpcResponse {
-                            request_id,
-                            result: IpcResult::Overview(overview),
-                        },
-                        // No running session: the process is past its last
-                        // session, so the socket is as good as gone.
-                        Some(None) | None => return,
-                    }
+                // The reply is written; from here the connection carries
+                // the client's event stream and the client's own input.
+                stream_events(
+                    connection,
+                    accepted.client_id,
+                    accepted.events,
+                    accepted.ending_notice,
+                    inbox_tx,
+                    live_setting,
+                    served,
+                );
+                return;
+            }
+            // A key press, a resize, a paste and a mouse round belong on an
+            // attached client's connection, which the `Attach` arm above
+            // hands to `stream_events`. On this control path they name no
+            // client, so they close the connection.
+            IpcRequestKind::KeyPress { .. }
+            | IpcRequestKind::Resize { .. }
+            | IpcRequestKind::Paste { .. }
+            | IpcRequestKind::Mouse(_) => return,
+            IpcRequestKind::Discovery => {
+                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
+                    RuntimeEvent::IpcDiscovery { reply }
+                });
+                match answer {
+                    Some(Some(overview)) => IpcResponse {
+                        request_id,
+                        result: IpcResult::Overview(overview),
+                    },
+                    // No running session: the process is past its last
+                    // session, so the socket is as good as gone.
+                    Some(None) | None => return,
                 }
-                IpcRequestKind::Layout { tab } => {
-                    let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                        RuntimeEvent::IpcLayout { tab, reply }
-                    });
-                    match answer {
-                        Some(Some(layout)) => IpcResponse {
-                            request_id,
-                            result: IpcResult::Layout(layout),
-                        },
-                        // No running session: the process is past its last
-                        // session, so the socket is as good as gone.
-                        Some(None) | None => return,
-                    }
+            }
+            IpcRequestKind::Layout { tab } => {
+                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
+                    RuntimeEvent::IpcLayout { tab, reply }
+                });
+                match answer {
+                    Some(Some(layout)) => IpcResponse {
+                        request_id,
+                        result: IpcResult::Layout(layout),
+                    },
+                    // No running session: the process is past its last
+                    // session, so the socket is as good as gone.
+                    Some(None) | None => return,
                 }
-                IpcRequestKind::Restart => {
-                    let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
-                        RuntimeEvent::IpcRestart { reply }
-                    });
-                    match answer {
-                        Some(Ok(())) => IpcResponse {
-                            request_id,
-                            result: IpcResult::Restarting,
-                        },
-                        // The dispatcher named what is wrong; nothing was torn
-                        // down, so the connection keeps serving.
-                        Some(Err(message)) => IpcResponse {
-                            request_id,
-                            result: IpcResult::Error(IpcErrorPayload {
-                                code: IpcErrorCode::MalformedRequest,
-                                message,
-                            }),
-                        },
-                        // No dispatcher left to swap anything: the process is
-                        // tearing down, so the socket is as good as gone.
-                        None => return,
-                    }
+            }
+            IpcRequestKind::Restart => {
+                let answer = ask_dispatcher(&served.intake, inbox_tx, |reply| {
+                    RuntimeEvent::IpcRestart { reply }
+                });
+                match answer {
+                    Some(Ok(())) => IpcResponse {
+                        request_id,
+                        result: IpcResult::Restarting,
+                    },
+                    // The dispatcher named what is wrong; nothing was torn
+                    // down, so the connection keeps serving.
+                    Some(Err(message)) => IpcResponse {
+                        request_id,
+                        result: IpcResult::Error(IpcErrorPayload {
+                            code: IpcErrorCode::MalformedRequest,
+                            message,
+                        }),
+                    },
+                    // No dispatcher left to swap anything: the process is
+                    // tearing down, so the socket is as good as gone.
+                    None => return,
                 }
-                // No answer belongs to this one.
-                IpcRequestKind::Leaving => return,
-            },
+            }
+            // No answer belongs to this one.
+            IpcRequestKind::Leaving => return,
         };
         if connection.send(&response).is_err() {
             return;

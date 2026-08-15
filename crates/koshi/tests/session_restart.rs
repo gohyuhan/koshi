@@ -363,7 +363,7 @@ fn type_line(connection: &mut Connection, client_id: ClientId, pane: PaneId, lin
 
 /// The session's own description of itself, read over its control socket.
 fn overview(runtime_dir: &Path, session_id: SessionId) -> SessionOverview {
-    koshi::ipc_client::fetch_overview(runtime_dir, session_id)
+    koshi_link::ipc_client::fetch_overview(runtime_dir, session_id)
         .expect("the session server describes itself")
 }
 

@@ -35,7 +35,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use koshi::cli::{Cli, ResolvedTargets};
-use koshi::error::CliError;
 use koshi_core::command::{CliExitCode, Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::event::{
@@ -53,6 +52,7 @@ use koshi_ipc::protocol::{
     PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
+use koshi_link::error::CliError;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
@@ -144,7 +144,7 @@ impl RunningSession {
     /// The session's own report of itself, read over the control socket by the
     /// library call the `koshi inspect` verbs make.
     fn overview(&self) -> koshi_core::discovery::SessionOverview {
-        koshi::ipc_client::fetch_overview(self.dir.path(), self.id)
+        koshi_link::ipc_client::fetch_overview(self.dir.path(), self.id)
             .expect("the session server describes itself")
     }
 }
@@ -721,7 +721,7 @@ fn dump_layout_over_the_socket_describes_a_tab_no_client_is_viewing() {
     let session = RunningSession::start();
     let root = session.panes()[0];
 
-    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+    let layout = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, None)
         .expect("the session describes its layout");
 
     assert_eq!(layout.id, session.id);
@@ -748,7 +748,7 @@ fn dump_layout_over_the_socket_shows_the_attached_clients_solved_rectangles() {
     let client = attach(&session);
     let root = session.panes()[0];
 
-    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, None)
+    let layout = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, None)
         .expect("the session describes its layout");
 
     assert_eq!(layout.tabs.len(), 1);
@@ -791,7 +791,7 @@ fn dump_layout_over_the_socket_narrowed_to_one_tab_describes_that_tab_alone() {
     assert_eq!(code, CliExitCode::Success);
     let wanted = session.overview().tabs[1].id;
 
-    let layout = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(wanted))
+    let layout = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, Some(wanted))
         .expect("the session describes its layout");
 
     assert_eq!(layout.tabs.len(), 1);
@@ -806,7 +806,7 @@ fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_reports_the_tab_missin
     let session = RunningSession::start();
     let unknown = TabId::new();
 
-    let error = koshi::ipc_client::fetch_layout(session.dir.path(), session.id, Some(unknown))
+    let error = koshi_link::ipc_client::fetch_layout(session.dir.path(), session.id, Some(unknown))
         .expect_err("the session holds no such tab");
 
     assert_eq!(
@@ -824,7 +824,7 @@ fn dump_layout_against_a_session_that_is_not_running_reports_it_as_not_running()
     let runtime_dir = test_runtime_dir();
     let session = SessionId::new();
 
-    let error = koshi::ipc_client::fetch_layout(runtime_dir.path(), session, None)
+    let error = koshi_link::ipc_client::fetch_layout(runtime_dir.path(), session, None)
         .expect_err("nothing advertises that session");
 
     assert!(
@@ -847,7 +847,7 @@ fn dump_state_over_the_socket_hides_a_pane_commands_arguments() {
     assert_eq!(code, CliExitCode::Success);
 
     let mut found = vec![session.overview()];
-    koshi::discovery::redact_pane_commands(&mut found);
+    koshi_link::discovery::redact_pane_commands(&mut found);
 
     let command_pane = found[0]
         .panes

@@ -29,8 +29,46 @@
 use std::fmt;
 
 use serde::de::{DeserializeOwned, Error as _, IgnoredAny, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
+
+/// One message asking a peer to do something, on any of koshi's protocols.
+///
+/// The envelope's own fields are fixed: decoding rejects any field it does not
+/// know, so a misspelled `request_id` is an error. What may travel inside `K`
+/// is each protocol's own business.
+///
+/// `K` is the request kind. A sender uses the protocol's own kind. A server
+/// uses [`MaybeKnown<K>`], where a kind this build does not have arrives as
+/// [`MaybeKnown::Unknown`] instead of ending the connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Envelope<K> {
+    /// Caller-chosen id, repeated in the answer to this message. Unique among
+    /// the messages in flight on one connection.
+    pub request_id: u64,
+    /// What is being asked.
+    pub kind: K,
+}
+
+/// One message answering an [`Envelope`], on any of koshi's protocols.
+///
+/// The envelope's own fields are fixed, the same way [`Envelope`]'s are.
+///
+/// `R` is the answer. A server uses the protocol's own result. A caller uses
+/// [`MaybeKnown<R>`], where a result this build does not have arrives as
+/// [`MaybeKnown::Unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Answer<R> {
+    /// The `request_id` of the message being answered, or `None` when the
+    /// bytes received were too malformed to read one — a caller that sent
+    /// request 7 and reads `None` knows the answer belongs to no request of
+    /// its own.
+    pub request_id: Option<u64>,
+    /// The answer itself.
+    pub result: R,
+}
 
 /// The variant names a build can decode, for one wire enum.
 ///

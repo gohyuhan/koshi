@@ -13,8 +13,9 @@ use koshi_core::ids::SessionId;
 use serde::Serialize;
 
 use crate::cli::SessionRef;
-use crate::error::CliError;
-use crate::{ipc_client, router_client, targeting};
+use crate::targeting;
+use koshi_link::error::CliError;
+use koshi_link::{ipc_client, router_client};
 
 /// The build of the koshi program that ran this command, as `koshi version`
 /// reports it.

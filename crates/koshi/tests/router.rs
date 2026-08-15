@@ -274,7 +274,7 @@ fn endpoint_after_restart(runtime_dir: &Path, before: &EndpointFile) -> Endpoint
 /// session.
 fn no_such_session(id: SessionId) -> RouterResult {
     RouterResult::Error(IpcErrorPayload {
-        code: IpcErrorCode::MalformedRequest,
+        code: IpcErrorCode::NotFound,
         message: format!("no session {id} is running"),
     })
 }
@@ -352,7 +352,7 @@ fn a_restarted_router_rediscovers_a_session_server_that_outlived_it() {
     let found = attach_lookup(&mut connection, &SessionSelector::Id(created.id));
     assert_eq!(found, RouterResult::Found(created.clone()));
 
-    let overview = koshi::ipc_client::fetch_overview(dir.path(), created.id)
+    let overview = koshi_link::ipc_client::fetch_overview(dir.path(), created.id)
         .expect("the session server describes itself");
     assert_eq!(overview.session.id, created.id);
     assert_eq!(overview.session.name, created.name);

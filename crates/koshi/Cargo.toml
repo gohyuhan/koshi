@@ -21,6 +21,8 @@ koshi-beta = { version = "0.2.0", path = "../koshi-beta" }
 koshi-client = { version = "0.2.0", path = "../koshi-client" }
 koshi-config = { version = "0.2.0", path = "../koshi-config" }
 koshi-core = { version = "0.2.0", path = "../koshi-core" }
+koshi-daemon = { version = "0.2.0", path = "../koshi-daemon" }
+koshi-link = { version = "0.2.0", path = "../koshi-link" }
 koshi-input = { version = "0.2.0", path = "../koshi-input" }
 koshi-ipc = { version = "0.2.0", path = "../koshi-ipc" }
 koshi-layout = { version = "0.2.0", path = "../koshi-layout" }

@@ -18,7 +18,7 @@ use koshi_config::parser::unknown_key;
 use koshi_storage::{atomic::write_atomic, error::StorageError};
 
 use crate::cli::ConfigCommand;
-use crate::error::CliError;
+use koshi_link::error::CliError;
 
 #[cfg(test)]
 mod tests;

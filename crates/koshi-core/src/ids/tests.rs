@@ -130,3 +130,35 @@ fn default_mints_a_fresh_non_nil_id_for_every_id_type() {
     assert_ne!(SubscriberId::default(), SubscriberId::default());
     assert_ne!(SubscriberId::default().as_uuid(), &nil);
 }
+
+#[test]
+fn an_id_reads_in_both_spellings_koshi_accepts() {
+    let id = SessionId::new();
+    let printed = id.to_string();
+    let bare = printed
+        .strip_prefix("session-")
+        .expect("a session id prints with its prefix");
+
+    assert_eq!(
+        parse_prefixed_uuid(&printed, "session").expect("the prefixed spelling reads"),
+        parse_prefixed_uuid(bare, "session").expect("the bare spelling reads")
+    );
+}
+
+#[test]
+fn an_id_carrying_another_kinds_prefix_names_both_spellings() {
+    let pane = PaneId::new().to_string();
+
+    assert_eq!(
+        parse_prefixed_uuid(&pane, "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}
+
+#[test]
+fn text_that_is_no_uuid_at_all_names_both_spellings() {
+    assert_eq!(
+        parse_prefixed_uuid("quiet-lake", "session"),
+        Err("expected `session-<uuid>` or a bare UUID".to_string())
+    );
+}

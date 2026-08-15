@@ -14,8 +14,9 @@ use koshi_ipc::router::{RouterRequestKind, RouterResult};
 use koshi_ipc::wire::WireName;
 
 use crate::cli::{Expiry, SessionRef, ShareCommand};
-use crate::error::CliError;
-use crate::{ipc_client, output, router_client, targeting};
+use crate::{output, targeting};
+use koshi_link::error::CliError;
+use koshi_link::{ipc_client, router_client};
 
 #[cfg(test)]
 mod tests;

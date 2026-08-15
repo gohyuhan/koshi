@@ -17,6 +17,9 @@ pub mod frame;
 pub mod handshake;
 /// One session's layout: each tab's split tree and the rectangles it solves to.
 pub mod layout;
+/// What every server does the same way, on whichever protocol it speaks: the
+/// framing faults, the unknown request kind, and the Hello.
+pub mod plane;
 pub mod protocol;
 /// The machine's remote access tokens: what a grant records, where it is
 /// stored, and what a presented token reaches.

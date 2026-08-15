@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use koshi_core::compat::CONTROL_PROTOCOL;
 use koshi_core::discovery::SessionInfo;
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
@@ -32,19 +33,19 @@ use serde::{Deserialize, Serialize};
 use crate::handshake::{GateWords, VersionGate};
 use crate::protocol::{ConnectionToken, IpcErrorPayload};
 use crate::remote_tokens::{TokenEntry, TokenScope};
-use crate::wire::{MaybeKnown, WireName, WireVariants};
+use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
 /// The highest control-plane protocol version this build speaks, and the one
 /// it uses when the peer speaks it too.
 ///
-/// Bumps once per release cycle, in the commit that first changes a wire shape
-/// after a release — not once per change. Version 1 is what 0.2.0 speaks;
-/// version 2 adds [`RouterRequestKind::Restart`] and its
-/// [`RouterResult::Restarting`] answer; version 3 adds
-/// [`RouterRequestKind::GrantToken`], [`RouterRequestKind::RevokeToken`] and
-/// [`RouterRequestKind::ListTokens`] with their [`RouterResult::Granted`],
-/// [`RouterResult::Revoked`] and [`RouterResult::Tokens`] answers.
-pub const ROUTER_PROTOCOL_VERSION: u32 = 3;
+/// The value and the rule it follows live in
+/// [`koshi_core::compat::CONTROL_PROTOCOL`].
+///
+/// Version 1 is what 0.2.0 speaks. Version 2 refuses a session the router does
+/// not have with [`NotFound`](crate::protocol::IpcErrorCode::NotFound), where
+/// version 1 sent
+/// [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest).
+pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -55,7 +56,7 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = 3;
 ///
 /// Raising this floor drops support for every build below it, so it moves
 /// only on a stated decision to end that support.
-pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = 1;
+pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.min;
 
 /// Which session a request means: the id, or the generated display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,15 +75,7 @@ pub enum SessionSelector {
 /// `K` is the request kind. A sender uses `RouterRequest`, where `K` is
 /// [`RouterRequestKind`]. The router uses [`IncomingRouterRequest`], where a
 /// kind this build does not have arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RouterRequest<K = RouterRequestKind> {
-    /// Caller-chosen id, repeated in the response that answers this request.
-    /// Unique among the requests in flight on one connection.
-    pub request_id: u64,
-    /// What is being asked.
-    pub kind: K,
-}
+pub type RouterRequest<K = RouterRequestKind> = Envelope<K>;
 
 /// A control-plane request as the router reads it: the kind may name something
 /// this build does not have.
@@ -214,15 +207,7 @@ impl RouterRequestKind {
 /// `R` is the answer. The router uses `RouterResponse`, where `R` is
 /// [`RouterResult`]. A caller uses [`IncomingRouterResponse`], where a result
 /// this build does not have arrives as [`MaybeKnown::Unknown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RouterResponse<R = RouterResult> {
-    /// The `request_id` of the request being answered, or `None` when the
-    /// bytes received were too malformed to read one.
-    pub request_id: Option<u64>,
-    /// The answer itself.
-    pub result: R,
-}
+pub type RouterResponse<R = RouterResult> = Answer<R>;
 
 /// A control-plane response as a caller reads it: the result may name
 /// something this build does not have.
@@ -491,6 +476,48 @@ impl WireName for RouterResult {
             RouterResult::Tokens(_) => "Tokens",
             RouterResult::Error(_) => "Error",
         }
+    }
+}
+
+/// The control plane, as a serve loop sees it: what the router answers on its
+/// own socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlPlane;
+
+impl crate::plane::Plane for ControlPlane {
+    type Kind = RouterRequestKind;
+    type Result = RouterResult;
+    type Gate = RouterHandshake;
+
+    fn refusal(payload: IpcErrorPayload) -> RouterResult {
+        RouterResult::Error(payload)
+    }
+
+    fn hello(agreed: u32, build: &str) -> RouterResult {
+        RouterResult::Hello {
+            protocol_version: agreed,
+            version: build.to_string(),
+        }
+    }
+}
+
+impl crate::plane::Gate for RouterHandshake {
+    type Kind = RouterRequestKind;
+
+    fn agreed(&self) -> Option<u32> {
+        RouterHandshake::agreed(self)
+    }
+
+    fn refuse_unknown(&self, name: &str) -> IpcErrorPayload {
+        RouterHandshake::refuse_unknown(self, name)
+    }
+
+    fn check(&mut self, kind: &RouterRequestKind) -> Result<(), IpcErrorPayload> {
+        RouterHandshake::check(self, kind)
+    }
+
+    fn is_hello(kind: &RouterRequestKind) -> bool {
+        matches!(kind, RouterRequestKind::Hello { .. })
     }
 }
 

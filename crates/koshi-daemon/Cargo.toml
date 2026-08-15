@@ -1,0 +1,33 @@
+[package]
+name = "koshi-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fs4 = "1.1.0"
+koshi-config = { version = "0.2.0", path = "../koshi-config" }
+koshi-core = { version = "0.2.0", path = "../koshi-core" }
+koshi-ipc = { version = "0.2.0", path = "../koshi-ipc" }
+koshi-link = { version = "0.2.0", path = "../koshi-link" }
+koshi-observability = { version = "0.2.0", path = "../koshi-observability" }
+koshi-paths = { version = "0.2.0", path = "../koshi-paths" }
+koshi-pty = { version = "0.2.0", path = "../koshi-pty" }
+koshi-runtime = { version = "0.2.0", path = "../koshi-runtime" }
+koshi-storage = { version = "0.2.0", path = "../koshi-storage" }
+serde = "1.0.228"
+serde_json = "1.0.150"
+tracing = "0.1.44"
+
+koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.188"
+
+[dev-dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+koshi = { version = "0.2.0", path = "../koshi" }
+koshi-terminal = { version = "0.2.0", path = "../koshi-terminal" }
+koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
+tempfile = "3.27.0"
+uuid = "1.23.4"

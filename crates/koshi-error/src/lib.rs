@@ -4,10 +4,10 @@
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-use koshi::error::CliError;
 use koshi_config::error::ConfigError;
 use koshi_ipc::error::IpcError;
 use koshi_layout::error::LayoutError;
+use koshi_link::error::CliError;
 use koshi_plugin_host::error::PluginError;
 use koshi_pty::error::PtyError;
 use koshi_storage::error::StorageError;
