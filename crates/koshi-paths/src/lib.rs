@@ -2,8 +2,9 @@
 //!
 //! Every directory koshi reads or writes comes from a function here. Each one
 //! returns the platform's conventional location — per-user everywhere except
-//! [`shared_sessions_dir`], which is machine-wide. koshi reads no `KOSHI_*`
-//! variable to relocate its files:
+//! [`shared_sessions_dir`], which is machine-wide. `KOSHI_RUNTIME_DIR` is the
+//! one `KOSHI_*` variable koshi reads: it names [`runtime_dir`], and must hold
+//! an absolute path. No other `KOSHI_*` variable relocates anything:
 //!
 //! | Function | Linux | macOS | Windows |
 //! |---|---|---|---|
@@ -11,13 +12,14 @@
 //! | [`data_dir`] | `~/.local/share/koshi` | `~/Library/Application Support/koshi` | `%APPDATA%\koshi\data` |
 //! | [`cache_dir`] | `~/.cache/koshi` | `~/Library/Caches/koshi` | `%LOCALAPPDATA%\koshi\cache` |
 //! | [`state_dir`] | `~/.local/state/koshi` | `~/Library/Application Support/koshi` | `%LOCALAPPDATA%\koshi\data` |
-//! | [`runtime_dir`] | `$XDG_RUNTIME_DIR/koshi` | `<data_dir>/run` | `<data_dir>/run` |
+//! | [`runtime_dir`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_dir>\run` |
 //! | [`shared_sessions_dir`] | `/tmp/koshi` | `/tmp/koshi` | `%ProgramData%\koshi` |
 //!
-//! The Linux column shows the XDG defaults for the per-user directories.
-//! Setting an `XDG_*` variable moves their base, because the [`directories`]
-//! crate implements the XDG spec. On Linux and macOS [`shared_sessions_dir`]
-//! is a fixed path that no variable moves.
+//! The Linux column shows the XDG defaults for [`config_dir`], [`data_dir`],
+//! [`cache_dir`] and [`state_dir`]. Setting an `XDG_*` variable moves their
+//! base, because the [`directories`] crate implements the XDG spec.
+//! [`runtime_dir`] reads no `XDG_*` variable. On Linux and macOS
+//! [`shared_sessions_dir`] is a fixed path that no variable moves.
 //!
 //! `None` from a per-user resolver means the platform reports no home
 //! directory for the current user — a stripped container, an unset `HOME`.
@@ -32,6 +34,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+
+/// The environment variable naming [`runtime_dir`], read only when it holds
+/// an absolute path.
+const RUNTIME_DIR_VAR: &str = "KOSHI_RUNTIME_DIR";
 
 /// The platform's per-user directory set for the `koshi` project, or `None`
 /// when the current user has no resolvable home directory.
@@ -76,18 +82,63 @@ pub fn state_dir() -> Option<PathBuf> {
     })
 }
 
-/// The directory for sockets and other per-boot runtime files. Linux uses
-/// `$XDG_RUNTIME_DIR/koshi` when that variable holds an absolute path.
-/// Everything else — macOS, Windows, Linux without an absolute
-/// `XDG_RUNTIME_DIR` — uses `run/` under [`data_dir`]. Create it with
-/// [`ensure_private_dir`]; runtime files are per-user private.
+/// What produced the path [`runtime_dir_with_rule`] answers with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDirRule {
+    /// `KOSHI_RUNTIME_DIR` held an absolute path.
+    Variable,
+    /// The effective user id, under `/tmp`.
+    UserId,
+    /// `run/` under the per-user data directory.
+    DataDir,
+}
+
+/// The directory for sockets and other per-boot runtime files, and the rule
+/// that produced it.
+///
+/// `KOSHI_RUNTIME_DIR` names the directory when it holds an absolute path —
+/// [`RuntimeDirRule::Variable`]. Without it, Unix uses
+/// `/tmp/koshi-<effective uid>` — [`RuntimeDirRule::UserId`] — and never
+/// answers `None`. Windows uses `run/` under [`data_dir`] —
+/// [`RuntimeDirRule::DataDir`] — and answers `None` when the machine reports
+/// no home directory. Create the directory with [`ensure_private_dir`];
+/// runtime files are per-user private.
+#[must_use]
+pub fn runtime_dir_with_rule() -> Option<(PathBuf, RuntimeDirRule)> {
+    if let Some(dir) = std::env::var_os(RUNTIME_DIR_VAR)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+    {
+        return Some((dir, RuntimeDirRule::Variable));
+    }
+    #[cfg(unix)]
+    {
+        let euid = unsafe { libc::geteuid() };
+        Some((
+            PathBuf::from(format!("/tmp/koshi-{euid}")),
+            RuntimeDirRule::UserId,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        Some((
+            project_dirs()?.data_dir().join("run"),
+            RuntimeDirRule::DataDir,
+        ))
+    }
+}
+
+/// The directory for sockets and other per-boot runtime files.
+///
+/// `KOSHI_RUNTIME_DIR` names it when that variable holds an absolute path.
+/// Without it, Unix uses `/tmp/koshi-<effective uid>` and never answers
+/// `None`; Windows uses `run/` under [`data_dir`] and answers `None` when the
+/// machine reports no home directory. Create it with [`ensure_private_dir`];
+/// runtime files are per-user private. [`runtime_dir_with_rule`] answers the
+/// same path together with the rule that produced it.
 #[must_use]
 pub fn runtime_dir() -> Option<PathBuf> {
-    let dirs = project_dirs()?;
-    Some(match dirs.runtime_dir() {
-        Some(runtime) => runtime.to_path_buf(),
-        None => dirs.data_dir().join("run"),
-    })
+    runtime_dir_with_rule().map(|(dir, _)| dir)
 }
 
 /// The machine-wide directory holding what koshi shares between local users:
@@ -110,13 +161,34 @@ pub fn shared_sessions_dir() -> Option<PathBuf> {
     }
 }
 
-/// Refuse a shared directory, naming the path and what is wrong with it.
+/// Refuse a directory, naming the path and what is wrong with it.
 #[cfg(unix)]
-fn shared_dir_refused(path: &Path, reason: &str) -> io::Error {
+fn dir_refused(path: &Path, reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!("{} {reason}", path.display()),
     )
+}
+
+/// Confirm the effective user id owns `path`.
+///
+/// The check reads the link itself rather than following it. A path another
+/// user owns is refused as [`io::ErrorKind::PermissionDenied`], naming the
+/// owner's user id and the expected one: `/tmp/koshi-501 is owned by uid 0,
+/// expected 501`.
+#[cfg(unix)]
+fn verify_owner_is_this_user(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = unsafe { libc::geteuid() };
+    let owner = std::fs::symlink_metadata(path)?.uid();
+    if owner != euid {
+        return Err(dir_refused(
+            path,
+            &format!("is owned by uid {owner}, expected {euid}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Create `path`, without creating its parents. A path something already
@@ -135,20 +207,19 @@ fn create_dir_if_absent(path: &Path) -> io::Result<()> {
 /// The check reads the link itself rather than following it, so a symbolic
 /// link planted at `path` is refused as "not a directory".
 #[cfg(unix)]
-fn verify_shared_dir_mode(path: &Path, mode: u32) -> io::Result<()> {
+fn verify_dir_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
-        return Err(shared_dir_refused(path, "is not a directory"));
+        return Err(dir_refused(path, "is not a directory"));
     }
     if metadata.permissions().mode() & 0o7777 != mode {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
-            shared_dir_refused(path, &format!("mode could not be set: {error}"))
-        })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| dir_refused(path, &format!("mode could not be set: {error}")))?;
         let found = std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777;
         if found != mode {
-            return Err(shared_dir_refused(
+            return Err(dir_refused(
                 path,
                 &format!("mode is {found:04o}, expected {mode:04o}"),
             ));
@@ -170,7 +241,7 @@ pub fn ensure_shared_base(base: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         create_dir_if_absent(base)?;
-        verify_shared_dir_mode(base, 0o1777)
+        verify_dir_mode(base, 0o1777)
     }
     #[cfg(windows)]
     {
@@ -189,19 +260,11 @@ pub fn ensure_shared_base(base: &Path) -> io::Result<()> {
 pub fn ensure_shared_user_dir(base: &Path) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-
         let euid = unsafe { libc::geteuid() };
         let dir = base.join(euid.to_string());
         create_dir_if_absent(&dir)?;
-        let owner = std::fs::symlink_metadata(&dir)?.uid();
-        if owner != euid {
-            return Err(shared_dir_refused(
-                &dir,
-                &format!("is owned by uid {owner}, expected {euid}"),
-            ));
-        }
-        verify_shared_dir_mode(&dir, 0o755)?;
+        verify_owner_is_this_user(&dir)?;
+        verify_dir_mode(&dir, 0o755)?;
         Ok(dir)
     }
     #[cfg(windows)]
@@ -216,15 +279,23 @@ pub fn ensure_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// Create `path` and any missing parents, then restrict it to the owning
-/// user: mode `0700` on Unix. On Windows it only creates the directory, which
-/// already carries owner-scoped ACLs. Used for [`runtime_dir`].
+/// Create `path` and any missing parents, then confirm it is this user's own
+/// private directory. Used for [`runtime_dir`].
+///
+/// On Unix `path` must be owned by the effective user id, and must be a
+/// directory rather than a symbolic link: the check reads the link itself
+/// rather than following it. Both refusals are
+/// [`io::ErrorKind::PermissionDenied`], and each names the path and what is
+/// wrong with it. The mode is then set to `0700` and read back, so a
+/// directory whose mode cannot be corrected is refused instead of used. On
+/// Windows it only creates the directory, which already carries owner-scoped
+/// ACLs.
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        verify_owner_is_this_user(path)?;
+        verify_dir_mode(path, 0o700)?;
     }
     Ok(())
 }

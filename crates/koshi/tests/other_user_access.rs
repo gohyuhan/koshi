@@ -144,8 +144,12 @@ fn waited_for_exit(session: &mut RunningSession) -> bool {
 /// A fresh home directory for the `koshi` processes a test starts to derive
 /// their runtime and config directories from. Removed when the test drops it.
 ///
-/// The name is one letter and six random characters, which leaves the paths
-/// built under it inside the 104-byte cap a Unix socket address has.
+/// The name is one letter and six random characters, so the home is
+/// `/tmp/k` plus six characters — 12 bytes — and the directory a `koshi`
+/// started under it serves is `<home>/run`, 16 bytes. The longest name these
+/// tests bind in that directory is the session socket, `session-<uuid>.sock`
+/// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
+/// Unix socket address holds.
 #[cfg(unix)]
 fn test_home() -> TempDir {
     tempfile::Builder::new()
@@ -163,18 +167,10 @@ fn test_shared_base() -> TempDir {
 }
 
 /// The runtime directory a `koshi` started by [`koshi_under`] with `home`
-/// serves: macOS derives it from the home directory alone.
-#[cfg(target_os = "macos")]
+/// serves: `run/` inside the home directory.
+#[cfg(unix)]
 fn runtime_dir_under(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/koshi/run")
-}
-
-/// The runtime directory a `koshi` started by [`koshi_under`] with `home`
-/// serves: `koshi/` inside `XDG_RUNTIME_DIR`, which [`koshi_under`] points at
-/// `home`.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn runtime_dir_under(home: &Path) -> PathBuf {
-    home.join("koshi")
+    home.join("run")
 }
 
 /// The config directory a `koshi` started by [`koshi_under`] with `home`
@@ -287,13 +283,14 @@ fn koshi_every_user_can_run() -> (TempDir, PathBuf) {
 /// The `koshi` binary at `binary`, set to keep its files under `home` rather
 /// than in the developer's own directories, and stripped of the pane identity
 /// so it runs as a CLI outside any session. Standard input is closed, and both
-/// output streams are pipes the test reads.
+/// output streams are pipes the test reads. The runtime directory the child
+/// serves is `<home>/run`.
 #[cfg(unix)]
 fn koshi_at(binary: &Path, home: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(binary);
     command
         .env("HOME", home)
-        .env("XDG_RUNTIME_DIR", home)
+        .env("KOSHI_RUNTIME_DIR", home.join("run"))
         // The five variables the runtime injects at pane spawn; `KOSHI` is the
         // marker `InSessionContext::from_env` reads, and a test run from inside
         // a koshi pane would hand every one of them to this child.

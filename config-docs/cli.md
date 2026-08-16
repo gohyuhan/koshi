@@ -401,17 +401,17 @@ session.
 
 ```text
 koshi doctor
-check               verdict  reason                                                                                help
-config              ok       3 config files validated                                                              -
-shell               ok       a new pane runs /bin/zsh                                                              -
-terminal            warn     TERM is not set                                                                       set TERM before running koshi, for example TERM=xterm-256color
-runtime directory   ok       /run/user/1000/koshi is ready                                                         -
-log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                      -
-plugins directory   ok       /home/you/.config/koshi/plugins is readable                                           -
-router              ok       no koshi is running                                                                   -
-session directory   ok       sessions are advertised in /run/user/1000/koshi (mode 700), which only you may reach  -
-remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants    -
-remote connections  ok       no koshi is running, so nothing from another machine is connected                     -
+check               verdict  reason                                                                              help
+config              ok       3 config files validated                                                            -
+shell               ok       a new pane runs /bin/zsh                                                            -
+terminal            warn     TERM is not set                                                                     set TERM before running koshi, for example TERM=xterm-256color
+runtime directory   ok       /tmp/koshi-1000 is ready; koshi names it after your user id                         -
+log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                    -
+plugins directory   ok       /home/you/.config/koshi/plugins is readable                                         -
+router              ok       no koshi is running                                                                 -
+session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach     -
+remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants  -
+remote connections  ok       no koshi is running, so nothing from another machine is connected                   -
 ```
 
 The verdict column reads:
@@ -432,7 +432,7 @@ The checks run in this order:
 | `config` | Every config file in the config directory, validated the way `koshi config check` validates it |
 | `shell` | `koshi.kdl`'s `terminal.default-shell`, else `SHELL` on Linux and macOS and `COMSPEC` on Windows, and whether the program it names exists |
 | `terminal` | `TERM` and `COLORTERM` |
-| `runtime directory` | The runtime directory: that it can be read, and that it is private |
+| `runtime directory` | The runtime directory: which directory it is, that it can be read, that it is private, and which rule produced its path |
 | `log directory` | The log directory: that a file can be written there, and whether `koshi.kdl` turns logging on |
 | `plugins directory` | The plugins directory: that it exists and can be read |
 | `router` | Whether a router answers on its control socket |
@@ -458,6 +458,19 @@ when the router sent one.
 A row whose `reason` is shortened to fit the table carries the whole text in a
 `detail` field, which `--format json` prints and the table leaves out. Every
 other row has `"detail": null`.
+
+### The runtime directory
+
+koshi keeps its router socket and its session sockets in one directory per
+user. On Linux and macOS that directory is `/tmp/koshi-<your user id>`, built
+from your user id and nothing else. On Windows it is `run` under your
+application data directory.
+
+`KOSHI_RUNTIME_DIR` names the directory instead, and koshi reads it only when
+it holds an absolute path. A relative value is ignored. Two koshi processes
+holding different values use different directories and do not find each other.
+
+`koshi doctor` prints the directory in use and the rule that produced it.
 
 ## Debugging
 

@@ -145,10 +145,7 @@ rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/koshi"
 rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/koshi"
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/koshi"
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/koshi"
-
-if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-  rm -rf "$XDG_RUNTIME_DIR/koshi"
-fi
+rm -rf "/tmp/koshi-$(id -u)"
 ```
 
 ### macOS
@@ -171,6 +168,7 @@ Remove all Koshi config, logs, update state, cache, and runtime files:
 ```bash
 rm -rf "$HOME/Library/Application Support/koshi"
 rm -rf "$HOME/Library/Caches/koshi"
+rm -rf "/tmp/koshi-$(id -u)"
 ```
 
 ### Windows
