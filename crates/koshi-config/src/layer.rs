@@ -147,7 +147,7 @@ fn merge_field<T>(field: &mut T, value: Option<T>) {
 /// section left `None` leaves the lower layers untouched; a section set to
 /// `Some` applies its own per-field overrides.
 ///
-/// One layer covers both sides' sections, because one file does:
+/// One layer covers both sides' sections, as one file holds both:
 /// [`merge_server`] reads the [`ServerConfig`] ones and [`merge_client`] reads
 /// the [`ClientConfig`] ones.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

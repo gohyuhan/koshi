@@ -256,7 +256,11 @@ pub enum CliCommand {
         all: bool,
     },
     /// Check the local koshi installation and environment.
-    Doctor,
+    Doctor {
+        /// Output format.
+        #[arg(long, value_enum, value_name = "FORMAT", default_value = "table")]
+        format: FormatArg,
+    },
     /// Open a new pane running a shell; its working directory and
     /// environment come from the issuing terminal.
     NewPane {
@@ -1028,7 +1032,7 @@ impl CliCommand {
             | CliCommand::KillSession { .. }
             | CliCommand::Attach { .. }
             | CliCommand::Detach { .. }
-            | CliCommand::Doctor
+            | CliCommand::Doctor { .. }
             | CliCommand::Config { .. }
             | CliCommand::Share { .. }
             | CliCommand::Remote { .. }

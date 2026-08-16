@@ -8,6 +8,7 @@ use koshi::cli::{
     KeysCommand, ResolvedTargets, SessionRef, TabRef,
 };
 use koshi::config_command;
+use koshi::doctor;
 use koshi::keymap::{self, KeymapView};
 use koshi::output;
 use koshi::remote_cmd;
@@ -47,12 +48,12 @@ fn main() -> ExitCode {
 }
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
-/// `actions` query and the read-only `keys` queries render locally; the
-/// discovery queries render what the running sessions report about
-/// themselves; the headless launch creates a session and prints its id; the
-/// bare launch creates a session and attaches this terminal to it; the action
-/// verbs travel
-/// a session's control socket as commands. Inside a pane they go to the pane's own
+/// `actions` query, the read-only `keys` queries and the `doctor` checks
+/// render locally; the discovery queries render what the running sessions
+/// report about themselves; the headless launch creates a session and prints
+/// its id; the bare launch creates a session and attaches this terminal to
+/// it; the action verbs travel a session's control socket as commands. Inside
+/// a pane they go to the pane's own
 /// session; outside one, the routing layer picks the target session from the
 /// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
 /// the only running session. `--remote` names another machine and picks the
@@ -121,6 +122,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // Every remote verb reads or writes the saved-server store on this
         // machine, so it opens no connection and asks no running koshi.
         return remote_cmd::run(command);
+    }
+
+    if let Some(CliCommand::Doctor { format }) = &cli.command {
+        // Doctor reads this machine's own files and asks the running router
+        // one question. It dispatches no command and starts no router.
+        return doctor::run(*format);
     }
 
     if let Some(CliCommand::ServeRouter {

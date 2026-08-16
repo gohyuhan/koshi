@@ -274,7 +274,19 @@ fn lifecycle_commands_parse() {
     );
     assert_eq!(
         parse(&["koshi", "doctor"]).command,
-        Some(CliCommand::Doctor)
+        Some(CliCommand::Doctor {
+            format: FormatArg::Table
+        })
+    );
+}
+
+#[test]
+fn doctor_takes_a_format() {
+    assert_eq!(
+        parse(&["koshi", "doctor", "--format", "json"]).command,
+        Some(CliCommand::Doctor {
+            format: FormatArg::Json
+        })
     );
 }
 

@@ -268,8 +268,8 @@ same machine. Neither key turns the other on.
 ## Full example
 
 This shows every app setting. Fixed values match defaults. `default-shell`,
-`remote-listen` and `shared-sessions-dir` are commented because they have no
-fixed default: `default-shell` comes from `$SHELL` or `%COMSPEC%`,
+`remote-listen` and `shared-sessions-dir` are commented out — they have no
+fixed default. `default-shell` comes from `$SHELL` or `%COMSPEC%`,
 `remote-listen` is unset, and the shared sessions directory is `/tmp/koshi` on
 Linux and macOS, `%ProgramData%\koshi` on Windows.
 

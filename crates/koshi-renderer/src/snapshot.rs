@@ -398,7 +398,7 @@ pub struct PaneSnapshot {
     /// every line the pane has ever pushed into scrollback.
     ///
     /// A press on the pane's `n`-th visible row names line `view_top_row + n`.
-    /// Absolute line numbers never move, so that answer keeps naming the same
+    /// Absolute line numbers never move, and that answer keeps naming the same
     /// text after more output arrives.
     pub view_top_row: u64,
     /// The viewing client's highlighted text in this pane, already cut down to

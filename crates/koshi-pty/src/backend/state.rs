@@ -50,8 +50,8 @@ pub trait PtyBackend: Send + Sync {
 /// A consumer implementing this trait is handed each chunk by the reader thread
 /// itself, so a pane needs no relay thread — unlike the channel-and-handle route
 /// in [`PtyHandle`], where one thread per pane moves chunks onto the consumer's
-/// queue. `Send + Sync` because the reader and watcher threads of every pane
-/// share one sink.
+/// queue. `Send + Sync`: the reader and watcher threads of every pane share
+/// one sink.
 pub trait PtySink: Send + Sync {
     /// Take one chunk of `pane`'s child output. Returning `false` means this
     /// consumer is done with `pane`: the reader stops reading it and nothing

@@ -266,6 +266,7 @@ fn open(endpoint: &EndpointFile) -> Connection {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token.clone(),
+            remote: false,
         },
     };
     connection.send(&hello).expect("the server reads the Hello");

@@ -175,6 +175,11 @@ pub enum RuntimeEvent {
         /// When the producer received the request, carried on the event so the
         /// handler never reads the clock itself.
         attached_at: SystemTime,
+        /// Whether the connection carrying this attach reached the session
+        /// from another machine. The client is minted with it as its origin.
+        /// The router marks the Hello it sends for a remote caller; every
+        /// other connection leaves it `false`.
+        remote: bool,
         /// Where the dispatcher sends what it minted.
         reply: Sender<Option<AttachAccepted>>,
     },

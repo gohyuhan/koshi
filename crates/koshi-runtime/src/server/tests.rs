@@ -60,8 +60,14 @@ fn attach_second_client(server: &mut Server, first: ClientId, viewport: Size) ->
         .expect("client record")
         .active_tab();
     let second = ClientId::new();
-    let _ =
-        server.handle_client_attach(session_id, second, viewport, active_tab, SystemTime::now());
+    let _ = server.handle_client_attach(
+        session_id,
+        second,
+        viewport,
+        active_tab,
+        SystemTime::now(),
+        false,
+    );
     second
 }
 
@@ -170,8 +176,14 @@ fn every_attached_client_is_local_with_its_own_generated_label() {
         .active_tab();
 
     let second = ClientId::new();
-    let _ =
-        server.handle_client_attach(session_id, second, VIEWPORT, active_tab, SystemTime::now());
+    let _ = server.handle_client_attach(
+        session_id,
+        second,
+        VIEWPORT,
+        active_tab,
+        SystemTime::now(),
+        false,
+    );
 
     let clients = &server.sessions()[&session_id].clients;
     let bootstrapped = clients.get(first).expect("bootstrapped client");
@@ -202,8 +214,14 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
 
     // A second client attaches, then detaches again.
     let second = ClientId::new();
-    let events =
-        server.handle_client_attach(session_id, second, VIEWPORT, active_tab, SystemTime::now());
+    let events = server.handle_client_attach(
+        session_id,
+        second,
+        VIEWPORT,
+        active_tab,
+        SystemTime::now(),
+        false,
+    );
     // Same size, so nothing reflows; the joining client still lands on the
     // tab's pane, which is the one event a same-size attach carries.
     let landed_on = server.sessions()[&session_id].tabs[&active_tab]
@@ -896,6 +914,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the session hands the record back");
 
@@ -926,6 +945,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the session mints a client instead of refusing");
 
@@ -951,6 +971,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the first attach takes the record");
     assert_eq!(held.client_id, client_id);
@@ -961,6 +982,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the second attach mints a client instead of refusing");
 
@@ -1004,7 +1026,13 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
     let (session_id, tab_id, _pane_id) = booted_parts(&server, client_id);
 
     let accepted = server
-        .handle_ipc_attach(None, REMOTE_VIEWPORT, EventFilter::All, SystemTime::now())
+        .handle_ipc_attach(
+            None,
+            REMOTE_VIEWPORT,
+            EventFilter::All,
+            SystemTime::now(),
+            false,
+        )
         .expect("the session mints a client");
 
     assert_ne!(accepted.client_id, client_id);
@@ -1056,6 +1084,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             .expect("the booted client")
             .active_tab(),
         SystemTime::now(),
+        false,
     );
     server.awaiting_reconnect.insert(client_id);
     server.awaiting_reconnect.insert(absent);
@@ -1066,6 +1095,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the record is handed back");
 
@@ -1376,6 +1406,7 @@ fn an_attach_claiming_a_client_whose_tab_is_gone_mints_a_new_one_and_leaves_that
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
+            false,
         )
         .expect("the session mints a client instead of refusing");
 

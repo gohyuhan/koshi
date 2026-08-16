@@ -73,12 +73,15 @@ impl Server {
                 active_tab,
                 attached_at,
             } => {
+                // The in-process attach path. Every client it registers is on
+                // this machine.
                 let events = self.handle_client_attach(
                     session_id,
                     client_id,
                     viewport,
                     active_tab,
                     attached_at,
+                    false,
                 );
                 self.publish_events(&events);
             }
@@ -105,12 +108,19 @@ impl Server {
                 viewport,
                 filter,
                 attached_at,
+                remote,
                 reply,
             } => {
                 // The client and its subscription are registered together here,
                 // so the structure in the answer and the queue's first event
                 // describe one continuous state.
-                let _ = reply.send(self.handle_ipc_attach(resume, viewport, filter, attached_at));
+                let _ = reply.send(self.handle_ipc_attach(
+                    resume,
+                    viewport,
+                    filter,
+                    attached_at,
+                    remote,
+                ));
             }
             RuntimeEvent::IpcDiscovery { reply } => {
                 let _ = reply.send(self.build_overview());

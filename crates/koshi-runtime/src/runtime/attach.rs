@@ -2,9 +2,9 @@
 //! [`AttachedSessionStructureSnapshot`] the server sends a client on attach.
 //!
 //! [`session_structure`] is a plain read-only mapping. It solves nothing and
-//! checks nothing: the layout trees travel as they are, because the client
-//! solves them against its own terminal size, and whether a session is fit to
-//! attach to is decided by the attach handler before it calls this.
+//! checks nothing: the layout trees travel as they are. The client solves them
+//! against its own terminal size, and the attach handler decides whether a
+//! session is fit to attach to before it calls this.
 //!
 //! Both lists are sorted here. Tabs come out in display order (`Tab::index`),
 //! so a client draws its tab bar straight from the list; panes come out by

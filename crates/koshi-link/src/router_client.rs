@@ -11,8 +11,9 @@
 //! until the new router answers or the wait runs out — the same path a request
 //! takes when it arrives just as an idle router exits.
 //!
-//! Restarting the running router is the one ask that never starts one. It
-//! sends a single exchange, and reports back when no router was running.
+//! Three asks never start one: restarting the running router, reading its
+//! build version, and counting the connections it holds from another machine.
+//! Each sends a single exchange, and reports back when no router was running.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -110,6 +111,57 @@ pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
             detail: refusal.message,
         }),
         Some(other) => Err(talk::ROUTER.unexpected_reply(&other)),
+    }
+}
+
+/// What asking the running router for its count of connections from another
+/// machine produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteConnections {
+    /// A router answered. `Some(n)` is the count of connections it holds from
+    /// another machine, whether they have attached to a session or not.
+    /// `Some(0)` is a router holding none; `None` is a router whose build
+    /// reports no count at all.
+    Answered(Option<usize>),
+    /// No endpoint file, or nothing listening behind it.
+    NotRunning,
+    /// A router is listening and has no request kind by this name.
+    OlderBuild,
+    /// A router is listening and did not answer the question.
+    NoAnswer {
+        /// The failure, in the words the control-plane client used.
+        detail: String,
+    },
+}
+
+/// How many connections from another machine the running router holds
+/// admitted, whether they have attached to a session or not.
+///
+/// Sends exactly one RemoteStatus exchange and never starts a router.
+///
+/// A router whose build has no such request kind refuses it with
+/// [`IpcErrorCode::UnsupportedKind`], which is
+/// [`RemoteConnections::OlderBuild`]. Every other refusal, unexpected reply
+/// and transport failure is [`RemoteConnections::NoAnswer`].
+#[must_use]
+pub fn running_router_remote_connections(runtime_dir: &Path) -> RemoteConnections {
+    match exchange(runtime_dir, &RouterRequestKind::RemoteStatus) {
+        Ok(None) => RemoteConnections::NotRunning,
+        Ok(Some(RouterResult::RemoteStatus {
+            remote_connections, ..
+        })) => RemoteConnections::Answered(remote_connections),
+        Ok(Some(RouterResult::Error(refusal))) if refusal.code == IpcErrorCode::UnsupportedKind => {
+            RemoteConnections::OlderBuild
+        }
+        Ok(Some(RouterResult::Error(refusal))) => RemoteConnections::NoAnswer {
+            detail: refusal.message,
+        },
+        Ok(Some(other)) => RemoteConnections::NoAnswer {
+            detail: talk::ROUTER.unexpected_reply(&other).to_string(),
+        },
+        Err(error) => RemoteConnections::NoAnswer {
+            detail: error.to_string(),
+        },
     }
 }
 

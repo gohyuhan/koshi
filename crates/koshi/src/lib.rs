@@ -22,6 +22,10 @@ pub mod cli;
 /// Local config path, explanation, validation, and migration commands.
 pub mod config_command;
 
+/// The `koshi doctor` checks: this machine's config, shell, terminal,
+/// directories, and what its sessions are reachable through.
+pub mod doctor;
+
 /// The offline keymap view served by the `koshi keys` queries: the user's
 /// keybinding file folded onto the built-in defaults, conflict-checked and
 /// merged.

@@ -6,8 +6,8 @@
 //!
 //! Trees travel unsolved, as they do on attach. Solving one needs a size, and
 //! that size comes from the clients viewing the tab. Each tab carries one
-//! [`SolvedTab`](crate::layout::SolvedTab) per client viewing it, because the
-//! layout mode is per client. A tab no client is viewing carries its tree and
+//! [`SolvedTab`](crate::layout::SolvedTab) per client viewing it; the layout
+//! mode is per client. A tab no client is viewing carries its tree and
 //! no solved entry.
 //!
 //! Nothing here describes pane content: no grid, no cursor, no scrollback, no

@@ -416,6 +416,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
                 enabled: true,
                 listening: false,
                 fingerprint: Some("ab".repeat(32)),
+                remote_connections: Some(2),
             },
             "RemoteStatus",
         ),

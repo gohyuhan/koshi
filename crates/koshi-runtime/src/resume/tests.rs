@@ -149,6 +149,7 @@ fn populated_server() -> Populated {
         SECOND_VIEWPORT,
         first_tab,
         SystemTime::UNIX_EPOCH,
+        false,
     );
 
     let panes = pane_ids(&server, session_id, first_tab);

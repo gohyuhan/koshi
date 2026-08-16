@@ -215,6 +215,9 @@ pub struct Handshake {
     /// Where this connection came from, which decides whether its Hello is
     /// asked for the token at all.
     peer: Peer,
+    /// Whether a Hello on this connection said it carries a caller on another
+    /// machine. Latched: once a Hello sets it, no later Hello clears it.
+    remote_caller: bool,
 }
 
 impl Handshake {
@@ -225,7 +228,18 @@ impl Handshake {
         Handshake {
             gate: VersionGate::new(expected, SESSION_WORDS),
             peer,
+            remote_caller: false,
         }
+    }
+
+    /// Whether this connection carries a caller on another machine.
+    ///
+    /// `false` until an accepted Hello says otherwise, and `true` from the
+    /// first accepted Hello that does. A refused Hello leaves this unchanged,
+    /// and a later accepted Hello saying `false` leaves this `true`.
+    #[must_use]
+    pub fn remote_caller(&self) -> bool {
+        self.remote_caller
     }
 
     /// The protocol version this connection settled on, or `None` while no
@@ -284,6 +298,7 @@ impl Handshake {
                 min_protocol_version,
                 max_protocol_version,
                 token,
+                remote,
             } => {
                 let agreed = self
                     .gate
@@ -310,6 +325,7 @@ impl Handshake {
                     }
                     | Peer::Remote => self.gate.token(token)?,
                 }
+                self.remote_caller |= *remote;
                 self.gate.open(agreed);
                 Ok(())
             }

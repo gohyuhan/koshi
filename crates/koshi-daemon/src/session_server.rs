@@ -385,8 +385,8 @@ fn seed_new_session(
 /// over panes that were never released.
 ///
 /// The file is deleted on every way out of this call. It outlives the socket
-/// being bound, because its presence is what stops the router taking this
-/// session's advertisement away while the swap is in flight.
+/// being bound. While it exists, the router leaves this session's
+/// advertisement in place through the swap.
 fn resume_from_file(
     resume_file: &Path,
     start: &mut SessionStart,
@@ -495,8 +495,8 @@ fn build_from_carried_state(
 /// Open the panes this session runs on.
 ///
 /// On Unix they are this process's own children on its own backend. On Windows
-/// they belong to a helper process this starts, so that they outlive an image
-/// swap; the secret its link presents and its process id are recorded on
+/// they belong to a helper process this starts and outlive an image swap; the
+/// secret its link presents and its process id are recorded on
 /// `start`, since the image replacing this one needs both to reach the same
 /// panes.
 ///
@@ -828,8 +828,8 @@ fn release_carried_panes(header: &ResumeHeader, _start: &SessionStart, _sink: Ar
 /// Record on `header` the exit status each pane reports now.
 ///
 /// The panes are read once to build the header and again just before it is
-/// written, because a child that ends between the two is reaped by this image's
-/// watcher and nothing else can answer for it afterwards. A status the header
+/// written. A child that ends between the two is reaped by this image's
+/// watcher, and nothing else can answer for it afterwards. A status the header
 /// already carries is kept: this only fills in the ones that settled late.
 ///
 /// Before → after: pane 3's shell exits with code 7 after the header was built

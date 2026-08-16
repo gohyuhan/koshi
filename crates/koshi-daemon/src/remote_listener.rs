@@ -33,7 +33,9 @@
 //! This listener carries the three remote frames and then one session server's
 //! own bytes. No path from it reaches the router's control plane, so
 //! `koshi share` is unreachable over a remote connection. A client counts as
-//! remote when this listener accepted it, never by anything the client sends.
+//! remote when this listener accepted it: the router marks the Hello it sends
+//! the session server on that client's behalf. A caller can add that mark to
+//! itself and cannot take it off.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -596,6 +598,24 @@ fn admitted_frames(
     }
 }
 
+/// The Hello the router sends a session server for a caller this listener
+/// accepted: `token` from that session's endpoint file, the caller's own
+/// version range in `versions` as `(min, max)`, and `remote` set.
+///
+/// This is the only place `remote` is set.
+fn bridged_hello(token: ConnectionToken, versions: (u32, u32)) -> IpcRequest {
+    let (min_protocol_version, max_protocol_version) = versions;
+    IpcRequest {
+        request_id: 1,
+        kind: IpcRequestKind::Hello {
+            min_protocol_version,
+            max_protocol_version,
+            token,
+            remote: true,
+        },
+    }
+}
+
 /// Open the local connection to an admitted client's session and carry the
 /// bytes both ways.
 ///
@@ -636,15 +656,7 @@ fn bridge_to_session(
         report_ended(admissions, id);
         return;
     };
-    let (min_protocol_version, max_protocol_version) = versions;
-    let hello = IpcRequest {
-        request_id: 1,
-        kind: IpcRequestKind::Hello {
-            min_protocol_version,
-            max_protocol_version,
-            token: endpoint.token,
-        },
-    };
+    let hello = bridged_hello(endpoint.token, versions);
     if local.send(&hello).is_err() {
         refuse(&mut writer);
         report_ended(admissions, id);

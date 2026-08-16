@@ -496,6 +496,7 @@ fn hello_for(runtime_dir: &Path, session: SessionId) -> IpcRequest {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token,
+            remote: false,
         },
     }
 }
@@ -723,6 +724,7 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
                 min_protocol_version: MIN_PROTOCOL_VERSION,
                 max_protocol_version: PROTOCOL_VERSION + 5,
                 token: endpoint.token,
+                remote: false,
             },
         })
         .expect("send a hello reaching above this build");
@@ -777,6 +779,7 @@ fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
                 min_protocol_version: above,
                 max_protocol_version: above + 2,
                 token: endpoint.token,
+                remote: false,
             },
         })
         .expect("send a hello sharing no version");
@@ -862,6 +865,7 @@ fn a_wrong_token_is_refused_as_bad_token() {
                 min_protocol_version: MIN_PROTOCOL_VERSION,
                 max_protocol_version: PROTOCOL_VERSION,
                 token: ConnectionToken::new("not-the-secret"),
+                remote: false,
             },
         })
         .expect("send hello");
@@ -905,6 +909,7 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: first.token,
+            remote: false,
         },
     })
     .expect("send hello with the token from before the restart");
@@ -1712,6 +1717,7 @@ fn other_user_hello() -> IpcRequest {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: ConnectionToken::new(""),
+            remote: false,
         },
     }
 }
@@ -2392,6 +2398,7 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: first.token,
+            remote: false,
         },
     })
     .expect("send hello with the token from before the rotation");

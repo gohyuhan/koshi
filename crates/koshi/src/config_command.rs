@@ -373,7 +373,20 @@ fn explain(key: &str) -> Result<String, CliError> {
     })
 }
 
-fn check(dir: &Path) -> Result<String, CliError> {
+/// What validating every config file in one directory produced.
+pub(crate) struct ConfigReport {
+    /// One line per file that validated, in read order, e.g.
+    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1)"`.
+    pub(crate) lines: Vec<String>,
+    /// One message per file that could not be read or did not validate.
+    pub(crate) errors: Vec<String>,
+}
+
+/// Read and validate every known config file under `dir`.
+///
+/// Reads the filesystem and writes nothing. A directory with no config file
+/// gives empty `lines` and empty `errors`.
+pub(crate) fn validate_dir(dir: &Path) -> ConfigReport {
     let loaded = read_files(dir);
     let mut lines = Vec::with_capacity(loaded.files.len());
     let mut errors = loaded.errors;
@@ -393,11 +406,17 @@ fn check(dir: &Path) -> Result<String, CliError> {
             Err(error) => errors.push(error.to_string()),
         }
     }
-    if !errors.is_empty() {
+    ConfigReport { lines, errors }
+}
+
+fn check(dir: &Path) -> Result<String, CliError> {
+    let report = validate_dir(dir);
+    if !report.errors.is_empty() {
         return Err(CliError::Config {
-            detail: errors.join("\n"),
+            detail: report.errors.join("\n"),
         });
     }
+    let mut lines = report.lines;
     if lines.is_empty() {
         lines.push(format!("no config files found in {}", dir.display()));
     }

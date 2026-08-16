@@ -9,9 +9,9 @@
 //! `<leader>` is refused.
 //!
 //! Case folds into the Shift bit: `<A-H>` and `<A-S-h>` both parse to
-//! `ALT|SHIFT` plus `Char('h')`. `S-` is rejected on a non-letter character,
-//! because "shift plus `1`" names no character without knowing the keyboard
-//! layout — write `!` instead. A named key accepts `S-`: `<S-Tab>` is
+//! `ALT|SHIFT` plus `Char('h')`. `S-` is rejected on a non-letter character:
+//! "shift plus `1`" names no character without knowing the keyboard layout.
+//! Write `!` instead. A named key accepts `S-`: `<S-Tab>` is
 //! Shift+Tab. A raw whitespace or control character (a literal tab in the
 //! config text) is refused: those keys are written by name, keeping one
 //! representation per physical key.

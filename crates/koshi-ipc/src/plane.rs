@@ -9,7 +9,7 @@
 //!    [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest), and the connection
 //!    keeps serving — the stream is still on a frame boundary.
 //! 2. A frame whose payload could not even be read leaves the stream off its
-//!    boundaries, so that one connection closes. Disconnects and transport
+//!    boundaries, and that one connection closes. Disconnects and transport
 //!    faults land here too, since they leave no stream at all.
 //! 3. A request kind this build does not have comes from a newer koshi. It is
 //!    refused by name and the connection keeps serving, so one unfamiliar verb

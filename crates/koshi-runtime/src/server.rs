@@ -619,8 +619,8 @@ impl Server {
 
     /// Install what a restart request must promise before it is accepted.
     /// Called by the session server before the event loop starts, and again on
-    /// the server it keeps after a swap that did not start, so that server
-    /// answers the next restart too.
+    /// the server it keeps after a swap that did not start, which then answers
+    /// the next restart too.
     pub fn set_restart_check(&mut self, check: RestartCheck) {
         self.restart_check = Some(check);
     }

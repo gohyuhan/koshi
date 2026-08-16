@@ -46,8 +46,8 @@ pub const DEFAULT_THEME: &str = "default";
 /// scrollback buffers it owns, the environment it spawns children into, its
 /// own log file, and who else on this machine may reach it.
 ///
-/// One session has one of these however many viewers are attached, because
-/// every field here describes something all of them share. A viewer's own
+/// One session has one of these however many viewers are attached. Every
+/// field here describes something all of them share. A viewer's own
 /// preferences are [`ClientConfig`], and the two are read from the same
 /// `koshi.kdl` — each side folding the sections it owns.
 #[derive(Debug, Clone, PartialEq, Eq)]

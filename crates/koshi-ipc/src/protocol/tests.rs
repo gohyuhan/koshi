@@ -488,6 +488,7 @@ fn hello_request_round_trips() {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: token(),
+            remote: false,
         },
     };
 
@@ -502,6 +503,7 @@ fn hello_request_encodes_to_the_expected_shape() {
             min_protocol_version: 1,
             max_protocol_version: 2,
             token: token(),
+            remote: false,
         },
     };
 
@@ -513,7 +515,8 @@ fn hello_request_encodes_to_the_expected_shape() {
                 "Hello": {
                     "min_protocol_version": 1,
                     "max_protocol_version": 2,
-                    "token": "k7QxSecret"
+                    "token": "k7QxSecret",
+                    "remote": false
                 }
             }
         })
@@ -1270,6 +1273,7 @@ fn a_hello_carrying_an_unknown_field_ignores_it() {
                 min_protocol_version: 2,
                 max_protocol_version: 2,
                 token: token(),
+                remote: false,
             },
         }
     );
@@ -1298,6 +1302,7 @@ fn the_hello_this_build_sends_carries_the_range_it_speaks() {
         min_protocol_version,
         max_protocol_version,
         token: carried,
+        remote: false,
     } = IpcRequestKind::hello(token())
     else {
         panic!("the constructor builds a Hello");
@@ -1338,6 +1343,7 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
             min_protocol_version: 1,
             max_protocol_version: 1,
             token: token(),
+            remote: false,
         },
     };
 
@@ -1357,6 +1363,7 @@ fn every_request_kind_names_itself_without_its_payload() {
             min_protocol_version: 1,
             max_protocol_version: 1,
             token: token(),
+            remote: false,
         }
         .name(),
         "Hello"
@@ -1421,6 +1428,7 @@ fn serializing_a_hello_writes_the_real_secret() {
             min_protocol_version: 1,
             max_protocol_version: 1,
             token: token(),
+            remote: false,
         },
     };
 

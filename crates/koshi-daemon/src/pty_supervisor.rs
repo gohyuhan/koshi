@@ -557,8 +557,8 @@ fn close_panes_that_ended(sink: &Arc<LinkSink>, backend: &PortablePtyBackend) {
 /// Close one pane: let every send for it go, end its child under `kill_policy`,
 /// then forget it.
 ///
-/// The sends go first, because closing a pane's terminal waits for its reader to
-/// carry that terminal to the end, and a reader parked in a send is not reading.
+/// The sends go first. Closing a pane's terminal waits for its reader to carry
+/// that terminal to the end, and a reader parked in a send is not reading.
 ///
 /// # Errors
 /// Returns the failure of a pane the backend could not close.

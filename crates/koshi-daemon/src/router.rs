@@ -899,8 +899,9 @@ fn locate_remote(
 
 /// What this machine's remote access is set to: the address `koshi.kdl` names,
 /// whether the operator has switched remote access on, whether this router is
-/// holding the port right now, and the fingerprint of the certificate this
-/// machine presents once it has one.
+/// holding the port right now, the fingerprint of the certificate this machine
+/// presents once it has one, and how many connections from another machine
+/// this router holds admitted.
 ///
 /// `enabled` and `listening` are separate answers: an operator who said yes on
 /// a machine whose address something else holds reads `enabled: true` and
@@ -914,6 +915,7 @@ fn remote_status(remote: &RemoteState) -> RouterResult {
         fingerprint: dir
             .and_then(|dir| CertFile::read(&CertFile::path(dir)).ok())
             .map(|cert| tls::fingerprint(&cert.cert_der)),
+        remote_connections: Some(remote.live.len()),
     }
 }
 

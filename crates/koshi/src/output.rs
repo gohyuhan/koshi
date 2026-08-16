@@ -2,8 +2,9 @@
 //! (`list-*`, `inspect`), action introspection (`actions list`, `actions
 //! explain`), keymap introspection (the `keys` queries), the `debug`
 //! dumps, the two version answers (`version`, `server-version`), the three
-//! `share` answers, and the three `remote` answers. Read-only queries print as
-//! aligned columns (`--format table`, the default) or JSON (`--format json`).
+//! `share` answers, the three `remote` answers, and the `doctor` answer.
+//! Read-only queries print as aligned columns (`--format table`, the default)
+//! or JSON (`--format json`).
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
@@ -13,7 +14,8 @@
 //! table row per koshi server. `share list` renders one table row per grant
 //! and `remote list` one per saved server; `share grant`, `share revoke`,
 //! `remote forget` and `remote set-secret` report one outcome as plain lines
-//! and carry no `--format` flag. JSON output is
+//! and carry no `--format` flag. `doctor` renders one table row per check.
+//! JSON output is
 //! the serde form of the rendered structs — the [`koshi_link::discovery`] listing
 //! rows, the [`koshi_core::discovery`] records an `inspect` reports, and this
 //! module's own summary/detail structs — a JSON array for a list, a JSON
@@ -97,6 +99,7 @@ fn fields(headers: &[&str], row: Vec<String>) -> String {
 
 mod actions;
 mod command;
+mod doctor;
 mod entities;
 mod keys;
 mod layout;
@@ -106,6 +109,7 @@ mod version;
 
 pub use actions::*;
 pub use command::*;
+pub use doctor::*;
 pub use entities::*;
 pub use keys::*;
 pub use layout::*;

@@ -360,6 +360,11 @@ impl Client {
     pub fn update_viewport(&mut self, viewport: Size) {
         self.viewport = viewport
     }
+
+    /// Set where this client's current connection came from.
+    pub fn update_origin(&mut self, origin: ClientOrigin) {
+        self.origin = origin;
+    }
 }
 
 /// The clients currently attached to one session, keyed by [`ClientId`]. The

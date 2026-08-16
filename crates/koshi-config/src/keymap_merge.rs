@@ -6,8 +6,8 @@
 //! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
 //! a later layer's entry on a key replaces a lower layer's on the same key,
 //! and every other key is untouched. The result splits each mode into two
-//! maps because the two resolve at different tiers of the key-resolution
-//! stack — sticky plugin layers sit between them:
+//! maps. The two resolve at different tiers of the key-resolution stack, with
+//! sticky plugin layers between them:
 //!
 //! - **`user_set`** — the winning user-authored entries, each tagged with
 //!   the layer that authored it.

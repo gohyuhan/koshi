@@ -48,9 +48,8 @@ const REPO: &str = "gohyuhan/koshi";
 /// short.
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long a binary download may run before it is abandoned. Generous, because
-/// the timeout covers streaming a multi-megabyte binary, which over a slow link
-/// takes far longer than an API reply — while still bounding a stuck transfer.
+/// How long a binary download may run before it is abandoned. Covers streaming
+/// a multi-megabyte binary over a slow link, and bounds a stuck transfer.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Seconds in a day, for turning the check interval into a duration.
@@ -538,9 +537,9 @@ fn install_binary(new_binary: &Path) -> Result<(), String> {
 /// Replaces the executable on Unix atomically. The new binary is staged as a
 /// sibling of `exe` — same directory, so the same filesystem — then renamed
 /// over `exe`. Renaming a running binary is safe on Unix: the live process
-/// keeps the old inode. Because the swap is a single rename, an interrupted
-/// copy never touches the running binary, and the replacement either fully
-/// happens or not at all. A permission error on the staging directory escalates
+/// keeps the old inode. The swap is a single rename: an interrupted copy never
+/// touches the running binary, and the replacement either fully happens or not
+/// at all. A permission error on the staging directory escalates
 /// to sudo.
 #[cfg(unix)]
 fn swap_exe(new_binary: &Path, exe: &Path) -> Result<(), String> {
@@ -697,9 +696,7 @@ fn is_due(state: &UpdateState, interval_days: u32) -> bool {
 
 /// Reads the `update` section of `koshi.kdl`. A missing or unreadable file
 /// falls back to defaults (auto-check on), since no opt-out was expressed. A
-/// file that is present but fails to parse fails **closed** — auto-check off —
-/// because it may carry an `auto-check #false` we could not read, and a network
-/// check should never be silently re-enabled by an unrelated typo.
+/// file that is present but fails to parse fails **closed** — auto-check off.
 fn load_update_config() -> UpdateConfig {
     let Some(path) = koshi_paths::config_dir().map(|dir| dir.join("koshi.kdl")) else {
         return UpdateConfig::default();

@@ -329,6 +329,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             min_protocol_version: 2,
             max_protocol_version: 2,
             token: ConnectionToken::new("t"),
+            remote: false,
         },
         IpcRequestKind::Attach {
             viewport: Size { cols: 80, rows: 24 },
@@ -539,6 +540,7 @@ fn sample_router_results() -> Vec<RouterResult> {
             enabled: false,
             listening: false,
             fingerprint: None,
+            remote_connections: Some(0),
         },
         RouterResult::RemoteEnabled {
             address: String::new(),

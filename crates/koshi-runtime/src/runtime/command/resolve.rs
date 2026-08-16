@@ -67,11 +67,10 @@ impl Server {
     ///
     /// The source's own client wins while it is attached to `session`. When it
     /// is gone — or was never named, which a pane spawned with no designated
-    /// client sends — the session's sole attached client stands in, because
-    /// with exactly one window attached there is only one window the command
-    /// could mean. Several attached is [`RejectReason::TargetAmbiguous`] and
-    /// none is [`RejectReason::SourceClientStale`]: neither has a single
-    /// answer, and the command is refused rather than guessed at.
+    /// client sends — the session's sole attached client stands in. Several
+    /// attached is [`RejectReason::TargetAmbiguous`] and none is
+    /// [`RejectReason::SourceClientStale`]; neither has a single answer, and
+    /// the command is refused.
     ///
     /// On a session whose sole client is `A`, a `koshi lock` issued from a pane
     /// whose own client has since detached resolves to `A`. Attach a second
@@ -145,10 +144,10 @@ impl Server {
     ///
     /// [`Command::FocusPane`], [`Command::FocusTab`], [`Command::NewTab`],
     /// [`Command::SetLockMode`], [`Command::ToggleLockMode`], and
-    /// [`Command::SwitchSession`] are absent
-    /// because they also accept an explicit `client` argument that outranks
-    /// the source; their resolvers call the same helper for the rest.
-    /// [`Command::Visual`] is absent for the opposite reason: a highlight
+    /// [`Command::SwitchSession`] are absent: they also accept an explicit
+    /// `client` argument that outranks the source, and their resolvers call
+    /// the same helper for the rest.
+    /// [`Command::Visual`] is absent too: a highlight
     /// belongs to the client that made it, so a gone issuer means the target
     /// is gone, never another client's screen ([`Self::issuing_client`]).
     /// [`Command::ToggleMouseSelect`] has no CLI verb, so
