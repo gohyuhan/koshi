@@ -46,16 +46,15 @@ pub struct Surface {
     /// when no release has carried it yet.
     ///
     /// `None` means the rule has nothing to anchor to: the surface may hold any
-    /// value until it ships, because no released build can disagree with it.
+    /// value until it ships.
     pub released: Option<u32>,
 }
 
 /// The session protocol: what an attached client and a session server speak
 /// over that session's control socket.
 ///
-/// `v0.1.0` spoke 1 and `v0.2.0` speaks 2. The floor is 2 because version 1 has
-/// no attach and puts nothing user-visible on the socket, so no version-1 peer
-/// has anything to ask a session server for.
+/// `v0.1.0` spoke 1 and `v0.2.0` speaks 2. The floor is 2. Version 1 has no
+/// attach and puts nothing user-visible on the socket.
 pub const SESSION_PROTOCOL: Surface = Surface {
     name: "session protocol",
     min: 2,
@@ -101,10 +100,10 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// The remote doorway: what a client on another machine and this machine's TLS
 /// listener speak before any session is reached.
 ///
-/// Born after `v0.2.0` and not yet in a release, so it has no anchor. It is
-/// its own surface because the two ends are different machines, which upgrade
-/// on their own schedules — the session protocol they settle after the door
-/// opens is a separate agreement with a separate number.
+/// Born after `v0.2.0` and not yet in a release, so it has no anchor. Its two
+/// ends are different machines, which upgrade on their own schedules. The
+/// session protocol they settle after the door opens is a separate agreement
+/// with a separate number.
 pub const REMOTE_PROTOCOL: Surface = Surface {
     name: "remote doorway",
     min: 1,

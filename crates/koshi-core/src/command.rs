@@ -741,8 +741,8 @@ pub struct CommandEnvelope {
     /// Client the command is attributed to; mirrors the source's client when it
     /// names one, and is `None` for sources that do not.
     pub client_id: Option<ClientId>,
-    /// When the command was issued. `SystemTime`, never `Instant`, because the
-    /// envelope crosses process boundaries.
+    /// When the command was issued, as wall-clock time. The envelope crosses
+    /// process boundaries.
     pub issued_at: SystemTime,
     /// The requested mutation.
     pub command: Command,

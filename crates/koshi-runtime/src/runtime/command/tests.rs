@@ -9666,7 +9666,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // A smaller second client attaches to the same tab: the effective size drops
     // to the per-axis minimum, so the live pane's PTY reflows down.
     let joining = ClientId::new();
-    let events = rt.handle_client_attach(sid, joining, small, tab_id, SystemTime::now());
+    let events = rt.handle_client_attach(sid, joining, small, tab_id, SystemTime::now(), false);
 
     let expected = size_root_pane(pane, pane_viewport(small), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane).unwrap().len(), resizes_before + 1);
@@ -9738,7 +9738,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
     // The larger client cannot lower the per-axis minimum, so the effective size
     // stays 40x24: no reflow, no resize event.
     let joining = ClientId::new();
-    let events = rt.handle_client_attach(sid, joining, big, tab_id, SystemTime::now());
+    let events = rt.handle_client_attach(sid, joining, big, tab_id, SystemTime::now(), false);
 
     // No reflow, but the joining client still lands on the tab's pane.
     assert_eq!(
@@ -9775,7 +9775,7 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
     );
 
     let client = ClientId::new();
-    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
 
     // The attaching client lands focused on the tab's only pane, so the first
     // key it types reaches that pane's shell.
@@ -9809,7 +9809,7 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
     // Attach once to take the tab's first pane, then split so the tab holds a
     // second pane and focus moves onto it.
     let client = ClientId::new();
-    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
     let second = PaneId::new();
     rt.sessions
         .get_mut(&sid)
@@ -9820,7 +9820,7 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         .update_focused_pane(tab_id, second);
 
     // Re-attaching does not drag focus back to the tab's first pane.
-    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now());
+    let events = rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
 
     assert_eq!(
         rt.sessions[&sid]
@@ -9851,7 +9851,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
 
     // Two clients view the tab; the smaller one holds it at 40x24.
     let small_client = ClientId::new();
-    rt.handle_client_attach(sid, small_client, small, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, small_client, small, tab_id, SystemTime::now(), false);
     let resizes_before = fake.resizes(pane).expect("pane spawned").len();
 
     // The smaller client leaves: only the 80x24 viewer remains, so the tab grows
@@ -9922,7 +9922,7 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
     rt.config.auto_close_session = true;
 
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now(), false);
 
     // One of two clients leaves: one is still attached, so nothing quits.
     rt.handle_client_detach(first);
@@ -9975,7 +9975,7 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         .expect("bootstrap the genesis client");
     let (sid, tab_id, _pane) = only_slot(&rt);
     rt.config.auto_close_session = true;
-    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now(), false);
     assert_eq!(rt.sessions[&sid].clients.len(), 2);
 
     // `DetachAll` runs the same per-client departure the setting watches, so the
@@ -9995,7 +9995,7 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
     rt.bootstrap_local(SessionId::new(), size, SystemTime::now())
         .expect("bootstrap the genesis client");
     let (sid, tab_id, _pane) = only_slot(&rt);
-    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, ClientId::new(), size, tab_id, SystemTime::now(), false);
 
     let env = envelope_from(CommandSource::external_cli(Some(sid)), Command::DetachAll);
     let _ = rt.dispatch(env);
@@ -10096,7 +10096,7 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
     let (sid, tab_id, _pane) = only_slot(&rt);
     rt.config.auto_close_session = true;
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, second, size, tab_id, SystemTime::now(), false);
 
     // One of two clients quits: the other is still attached, so nothing quits.
     let env = envelope_from(CommandSource::key_binding(first), Command::Quit);
@@ -10168,6 +10168,7 @@ fn client_attach_to_an_unknown_session_is_dropped() {
         Size { cols: 80, rows: 24 },
         TabId::new(),
         SystemTime::now(),
+        false,
     );
     assert!(events.is_empty());
 }
@@ -10191,7 +10192,8 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
     // The named tab is not one this session holds: the client is not attached
     // and nothing reflows.
     let stranger = ClientId::new();
-    let events = rt.handle_client_attach(sid, stranger, big, TabId::new(), SystemTime::now());
+    let events =
+        rt.handle_client_attach(sid, stranger, big, TabId::new(), SystemTime::now(), false);
 
     assert!(events.is_empty());
     assert!(rt.sessions[&sid].clients.get(stranger).is_none());
@@ -10227,8 +10229,8 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     // Two clients view `tab_1`; the smaller one (C) constrains `pane_1` to 40x24.
     let client_b = ClientId::new();
     let client_c = ClientId::new();
-    rt.handle_client_attach(sid, client_b, big, tab_1, SystemTime::now());
-    rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now());
+    rt.handle_client_attach(sid, client_b, big, tab_1, SystemTime::now(), false);
+    rt.handle_client_attach(sid, client_c, small, tab_1, SystemTime::now(), false);
     assert_eq!(
         *fake.resizes(pane_1).unwrap().last().unwrap(),
         size_root_pane(pane_1, pane_viewport(small), MIN_PANE_SIZE)
@@ -10237,7 +10239,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 
     // C re-attaches onto `tab_2`: it leaves `tab_1`, where only the 80x24 client
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
-    let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now());
+    let events = rt.handle_client_attach(sid, client_c, big, tab_2, SystemTime::now(), false);
 
     let expected = size_root_pane(pane_1, pane_viewport(big), MIN_PANE_SIZE);
     assert_eq!(fake.resizes(pane_1).unwrap().len(), resizes_before + 1);
@@ -10303,6 +10305,7 @@ fn client_attach_schedules_a_render() {
         },
         tab_id,
         SystemTime::now(),
+        false,
     );
 
     assert!(rt.poll_render(now + Duration::from_secs(1)));
@@ -10473,7 +10476,7 @@ fn same_session_reattach_preserves_client_view_state() {
         cols: 100,
         rows: 30,
     };
-    rt.handle_client_attach(sid, client, grown, tab_id, SystemTime::now());
+    rt.handle_client_attach(sid, client, grown, tab_id, SystemTime::now(), false);
 
     let record = rt.sessions[&sid]
         .clients
@@ -10514,7 +10517,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
     let pane_1_resizes_before = fake.resizes(pane_1).expect("pane spawned").len();
 
     // Move `client` from session 1 into session 2 at a smaller viewport.
-    let events = rt.handle_client_attach(sid_2, client, small, tab_2, SystemTime::now());
+    let events = rt.handle_client_attach(sid_2, client, small, tab_2, SystemTime::now(), false);
 
     // It left session 1 entirely and is now the 40x24 co-viewer of session 2.
     assert!(rt.sessions[&sid_1].clients.get(client).is_none());
@@ -11840,7 +11843,7 @@ fn detach_all_takes_every_attached_client() {
         .expect("bootstrap the genesis client");
     let (sid, tab, pane) = only_slot(&rt);
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab, SystemTime::now());
+    rt.handle_client_attach(sid, second, size, tab, SystemTime::now(), false);
     let first_events = rt.subscribe(first, EventFilter::All);
     let second_events = rt.subscribe(second, EventFilter::All);
 
@@ -11914,7 +11917,7 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         .expect("bootstrap the genesis client");
     let (sid, tab, _pane) = only_slot(&rt);
     let second = ClientId::new();
-    rt.handle_client_attach(sid, second, size, tab, SystemTime::now());
+    rt.handle_client_attach(sid, second, size, tab, SystemTime::now(), false);
 
     // An external CLI names no client of its own, and two are attached.
     let env = envelope_from(
@@ -12324,5 +12327,112 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
             reason: RejectReason::InvalidState,
             help: Some("the client is too far behind to be moved right now; try again".to_string()),
         }
+    );
+}
+
+#[test]
+fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+
+    let joining = ClientId::new();
+    rt.handle_client_attach(sid, joining, viewport, tab_id, SystemTime::now(), true);
+
+    assert_eq!(
+        rt.sessions
+            .get(&sid)
+            .expect("session")
+            .clients
+            .get(joining)
+            .expect("the attached client")
+            .origin(),
+        ClientOrigin::Remote
+    );
+}
+
+#[test]
+fn a_client_that_reached_this_machine_directly_is_recorded_local() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+
+    let joining = ClientId::new();
+    rt.handle_client_attach(sid, joining, viewport, tab_id, SystemTime::now(), false);
+
+    assert_eq!(
+        rt.sessions
+            .get(&sid)
+            .expect("session")
+            .clients
+            .get(joining)
+            .expect("the attached client")
+            .origin(),
+        ClientOrigin::Local
+    );
+}
+
+#[test]
+fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+
+    let client = ClientId::new();
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+    assert_eq!(
+        rt.sessions
+            .get(&sid)
+            .expect("session")
+            .clients
+            .get(client)
+            .expect("the attached client")
+            .origin(),
+        ClientOrigin::Local
+    );
+
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), true);
+
+    assert_eq!(
+        rt.sessions
+            .get(&sid)
+            .expect("session")
+            .clients
+            .get(client)
+            .expect("the re-attached client")
+            .origin(),
+        ClientOrigin::Remote,
+        "re-attaching the same id over a remote connection left it recorded local"
+    );
+}
+
+#[test]
+fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let viewport = Size { cols: 80, rows: 24 };
+    rt.bootstrap_local(SessionId::new(), viewport, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab_id, _pane) = only_slot(&rt);
+
+    let client = ClientId::new();
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), true);
+
+    rt.handle_client_attach(sid, client, viewport, tab_id, SystemTime::now(), false);
+
+    assert_eq!(
+        rt.sessions
+            .get(&sid)
+            .expect("session")
+            .clients
+            .get(client)
+            .expect("the re-attached client")
+            .origin(),
+        ClientOrigin::Local
     );
 }

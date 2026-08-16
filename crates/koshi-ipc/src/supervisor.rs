@@ -228,8 +228,8 @@ pub struct SupervisorPane {
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorResult {
-    /// Answers [`SupervisorRequestKind::Hello`]: the link is open, because the
-    /// ranges overlap and the token matched.
+    /// Answers [`SupervisorRequestKind::Hello`]: the link is open, the ranges
+    /// overlap, and the token matched.
     Hello {
         /// The version both sides use on this link: the highest they both
         /// speak.

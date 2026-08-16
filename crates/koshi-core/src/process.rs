@@ -76,8 +76,8 @@ pub enum ShellKind {
 
 impl ShellKind {
     /// Classify a shell from its program path by inspecting the file stem
-    /// (case-insensitive). The `.exe` suffix on Windows is ignored because
-    /// `file_stem` strips it. Unrecognised programs become [`ShellKind::Other`]
+    /// (case-insensitive). `file_stem` strips the `.exe` suffix on Windows, so
+    /// it plays no part. Unrecognised programs become [`ShellKind::Other`]
     /// carrying the lowercased stem.
     #[must_use]
     pub fn from_program(program: &Path) -> Self {

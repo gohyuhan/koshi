@@ -299,6 +299,12 @@ pub enum RouterResult {
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters, or `None` when no certificate has been generated.
         fingerprint: Option<String>,
+        /// How many connections from another machine this router holds
+        /// admitted right now, whether they have attached to a session or
+        /// not. `Some(0)` is a router holding none; `None` is a router whose
+        /// build reports no count at all.
+        #[serde(default)]
+        remote_connections: Option<usize>,
     },
     /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
     RemoteEnabled {

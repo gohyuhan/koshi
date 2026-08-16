@@ -191,6 +191,12 @@ pub enum IpcRequestKind {
         max_protocol_version: u32,
         /// The secret read from the endpoint file.
         token: ConnectionToken,
+        /// Whether the connection this Hello opens carries a caller on
+        /// another machine. The router sets it on the local connection it
+        /// opens for a remote caller. Absent means `false`. A connection this
+        /// marks reaches no more than one it does not.
+        #[serde(default)]
+        remote: bool,
     },
     /// Join the session as a viewing client: the server mints the client,
     /// registers it for the events `filter` selects, and answers with
@@ -274,6 +280,7 @@ impl IpcRequestKind {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token,
+            remote: false,
         }
     }
 

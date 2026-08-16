@@ -37,6 +37,7 @@ impl Server {
         viewport: Size,
         filter: EventFilter,
         attached_at: SystemTime,
+        remote: bool,
     ) -> Option<AttachAccepted> {
         // One process serves one session: genesis seeds exactly one and no
         // command creates another in-process.
@@ -57,8 +58,14 @@ impl Server {
         let (client_id, active_tab) = claimed.unwrap_or_else(|| (ClientId::new(), first_tab));
         self.awaiting_reconnect.remove(&client_id);
 
-        let emitted =
-            self.handle_client_attach(session_id, client_id, viewport, active_tab, attached_at);
+        let emitted = self.handle_client_attach(
+            session_id,
+            client_id,
+            viewport,
+            active_tab,
+            attached_at,
+            remote,
+        );
         self.publish_events(&emitted);
 
         let events = self.subscribe(client_id, filter);
@@ -83,10 +90,14 @@ impl Server {
     /// is never recorded twice. Within the target session an id that is already
     /// attached is a re-attach: its view updates in place, keeping its per-tab
     /// focus, scrollback offsets, and lock mode, and the tab it moves off of
-    /// reflows too. A fresh id is registered anew as [`ClientOrigin::Local`],
-    /// with a generated `C-<adjective>-<noun>` label that no client in the
-    /// session already holds, and the lowest palette index no attached client
-    /// is painted in.
+    /// reflows too. A fresh id is registered anew with a generated
+    /// `C-<adjective>-<noun>` label that no client in the session already
+    /// holds, and the lowest palette index no attached client is painted in.
+    ///
+    /// `remote` names where the connection carrying this attach came from. It
+    /// is recorded as the client's [`ClientOrigin`]: [`ClientOrigin::Remote`]
+    /// when true, [`ClientOrigin::Local`] otherwise. A re-attach overwrites the
+    /// origin the client already carried.
     ///
     /// The viewer joins each affected tab's effective size
     /// ([`Session::tab_viewport`], the per-axis minimum across every client
@@ -105,7 +116,13 @@ impl Server {
         viewport: Size,
         active_tab: TabId,
         attached_at: SystemTime,
+        remote: bool,
     ) -> Vec<Event> {
+        let origin = if remote {
+            ClientOrigin::Remote
+        } else {
+            ClientOrigin::Local
+        };
         // Clone the shared backend before borrowing the session: the reflow then
         // needs no `&self` across the mutation.
         let backend = Arc::clone(self.pty_backend());
@@ -153,6 +170,7 @@ impl Server {
             let prior = client.active_tab();
             client.update_viewport(viewport);
             client.update_active_tab(active_tab);
+            client.update_origin(origin);
             Some(prior)
         } else {
             let label = generate_name(NameKind::Client, |candidate| {
@@ -176,7 +194,7 @@ impl Server {
                 attached_at,
                 viewport,
                 active_tab,
-                ClientOrigin::Local,
+                origin,
                 label,
                 colour,
             ));

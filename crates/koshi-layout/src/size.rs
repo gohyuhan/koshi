@@ -138,8 +138,8 @@ impl SizeConstraint {
 /// `primary` picks the distribution strategy; `min` and `preferred` overlay a
 /// floor and a target on top of any primary; `resize_delta` records explicit
 /// user resizes as exact cell offsets applied after the primary distribution.
-/// Because the resize is stored as a delta, not a final size, a terminal
-/// resize re-applies it on top of a fresh distribution at the new size.
+/// The resize is stored as a delta, not a final size, so a terminal resize
+/// re-applies it on top of a fresh distribution at the new size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SizeWeight {
     /// The distribution strategy for this child.

@@ -66,8 +66,8 @@ pub struct TerminalState {
     /// The cursor for the primary screen, holding its own position, visibility,
     /// wrap latch, and saved snapshot.
     primary_cursor: Cursor,
-    /// The cursor for the alternate screen, independent of the primary cursor
-    /// so that position and wrap state do not leak across screen switches.
+    /// The cursor for the alternate screen, independent of the primary cursor:
+    /// position and wrap state do not carry across screen switches.
     alternate_cursor: Cursor,
     /// The primary screen's [`RenderState`] (pen, charsets, GL slot).
     primary_render: RenderState,

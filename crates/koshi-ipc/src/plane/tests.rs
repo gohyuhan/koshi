@@ -349,6 +349,7 @@ fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
                     min_protocol_version: above,
                     max_protocol_version: above,
                     token,
+                    remote: false,
                 },
             })
             .expect("send a hello from the future");

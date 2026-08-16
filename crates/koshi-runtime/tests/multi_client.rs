@@ -199,6 +199,7 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
                 min_protocol_version: MIN_PROTOCOL_VERSION,
                 max_protocol_version: PROTOCOL_VERSION,
                 token: endpoint.token,
+                remote: false,
             },
         })
         .expect("send hello");

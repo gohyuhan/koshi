@@ -45,8 +45,8 @@ pub struct NewPaneSpec {
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_to_stack`],
 /// preflighted its fit against the sizing viewport, and spawned the child under
-/// `new_pane_id` — so this only commits state (and, because the child is already
-/// live, registers the pane `Running`).
+/// `new_pane_id` — so this only commits state and registers the pane
+/// `Running`, the child already being live.
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `spec` carries the cwd and
 /// command recorded on the new pane so a later restore or respawn can recover

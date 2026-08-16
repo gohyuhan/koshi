@@ -13,7 +13,7 @@
 //! never set alongside a non-letter character — the shifted character stands
 //! for itself (`!`, not shift-plus-`1`). A named key carries `SHIFT` like any
 //! other modifier: `<S-Tab>` is Shift+Tab. The input layer normalizes inbound
-//! events to this same form, which matters because hosts disagree: a terminal
+//! events to this same form. Hosts differ on what they send: a terminal
 //! without the kitty keyboard protocol reports Alt+Shift+h as `Char('H')`
 //! carrying only ALT, while the Windows console reports `Char('h')` carrying
 //! ALT and SHIFT.

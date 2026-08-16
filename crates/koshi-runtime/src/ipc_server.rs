@@ -670,6 +670,7 @@ fn serve_connection(
                         viewport,
                         filter: filter.into(),
                         attached_at: SystemTime::now(),
+                        remote: gate.remote_caller(),
                         reply,
                     });
                 // No running session, or no dispatcher left to mint the

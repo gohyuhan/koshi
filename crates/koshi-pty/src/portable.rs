@@ -329,9 +329,9 @@ use libc::ptsname_r;
 ///
 /// `ptsname_r` answers for a master only: the slave end of that same pair, an
 /// ordinary file, a pipe, a socket, and a number naming nothing open all fail
-/// it. Only the return value decides that, because a failure reports itself
-/// differently per system — macOS returns `-1` and sets `errno`, glibc and musl
-/// return the error number itself — while `0` means success on all of them.
+/// it. Only the return value decides that. A failure reports itself
+/// differently per system: macOS returns `-1` and sets `errno`, glibc and musl
+/// return the error number itself. `0` means success on all of them.
 ///
 /// The name is the master's own identity: two masters this process holds at
 /// once are paired with two different terminals, so a caller that recorded the
@@ -1624,7 +1624,7 @@ pub struct CarriedPtyPane {
 /// owns them all through the [`PaneEntry`] map.
 pub struct PortablePtyBackend {
     /// Every live pane's PTY, threads, and kill handle, keyed by [`PaneId`].
-    /// Locked because [`spawn`](PtyBackend::spawn), [`resize`](PtyBackend::resize),
+    /// Locked: [`spawn`](PtyBackend::spawn), [`resize`](PtyBackend::resize),
     /// [`write`](PtyBackend::write), and [`kill`](PtyBackend::kill) can all be
     /// called from different dispatcher calls.
     panes: Mutex<HashMap<PaneId, PaneEntry>>,
@@ -2508,9 +2508,9 @@ fn map_status(s: portable_pty::ExitStatus) -> ExitStatus {
 /// - portable-pty's fallback when `strsignal` returns null: `"Signal <n>"`
 ///
 /// We parse the number ONLY when it follows a `": "` (macOS) or the `"Signal "`
-/// prefix (the fallback) — never a bare trailing word, because some glibc
-/// descriptions end in a non-signal ordinal (e.g. `"User defined signal 1"` is
-/// SIGUSR1 = 10, not signal 1). Otherwise we map the known glibc descriptions;
+/// prefix (the fallback) — never a bare trailing word. Some glibc descriptions
+/// end in a non-signal ordinal: `"User defined signal 1"` is SIGUSR1 = 10, not
+/// signal 1. Otherwise we map the known glibc descriptions;
 /// an unrecognised one yields 0. Reachable only for Unix children — on Windows
 /// `signal()` is always `None`, so `map_status` takes the exit-code arm.
 fn sig_no(desc: &str) -> i32 {

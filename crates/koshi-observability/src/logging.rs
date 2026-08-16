@@ -97,20 +97,27 @@ pub struct LoggingParams {
     pub session_id: SessionId,
 }
 
-/// The log file for `session_id`: `logs/koshi-log-<uuid>.log` under the user's
-/// state directory (resolved by [`koshi_paths::state_dir`]) —
+/// The directory every log file goes in: `logs/` under the user's state
+/// directory (resolved by [`koshi_paths::state_dir`]) —
 /// `~/.local/state/koshi/logs` on Linux, `~/Library/Application
 /// Support/koshi/logs` on macOS, `%LOCALAPPDATA%\koshi\data\logs` on Windows.
-/// If no home directory can be found at all, the file lands in the current
-/// directory as a last resort.
+/// `None` when no home directory can be found at all.
+#[must_use]
+pub fn log_dir() -> Option<PathBuf> {
+    koshi_paths::state_dir().map(|dir| dir.join("logs"))
+}
+
+/// The log file for `session_id`: `koshi-log-<uuid>.log` in [`log_dir`]. If no
+/// home directory can be found at all, the file lands in the current directory
+/// as a last resort.
 ///
 /// Example: session `…446655440000` resolves on Linux to
 /// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
 #[must_use]
 pub fn session_log_path(session_id: SessionId) -> PathBuf {
     let name = format!("koshi-log-{}.log", session_id.as_uuid());
-    match koshi_paths::state_dir() {
-        Some(dir) => dir.join("logs").join(name),
+    match log_dir() {
+        Some(dir) => dir.join(name),
         None => PathBuf::from(name),
     }
 }

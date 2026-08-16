@@ -142,6 +142,7 @@ fn try_open(runtime_dir: &Path, session_id: SessionId) -> Option<Connection> {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: endpoint.token,
+            remote: false,
         },
     };
     connection.send(&hello).ok()?;

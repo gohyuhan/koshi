@@ -69,6 +69,7 @@ fn hello_speaking(min: u32, max: u32) -> IpcRequestKind {
         min_protocol_version: min,
         max_protocol_version: max,
         token: expected(),
+        remote: false,
     }
 }
 
@@ -77,12 +78,25 @@ fn good_hello() -> IpcRequestKind {
     hello_speaking(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
 }
 
+/// A Hello speaking this build's range, presenting the right token, and
+/// saying `remote` — the shape the router sends for a caller it accepted over
+/// TLS.
+fn remote_hello() -> IpcRequestKind {
+    IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: expected(),
+        remote: true,
+    }
+}
+
 /// A Hello speaking this build's range and presenting a wrong token.
 fn wrong_token_hello() -> IpcRequestKind {
     IpcRequestKind::Hello {
         min_protocol_version: MIN_PROTOCOL_VERSION,
         max_protocol_version: PROTOCOL_VERSION,
         token: ConnectionToken::new("wrongToken"),
+        remote: false,
     }
 }
 
@@ -188,6 +202,7 @@ fn an_allowed_other_user_opens_the_gate_without_a_token() {
         min_protocol_version: MIN_PROTOCOL_VERSION,
         max_protocol_version: PROTOCOL_VERSION,
         token: ConnectionToken::new(""),
+        remote: false,
     };
 
     assert_eq!(gate.check(&hello), Ok(()));
@@ -240,6 +255,7 @@ fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
         min_protocol_version: MIN_PROTOCOL_VERSION,
         max_protocol_version: PROTOCOL_VERSION,
         token: ConnectionToken::new(""),
+        remote: false,
     };
 
     assert_eq!(
@@ -347,6 +363,7 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
         min_protocol_version: ABOVE_RANGE,
         max_protocol_version: ABOVE_RANGE,
         token: ConnectionToken::new("wrongToken"),
+        remote: false,
     };
 
     assert_eq!(
@@ -488,4 +505,80 @@ fn the_agreed_version_is_the_highest_both_sides_speak() {
         None,
         "the caller is entirely below this build"
     );
+}
+
+#[test]
+fn a_hello_that_says_nothing_leaves_the_connection_local() {
+    let mut gate = gate();
+
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+
+    assert!(!gate.remote_caller());
+}
+
+#[test]
+fn a_hello_saying_remote_marks_the_connection() {
+    let mut gate = gate();
+
+    assert_eq!(gate.check(&remote_hello()), Ok(()));
+
+    assert!(gate.remote_caller());
+}
+
+#[test]
+fn a_second_hello_cannot_clear_the_remote_mark() {
+    let mut gate = gate();
+    assert_eq!(gate.check(&remote_hello()), Ok(()));
+
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+
+    assert!(
+        gate.remote_caller(),
+        "a later Hello saying local left the connection marked remote"
+    );
+}
+
+#[test]
+fn a_second_hello_can_still_set_the_remote_mark() {
+    let mut gate = gate();
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+
+    assert_eq!(gate.check(&remote_hello()), Ok(()));
+
+    assert!(gate.remote_caller());
+}
+
+#[test]
+fn a_refused_hello_saying_remote_does_not_mark_the_connection() {
+    let mut gate = gate();
+    let refused = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: ConnectionToken::new("wrongToken"),
+        remote: true,
+    };
+
+    assert!(gate.check(&refused).is_err());
+
+    assert!(!gate.remote_caller());
+    assert_eq!(gate.check(&good_hello()), Ok(()));
+    assert!(
+        !gate.remote_caller(),
+        "a Hello that never passed its token check marked the connection"
+    );
+}
+
+#[test]
+fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
+    let mut gate = gate();
+    let refused = IpcRequestKind::Hello {
+        min_protocol_version: MIN_PROTOCOL_VERSION,
+        max_protocol_version: PROTOCOL_VERSION,
+        token: ConnectionToken::new("wrongToken"),
+        remote: true,
+    };
+
+    assert!(gate.check(&refused).is_err());
+
+    assert_eq!(gate.agreed(), None);
 }

@@ -195,9 +195,9 @@ impl Server {
     /// `--force`. The removal itself is the shared cascade behind shell-exit
     /// and user close: registry drop, layout collapse, per-client focus
     /// repair, and — when the last pane of the last tab goes — tab close and
-    /// session quit. The kill runs on a detached thread because a graceful
-    /// kill can sleep out its grace window, and the dispatcher thread must
-    /// never stall.
+    /// session quit. The kill runs on a detached thread; a graceful kill can
+    /// sleep out its grace window, and the dispatcher thread keeps serving
+    /// through it.
     ///
     /// After the removal the survivors reflow: the tab re-solves against its
     /// viewport and each live PTY whose size changed is resized, one

@@ -107,6 +107,7 @@ fn attach(server: &mut Server) -> AttachAccepted {
         viewport: STARTING_VIEWPORT,
         filter: EventFilter::All,
         attached_at: SystemTime::now(),
+        remote: false,
         reply: reply_tx,
     });
     reply_rx

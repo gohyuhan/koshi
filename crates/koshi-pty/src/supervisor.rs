@@ -239,9 +239,9 @@ impl SupervisorPtyBackend {
     ///
     /// The pane itself never moves — the supervisor keeps holding it — so the
     /// record carries only the pane's identity, its child's process id and its
-    /// size. The terminal descriptor is always `None`, because that descriptor
-    /// belongs to the supervisor, and the exit status is always `None`, because
-    /// the supervisor reaps every child and reports the status over the link.
+    /// size. The terminal descriptor is always `None`; that descriptor belongs
+    /// to the supervisor. The exit status is always `None`; the supervisor
+    /// reaps every child and reports the status over the link.
     pub fn carried_panes(&self) -> Vec<CarriedPtyPane> {
         let panes = self.panes.lock().expect("supervisor panes");
         panes

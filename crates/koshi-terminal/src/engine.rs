@@ -161,8 +161,8 @@ impl TerminalEngine {
     /// those bytes, and the pane's reported directory is still whatever the
     /// last finished report set.
     ///
-    /// Four string kinds keep only their opening bytes, because the parser
-    /// hands each body byte straight on or drops it and holds none of it:
+    /// Four string kinds keep only their opening bytes. The parser hands each
+    /// body byte straight on or drops it, holding none of it:
     ///
     /// - a device control string — `ESC P q # 0 ; 2 ; 0` → `ESC P q`, so a
     ///   sixel image of any size adds nothing here;
@@ -171,8 +171,8 @@ impl TerminalEngine {
     /// - an application program command, `ESC _` — `ESC _ G a=T,f=100;<image>`
     ///   → `ESC _`, so a kitty graphics image of any size adds nothing here.
     ///
-    /// An operating system command keeps its whole body, because the parser
-    /// reads the body and dispatches it at the terminator. Once any sequence
+    /// An operating system command keeps its whole body; the parser reads the
+    /// body and dispatches it at the terminator. Once any sequence
     /// passes 64 KiB the engine stops holding it and reports empty until it
     /// ends: the swap then leaves the next parser on a sequence boundary, and
     /// the rest of the body prints as text.

@@ -362,6 +362,16 @@ session id.
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a keybinding file without applying it |
 
+### Checking the installation
+
+| Command | Result |
+|---|---|
+| `koshi doctor [--format table\|json]` | Check this machine's koshi installation |
+
+One row per check, each with a verdict of `ok`, `warn`, or `fail`, the fact
+behind it, and what to do about it. The whole answer prints either way: a run
+holding a `fail` row exits 1, and a run of only `ok` and `warn` rows exits 0.
+
 ### Versions and updating
 
 | Command | Result |

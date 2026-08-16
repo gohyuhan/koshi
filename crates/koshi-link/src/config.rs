@@ -161,7 +161,7 @@ pub fn other_users_policy(
 /// file again on each call, so the answer is the one the file holds at this
 /// moment.
 #[must_use]
-pub(crate) fn server_config_now() -> ServerConfig {
+pub fn server_config_now() -> ServerConfig {
     merge_server(
         ServerConfig::default(),
         load_app_layer().into_iter().collect(),

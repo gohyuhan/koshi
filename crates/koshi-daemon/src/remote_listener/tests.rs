@@ -251,3 +251,21 @@ fn a_place_in_the_admission_window_is_given_back_however_the_caller_left() {
         "an empty window counts nothing"
     );
 }
+
+#[test]
+fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
+    let hello = bridged_hello(ConnectionToken::new("endpointSecret"), (1, 4));
+
+    assert_eq!(
+        hello,
+        IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Hello {
+                min_protocol_version: 1,
+                max_protocol_version: 4,
+                token: ConnectionToken::new("endpointSecret"),
+                remote: true,
+            },
+        }
+    );
+}

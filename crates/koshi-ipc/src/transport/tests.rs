@@ -35,6 +35,7 @@ fn hello_request(request_id: u64) -> IpcRequest {
             min_protocol_version: MIN_PROTOCOL_VERSION,
             max_protocol_version: PROTOCOL_VERSION,
             token: ConnectionToken::new("test-secret"),
+            remote: false,
         },
     }
 }

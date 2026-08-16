@@ -65,8 +65,8 @@ flags choose the owner. With no explicit target, exactly one running session
 may be used; zero or several sessions fail.
 
 Example: one running session + `koshi new-tab` results in a tab in that
-session. Two running sessions + the same command fails because koshi cannot
-choose safely.
+session. Two running sessions + the same command fails with `several sessions
+are running; name one with --session <name-or-id>`.
 
 Session and tab flags that say `NAME_OR_ID` accept either their generated name
 or printed id. A value that reads as an id is always the id — it never falls
@@ -221,7 +221,7 @@ the token alice already held on host stopped working.
 ```
 
 That line is absent when the grant it replaced had already been revoked or had
-already expired, because nothing that still worked stopped working.
+already expired.
 
 `--session` takes a session id or a display name. A name that matches two
 running sessions is refused, and the error lists every matching id.
@@ -240,15 +240,15 @@ A length koshi cannot represent is refused, and no token is granted:
 koshi share grant alice --expires 18446744073709551615d
 ```
 
-is refused by the command, because the count times its unit does not fit the
-length koshi carries.
+is refused by the command: the count times its unit does not fit the length
+koshi carries.
 
 ```text
 koshi share grant alice --expires 10000000000000000000s
 ```
 
-is refused by the router, because the expiry lands further ahead than this
-machine's clock can represent.
+is refused by the router: the expiry lands further ahead than this machine's
+clock can represent.
 
 A grant prints its token once, so copy it from that one printing. Anyone
 holding the token can run anything the granting user can.
@@ -392,6 +392,72 @@ exits 0, including a machine running nothing at all.
 `--session` reports that one session and leaves out the router. It takes the
 session id or its exact generated name. A name must match exactly one running
 session.
+
+## Checking the installation
+
+| Command | Result |
+|---|---|
+| `koshi doctor [--format table\|json]` | Check this machine's koshi installation |
+
+```text
+koshi doctor
+check               verdict  reason                                                                                help
+config              ok       3 config files validated                                                              -
+shell               ok       a new pane runs /bin/zsh                                                              -
+terminal            warn     TERM is not set                                                                       set TERM before running koshi, for example TERM=xterm-256color
+runtime directory   ok       /run/user/1000/koshi is ready                                                         -
+log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                      -
+plugins directory   ok       /home/you/.config/koshi/plugins is readable                                           -
+router              ok       no koshi is running                                                                   -
+session directory   ok       sessions are advertised in /run/user/1000/koshi (mode 700), which only you may reach  -
+remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants    -
+remote connections  ok       no koshi is running, so nothing from another machine is connected                     -
+```
+
+The verdict column reads:
+
+| Cell | Meaning |
+|---|---|
+| `ok` | The check found what it looks for |
+| `warn` | The check found something that still works and is worth reading |
+| `fail` | The check found something koshi cannot work through |
+
+The whole answer prints either way: a run holding a `fail` row exits 1, and a
+run of only `ok` and `warn` rows exits 0.
+
+The checks run in this order:
+
+| Check | What it reads |
+|---|---|
+| `config` | Every config file in the config directory, validated the way `koshi config check` validates it |
+| `shell` | `koshi.kdl`'s `terminal.default-shell`, else `SHELL` on Linux and macOS and `COMSPEC` on Windows, and whether the program it names exists |
+| `terminal` | `TERM` and `COLORTERM` |
+| `runtime directory` | The runtime directory: that it can be read, and that it is private |
+| `log directory` | The log directory: that a file can be written there, and whether `koshi.kdl` turns logging on |
+| `plugins directory` | The plugins directory: that it exists and can be read |
+| `router` | Whether a router answers on its control socket |
+| `session directory` | Where sessions are advertised, and who may reach that directory |
+| `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
+| `remote connections` | How many open connections the running router holds from another machine |
+
+The last three rows report facts and rate nothing. The `plugins directory` row
+reads the directory and opens no plugin. `koshi doctor` starts no koshi and
+creates no directory. The `log directory` row writes one empty file in the log
+directory and removes it again, which is how it reports whether that directory
+can be written.
+
+The `router` row is the only row that rates the running router. A router whose
+build has no such question is `warn`; a router that is listening and does not
+answer is `fail`. Either way the `remote connections` row reads `the running
+router did not answer, so this is not known`.
+
+A router that answers but whose build reports no count reads `the running
+router reports no count, so this is not known`. A count of `0` prints only
+when the router sent one.
+
+A row whose `reason` is shortened to fit the table carries the whole text in a
+`detail` field, which `--format json` prints and the table leaves out. Every
+other row has `"detail": null`.
 
 ## Debugging
 

@@ -8,10 +8,8 @@
 //! and file the results per mode behind [`Arc`]s. Reading a mode's hints then
 //! costs two `Arc` clones, not a re-merge.
 //!
-//! [`HintBinding`] and [`KeymapHints`] live here rather than with the renderer
-//! because they describe the *keymap*; drawing them is one consumer of that
-//! description, not what they are. The renderer re-exports both so a frame's
-//! fields resolve from one place.
+//! [`HintBinding`] and [`KeymapHints`] describe the *keymap*. The renderer
+//! re-exports both, so a frame's fields resolve from one place.
 //!
 //! The catalog is built at startup by [`KeymapHintCatalog::from_parts`], from
 //! the folded keybinding layers and the action table.

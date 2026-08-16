@@ -188,8 +188,8 @@ pub(crate) fn spawn_input_thread(inbox_tx: mpsc::Sender<RuntimeEvent>, client_id
 ///
 /// `last_title` and `last_cursor` hold what was last sent to the outer terminal,
 /// so each is written only when it changes: focus moving to a pane with a
-/// different DECSCUSR style re-emits that style, because the style belongs to
-/// the outer terminal rather than to the frame. The bar vim asked its "terminal"
+/// different DECSCUSR style re-emits that style. The style belongs to the
+/// outer terminal, not to the frame. The bar vim asked its "terminal"
 /// for is the bar the user sees.
 ///
 /// The hint bar, the theme, the open key sequence, the hovered pane and the tab
