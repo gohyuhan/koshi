@@ -19,6 +19,7 @@ fn context(dir: &Path) -> Context {
     Context {
         config_dir: Some(dir.join("config")),
         runtime_dir: Some(dir.join("runtime")),
+        runtime_dir_rule: Some(RuntimeDirRule::Variable),
         runtime_mode: Some(0o700),
         log_dir: Some(dir.join("log")),
         plugins_dir: Some(dir.join("config").join("plugins")),
@@ -381,6 +382,7 @@ fn runtime_directory_fails_when_this_machine_reports_no_home_directory() {
     let temp = TempDir::new().unwrap();
     let mut context = context(temp.path());
     context.runtime_dir = None;
+    context.runtime_dir_rule = None;
 
     assert_eq!(
         check_runtime_dir(&context),
@@ -404,7 +406,7 @@ fn runtime_directory_is_ok_when_it_does_not_exist_yet() {
         Outcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "{} does not exist yet; koshi creates it under {} when a session starts",
+                "{} does not exist yet; koshi creates it under {} when a session starts; KOSHI_RUNTIME_DIR names it",
                 context.runtime_dir.as_deref().unwrap().display(),
                 temp.path().display()
             ),
@@ -427,7 +429,10 @@ fn runtime_directory_fails_when_it_cannot_be_read() {
         check_runtime_dir(&context),
         Outcome {
             verdict: Verdict::Fail,
-            reason: format!("{} cannot be read: {error}", path.display()),
+            reason: format!(
+                "{} cannot be read: {error}; KOSHI_RUNTIME_DIR names it",
+                path.display()
+            ),
             help: Some(format!("make sure you own {}", path.display())),
             detail: None,
         }
@@ -446,7 +451,7 @@ fn runtime_directory_fails_on_a_mode_other_than_700() {
         Outcome {
             verdict: Verdict::Fail,
             reason: format!(
-                "{} has mode 755; koshi serves a session socket only from a directory with mode 700",
+                "{} has mode 755; koshi serves a session socket only from a directory with mode 700; KOSHI_RUNTIME_DIR names it",
                 dir.display()
             ),
             help: Some(format!("run chmod 700 {}", dir.display())),
@@ -465,7 +470,7 @@ fn runtime_directory_with_mode_700_is_ok() {
         check_runtime_dir(&context),
         Outcome {
             verdict: Verdict::Ok,
-            reason: format!("{} is ready", dir.display()),
+            reason: format!("{} is ready; KOSHI_RUNTIME_DIR names it", dir.display()),
             help: None,
             detail: None,
         }
@@ -479,7 +484,7 @@ fn runtime_directory_says_nothing_about_the_router() {
     let dir = runtime_dir(&context);
     let ready = Outcome {
         verdict: Verdict::Ok,
-        reason: format!("{} is ready", dir.display()),
+        reason: format!("{} is ready; KOSHI_RUNTIME_DIR names it", dir.display()),
         help: None,
         detail: None,
     };
@@ -496,6 +501,66 @@ fn runtime_directory_says_nothing_about_the_router() {
         context.router = router;
         assert_eq!(check_runtime_dir(&context), ready);
     }
+}
+
+#[test]
+fn runtime_directory_names_the_variable_that_set_it() {
+    let temp = TempDir::new().unwrap();
+    let mut context = context(temp.path());
+    let dir = runtime_dir(&context);
+    context.runtime_dir_rule = Some(RuntimeDirRule::Variable);
+
+    assert_eq!(
+        check_runtime_dir(&context),
+        Outcome {
+            verdict: Verdict::Ok,
+            reason: format!("{} is ready; KOSHI_RUNTIME_DIR names it", dir.display()),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn runtime_directory_names_the_user_id_rule() {
+    let temp = TempDir::new().unwrap();
+    let mut context = context(temp.path());
+    let dir = runtime_dir(&context);
+    context.runtime_dir_rule = Some(RuntimeDirRule::UserId);
+
+    assert_eq!(
+        check_runtime_dir(&context),
+        Outcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "{} is ready; koshi names it after your user id",
+                dir.display()
+            ),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn runtime_directory_names_the_data_directory_rule() {
+    let temp = TempDir::new().unwrap();
+    let mut context = context(temp.path());
+    let dir = runtime_dir(&context);
+    context.runtime_dir_rule = Some(RuntimeDirRule::DataDir);
+
+    assert_eq!(
+        check_runtime_dir(&context),
+        Outcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "{} is ready; koshi puts it under your application data directory",
+                dir.display()
+            ),
+            help: None,
+            detail: None,
+        }
+    );
 }
 
 // ---------------------------------------------------------------- router
@@ -1213,7 +1278,7 @@ fn a_sticky_runtime_directory_passes_the_same_check_the_socket_bind_applies() {
         check_runtime_dir(&context),
         Outcome {
             verdict: Verdict::Ok,
-            reason: format!("{} is ready", dir.display()),
+            reason: format!("{} is ready; KOSHI_RUNTIME_DIR names it", dir.display()),
             help: None,
             detail: None,
         }
@@ -1390,7 +1455,7 @@ fn runtime_directory_fails_when_nothing_can_be_created_above_it() {
         Outcome {
             verdict: Verdict::Fail,
             reason: format!(
-                "{} does not exist and koshi cannot create it: nothing new can be written in {}",
+                "{} does not exist and koshi cannot create it: nothing new can be written in {}; KOSHI_RUNTIME_DIR names it",
                 sealed.join("run").display(),
                 sealed.display()
             ),
@@ -1416,7 +1481,7 @@ fn runtime_directory_fails_when_a_name_above_it_points_nowhere() {
         Outcome {
             verdict: Verdict::Fail,
             reason: format!(
-                "{} does not exist and koshi cannot create it: nothing new can be written in {}",
+                "{} does not exist and koshi cannot create it: nothing new can be written in {}; KOSHI_RUNTIME_DIR names it",
                 link.join("koshi").display(),
                 link.display()
             ),
@@ -1444,7 +1509,7 @@ fn runtime_directory_is_ok_under_a_symlink_that_points_at_a_real_directory() {
         Outcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "{} does not exist yet; koshi creates it under {} when a session starts",
+                "{} does not exist yet; koshi creates it under {} when a session starts; KOSHI_RUNTIME_DIR names it",
                 link.join("koshi").display(),
                 link.display()
             ),
@@ -1468,7 +1533,7 @@ fn runtime_directory_fails_when_the_directory_itself_points_nowhere() {
         Outcome {
             verdict: Verdict::Fail,
             reason: format!(
-                "{} is a name koshi cannot make a directory at",
+                "{} is a name koshi cannot make a directory at; KOSHI_RUNTIME_DIR names it",
                 dir.display()
             ),
             help: Some(format!(

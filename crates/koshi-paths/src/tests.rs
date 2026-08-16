@@ -1,9 +1,11 @@
 //! Tests for the path resolvers: each resolver routes to its own per-platform
-//! location, the runtime fallback chain, that `KOSHI_*` environment variables
-//! are ignored, the ensure helpers, and the modes the machine-wide shared
-//! directories carry. Every test that touches the process environment holds
-//! `ENV_LOCK` and restores the prior values on drop, so tests stay correct
-//! under the parallel test runner.
+//! location, the runtime directory answers the same path whatever
+//! `XDG_RUNTIME_DIR` holds, `KOSHI_RUNTIME_DIR` names it only when absolute,
+//! every other `KOSHI_*` variable is ignored, and the ensure helpers refuse
+//! what another user could have planted while carrying the modes the
+//! machine-wide shared directories need. Every test that touches the process
+//! environment holds `ENV_LOCK` and restores the prior values on drop, so
+//! tests stay correct under the parallel test runner.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -37,9 +39,6 @@ impl EnvGuard {
         std::env::set_var(var, value);
     }
 
-    // Used only where a test clears a variable: Linux (`XDG_RUNTIME_DIR`) and
-    // Windows (`ProgramData`).
-    #[allow(dead_code)]
     fn unset(&mut self, var: &'static str) {
         self.save(var);
         std::env::remove_var(var);
@@ -87,21 +86,128 @@ fn each_resolver_routes_to_its_own_platform_dir() {
 
 #[test]
 fn koshi_dir_env_vars_are_ignored() {
-    // koshi reads no `KOSHI_*` path override: setting one must not move any
-    // resolved directory off its platform default.
+    // `KOSHI_RUNTIME_DIR` is the only `KOSHI_*` path override koshi reads:
+    // setting any other one must not move a resolved directory off its
+    // platform default.
     let mut env = EnvGuard::new();
     env.set("KOSHI_CONFIG_DIR", "/override/config");
     env.set("KOSHI_DATA_DIR", "/override/data");
     env.set("KOSHI_CACHE_DIR", "/override/cache");
     env.set("KOSHI_STATE_DIR", "/override/state");
-    env.set("KOSHI_RUNTIME_DIR", "/override/runtime");
 
     let dirs = project_dirs().expect("test machine has a home directory");
     assert_eq!(config_dir(), Some(dirs.config_dir().to_path_buf()));
     assert_eq!(data_dir(), Some(dirs.data_dir().to_path_buf()));
     assert_eq!(cache_dir(), Some(dirs.cache_dir().to_path_buf()));
+    assert_eq!(
+        state_dir(),
+        Some(
+            dirs.state_dir()
+                .unwrap_or_else(|| dirs.data_local_dir())
+                .to_path_buf()
+        )
+    );
     assert_ne!(config_dir(), Some(PathBuf::from("/override/config")));
-    assert_ne!(runtime_dir(), Some(PathBuf::from("/override/runtime")));
+}
+
+/// An absolute path on this platform. Windows counts a leading separator
+/// alone as root-relative, so its value carries a drive letter.
+#[cfg(unix)]
+const ABSOLUTE_OVERRIDE: &str = "/override/runtime";
+#[cfg(windows)]
+const ABSOLUTE_OVERRIDE: &str = r"C:\override\runtime";
+
+/// A relative path, which `KOSHI_RUNTIME_DIR` ignores on every platform.
+const RELATIVE_OVERRIDE: &str = "override/runtime";
+
+#[test]
+fn the_runtime_dir_is_the_same_whatever_xdg_runtime_dir_holds() {
+    // A user with `$XDG_RUNTIME_DIR` set, unset, or holding a relative path
+    // reaches the same sockets.
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+    env.unset("XDG_RUNTIME_DIR");
+    let absent = runtime_dir();
+
+    env.set("XDG_RUNTIME_DIR", "/run/user/1000");
+    let set = runtime_dir();
+    env.unset("XDG_RUNTIME_DIR");
+    let unset = runtime_dir();
+    env.set("XDG_RUNTIME_DIR", "run/user");
+    let relative = runtime_dir();
+
+    assert_eq!(set, absent);
+    assert_eq!(unset, absent);
+    assert_eq!(relative, absent);
+}
+
+/// The home directory moves the per-user directories and leaves the runtime
+/// directory where it was. Moving `HOME` is the control: it proves the
+/// resolvers read the changed environment at all.
+#[cfg(unix)]
+#[test]
+fn the_runtime_dir_does_not_follow_the_home_directory() {
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+    let runtime_before = runtime_dir();
+    let data_before = data_dir();
+
+    env.set("HOME", "/tmp/koshi-another-home");
+    env.set("XDG_DATA_HOME", "/tmp/koshi-another-home/data");
+
+    assert_ne!(data_dir(), data_before);
+    assert_eq!(runtime_dir(), runtime_before);
+}
+
+#[test]
+fn the_runtime_dir_variable_names_it_when_it_is_absolute() {
+    let mut env = EnvGuard::new();
+    env.set("KOSHI_RUNTIME_DIR", ABSOLUTE_OVERRIDE);
+
+    assert_eq!(
+        runtime_dir_with_rule(),
+        Some((PathBuf::from(ABSOLUTE_OVERRIDE), RuntimeDirRule::Variable))
+    );
+}
+
+#[test]
+fn a_relative_runtime_dir_variable_is_ignored() {
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+    let default = runtime_dir_with_rule();
+
+    env.set("KOSHI_RUNTIME_DIR", RELATIVE_OVERRIDE);
+    let answer = runtime_dir_with_rule();
+
+    assert_eq!(answer, default);
+    assert_ne!(answer.map(|(_, rule)| rule), Some(RuntimeDirRule::Variable));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_runtime_dir_is_named_after_the_effective_user_id() {
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+
+    assert_eq!(
+        runtime_dir_with_rule(),
+        Some((
+            PathBuf::from(format!("/tmp/koshi-{}", euid())),
+            RuntimeDirRule::UserId
+        ))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_runtime_dir_is_run_under_the_data_dir() {
+    let mut env = EnvGuard::new();
+    env.unset("KOSHI_RUNTIME_DIR");
+
+    assert_eq!(
+        runtime_dir_with_rule(),
+        data_dir().map(|dir| (dir.join("run"), RuntimeDirRule::DataDir))
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -136,35 +242,6 @@ fn windows_config_dir_lands_under_appdata_config() {
         config.ends_with("koshi\\config"),
         "config_dir was {config:?}"
     );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_runtime_dir_follows_xdg_runtime_dir() {
-    // `$XDG_RUNTIME_DIR` is the OS's own base-directory rule, read by the
-    // `directories` crate — not a koshi override.
-    let mut env = EnvGuard::new();
-    env.set("XDG_RUNTIME_DIR", "/run/user/1000");
-
-    assert_eq!(runtime_dir(), Some(PathBuf::from("/run/user/1000/koshi")));
-}
-
-// On macOS and Windows there is no per-boot runtime base, so `runtime_dir`
-// always falls through to `<data_dir>/run`. On Linux the same fallback fires
-// only when `$XDG_RUNTIME_DIR` is unset.
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn runtime_dir_falls_back_to_data_dir_run() {
-    let _env = EnvGuard::new();
-    assert_eq!(runtime_dir(), data_dir().map(|d| d.join("run")));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_runtime_dir_falls_back_to_data_dir_run_without_xdg() {
-    let mut env = EnvGuard::new();
-    env.unset("XDG_RUNTIME_DIR");
-    assert_eq!(runtime_dir(), data_dir().map(|d| d.join("run")));
 }
 
 #[test]
@@ -238,6 +315,56 @@ fn ensure_private_dir_repairs_a_pre_existing_wide_open_directory() {
         mode & 0o777,
         0o700,
         "a pre-existing 0755 dir must be tightened to 0700, not left as-is"
+    );
+}
+
+/// Only root can hand a directory to another user, so this test says why it
+/// was skipped and returns when this process is not root.
+#[cfg(unix)]
+#[test]
+fn ensure_private_dir_refuses_a_directory_another_user_owns() {
+    if euid() != 0 {
+        eprintln!(
+            "skipped `ensure_private_dir_refuses_a_directory_another_user_owns`: \
+             planting a directory owned by another user needs root; re-run under sudo"
+        );
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let private = root.path().join("run");
+    plant_dir(&private, 0o700);
+    std::os::unix::fs::chown(&private, Some(1), None).expect("hand the directory to another user");
+
+    let error = ensure_private_dir(&private).expect_err("another user's directory is refused");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} is owned by uid 1, expected {}",
+            private.display(),
+            euid()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_private_dir_refuses_a_symbolic_link() {
+    // The link points at a directory that passes every other check, which is
+    // the squat this refuses: the target can be moved afterwards.
+    let root = tempfile::tempdir().expect("tempdir");
+    let target = root.path().join("target");
+    plant_dir(&target, 0o700);
+    let private = root.path().join("run");
+    std::os::unix::fs::symlink(&target, &private).expect("plant the link");
+
+    let error = ensure_private_dir(&private).expect_err("a link is not a directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not a directory", private.display())
     );
 }
 

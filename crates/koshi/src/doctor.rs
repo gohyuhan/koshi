@@ -27,6 +27,7 @@ use crate::cli::FormatArg;
 use crate::output;
 use koshi_link::error::CliError;
 use koshi_link::router_client::{running_router_remote_connections, RemoteConnections};
+use koshi_paths::RuntimeDirRule;
 
 /// What one check concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -170,7 +171,11 @@ pub struct Context {
     pub config_dir: Option<PathBuf>,
     /// The private runtime directory holding the endpoint files, or `None`
     /// when this machine reports no home directory.
+    /// [`Context::runtime_dir_rule`] names the rule that produced it.
     pub runtime_dir: Option<PathBuf>,
+    /// The rule that produced [`Context::runtime_dir`], or `None` when this
+    /// machine reports no home directory.
+    pub runtime_dir_rule: Option<RuntimeDirRule>,
     /// The runtime directory's permission bits, `None` on Windows and when
     /// the directory could not be read.
     pub runtime_mode: Option<u32>,
@@ -208,12 +213,13 @@ pub struct Context {
 
 impl Context {
     /// Read every fact the checks need from this machine: the platform
-    /// directories, `koshi.kdl`, the environment, the grant file, and the
-    /// running router. Creates nothing and starts no router.
+    /// directories, the rule that produced the runtime directory, `koshi.kdl`,
+    /// the environment, the grant file, and the running router. Creates
+    /// nothing and starts no router.
     #[must_use]
     pub fn of_this_machine() -> Context {
         let config_dir = koshi_paths::config_dir();
-        let runtime_dir = koshi_paths::runtime_dir();
+        let (runtime_dir, runtime_dir_rule) = koshi_paths::runtime_dir_with_rule().unzip();
         let runtime_mode = runtime_dir.as_deref().and_then(directory_mode);
         let plugins_dir = config_dir.as_ref().map(|dir| dir.join("plugins"));
         let server = koshi_link::config::server_config_now();
@@ -235,6 +241,7 @@ impl Context {
         Context {
             config_dir,
             runtime_dir,
+            runtime_dir_rule,
             runtime_mode,
             log_dir: koshi_observability::logging::log_dir(),
             plugins_dir,
@@ -393,31 +400,18 @@ fn check_terminal(context: &Context) -> Outcome {
     }
 }
 
+/// The runtime directory check: what state the directory is in, and after a
+/// `; ` the rule that produced its path.
+///
+/// `/tmp/koshi-501` ready, named by `KOSHI_RUNTIME_DIR`, gives the reason
+/// `"/tmp/koshi-501 is ready; KOSHI_RUNTIME_DIR names it"`.
 fn check_runtime_dir(context: &Context) -> Outcome {
-    let Some(dir) = context.runtime_dir.as_deref() else {
+    let (Some(dir), Some(rule)) = (context.runtime_dir.as_deref(), context.runtime_dir_rule) else {
         return no_home_directory("runtime");
     };
-    let path = dir.display();
-    if !dir.exists() {
-        return absent_directory(dir, "when a session starts");
-    }
-    if let Err(error) = std::fs::read_dir(dir) {
-        return Outcome::fail(
-            format!("{path} cannot be read: {error}"),
-            &format!("make sure you own {path}"),
-        );
-    }
-    if let Some(mode) = context.runtime_mode {
-        if mode != 0o700 {
-            return Outcome::fail(
-                format!(
-                    "{path} has mode {mode:03o}; koshi serves a session socket only from a directory with mode 700"
-                ),
-                &format!("run chmod 700 {path}"),
-            );
-        }
-    }
-    Outcome::ok(format!("{path} is ready"))
+    let mut outcome = runtime_dir_state(dir, context.runtime_mode);
+    outcome.reason = format!("{}; {}", outcome.reason, runtime_dir_rule_phrase(rule));
+    outcome
 }
 
 fn check_router(context: &Context) -> Outcome {
@@ -550,6 +544,46 @@ fn check_remote_connections(context: &Context) -> Outcome {
     }
 }
 
+/// What state the runtime directory `dir` is in, with `mode` its permission
+/// bits and `None` where they are not known.
+///
+/// Ok when `dir` holds mode 700, and when `dir` is not there yet and koshi can
+/// create it. Fail when `dir` cannot be read, when `mode` is anything other
+/// than 700, and when `dir` is not there and koshi cannot create it.
+fn runtime_dir_state(dir: &Path, mode: Option<u32>) -> Outcome {
+    let path = dir.display();
+    if !dir.exists() {
+        return absent_directory(dir, "when a session starts");
+    }
+    if let Err(error) = std::fs::read_dir(dir) {
+        return Outcome::fail(
+            format!("{path} cannot be read: {error}"),
+            &format!("make sure you own {path}"),
+        );
+    }
+    if let Some(mode) = mode {
+        if mode != 0o700 {
+            return Outcome::fail(
+                format!(
+                    "{path} has mode {mode:03o}; koshi serves a session socket only from a directory with mode 700"
+                ),
+                &format!("run chmod 700 {path}"),
+            );
+        }
+    }
+    Outcome::ok(format!("{path} is ready"))
+}
+
+/// `rule` in words, holding no newline:
+/// [`RuntimeDirRule::Variable`] gives `"KOSHI_RUNTIME_DIR names it"`.
+fn runtime_dir_rule_phrase(rule: RuntimeDirRule) -> &'static str {
+    match rule {
+        RuntimeDirRule::Variable => "KOSHI_RUNTIME_DIR names it",
+        RuntimeDirRule::UserId => "koshi names it after your user id",
+        RuntimeDirRule::DataDir => "koshi puts it under your application data directory",
+    }
+}
+
 /// The answer for a directory koshi makes for itself that is not there yet.
 ///
 /// `created` names the moment koshi makes it, such as `"when a session
@@ -592,9 +626,9 @@ fn absent_directory(dir: &Path, created: &str) -> Outcome {
 /// value comes from making a directory inside that name and removing it
 /// again.
 ///
-/// `/run/user/501/koshi` with `/run/user/501` present and writable gives
-/// `Some(("/run/user/501", true))`. `/tmp/parent/koshi` where `koshi` points
-/// nowhere gives `Some(("/tmp/parent/koshi", false))`.
+/// `/tmp/koshi-501` with `/tmp` present and writable gives
+/// `Some(("/tmp", true))`. `/tmp/parent/koshi` where `koshi` points nowhere
+/// gives `Some(("/tmp/parent/koshi", false))`.
 fn nearest_existing_name(path: &Path) -> Option<(PathBuf, bool)> {
     let name = path
         .ancestors()

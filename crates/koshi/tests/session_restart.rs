@@ -173,12 +173,14 @@ impl Drop for RunningRouter {
 /// Every variable the platform path resolvers read is pointed at `home`, on
 /// every platform, so the config file this process reads is the one the test
 /// home holds — none, which leaves every setting at its built-in default.
+/// `KOSHI_RUNTIME_DIR` names `<home>/run`, which every caller here then
+/// overrides with its own `--runtime-dir` argument.
 fn koshi_under(exe: &Path, home: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(exe);
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("XDG_RUNTIME_DIR", home)
+        .env("KOSHI_RUNTIME_DIR", home.join("run"))
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
