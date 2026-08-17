@@ -2,7 +2,8 @@
 //! loop-facing driver surface, command dispatch, the event inbox, the event
 //! fan-out bus, outer-input routing, PTY (pseudo-terminal, a child process's
 //! terminal connection) forwarding and output handling, config reload
-//! transactions, render scheduling, per-client scrollback scrolling, staged
+//! transactions, render scheduling, the saved views a detached client can take
+//! back, per-client scrollback scrolling, staged
 //! shutdown, the render-snapshot builder, the wire-frame builder, the
 //! attach-structure builder, the layout-dump builder, and event transactions.
 //! The [`Server`](crate::server::Server) type these modules extend lives in
@@ -24,6 +25,7 @@ pub mod pty_forward;
 pub mod pty_output;
 pub mod reload;
 pub mod render_schedule;
+pub mod saved_view;
 pub mod scroll;
 pub mod selection;
 pub mod shutdown;

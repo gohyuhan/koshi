@@ -218,6 +218,15 @@ pub enum IpcRequestKind {
         /// a caller that predates this field.
         #[serde(default)]
         resume: Option<ClientId>,
+        /// The token the session handed this caller at its last attach,
+        /// presented to get that attach's view back: the active tab, the
+        /// focused pane of each tab, the zoomed pane of each tab, and the
+        /// scroll offset of each pane. Absent on a first attach, and from a
+        /// caller that predates this field. A token the session does not
+        /// hold, and a token older than 120 seconds, attach with a fresh view
+        /// instead of failing.
+        #[serde(default)]
+        resume_token: Option<ConnectionToken>,
     },
     /// One key press the attached client's keymap did not bind, for the pane
     /// it is typing into.
@@ -416,6 +425,11 @@ pub enum IpcResult {
         session_id: SessionId,
         /// What the session contains right now, built for this reply.
         structure: AttachedSessionStructureSnapshot,
+        /// The fresh secret this attach minted, presented on the next attach
+        /// to get this attach's view back. `None` from a session server that
+        /// predates this field.
+        #[serde(default)]
+        resume_token: Option<ConnectionToken>,
     },
     /// What dispatching the submitted command produced.
     CommandResult(CommandResult),

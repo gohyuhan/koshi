@@ -27,6 +27,10 @@ use super::*;
 /// The terminal size every attaching client in these tests reports.
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
+/// The secret every stand-in attach mints, so an assertion names the exact
+/// token the reply carries.
+const MINTED_TOKEN: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
 /// A fresh directory to stand in for the runtime dir, under a short base so
 /// the Unix socket path stays inside the OS path-length cap.
 /// [`IpcServer::start`] creates it private itself.
@@ -116,6 +120,7 @@ fn spawn_attaching_dispatcher(
                         structure: attached_structure(session_id),
                         events: events_rx,
                         ending_notice: Arc::clone(&ending_notice),
+                        resume_token: ConnectionToken::new(MINTED_TOKEN),
                     }));
                 }
                 detached @ RuntimeEvent::ClientDetached { .. } => {
@@ -158,6 +163,7 @@ fn spawn_ending_dispatcher(
                     structure: attached_structure(session_id),
                     events,
                     ending_notice: Arc::clone(&ending_notice),
+                    resume_token: ConnectionToken::new(MINTED_TOKEN),
                 }));
             }
         }
@@ -421,6 +427,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
                 viewport: VIEWPORT,
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             },
         })
         .expect("send attach");
@@ -432,6 +439,7 @@ fn attach_to(runtime_dir: &Path, session: SessionId, client_id: ClientId) -> Con
             client_id,
             session_id: session,
             structure: attached_structure(session),
+            resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
         },
     );
     connection
@@ -945,7 +953,7 @@ fn a_detach_leaves_the_sessions_token_unchanged() {
 
     let attached = attach_to(&runtime_dir, session, client);
     drop(attached);
-    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -1149,7 +1157,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
             kind: IpcRequestKind::Discovery,
         })
         .expect("send discovery");
-    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -1375,7 +1383,7 @@ fn a_layout_request_on_an_attached_connection_ends_that_client_stream() {
         })
         .expect("send layout request");
 
-    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -1823,6 +1831,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
                 viewport: VIEWPORT,
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             },
         })
         .expect("send attach");
@@ -1833,6 +1842,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
             client_id: client,
             session_id: session,
             structure: attached_structure(session),
+            resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
         }
     );
 
@@ -1860,7 +1870,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
 
     // The typing that arrived after the setting went off never reached the
     // session; the client left instead.
-    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -2199,7 +2209,7 @@ fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing
         })
         .expect("send restart");
 
-    let RuntimeEvent::ClientDetached { client_id } = seen.recv().expect("detach event") else {
+    let RuntimeEvent::ClientDetached { client_id, .. } = seen.recv().expect("detach event") else {
         panic!("expected ClientDetached");
     };
     assert_eq!(client_id, client);
@@ -2297,7 +2307,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     assert!(
         matches!(
             seen.recv_timeout(Duration::from_secs(5)).expect("detach event"),
-            RuntimeEvent::ClientDetached { client_id } if client_id == client,
+            RuntimeEvent::ClientDetached { client_id, .. } if client_id == client,
         ),
         "leaving detaches the client that left",
     );
@@ -2456,6 +2466,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
                 viewport: VIEWPORT,
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             },
         })
         .expect("send attach");
@@ -2539,7 +2550,11 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     // Closing this client's queue is what ends its writing thread, and the
     // dispatcher ends once every inbox sender is gone.
     inbox_tx
-        .send(RuntimeEvent::ClientDetached { client_id: client })
+        .send(RuntimeEvent::ClientDetached {
+            client_id: client,
+            detached_at: SystemTime::now(),
+            streamed: true,
+        })
         .expect("the detach is queued");
     drop(inbox_tx);
     server.shutdown();

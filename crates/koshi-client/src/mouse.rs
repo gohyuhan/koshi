@@ -242,8 +242,9 @@ pub(crate) struct LastPress {
 }
 
 impl Client {
-    /// The pane this viewer's pointer is over and where its tab strip is
-    /// scrolled, for the frame it is about to paint or hit-test.
+    /// The pane this viewer's pointer is over, where its tab strip is scrolled,
+    /// and whether it is dialing the session again, for the frame it is about to
+    /// paint or hit-test.
     ///
     /// A peek made on a tab other than `active_tab` is not applied, so a tab
     /// switch reveals the new tab. The peek is thrown away outright the moment
@@ -258,6 +259,7 @@ impl Client {
                 .tabline_peek
                 .filter(|&(tab, _)| tab == active_tab)
                 .map(|(_, first)| first),
+            reconnecting: self.reconnecting,
         }
     }
 
@@ -420,6 +422,19 @@ impl Client {
     /// program's, so the gesture ends.
     pub fn end_mouse_selection(&mut self) {
         self.selection_drag = None;
+    }
+
+    /// Drop every gesture under way: the selection drag, the border drag, the
+    /// tab-strip peek-drag, and the pane a held button was captured to. The
+    /// highlight a selection drag already made stands.
+    ///
+    /// The pane under the pointer, where the tab strip is peeked, and the line a
+    /// pending edge-scroll was asked from are left as they are.
+    pub fn end_mouse_gestures(&mut self) {
+        self.selection_drag = None;
+        self.resize_drag = None;
+        self.tabline_drag = None;
+        self.mouse_capture = None;
     }
 
     /// Decide what wheel tick `mouse` means against `frame`, the last frame this

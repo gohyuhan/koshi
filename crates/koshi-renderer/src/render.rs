@@ -66,7 +66,8 @@ use crate::theme::Theme;
 /// `theme`, `hints`, `pending`, and `viewer` come from the viewer: the colors
 /// it paints koshi's chrome in, the hint-bar data for the mode it is in, the
 /// multi-chord sequence it has open, and the pane its pointer is over together
-/// with where its tab strip is scrolled.
+/// with where its tab strip is scrolled and whether it is dialing the session
+/// again.
 pub fn render_frame(
     snapshot: &RenderSnapshot,
     theme: &Theme,
@@ -490,14 +491,20 @@ fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> &str {
 }
 
 /// The mode indicator shown in the tabline: every active mode label joined with
-/// ` · `, or `BASE` when the client is in plain mode with the mouse ungrabbed.
+/// ` · `, or `BASE` when the client is in plain mode with the mouse ungrabbed
+/// and `reconnecting` is `false`.
 ///
-/// The labels compose from independent axes: the `lock_mode` layer contributes
-/// at most one tag (nothing when `Normal`), and `mouse_select` adds `SELECT`.
-/// So a locked client grabbing the mouse reads `LOCK · SELECT`, and a plain one
-/// grabbing it reads `SELECT`.
-fn mode_tags(client: &ClientSnapshot) -> String {
+/// The labels compose from independent axes, always in this order:
+/// `reconnecting` adds `RECONNECTING`, the `lock_mode` layer contributes at
+/// most one tag (nothing when `Normal`), and `mouse_select` adds `SELECT`. So a
+/// reconnecting client that is locked and grabbing the mouse reads
+/// `RECONNECTING · LOCK · SELECT`, and a plain one grabbing it reads `SELECT`.
+/// A `reconnecting` client never reads `BASE`.
+fn mode_tags(client: &ClientSnapshot, reconnecting: bool) -> String {
     let mut tags: Vec<&'static str> = Vec::new();
+    if reconnecting {
+        tags.push("RECONNECTING");
+    }
     if let Some(tag) = lock_mode_tag(client.lock_mode) {
         tags.push(tag);
     }

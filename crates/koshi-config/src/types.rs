@@ -123,6 +123,14 @@ pub struct ClientConfig {
     pub logging: LoggingConfig,
     /// Self-update checking behavior.
     pub update: UpdateConfig,
+    /// Whether a viewer whose link to a session on another machine drops dials
+    /// that machine again by itself. While it dials, the viewer draws
+    /// `RECONNECTING` on its tab strip and keeps trying for up to 120 seconds,
+    /// and joining again puts back the tab, the focused and zoomed pane of each
+    /// tab, and the scroll offset of each pane. `false` ends the viewer on a
+    /// dropped link, with the message that names how to attach again by hand. A
+    /// link to a session on this machine ends the viewer either way.
+    pub remote_reconnect: bool,
 }
 
 impl Default for ClientConfig {
@@ -138,6 +146,7 @@ impl Default for ClientConfig {
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
             update: UpdateConfig::default(),
+            remote_reconnect: true,
         }
     }
 }

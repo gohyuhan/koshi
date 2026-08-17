@@ -1461,3 +1461,66 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
         "the press drops the old highlight and arms a drag"
     );
 }
+
+#[test]
+fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone() {
+    let first = PaneId::new();
+    let second = PaneId::new();
+    let frame = frame(
+        &[plain_pane(first), plain_pane(second)],
+        Some(first),
+        PaneKind::Terminal,
+    );
+    let tab = frame.client.active_tab;
+    let at = content_cell(&frame, 0);
+    // The shared divider between the two bands: the second pane's top edge.
+    let divider = Point {
+        x: 10,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+    };
+    // The bare tab strip, past the one tab's ribbon.
+    let strip = Point { x: 40, y: 0 };
+    let now = Instant::now();
+    let mut viewer = viewer();
+
+    // A peeked strip and a hovered pane. Neither is a gesture.
+    viewer
+        .handle_mouse_wheel(wheel(ScrollDirection::Down, strip), &frame)
+        .expect("a wheel tick decides");
+    viewer.handle_mouse(motion(at), &frame, now);
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(1));
+    assert_eq!(viewer.chrome(tab).hovered_pane, Some(first));
+
+    // All four gestures under way at once: the presses that began them are
+    // spaced so no two read as one double click.
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(press(divider), &frame, later(now, 1));
+    viewer.handle_mouse(press(strip), &frame, later(now, 2));
+    viewer.note_press_forwarded(second, MouseButton::Left);
+    assert_eq!(viewer.selection_drag.map(|drag| drag.pane), Some(first));
+    assert_eq!(viewer.resize_drag.map(|drag| drag.pane), Some(second));
+    assert_eq!(viewer.tabline_drag.map(|drag| drag.anchor_x), Some(strip.x));
+    assert_eq!(viewer.mouse_capture, Some((second, MouseButton::Left)));
+
+    viewer.end_mouse_gestures();
+
+    assert_eq!(viewer.selection_drag, None);
+    assert_eq!(viewer.resize_drag, None);
+    assert_eq!(viewer.tabline_drag, None);
+    assert_eq!(viewer.mouse_capture, None);
+    assert_eq!(
+        viewer.chrome(tab).tabline_offset,
+        Some(1),
+        "the strip peek stands"
+    );
+    assert_eq!(
+        viewer.chrome(tab).hovered_pane,
+        Some(first),
+        "the hovered pane stands"
+    );
+    assert_eq!(
+        viewer.handle_mouse(drag(Point { x: at.x + 4, ..at }), &frame, later(now, 3)),
+        Vec::new(),
+        "no gesture is under way, so the drag decides nothing"
+    );
+}

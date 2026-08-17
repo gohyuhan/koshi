@@ -174,6 +174,8 @@ pub struct PartialKoshiConfig {
     pub logging: Option<PartialLoggingConfig>,
     /// Self-update overrides.
     pub update: Option<PartialUpdateConfig>,
+    /// Remote-reconnect override.
+    pub remote_reconnect: Option<bool>,
     /// Beta-feature gate override.
     pub allow_beta_features: Option<bool>,
     /// Other-users gate override.
@@ -243,6 +245,7 @@ impl PartialKoshiConfig {
         if let Some(update) = self.update {
             update.apply(&mut config.update);
         }
+        merge_field(&mut config.remote_reconnect, self.remote_reconnect);
     }
 
     /// The effective logging settings from this layer over the built-in

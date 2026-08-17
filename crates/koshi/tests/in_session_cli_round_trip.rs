@@ -291,6 +291,7 @@ fn attach(session: &RunningSession) -> AttachedClient {
             viewport: VIEWPORT,
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
     };
     connection

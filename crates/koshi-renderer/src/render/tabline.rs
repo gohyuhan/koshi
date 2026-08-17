@@ -221,10 +221,12 @@ fn text_width(text: &str) -> u16 {
     u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
 }
 
-/// The tabline's right-anchored block text: the mode tag. Each pane's scroll
-/// position lives in its own bottom border (see [`draw_panes`]), not here.
+/// The tabline's right-anchored block text: the mode tag, which reads
+/// `RECONNECTING` first while the viewer has no link to the session. Each
+/// pane's scroll position lives in its own bottom border (see [`draw_panes`]),
+/// not here.
 fn right_block_text(frame: FrameLayout<'_>) -> String {
-    format!(" {} ", mode_tags(frame.client))
+    format!(" {} ", mode_tags(frame.client, frame.viewer.reconnecting))
 }
 
 /// The right-anchored block, colored for drawing.

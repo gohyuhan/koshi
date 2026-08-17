@@ -267,6 +267,14 @@ impl Client {
         }
     }
 
+    /// Every scrolled-up pane this client remembers, keyed by pane id, each
+    /// value the lines scrolled up from the live bottom. A pane with no entry
+    /// sits at the live bottom.
+    #[must_use]
+    pub fn scroll_offsets(&self) -> &HashMap<PaneId, usize> {
+        &self.scroll_by_pane
+    }
+
     /// This client's highlight in `pane_id`, or `None` if it has none there.
     #[must_use]
     pub fn selection(&self, pane_id: PaneId) -> Option<Selection> {

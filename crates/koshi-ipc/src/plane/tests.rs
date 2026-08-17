@@ -496,6 +496,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                     viewport,
                     filter: EventFilterSpec::All,
                     resume: None,
+                    resume_token: None,
                 },
             })
             .expect("send attach");
@@ -511,6 +512,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                         viewport,
                         filter: EventFilterSpec::All,
                         resume: None,
+                        resume_token: None,
                     },
                 },
                 Next::Stop,

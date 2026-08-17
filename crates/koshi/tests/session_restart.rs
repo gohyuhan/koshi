@@ -475,6 +475,7 @@ impl Stream {
                 viewport,
                 filter: EventFilterSpec::All,
                 resume,
+                resume_token: None,
             },
         };
         connection

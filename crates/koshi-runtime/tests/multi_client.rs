@@ -228,6 +228,7 @@ fn attach_sized(
                 viewport,
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             },
         })
         .expect("send attach");
@@ -237,6 +238,7 @@ fn attach_sized(
         client_id,
         session_id,
         structure,
+        ..
     } = reply.result
     else {
         panic!("expected an attach reply, got {:?}", reply.result);

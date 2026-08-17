@@ -405,6 +405,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
     };
 
@@ -416,7 +417,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                 "Attach": {
                     "viewport": { "cols": 80, "rows": 24 },
                     "filter": "All",
-                    "resume": null
+                    "resume": null,
+                    "resume_token": null
                 }
             }
         })
@@ -428,6 +430,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             client_id: ClientId::from_uuid(fixed_uuid()),
             session_id: SessionId::from_uuid(fixed_uuid()),
             structure: populated_structure(),
+            resume_token: None,
         },
     };
 
@@ -453,7 +456,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                             "id": "00000000-0000-0000-0000-000000000001",
                             "kind": "Terminal"
                         }]
-                    }
+                    },
+                    "resume_token": null
                 }
             }
         })
@@ -531,6 +535,7 @@ fn attach_request_round_trips() {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
     };
 
@@ -545,6 +550,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
             resume: Some(ClientId::from_uuid(fixed_uuid())),
+            resume_token: None,
         },
     };
 
@@ -552,13 +558,14 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
 }
 
 #[test]
-fn an_attach_request_written_without_the_resume_field_decodes_as_no_claim() {
-    // A caller built before the field exists writes an attach without it. It
-    // must still attach, as a client naming no record to come back as.
+fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
+    // A caller built before the two resume fields exist writes an attach
+    // without either. It must still attach, as a client naming no record to
+    // come back as and no view to get back.
     let decoded: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
     )
-    .expect("an attach without the resume field decodes");
+    .expect("an attach without the resume fields decodes");
 
     assert_eq!(
         decoded,
@@ -568,6 +575,53 @@ fn an_attach_request_written_without_the_resume_field_decodes_as_no_claim() {
                 viewport: Size { cols: 80, rows: 24 },
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
+            },
+        }
+    );
+}
+
+#[test]
+fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
+    let request = IpcRequest {
+        request_id: 4,
+        kind: IpcRequestKind::Attach {
+            viewport: Size { cols: 80, rows: 24 },
+            filter: EventFilterSpec::All,
+            resume: Some(ClientId::from_uuid(fixed_uuid())),
+            resume_token: Some(token()),
+        },
+    };
+
+    let IpcRequestKind::Attach {
+        resume_token: Some(carried),
+        ..
+    } = round_trip(&request).kind
+    else {
+        panic!("an attach carrying a resume token decodes as one");
+    };
+
+    assert_eq!(carried.expose(), token().expose());
+}
+
+#[test]
+fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_no_token() {
+    // A caller that names a client record but predates the token field writes
+    // `resume` and no `resume_token`.
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","resume":"00000000-0000-0000-0000-000000000001"}}}"#,
+    )
+    .expect("an attach without the resume token field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcRequest {
+            request_id: 4,
+            kind: IpcRequestKind::Attach {
+                viewport: Size { cols: 80, rows: 24 },
+                filter: EventFilterSpec::All,
+                resume: Some(ClientId::from_uuid(fixed_uuid())),
+                resume_token: None,
             },
         }
     );
@@ -609,10 +663,62 @@ fn attached_response_round_trips() {
             client_id: ClientId::new(),
             session_id: SessionId::new(),
             structure: populated_structure(),
+            resume_token: None,
         },
     };
 
     assert_eq!(round_trip(&response), response);
+}
+
+#[test]
+fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
+    let response = IpcResponse {
+        request_id: Some(4),
+        result: IpcResult::Attached {
+            client_id: ClientId::from_uuid(fixed_uuid()),
+            session_id: SessionId::from_uuid(fixed_uuid()),
+            structure: populated_structure(),
+            resume_token: Some(token()),
+        },
+    };
+
+    let IpcResult::Attached {
+        resume_token: Some(carried),
+        ..
+    } = round_trip(&response).result
+    else {
+        panic!("an attached answer carrying a resume token decodes as one");
+    };
+
+    assert_eq!(carried.expose(), token().expose());
+}
+
+#[test]
+fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
+    // A session server built before the field exists answers without it. The
+    // client must attach, holding no token to present at its next attach.
+    let decoded: IpcResponse = serde_json::from_str(
+        r#"{"request_id":4,"result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","structure":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[],"panes":[]}}}}"#,
+    )
+    .expect("an attached answer without the resume token field decodes");
+
+    assert_eq!(
+        decoded,
+        IpcResponse {
+            request_id: Some(4),
+            result: IpcResult::Attached {
+                client_id: ClientId::from_uuid(fixed_uuid()),
+                session_id: SessionId::from_uuid(fixed_uuid()),
+                structure: AttachedSessionStructureSnapshot {
+                    id: SessionId::from_uuid(fixed_uuid()),
+                    name: "quiet-lake".to_string(),
+                    tabs: Vec::new(),
+                    panes: Vec::new(),
+                },
+                resume_token: None,
+            },
+        }
+    );
 }
 
 #[test]
@@ -666,6 +772,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 viewport: Size { cols: 80, rows: 24 },
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             },
         }
     );
@@ -692,6 +799,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
     };
 
@@ -1128,6 +1236,7 @@ fn each_request_kind_is_tagged_with_its_own_name() {
                 viewport: Size { cols: 80, rows: 24 },
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token: None,
             })
             .unwrap()
         ),
@@ -1169,6 +1278,7 @@ fn each_result_is_tagged_with_its_own_name() {
                 client_id: ClientId::new(),
                 session_id: SessionId::new(),
                 structure: populated_structure(),
+                resume_token: None,
             })
             .unwrap()
         ),
@@ -1373,6 +1483,7 @@ fn every_request_kind_names_itself_without_its_payload() {
             viewport: Size { cols: 80, rows: 24 },
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         }
         .name(),
         "Attach"

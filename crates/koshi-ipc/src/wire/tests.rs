@@ -335,6 +335,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             viewport: Size { cols: 80, rows: 24 },
             filter: crate::protocol::EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
         IpcRequestKind::KeyPress {
             chord: koshi_core::key::KeyChord::new(
@@ -380,6 +381,7 @@ fn sample_results() -> Vec<IpcResult> {
                 tabs: Vec::new(),
                 panes: Vec::new(),
             },
+            resume_token: None,
         },
         IpcResult::CommandResult(koshi_core::command::CommandResult::Ok {
             command_id: koshi_core::ids::CommandId::new(),
