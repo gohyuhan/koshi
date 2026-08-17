@@ -171,12 +171,27 @@ that are marked beta next.
 Each terminal reads this for itself. It applies only to a terminal viewing a
 session on another machine, reached with `koshi attach --remote`.
 
-On, a link that drops draws `RECONNECTING` on the tab strip and dials that
-machine again — after 1 second, then 2, 4, 8, and 8 before every dial after
-that — for up to 120 seconds. Joining again puts back the tab you were on, the
-focused pane of each tab, the fullscreened pane of each tab, and the scroll
-offset of each pane. Keys typed while the link is down are dropped; a resize is
-kept.
+On, a link that drops dials that machine again — after 1 second, then 2, 4, 8,
+and 8 before every dial after that — for up to 120 seconds. While it waits, the
+tab strip reads a tag shaped like `RECONNECTING (attempt 4, retry in 8s)`: the
+first number is the dial it is about to make, and the second is the seconds left
+before that dial. The seconds count down by one each second. The attempt number
+rises by one on every dial, so the fourth dial and every dial after it waits the
+full 8 seconds. Joining again puts back the tab you were on, the focused pane of
+each tab, the fullscreened pane of each tab, and the scroll offset of each pane.
+Keys typed while the link is down are dropped; a resize is kept.
+
+A refusal no dial can change stops the dialing at once, without waiting the 120
+seconds out: the certificate the server presents is not the pinned one, the
+server does not admit the token, the token does not reach the session, or the
+two builds share no protocol version. Every identical dial gets that same
+answer, so no dial follows it.
+
+When the dialing stops, koshi puts your terminal back the way it found it.
+Then it prints the cause it stopped on, then `the session continues without
+you`, then the command that lists the session on that server and the command
+that joins it again — `koshi attach --remote <server> <session>`. It exits with
+a non-zero status.
 
 Off, a dropped link ends the terminal, printing how to attach again by hand.
 

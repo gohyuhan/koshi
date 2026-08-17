@@ -5,7 +5,7 @@
 
 use super::*;
 
-use crate::snapshot::{FrameLayout, ViewerChrome};
+use crate::snapshot::{FrameLayout, Reconnecting, ViewerChrome};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
@@ -67,7 +67,7 @@ fn snap(
         chrome: ViewerChrome {
             hovered_pane: None,
             tabline_offset,
-            reconnecting: false,
+            reconnecting: None,
         },
     }
 }
@@ -456,14 +456,21 @@ fn draw_paints_the_lock_tag_in_locked_mode() {
 
 #[test]
 fn draw_paints_the_reconnecting_tag_while_the_viewer_has_no_link() {
-    let width = 30 + BADGE;
     let mut frame = snap("s", &[("a", true)], None, LockMode::Normal, false);
-    frame.chrome.reconnecting = true;
+    frame.chrome.reconnecting = Some(Reconnecting {
+        attempt: 3,
+        retry_in_seconds: 8,
+    });
+    // " RECONNECTING (attempt 3, retry in 8s) " fills the row's last 39 cells,
+    // and the row is 16 + BADGE cells wider than that block.
+    let block = " RECONNECTING (attempt 3, retry in 8s) ";
+    assert_eq!(right_block_text(frame.layout()), block);
+    let tag_width = text_width(block);
+    assert_eq!(tag_width, 39);
+    let width = tag_width + 16 + BADGE;
     let buf = draw(&frame, width);
-    // " RECONNECTING " fills the row's last 14 cells.
-    let tag = width - 14;
-    let text: String = (tag..width).map(|x| cell(&buf, x)).collect();
-    assert_eq!(text, " RECONNECTING ");
+    let text: String = (width - tag_width..width).map(|x| cell(&buf, x)).collect();
+    assert_eq!(text, block);
 }
 
 #[test]

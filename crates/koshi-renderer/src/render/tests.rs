@@ -199,7 +199,7 @@ fn render_hovering(snapshot: &RenderSnapshot, hovered: Option<PaneId>, w: u16, h
         ViewerChrome {
             hovered_pane: hovered,
             tabline_offset: None,
-            reconnecting: false,
+            reconnecting: None,
         },
         area,
         &mut buf,
@@ -474,7 +474,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
     let peeking = ViewerChrome {
         hovered_pane: None,
         tabline_offset: Some(0),
-        reconnecting: false,
+        reconnecting: None,
     };
     let tabline = row_text(&render_peeking(&snap, peeking, badge_cols() + 21, 8), 0);
 
@@ -1972,19 +1972,19 @@ fn mode_indicator_joins_active_mode_labels() {
     );
 
     // Plain mode with the mouse ungrabbed reads BASE.
-    assert_eq!(mode_tags(&snap.client, false), "BASE");
+    assert_eq!(mode_tags(&snap.client, None), "BASE");
 
     // Mouse-select alone reads SELECT.
     snap.client.mouse_select = true;
-    assert_eq!(mode_tags(&snap.client, false), "SELECT");
+    assert_eq!(mode_tags(&snap.client, None), "SELECT");
 
     // Locked and grabbing reads both, joined by ` · `.
     snap.client.lock_mode = LockMode::Locked;
-    assert_eq!(mode_tags(&snap.client, false), "LOCK · SELECT");
+    assert_eq!(mode_tags(&snap.client, None), "LOCK · SELECT");
 
     // Locked alone reads LOCK.
     snap.client.mouse_select = false;
-    assert_eq!(mode_tags(&snap.client, false), "LOCK");
+    assert_eq!(mode_tags(&snap.client, None), "LOCK");
 }
 
 #[test]
@@ -1999,14 +1999,23 @@ fn mode_indicator_puts_the_reconnecting_tag_first_and_replaces_base() {
         Size { cols: 20, rows: 6 },
     );
 
-    // A reconnecting client in plain mode reads RECONNECTING, never BASE.
-    assert_eq!(mode_tags(&snap.client, true), "RECONNECTING");
+    let dialing = Some(Reconnecting {
+        attempt: 3,
+        retry_in_seconds: 8,
+    });
+
+    // A reconnecting client in plain mode reads the link tag, never BASE, and
+    // the tag carries the dial it waits for and the seconds left before it.
+    assert_eq!(
+        mode_tags(&snap.client, dialing),
+        "RECONNECTING (attempt 3, retry in 8s)"
+    );
 
     // Reconnecting while locked and grabbing puts the link tag ahead of both.
     snap.client.lock_mode = LockMode::Locked;
     snap.client.mouse_select = true;
     assert_eq!(
-        mode_tags(&snap.client, true),
-        "RECONNECTING · LOCK · SELECT"
+        mode_tags(&snap.client, dialing),
+        "RECONNECTING (attempt 3, retry in 8s) · LOCK · SELECT"
     );
 }

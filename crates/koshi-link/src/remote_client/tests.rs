@@ -1,6 +1,6 @@
 //! Tests for the dialling side: which strings count as an address, which saved
-//! names are refused, and which of the three lookup answers leads to a pinned
-//! dial.
+//! names are refused, which of the three lookup answers leads to a pinned dial,
+//! and which answer to a Hello reads as a refusal a repeat dial cannot change.
 
 use std::time::SystemTime;
 
@@ -127,7 +127,7 @@ fn naming_a_server_that_is_already_saved_is_refused_rather_than_ignored() {
     let refusal = connect_saved(&ServerArg::Saved(record), Some("home"), None)
         .expect_err("a name for a server that is already saved is refused");
 
-    let CliError::InvalidArgs { detail } = refusal else {
+    let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
         panic!("a name that cannot be given is a bad argument, not a runtime failure");
     };
     assert_eq!(
@@ -146,12 +146,87 @@ fn a_saved_server_with_no_name_is_named_by_its_address_when_it_refuses() {
     let refusal = connect_saved(&ServerArg::Saved(record), Some("home"), None)
         .expect_err("a name for a server that is already saved is refused");
 
-    let CliError::InvalidArgs { detail } = refusal else {
+    let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
         panic!("a name that cannot be given is a bad argument");
     };
     assert_eq!(
         detail,
         "desk.local:7654 is already saved, so --save-as home would change nothing; \
          run `koshi remote forget desk.local:7654` first to save it under another name"
+    );
+}
+
+#[test]
+fn a_dial_failure_hands_back_the_error_it_carries_unchanged() {
+    let unreachable = DialError::Unreachable(CliError::IpcUnavailable {
+        detail: "the connect to desk.local:7654 was refused".to_string(),
+    });
+    assert_eq!(
+        CliError::from(unreachable).to_string(),
+        "IPC unavailable: the connect to desk.local:7654 was refused"
+    );
+
+    let refused = DialError::Refused(CliError::Runtime {
+        detail: "the server desk.local:7654 did not admit the connection".to_string(),
+    });
+    assert_eq!(
+        CliError::from(refused).to_string(),
+        "the server desk.local:7654 did not admit the connection"
+    );
+}
+
+#[test]
+fn the_refusal_every_rejected_token_carries_names_both_ways_to_replace_it() {
+    let answer = RemoteServerFrame::Refused {
+        message: remote_wire::REMOTE_REFUSED.to_string(),
+    };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        "the server desk.local:7654 did not admit the connection: the token was rejected \
+         or revoked. re-grant it on that machine with `koshi share grant`; store the new \
+         secret with `koshi remote set-secret` for a saved server, or give it when the \
+         next dial asks"
+    );
+}
+
+#[test]
+fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
+    let answer = RemoteServerFrame::Refused {
+        message: "the session is gone".to_string(),
+    };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(detail, "the session is gone (server desk.local:7654)");
+}
+
+#[test]
+fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
+    // `probe` sends a `CliError::Runtime` to `Reach::Refused` and everything
+    // else to `Reach::Unreachable`.
+    let changed = DialError::Refused(talk_failed(IpcError::CertificateChanged {
+        address: "desk.local:7654".to_string(),
+        pinned: "aa".repeat(32),
+        presented: "bb".repeat(32),
+    }));
+
+    assert_eq!(
+        CliError::from(changed).to_string(),
+        format!(
+            "IPC unavailable: the certificate of desk.local:7654 changed: pinned {}, \
+             presented {}. if the server was reinstalled on purpose, run \
+             `koshi remote forget desk.local:7654` and connect again.",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        )
     );
 }

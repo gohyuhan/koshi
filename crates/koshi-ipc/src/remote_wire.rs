@@ -160,10 +160,14 @@ pub enum RemoteServerFrame {
 /// presented as 64 lowercase hex characters, and the answer.
 ///
 /// # Errors
-/// [`IpcError::Transport`] naming what failed: the lookup, the connect, the
-/// handshake, a fingerprint that does not match the pinned one, or a deadline
-/// that passed. [`IpcError::Disconnected`] when the server hung up, and
-/// [`IpcError::MalformedFrame`] when its answer does not decode.
+/// [`IpcError::ConnectRefused`] when nothing accepts the TCP connection,
+/// [`IpcError::ConnectTimedOut`] when the connect deadline passes,
+/// [`IpcError::TlsHandshakeFailed`] when the handshake fails, and
+/// [`IpcError::CertificateChanged`] when the presented certificate does not
+/// match the pinned fingerprint. [`IpcError::Transport`] naming what failed
+/// for the lookup and the stream split. [`IpcError::Disconnected`] when the
+/// server hung up, and [`IpcError::MalformedFrame`] when its answer does not
+/// decode.
 pub fn open(
     address: &str,
     pinned: Option<&str>,

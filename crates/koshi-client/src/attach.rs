@@ -39,10 +39,15 @@
 //! moves this client to another session comes back the same way.
 //!
 //! A dropped link to a session on a server is not a way out either, while
-//! `remote-reconnect` is on. The viewer
-//! draws `RECONNECTING` on its tab strip and dials that server again — after 1
-//! second, then 2, 4, 8, and 8 seconds before every dial after that — until it
-//! joins or 120 seconds pass. Each dial presents the secret the last attach
+//! `remote-reconnect` is on. The viewer draws
+//! `RECONNECTING (attempt 1, retry in 1s)` on its tab strip, counting the
+//! seconds down as it waits, and dials that server again — after 1 second, then
+//! 2, 4, 8, and 8 seconds before every dial after that — until it joins or 120
+//! seconds pass. A dial the server answers with a refusal — a certificate that
+//! is not the pinned one, a secret it does not admit, a session that secret does
+//! not reach, or a protocol version this build does not accept — is not dialed
+//! again: every identical dial gets the same answer, so the viewer stops there.
+//! Each dial presents the secret the last attach
 //! minted, and the session hands that attach's view back for it: the same
 //! active tab, the same focused and zoomed pane of each tab, and the same
 //! scroll offset of each pane. A session that no longer holds that view mints a
@@ -51,8 +56,10 @@
 //! viewer reads the terminal's size again and reports it. The screen keeps the
 //! last frame it drew, at the size it was drawn for, until the viewer joins
 //! again — a terminal resized over that stretch repaints when the first frame
-//! of the new link arrives. With `remote-reconnect` off, and for a session on
-//! this machine, a dropped link ends the client.
+//! of the new link arrives. A viewer that stops dialing restores its terminal,
+//! then prints the cause it stopped on, `the session continues without you`, and
+//! the command that reattaches, and exits non-zero. With `remote-reconnect` off,
+//! and for a session on this machine, a dropped link ends the client.
 //!
 //! From there the connection carries traffic both ways. The session composes
 //! this terminal's own frame — at this terminal's size and scroll position —
@@ -126,7 +133,9 @@ use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, Session
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
-use koshi_renderer::snapshot::{CursorStyle, MouseFrame, RenderSnapshot, ViewerChrome};
+use koshi_renderer::snapshot::{
+    CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
+};
 use koshi_runtime::runtime::event::RuntimeEvent;
 
 use crate::app;
@@ -137,7 +146,7 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, Reach, ServerArg};
+use koshi_link::remote_client::{self, DialError, Reach, ServerArg};
 use koshi_link::router_client::router_request;
 use koshi_link::talk;
 
@@ -346,7 +355,7 @@ impl<B: Backend> Screen<B> {
 }
 
 /// How an attached client's event stream ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Ending {
     /// The server detached this client. The session keeps running.
     Detached,
@@ -362,6 +371,30 @@ enum Ending {
     /// session's new socket and attaches again on it. A loop that cannot ends
     /// here and reports the same death a broken connection reports.
     Restarting,
+    /// A remote viewer's link broke and [`redial`] gave up, carrying the cause it
+    /// gave up on. The session keeps running without this viewer.
+    LinkLost(Box<CliError>),
+}
+
+/// Two endings are equal when they are the same variant carrying the same
+/// fields. A [`Ending::Switch`] compares its [`SessionId`], and a
+/// [`Ending::LinkLost`] compares the text its cause prints, which is what the
+/// viewer shows.
+impl PartialEq for Ending {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Ending::Detached, Ending::Detached)
+            | (Ending::SessionEnded, Ending::SessionEnded)
+            | (Ending::Died, Ending::Died)
+            | (Ending::TerminalGone, Ending::TerminalGone)
+            | (Ending::Restarting, Ending::Restarting) => true,
+            (Ending::Switch(left), Ending::Switch(right)) => left == right,
+            (Ending::LinkLost(left), Ending::LinkLost(right)) => {
+                left.to_string() == right.to_string()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// One thing the loop reacts to: a frame read off the session's event stream,
@@ -841,10 +874,12 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
 /// comes back through [`come_back`], which re-enters `home` the way that home
 /// is entered.
 ///
-/// A remote viewer whose link breaks comes back through [`redial`]: it paints
-/// the `RECONNECTING` tag, dials the server again on a widening pause, and
-/// drops everything typed while it had no link. A local viewer whose link
-/// breaks ends the loop, as it always has.
+/// A remote viewer whose link breaks comes back through [`redial`], which is
+/// handed this loop's `client` and `screen`: it paints the
+/// `RECONNECTING (attempt 1, retry in 1s)` tag once a second, dials the server
+/// again on a widening pause, and drops everything typed while it had no link. A
+/// dial it gives up on ends the loop as [`Ending::LinkLost`] carrying the cause.
+/// A local viewer whose link breaks ends the loop, as it always has.
 ///
 /// `token` is the token the open connection was opened under, which
 /// [`come_back`] reads and stamps with the token of the connection this client
@@ -997,20 +1032,22 @@ fn run_attachment<B: Backend>(
                 }
                 // The link broke. A viewer of a session on a server, with
                 // `remote-reconnect` on, dials that server again while the
-                // tabline reads `RECONNECTING`; nothing typed over that
-                // stretch is sent. A viewer with it off, and a viewer of a
-                // session on this machine, end here.
+                // tabline reads `RECONNECTING (attempt 1, retry in 1s)`;
+                // nothing typed over that stretch is sent. A dial this client
+                // gave up on ends as [`Ending::LinkLost`] carrying its cause. A
+                // viewer with `remote-reconnect` off, and a viewer of a session
+                // on this machine, end here.
                 Ending::Died => match home {
                     Home::Remote { server } if client.config().remote_reconnect => {
-                        client.set_reconnecting(true);
-                        screen.refresh(
+                        match redial(
+                            server,
+                            session_id,
+                            resume_token.as_ref(),
                             client,
+                            screen,
                             last_frame.as_ref().map(|frame| frame.client.active_tab),
-                        );
-                        let joined = redial(server, session_id, resume_token.as_ref());
-                        client.set_reconnecting(false);
-                        match joined {
-                            Some(joined) => {
+                        ) {
+                            Ok(joined) => {
                                 client_id = joined.client_id;
                                 client.set_id(joined.client_id);
                                 resume_token = joined.resume_token;
@@ -1025,7 +1062,7 @@ fn run_attachment<B: Backend>(
                                 }
                                 Some((joined.reader, joined.writer))
                             }
-                            None => None,
+                            Err(cause) => break Ending::LinkLost(cause),
                         }
                     }
                     Home::Remote { .. } | Home::Local { .. } => None,
@@ -1033,7 +1070,8 @@ fn run_attachment<B: Backend>(
                 Ending::Detached
                 | Ending::SessionEnded
                 | Ending::TerminalGone
-                | Ending::Switch(_) => None,
+                | Ending::Switch(_)
+                | Ending::LinkLost(_) => None,
             };
             let Some((reader, writer)) = halves else {
                 break ending;
@@ -1103,7 +1141,7 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
                 resume_token,
             })
         }
-        Home::Remote { server } => dial_remote(server, target, None, None),
+        Home::Remote { server } => dial_remote(server, target, None, None).map_err(CliError::from),
     }
 }
 
@@ -1117,23 +1155,29 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
 /// secret the last attach minted, presented to get that attach's view back.
 ///
 /// # Errors
-/// [`CliError::Runtime`] when the server does not admit the secret, when the
-/// certificate it presents is not the pinned one, and when the admitted secret
-/// does not reach `target`.
+/// [`DialError::Unreachable`] when the path to the server failed: the
+/// connection could not be opened, or a frame of the join could not be written
+/// or read. [`DialError::Refused`] when the server answered and every identical
+/// dial after it gets the same answer: the certificate it presents is not the
+/// pinned one, it does not admit the secret, the admitted secret does not reach
+/// `target`, the protocol versions do not overlap, or its answer is a frame this
+/// attach cannot read.
 fn dial_remote(
     server: &ServerArg,
     target: &SessionSelector,
     resume: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
-) -> Result<Joined, CliError> {
+) -> Result<Joined, DialError> {
     // The join is held to JOIN_WAIT; the clock comes off once it is joined.
     let (link, saved) = remote_client::connect_saved(server, None, Some(remote_client::JOIN_WAIT))?;
-    let (mut reader, mut writer) = remote_client::attach_remote(link, target.clone())?;
+    let (mut reader, mut writer) =
+        remote_client::attach_remote(link, target.clone()).map_err(DialError::Unreachable)?;
     settle_forwarded_hello(&mut reader, target)?;
     writer
         .send(&attach_request(resume, resume_token))
-        .map_err(talk::talk_failed)?;
-    let (client_id, session_id, minted) = take_attached(reader.recv().map_err(talk::talk_failed)?)?;
+        .map_err(link_failed)?;
+    let reply = reader.recv().map_err(link_failed)?;
+    let (client_id, session_id, minted) = take_attached(reply).map_err(DialError::Refused)?;
 
     // Joined: both halves block for as long as it takes from here.
     reader.set_deadline(None);
@@ -1156,24 +1200,37 @@ fn dial_remote(
 /// server's own answer arrives unread through the bridge. The frame is held as
 /// its JSON text and decoded as a refusal first, then as an
 /// [`IncomingResponse`].
+///
+/// # Errors
+/// [`DialError::Unreachable`] when the frame could not be read at all.
+/// [`DialError::Refused`] for every answer that did arrive and does not join:
+/// the serving machine's refusal, an answer this attach cannot read, and a
+/// protocol version this build does not accept.
 fn settle_forwarded_hello(
     reader: &mut FrameReader,
     target: &SessionSelector,
-) -> Result<(), CliError> {
-    let frame: Box<RawValue> = reader.recv().map_err(talk::talk_failed)?;
+) -> Result<(), DialError> {
+    let frame: Box<RawValue> = reader.recv().map_err(link_failed)?;
     if let Ok(RemoteServerFrame::Refused { .. }) = serde_json::from_str(frame.get()) {
-        return Err(CliError::Runtime {
+        return Err(DialError::Refused(CliError::Runtime {
             detail: format!(
                 "the token this server saved does not reach session {}",
                 target_name(target)
             ),
-        });
+        }));
     }
-    let reply: IncomingResponse =
-        serde_json::from_str(frame.get()).map_err(|error| CliError::IpcUnavailable {
+    let reply: IncomingResponse = serde_json::from_str(frame.get()).map_err(|error| {
+        DialError::Refused(CliError::IpcUnavailable {
             detail: format!("the server answered with a frame this attach cannot read: {error}"),
-        })?;
-    settle_version(reply)
+        })
+    })?;
+    settle_version(reply).map_err(DialError::Refused)
+}
+
+/// The [`DialError::Unreachable`] a failed read or write on the open link maps
+/// to, carrying [`talk::talk_failed`]'s message.
+fn link_failed(error: IpcError) -> DialError {
+    DialError::Unreachable(talk::talk_failed(error))
 }
 
 /// How a selector reads in a message: the id itself, or the display name.
@@ -1230,7 +1287,9 @@ fn come_back(
                     &SessionSelector::Id(session_id),
                     Some(client_id),
                     None,
-                ) {
+                )
+                .map_err(CliError::from)
+                {
                     Ok(joined) if joined.client_id != client_id => {
                         tracing::warn!(
                             %session_id,
@@ -1261,9 +1320,23 @@ fn come_back(
 /// The pause comes before each dial and widens as
 /// [`next_redial_wait`] says: 1 second, 2, 4, 8, then 8 before every dial after
 /// that. A pause that would end past [`REDIAL_WINDOW`] — 120 seconds from the
-/// first pause — is not taken, and no dial follows it: the answer is `None`,
-/// naming the last dial's refusal. A dial already under way runs to its own
-/// timeout, so that answer can arrive after the window closes.
+/// first pause — is not taken, and no dial follows it: the answer is the last
+/// dial's cause. A dial already under way runs to its own timeout, so that
+/// answer can arrive after the window closes.
+///
+/// A [`DialError::Refused`] ends this at once and is the answer: the server
+/// answered, and every identical dial after it gets the same answer, so waiting
+/// changes nothing. Only a [`DialError::Unreachable`] is dialed again.
+///
+/// The pause is taken one second at a time. Each slice records
+/// `Reconnecting { attempt, retry_in_seconds }` on `client` and draws the frame
+/// already on the screen again through `screen`, so the tabline tag counts down
+/// `RECONNECTING (attempt 1, retry in 1s)` before the first dial and
+/// `attempt 2, retry in 2s` … `retry in 1s` before the second. `active_tab` is
+/// the tab that frame shows, and `None` before any frame has been drawn. On
+/// every answer, and before returning either way, `client` is put back to no
+/// dialing under way; a dial that joined repaints once more, so the tag leaves
+/// the screen before the new connection's first frame arrives.
 ///
 /// `resume_token` is the secret the last attach minted. The session hands that
 /// attach's view back for it — the active tab, each tab's focused and zoomed
@@ -1274,26 +1347,74 @@ fn come_back(
 /// A session that no longer holds the view mints a fresh client, and the
 /// returned [`Joined`] names it: the viewer takes that client id as its own and
 /// keeps running.
-fn redial(
+///
+/// # Errors
+/// The cause of the dial this gave up on: the refusal that ended it, or the last
+/// unreachable-path cause before the window closed.
+fn redial<B: Backend>(
     server: &ServerArg,
     session_id: SessionId,
     resume_token: Option<&ConnectionToken>,
-) -> Option<Joined> {
+    client: &mut Client,
+    screen: &mut Screen<B>,
+    active_tab: Option<TabId>,
+) -> Result<Joined, Box<CliError>> {
+    redial_with(
+        || dial_remote(server, &SessionSelector::Id(session_id), None, resume_token),
+        session_id,
+        client,
+        screen,
+        active_tab,
+    )
+}
+
+/// [`redial`]'s loop over any dial: pause, paint the countdown, call `dial`,
+/// and classify its answer — a [`DialError::Refused`] ends the loop at once, a
+/// [`DialError::Unreachable`] widens the pause and dials again while the pause
+/// fits [`REDIAL_WINDOW`].
+///
+/// # Errors
+/// The cause of the dial this gave up on: the refusal that ended it, or the last
+/// unreachable-path cause before the window closed.
+fn redial_with<B: Backend>(
+    mut dial: impl FnMut() -> Result<Joined, DialError>,
+    session_id: SessionId,
+    client: &mut Client,
+    screen: &mut Screen<B>,
+    active_tab: Option<TabId>,
+) -> Result<Joined, Box<CliError>> {
     let started = Instant::now();
     let mut wait = FIRST_REDIAL_WAIT;
-    let mut refusal = None;
-    while pause_fits(started.elapsed(), wait) {
-        thread::sleep(wait);
-        match dial_remote(server, &SessionSelector::Id(session_id), None, resume_token) {
-            Ok(joined) => return Some(joined),
-            Err(error) => {
-                refusal = Some(error);
+    let mut attempt: u32 = 1;
+    let cause = loop {
+        let seconds = u32::try_from(wait.as_secs()).unwrap_or(u32::MAX);
+        for retry_in_seconds in (1..=seconds).rev() {
+            client.set_reconnecting(Some(Reconnecting {
+                attempt,
+                retry_in_seconds,
+            }));
+            screen.refresh(client, active_tab);
+            thread::sleep(Duration::from_secs(1));
+        }
+        match dial() {
+            Ok(joined) => {
+                client.set_reconnecting(None);
+                screen.refresh(client, active_tab);
+                return Ok(joined);
+            }
+            Err(DialError::Refused(error)) => break error,
+            Err(DialError::Unreachable(error)) => {
                 wait = next_redial_wait(wait);
+                attempt += 1;
+                if !pause_fits(started.elapsed(), wait) {
+                    break error;
+                }
             }
         }
-    }
-    tracing::warn!(?refusal, %session_id, "could not reach the session again");
-    None
+    };
+    client.set_reconnecting(None);
+    tracing::warn!(%cause, %session_id, "could not join the session again");
+    Err(Box::new(cause))
 }
 
 /// Whether a pause of `wait`, begun `elapsed` after the first one, ends inside
@@ -2221,6 +2342,9 @@ fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
 ///
 /// A restart reaches here only when the client could not come back on the
 /// session's new socket, so it names the same cause and the same way back.
+///
+/// A remote viewer that gave up dialing again names the cause it gave up on,
+/// then `the session continues without you`, then that same way back.
 fn report(
     home: &Home,
     ending: Ending,
@@ -2236,31 +2360,48 @@ fn report(
             Ok(None)
         }
         Ending::Switch(target) => Ok(Some(target)),
-        Ending::Died | Ending::Restarting => {
-            let way_back = match home {
-                Home::Local { .. } => format!(
-                    "run `koshi list-sessions`; if session {session_id} is still listed, \
-                     reattach with `koshi attach {session_id}`"
-                ),
-                Home::Remote { server } => {
-                    let server = server.label();
-                    format!(
-                        "run `koshi list-sessions --remote {server}`; if session {session_id} \
-                         is still listed, reattach with \
-                         `koshi attach --remote {server} {session_id}`"
-                    )
-                }
-            };
-            Err(CliError::Runtime {
-                detail: format!("the session ended unexpectedly\n  {way_back}"),
-            })
-        }
+        Ending::Died | Ending::Restarting => Err(CliError::Runtime {
+            detail: format!(
+                "the session ended unexpectedly\n  {}",
+                way_back(home, session_id)
+            ),
+        }),
+        Ending::LinkLost(cause) => Err(CliError::Runtime {
+            detail: format!(
+                "{cause}\n  the session continues without you\n  {}",
+                way_back(home, session_id)
+            ),
+        }),
         // Nothing is left to read a message, so this ending is logged rather
         // than printed. The session drops this client when the connection
         // closes behind it.
         Ending::TerminalGone => {
             tracing::info!(%session_id, "this terminal went away; leaving the session running");
             Ok(None)
+        }
+    }
+}
+
+/// How to reach `session_id` again from where it runs: the command that shows
+/// whether it still runs, and the attach command to come back on.
+///
+/// A session on this machine reads `run \`koshi list-sessions\`; …`. One on a
+/// server names that server in both commands — `koshi attach --remote my-box`
+/// shows that server's sessions, since `list-sessions` answers from this
+/// machine alone.
+fn way_back(home: &Home, session_id: SessionId) -> String {
+    match home {
+        Home::Local { .. } => format!(
+            "run `koshi list-sessions`; if session {session_id} is still listed, \
+             reattach with `koshi attach {session_id}`"
+        ),
+        Home::Remote { server } => {
+            let server = server.label();
+            format!(
+                "run `koshi attach --remote {server}` to see that server's sessions; \
+                 if session {session_id} is among them, reattach with \
+                 `koshi attach --remote {server} {session_id}`"
+            )
         }
     }
 }

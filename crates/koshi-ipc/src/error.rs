@@ -7,7 +7,10 @@ use thiserror::Error;
 ///
 /// Client-fatal — the affected connection or caller stops and the session
 /// serves on: a broken link ([`Transport`](IpcError::Transport),
-/// [`Disconnected`](IpcError::Disconnected)), a refused frame
+/// [`Disconnected`](IpcError::Disconnected)), a remote dial that fails
+/// ([`ConnectRefused`](IpcError::ConnectRefused),
+/// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
+/// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed)), a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge)), a socket address that fails
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
@@ -100,6 +103,25 @@ pub enum IpcError {
         path: String,
         detail: String,
     },
+    /// Nothing accepted the TCP connection at `address`.
+    #[error(
+        "{address} refused the connection: nothing is listening on that port. \
+         if remote access is not enabled on that machine, run `koshi share grant` \
+         there and answer yes to the offer to open the port"
+    )]
+    ConnectRefused { address: String },
+    /// The TCP connection to `address` was still unanswered when the dial ran
+    /// out of time.
+    #[error(
+        "connecting to {address} timed out: nothing answered. check that the \
+         machine is up, the address and port are right, and the network path \
+         allows it"
+    )]
+    ConnectTimedOut { address: String },
+    /// The TCP connection to `address` opened and the TLS handshake on it did
+    /// not finish, for the reason in `detail`.
+    #[error("the TLS handshake with {address} failed: {detail}")]
+    TlsHandshakeFailed { address: String, detail: String },
     /// The server at `address` presented a different certificate than the one
     /// pinned the first time it was dialled.
     #[error(
@@ -156,6 +178,9 @@ impl DomainError for IpcError {
             | IpcError::TokenStoreWrite { .. }
             | IpcError::RemoteFileUnreadable { .. }
             | IpcError::RemoteFileWrite { .. }
+            | IpcError::ConnectRefused { .. }
+            | IpcError::ConnectTimedOut { .. }
+            | IpcError::TlsHandshakeFailed { .. }
             | IpcError::CertificateChanged { .. } => Severity::ClientFatal,
             IpcError::EndpointFileWrite { .. } => Severity::SessionFatal,
             IpcError::MalformedFrame { .. } => Severity::Recoverable,
