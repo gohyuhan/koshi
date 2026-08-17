@@ -104,6 +104,7 @@ fn attach(server: &mut Server) -> AttachAccepted {
     let (reply_tx, reply_rx) = mpsc::channel();
     let _ = server.handle_runtime_event(RuntimeEvent::IpcAttach {
         resume: None,
+        resume_token: None,
         viewport: STARTING_VIEWPORT,
         filter: EventFilter::All,
         attached_at: SystemTime::now(),
@@ -507,6 +508,8 @@ fn a_client_that_hung_up_before_the_swap_told_anyone_is_detached() {
     let leaving = attach(&mut server);
     tx.send(RuntimeEvent::ClientDetached {
         client_id: leaving.client_id,
+        detached_at: SystemTime::now(),
+        streamed: true,
     })
     .expect("the detach is queued");
 
@@ -527,6 +530,8 @@ fn the_record_of_a_client_the_swap_told_survives_the_pass_after_the_announce() {
     let told = attach(&mut server);
     tx.send(RuntimeEvent::ClientDetached {
         client_id: told.client_id,
+        detached_at: SystemTime::now(),
+        streamed: true,
     })
     .expect("the detach is queued");
 

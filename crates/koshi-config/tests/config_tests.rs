@@ -18,6 +18,7 @@ allow-beta-features #false
 allow-other-users #false
 // shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
+remote-reconnect #true
 pane { min-cols 2; min-rows 1 }
 scrollback { max-lines 10000; max-bytes 33554432; scroll-on-input #true }
 layout { new-pane-direction "right" }

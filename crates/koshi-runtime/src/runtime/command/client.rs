@@ -5,9 +5,12 @@ use super::*;
 
 use std::time::Instant;
 
+use koshi_ipc::protocol::ConnectionToken;
+
 use crate::runtime::attach::session_structure;
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::AttachAccepted;
+use crate::runtime::saved_view::SavedView;
 
 impl Server {
     /// Serve one attach arriving over the control socket, in this single
@@ -20,10 +23,27 @@ impl Server {
     /// when the session still holds it, the tab it was viewing still exists,
     /// and no connection is streaming for it: the arriving viewport replaces
     /// the record's, and its per-tab focus, zoom, scrollback offsets,
-    /// selections, lock mode, label and colour all stay. Everything else
-    /// — no `resume`, an id the session does not hold, an id whose tab is gone,
-    /// an id a connection is already streaming for — mints a fresh client on
-    /// the session's first tab, so an attach never fails over `resume`.
+    /// selections, lock mode, label and colour all stay. That is the whole of
+    /// the `resume` path — no `resume`, an id the session does not hold, an id
+    /// whose tab is gone, an id a connection is already streaming for all mint
+    /// a fresh client instead, so an attach never fails over `resume`.
+    ///
+    /// `resume_token` names the view a caller asks to have back, filed when
+    /// that caller's last client detached. It is read on the fresh-client path
+    /// alone: a `resume` claim that succeeds keeps the record it took, and the
+    /// token's view is dropped. A view that comes back puts the client on the
+    /// tab it names — the session's first tab when that tab is gone — and then
+    /// restores the focused pane of each tab, the zoomed pane of each tab and
+    /// the scroll offset of each pane — cut down to the lines that pane still
+    /// retains — onto the freshly minted client. The token
+    /// is consumed by this one attach: presenting it again restores nothing. A
+    /// token the session holds no view under, and a token older than 120
+    /// seconds, attach with a fresh view instead of failing. An attach that
+    /// returns `None` reads no token and spends none: that view stands until
+    /// its 120 seconds run out.
+    ///
+    /// Every accepted attach mints a new token, carried back on
+    /// [`AttachAccepted::resume_token`].
     ///
     /// Registration and subscription land in the same turn, so the structure
     /// returned here and the queue's first event describe one continuous
@@ -34,6 +54,7 @@ impl Server {
     pub(crate) fn handle_ipc_attach(
         &mut self,
         resume: Option<ClientId>,
+        resume_token: Option<ConnectionToken>,
         viewport: Size,
         filter: EventFilter,
         attached_at: SystemTime,
@@ -55,10 +76,27 @@ impl Server {
             (session.tabs.contains_key(&client_tab) && !streaming)
                 .then_some((claimed_id, client_tab))
         });
-        let (client_id, active_tab) = claimed.unwrap_or_else(|| (ClientId::new(), first_tab));
+        let saved = resume_token
+            .and_then(|token| self.saved_views.take(&token, attached_at))
+            .filter(|_| claimed.is_none());
+        let (client_id, active_tab) = match claimed {
+            Some(claim) => claim,
+            None => {
+                let session = self
+                    .sessions
+                    .get(&session_id)
+                    .expect("session located above");
+                let tab = saved
+                    .as_ref()
+                    .map(|view| view.active_tab)
+                    .filter(|tab| session.tabs.contains_key(tab))
+                    .unwrap_or(first_tab);
+                (ClientId::new(), tab)
+            }
+        };
         self.awaiting_reconnect.remove(&client_id);
 
-        let emitted = self.handle_client_attach(
+        let mut emitted = self.handle_client_attach(
             session_id,
             client_id,
             viewport,
@@ -66,9 +104,13 @@ impl Server {
             attached_at,
             remote,
         );
+        if let Some(view) = saved {
+            emitted.extend(self.restore_saved_view(session_id, client_id, active_tab, &view));
+        }
         self.publish_events(&emitted);
 
         let events = self.subscribe(client_id, filter);
+        let resume_token = self.saved_views.mint(client_id);
         let session = self
             .sessions
             .get(&session_id)
@@ -79,7 +121,76 @@ impl Server {
             structure: session_structure(session),
             events,
             ending_notice: Arc::clone(self.event_bus.ending_notice()),
+            resume_token,
         })
+    }
+
+    /// Put `view` back on `client_id` in `session_id`, then reconcile the PTY
+    /// sizes of `active_tab` and schedule a redraw.
+    ///
+    /// Applies the focused pane of each tab first, then the zoomed pane of each
+    /// tab, then the scroll offset of each pane.
+    /// [`Client::update_focused_pane`] moves an existing zoom onto the pane it
+    /// focuses; the zoom pass runs after it, and leaves each tab zoomed on the
+    /// pane `view` names.
+    ///
+    /// An entry naming a tab the session no longer holds, or a pane the session
+    /// no longer holds, is dropped instead of applied: that tab keeps no focus
+    /// and stays tiled, and that pane sits at the live bottom. A scroll offset
+    /// past the lines its pane still retains is cut down to that count — an
+    /// offset of 500 onto a pane retaining 120 lines restores 120, and onto a
+    /// pane whose scrollback was erased restores 0, which sits at the live
+    /// bottom and holds the view no longer. A restored zoom
+    /// changes the size the tab's panes solve to, so the tab reflows and one
+    /// [`Event::PtyResized`] is returned for each pane whose PTY size changed.
+    /// Returns no event when the session or the client is gone.
+    fn restore_saved_view(
+        &mut self,
+        session_id: SessionId,
+        client_id: ClientId,
+        active_tab: TabId,
+        view: &SavedView,
+    ) -> Vec<Event> {
+        // Clone the shared backend before borrowing the session: the reflow then
+        // needs no `&self` across the mutation.
+        let backend = Arc::clone(self.pty_backend());
+        let mut events = Vec::new();
+
+        {
+            let Some(session) = self.sessions.get_mut(&session_id) else {
+                return events;
+            };
+            let tabs = &session.tabs;
+            let panes = &session.panes;
+            let Some(client) = session.clients.get_mut(client_id) else {
+                return events;
+            };
+            for (&tab_id, &pane_id) in &view.focus_by_tab {
+                if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
+                    client.update_focused_pane(tab_id, pane_id);
+                }
+            }
+            for (&tab_id, &pane_id) in &view.zoom_by_tab {
+                if tabs.contains_key(&tab_id) && panes.get(pane_id).is_some() {
+                    client.zoom_pane(tab_id, pane_id);
+                }
+            }
+            for (&pane_id, &offset) in &view.scroll_by_pane {
+                if panes.get(pane_id).is_some() {
+                    let retained = self
+                        .terminal_engines
+                        .get(&pane_id)
+                        .map_or(0, |engine| engine.state().scrollback().len());
+                    client.set_scroll_offset(pane_id, offset.min(retained));
+                }
+            }
+        }
+
+        self.reflow_tab_if_viewed(backend.as_ref(), session_id, active_tab, &mut events);
+        self.render_scheduler
+            .invalidate(InvalidationReason::LayoutChanged);
+
+        events
     }
 
     /// Attach a client to `session_id` viewing `active_tab`, then reconcile the
@@ -259,6 +370,44 @@ impl Server {
         self.render_scheduler
             .invalidate(InvalidationReason::TerminalResize);
         events
+    }
+
+    /// File the view `client_id` is leaving behind, under the token that
+    /// client's attach minted: the tab it is on, the pane it has focused in
+    /// each tab, the pane it has zoomed in each tab, and how far it has
+    /// scrolled up each pane. The record stands for 120 seconds from
+    /// `detached_at`, and presenting the minted token within that window hands
+    /// the view back once.
+    ///
+    /// `detached_at` is when the producer saw the connection end, supplied by
+    /// the producer; the handler never reads the clock itself.
+    ///
+    /// Files nothing in three cases. A client that is still awaiting reconnect
+    /// files nothing and keeps whatever hash stands against its id; a process
+    /// that came back from a restart starts with an empty store, so a client
+    /// awaiting reconnect there has no hash to keep. A client no session holds
+    /// files nothing and its minted hash is dropped, so the token it was handed
+    /// takes back nothing. A client whose attach minted no token files nothing.
+    ///
+    /// Call this before [`handle_client_detach`](Self::handle_client_detach),
+    /// which removes the record read here.
+    pub(crate) fn save_view_of(&mut self, client_id: ClientId, detached_at: SystemTime) {
+        if self.awaiting_reconnect.contains(&client_id) {
+            return;
+        }
+        let Some(session_id) = self.session_for_client(client_id).map(|session| session.id) else {
+            self.saved_views.forget(client_id);
+            return;
+        };
+        let Some(client) = self
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.clients.get(client_id))
+        else {
+            self.saved_views.forget(client_id);
+            return;
+        };
+        self.saved_views.save(client, detached_at);
     }
 
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it

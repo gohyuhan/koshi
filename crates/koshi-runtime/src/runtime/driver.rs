@@ -85,7 +85,18 @@ impl Server {
                 );
                 self.publish_events(&events);
             }
-            RuntimeEvent::ClientDetached { client_id } => {
+            RuntimeEvent::ClientDetached {
+                client_id,
+                detached_at,
+                streamed,
+            } => {
+                // The view is filed before the detach, which removes the record
+                // it is read from.
+                if streamed {
+                    self.save_view_of(client_id, detached_at);
+                } else {
+                    self.saved_views.forget(client_id);
+                }
                 let events = self.handle_client_detach(client_id);
                 self.publish_events(&events);
             }
@@ -105,6 +116,7 @@ impl Server {
             }
             RuntimeEvent::IpcAttach {
                 resume,
+                resume_token,
                 viewport,
                 filter,
                 attached_at,
@@ -116,6 +128,7 @@ impl Server {
                 // describe one continuous state.
                 let _ = reply.send(self.handle_ipc_attach(
                     resume,
+                    resume_token,
                     viewport,
                     filter,
                     attached_at,

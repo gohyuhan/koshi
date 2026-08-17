@@ -31,7 +31,7 @@ use koshi_core::{
 };
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
-use koshi_ipc::protocol::WireMouseAction;
+use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
 use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::EventFilter;
@@ -86,6 +86,13 @@ pub enum RuntimeEvent {
     ClientDetached {
         /// The departing client.
         client_id: ClientId,
+        /// When the producer saw the connection end, carried on the event so
+        /// the handler never reads the clock itself.
+        detached_at: SystemTime,
+        /// Whether the connection carrying this client reached its event
+        /// stream. `false` from the attach reply failing to write, which hands
+        /// the client no token; the view it was looking at is dropped.
+        streamed: bool,
     },
     /// A periodic tick for time-driven refreshes such as cursor blink.
     Timer,
@@ -167,6 +174,12 @@ pub enum RuntimeEvent {
         /// still exists, and no connection is streaming for it, and mints a
         /// fresh client otherwise.
         resume: Option<ClientId>,
+        /// The token the caller's last attach minted, presented to get that
+        /// attach's view back: the active tab, the focused pane of each tab,
+        /// the zoomed pane of each tab, and the scroll offset of each pane. The
+        /// dispatcher hands that view back when it still holds one under this
+        /// token, and mints a fresh view otherwise. Absent on a first attach.
+        resume_token: Option<ConnectionToken>,
         /// The caller's terminal size in cells, recorded as the client's
         /// viewport.
         viewport: Size,
@@ -244,6 +257,9 @@ pub struct AttachAccepted {
     /// session is ending even when the queue above is full, and so the session
     /// learns when that thread has written the last frame.
     pub ending_notice: Arc<EndingNotice>,
+    /// The fresh secret this attach minted. Presenting it on the next attach
+    /// takes back the view this client leaves behind when it detaches.
+    pub resume_token: ConnectionToken,
 }
 
 /// How a client's event stream ends: the last frame that client's writing

@@ -11,7 +11,10 @@
 //! covers coming back after the session replaces its own process image: which
 //! endpoint file the wait takes and which it reads past, that the join names the
 //! client record this terminal holds, and every way back that fails reporting
-//! the death a broken connection already reports.
+//! the death a broken connection already reports. It also covers a remote
+//! viewer whose link broke: the pause each redial waits, that dialing again
+//! moves what the viewer paints, and what the drain of the stretch with no link
+//! keeps and what it drops.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -593,6 +596,7 @@ fn restarted_session(
                                 tabs: Vec::new(),
                                 panes: Vec::new(),
                             },
+                            resume_token: None,
                         },
                         Err(message) => IpcResult::Error(IpcErrorPayload {
                             code: IpcErrorCode::BadToken,
@@ -639,7 +643,9 @@ fn coming_back_after_a_restart_asks_for_the_client_record_this_terminal_holds() 
             viewport: viewport(),
             filter: EventFilterSpec::All,
             resume: Some(client_id),
-        })
+            resume_token: None,
+        }),
+        "the restart path claims the client record by its id and presents no token"
     );
 }
 
@@ -2669,6 +2675,153 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints() {
     assert_eq!(before.pending, None);
     assert_eq!(after.pending, Some(KeySequence::from(opener)));
     assert_ne!(after, before);
+}
+
+#[test]
+fn dialing_again_moves_what_the_viewer_paints() {
+    // No frame arrives while the link is down, so the `RECONNECTING` tag is
+    // drawn by the repaint a moved `ViewerPaint` fires.
+    let mut client = viewer();
+    let tab = TabId::new();
+    let before = ViewerPaint::read(&client, tab);
+
+    client.set_reconnecting(true);
+
+    let after = ViewerPaint::read(&client, tab);
+    assert!(!before.chrome.reconnecting);
+    assert!(after.chrome.reconnecting);
+    assert_ne!(after, before);
+}
+
+#[test]
+fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
+    let client = viewer();
+    let typed = sequence_opener(&client);
+    let resized = Size {
+        cols: 100,
+        rows: 40,
+    };
+    let (incoming_tx, incoming_rx) = mpsc::channel();
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
+            client_id: client.id(),
+            chord: typed,
+        })))
+        .expect("the loop's channel takes it");
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
+        .expect("the loop's channel takes it");
+    incoming_tx
+        .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
+            client_id: client.id(),
+            size: resized,
+        })))
+        .expect("the loop's channel takes it");
+    incoming_tx
+        .send(Incoming::Frame {
+            connection: 0,
+            frame: Ok(SessionEvent::Painted {
+                frame: Box::new(painted_frame()),
+            }),
+        })
+        .expect("the loop's channel takes it");
+
+    let before = client.viewport();
+
+    assert!(
+        drop_input_from_the_blackout(&incoming_rx),
+        "the terminal hung up while the link was down"
+    );
+
+    assert_eq!(
+        client.viewport(),
+        before,
+        "the resize was dropped with the rest; the new link reads the size itself"
+    );
+    assert_ne!(before, resized, "the dropped resize named another size");
+    assert_eq!(
+        incoming_rx.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty),
+        "the key, the resize and the stale frame were all taken off the channel"
+    );
+}
+
+#[test]
+fn a_new_connection_is_told_the_size_the_terminal_is_now() {
+    let mut client = viewer();
+    let (requests, sent) = mpsc::channel();
+    let mut uplink = Uplink {
+        requests,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_LOOP_REQUEST_ID,
+    };
+
+    report_terminal_size(&mut client, &mut uplink);
+
+    let request = sent.try_recv().expect("the size was reported");
+    assert_eq!(request.request_id, FIRST_LOOP_REQUEST_ID);
+    let IpcRequestKind::Resize { viewport } = request.kind else {
+        panic!("expected a Resize, got {:?}", request.kind);
+    };
+    assert_eq!(
+        viewport,
+        client.viewport(),
+        "the session is told the size the viewer holds"
+    );
+    assert_eq!(
+        sent.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty),
+        "the size is reported once"
+    );
+}
+
+#[test]
+fn the_redial_wait_doubles_to_eight_seconds_and_holds_there() {
+    let first = FIRST_REDIAL_WAIT;
+    let second = next_redial_wait(first);
+    let third = next_redial_wait(second);
+    let fourth = next_redial_wait(third);
+    let fifth = next_redial_wait(fourth);
+
+    assert_eq!(first, Duration::from_secs(1));
+    assert_eq!(second, Duration::from_secs(2));
+    assert_eq!(third, Duration::from_secs(4));
+    assert_eq!(fourth, Duration::from_secs(8));
+    assert_eq!(fifth, Duration::from_secs(8));
+}
+
+#[test]
+fn a_pause_ending_on_or_past_the_window_is_not_taken() {
+    // The first pause always fits, so the ladder always dials at least once.
+    assert!(pause_fits(Duration::ZERO, FIRST_REDIAL_WAIT));
+
+    // 111 + 8 lands at 119 and fits; 112 + 8 lands exactly on 120 and does not.
+    assert!(pause_fits(Duration::from_secs(111), Duration::from_secs(8)));
+    assert!(!pause_fits(
+        Duration::from_secs(112),
+        Duration::from_secs(8)
+    ));
+
+    // A pause that would end long past the window is refused too.
+    assert!(!pause_fits(REDIAL_WINDOW, FIRST_REDIAL_WAIT));
+}
+
+#[test]
+fn every_pause_the_ladder_hands_out_stays_inside_the_window() {
+    // Walking the real ladder from the first pause, the loop stops before any
+    // pause crosses 120 seconds, and it stops after taking at least one.
+    let mut elapsed = Duration::ZERO;
+    let mut wait = FIRST_REDIAL_WAIT;
+    let mut pauses = 0;
+    while pause_fits(elapsed, wait) {
+        elapsed += wait;
+        wait = next_redial_wait(wait);
+        pauses += 1;
+    }
+
+    assert_eq!(pauses, 17);
+    assert_eq!(elapsed, Duration::from_secs(119));
+    assert!(elapsed < REDIAL_WINDOW);
 }
 
 #[test]

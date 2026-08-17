@@ -221,6 +221,7 @@ fn attach(connection: &mut Connection, session_id: SessionId) -> ClientId {
             viewport: VIEWPORT,
             filter: EventFilterSpec::All,
             resume: None,
+            resume_token: None,
         },
     };
     connection

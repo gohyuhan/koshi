@@ -199,6 +199,7 @@ fn render_hovering(snapshot: &RenderSnapshot, hovered: Option<PaneId>, w: u16, h
         ViewerChrome {
             hovered_pane: hovered,
             tabline_offset: None,
+            reconnecting: false,
         },
         area,
         &mut buf,
@@ -473,6 +474,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
     let peeking = ViewerChrome {
         hovered_pane: None,
         tabline_offset: Some(0),
+        reconnecting: false,
     };
     let tabline = row_text(&render_peeking(&snap, peeking, badge_cols() + 21, 8), 0);
 
@@ -1970,17 +1972,41 @@ fn mode_indicator_joins_active_mode_labels() {
     );
 
     // Plain mode with the mouse ungrabbed reads BASE.
-    assert_eq!(mode_tags(&snap.client), "BASE");
+    assert_eq!(mode_tags(&snap.client, false), "BASE");
 
     // Mouse-select alone reads SELECT.
     snap.client.mouse_select = true;
-    assert_eq!(mode_tags(&snap.client), "SELECT");
+    assert_eq!(mode_tags(&snap.client, false), "SELECT");
 
     // Locked and grabbing reads both, joined by ` · `.
     snap.client.lock_mode = LockMode::Locked;
-    assert_eq!(mode_tags(&snap.client), "LOCK · SELECT");
+    assert_eq!(mode_tags(&snap.client, false), "LOCK · SELECT");
 
     // Locked alone reads LOCK.
     snap.client.mouse_select = false;
-    assert_eq!(mode_tags(&snap.client), "LOCK");
+    assert_eq!(mode_tags(&snap.client, false), "LOCK");
+}
+
+#[test]
+fn mode_indicator_puts_the_reconnecting_tag_first_and_replaces_base() {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, 20, 4), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size { cols: 20, rows: 6 },
+    );
+
+    // A reconnecting client in plain mode reads RECONNECTING, never BASE.
+    assert_eq!(mode_tags(&snap.client, true), "RECONNECTING");
+
+    // Reconnecting while locked and grabbing puts the link tag ahead of both.
+    snap.client.lock_mode = LockMode::Locked;
+    snap.client.mouse_select = true;
+    assert_eq!(
+        mode_tags(&snap.client, true),
+        "RECONNECTING · LOCK · SELECT"
+    );
 }

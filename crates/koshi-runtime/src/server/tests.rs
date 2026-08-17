@@ -10,10 +10,15 @@
 use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
 
-use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
-use koshi_core::event::{EventClass, InputMode, InputModeChanged, PaneFocused, SubscriberLagged};
+use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
+use koshi_core::event::{
+    EventClass, InputMode, InputModeChanged, PaneFocused, PtyResized, SubscriberLagged,
+};
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::process::PtySize;
+use koshi_ipc::protocol::ConnectionToken;
+use koshi_layout::mode::LayoutMode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
@@ -22,7 +27,8 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
 use crate::placeholder::{NullSnapshotProvider, NullStorage};
-use crate::runtime::event::SessionEnding;
+use crate::runtime::event::{AttachAccepted, SessionEnding};
+use crate::runtime::saved_view::SavedView;
 
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// The viewport of a second, out-of-process client, sized apart from
@@ -911,6 +917,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
     let accepted = server
         .handle_ipc_attach(
             Some(client_id),
+            None,
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -942,6 +949,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
     let accepted = server
         .handle_ipc_attach(
             Some(stranger),
+            None,
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -968,6 +976,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
     let held = server
         .handle_ipc_attach(
             Some(client_id),
+            None,
             VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -979,6 +988,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
     let second = server
         .handle_ipc_attach(
             Some(client_id),
+            None,
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -1028,6 +1038,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
     let accepted = server
         .handle_ipc_attach(
             None,
+            None,
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -1044,6 +1055,618 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             .expect("the minted record")
             .active_tab(),
         tab_id
+    );
+}
+
+/// A second pane in the tab the booted client views, split rightward from that
+/// tab's root pane, so zooming one pane changes the size the tab's panes solve
+/// to. Returns the new pane's id.
+fn split_booted_pane(server: &mut Server, client_id: ClientId, root: PaneId) -> PaneId {
+    let session_id = *server.sessions.keys().next().expect("the booted session");
+    let result = server.submit_command(CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::now(),
+        Command::NewPane(NewPaneArgs {
+            source: None,
+            tab: None,
+            direction: Direction::Right,
+            stacked: false,
+            cwd: None,
+            command: None,
+            client: None,
+        }),
+    ));
+    assert!(
+        matches!(result, CommandResult::Ok { .. }),
+        "the split ran, got {result:?}"
+    );
+    let added: Vec<PaneId> = server.sessions[&session_id]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .filter(|&pane_id| pane_id != root)
+        .collect();
+    assert_eq!(added.len(), 1, "the split added exactly one pane");
+    added[0]
+}
+
+/// [`add_second_tab`], also handing back the pane it put in that tab.
+fn add_second_tab_with_pane(server: &mut Server, session_id: SessionId) -> (TabId, PaneId) {
+    let before: HashSet<PaneId> = server.sessions[&session_id]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .collect();
+    let tab_id = add_second_tab(server, session_id);
+    let pane_id = server.sessions[&session_id]
+        .panes
+        .list()
+        .map(PaneRecord::id)
+        .find(|pane_id| !before.contains(pane_id))
+        .expect("the second tab's pane");
+    (tab_id, pane_id)
+}
+
+/// Attach over `handle_ipc_attach` presenting `resume_token` at `attached_at`,
+/// and hand back what the session minted.
+fn attach_with_token(
+    server: &mut Server,
+    resume_token: Option<ConnectionToken>,
+    attached_at: SystemTime,
+) -> AttachAccepted {
+    server
+        .handle_ipc_attach(
+            None,
+            resume_token,
+            VIEWPORT,
+            EventFilter::All,
+            attached_at,
+            false,
+        )
+        .expect("the session mints a client")
+}
+
+#[test]
+fn an_attach_presenting_no_token_still_mints_one_and_files_no_view() {
+    let (mut server, _client_id) = booted_server();
+    let now = SystemTime::now();
+
+    let accepted = attach_with_token(&mut server, None, now);
+
+    assert_eq!(
+        accepted.resume_token.expose().len(),
+        64,
+        "a minted token is 32 random bytes written as hex"
+    );
+    // Nothing has detached, so the token this attach minted takes back nothing.
+    assert_eq!(server.saved_views.take(&accepted.resume_token, now), None);
+}
+
+#[test]
+fn a_token_takes_back_the_tab_focus_zoom_and_scroll_the_client_left() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let split = split_booted_pane(&mut server, client_id, root);
+    let (second_tab, second_pane) = add_second_tab_with_pane(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    // 600 newlines on a 24-row viewport retain at least 576 lines, so the offset
+    // of 500 the view files stands inside the split pane's history.
+    server.handle_pty_output(split, &b"\n".repeat(600));
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.update_focused_pane(first_tab, root);
+        client.update_focused_pane(second_tab, second_pane);
+        client.zoom_pane(first_tab, root);
+        client.set_scroll_offset(split, 500);
+        client.update_active_tab(second_tab);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    assert_ne!(back.client_id, leaving.client_id);
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the client the token attached");
+    assert_eq!(client.active_tab(), second_tab);
+    assert_eq!(client.focused_pane(first_tab), Some(root));
+    assert_eq!(client.focused_pane(second_tab), Some(second_pane));
+    assert_eq!(
+        client.layout_mode(first_tab),
+        LayoutMode::Fullscreen { focused: root }
+    );
+    assert_eq!(client.layout_mode(second_tab), LayoutMode::Tiled);
+    assert_eq!(client.scroll_offset(split), 500);
+}
+
+#[test]
+fn a_token_whose_pane_lost_its_history_comes_back_at_the_live_bottom() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, _first_tab, root) = booted_parts(&server, client_id);
+    let split = split_booted_pane(&mut server, client_id, root);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    server.handle_pty_output(split, &b"\n".repeat(600));
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_mut(leaving.client_id)
+        .expect("the client that is about to leave")
+        .set_scroll_offset(split, 500);
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    // `CSI 3 J` — what `clear` sends when terminfo names `E3` — drops every
+    // retained line of the split pane while the view stands.
+    server.handle_pty_output(split, b"\x1b[3J");
+    assert_eq!(
+        server.terminal_engines[&split].state().scrollback().len(),
+        0
+    );
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the client the token attached");
+    assert_eq!(client.scroll_offset(split), 0);
+    assert!(!client.is_view_held(split));
+}
+
+#[test]
+fn the_same_token_twice_takes_the_view_back_once() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let second_tab = add_second_tab(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.zoom_pane(first_tab, root);
+        client.update_active_tab(second_tab);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    let token = leaving.resume_token;
+
+    let first = attach_with_token(&mut server, Some(token.clone()), detached_at);
+    let second = attach_with_token(&mut server, Some(token), detached_at);
+
+    let clients = &server.sessions[&session_id].clients;
+    let restored = clients.get(first.client_id).expect("the first client back");
+    assert_eq!(restored.active_tab(), second_tab);
+    assert_eq!(
+        restored.layout_mode(first_tab),
+        LayoutMode::Fullscreen { focused: root }
+    );
+    let plain = clients.get(second.client_id).expect("the second client");
+    assert_eq!(plain.active_tab(), first_tab);
+    assert_eq!(plain.layout_mode(first_tab), LayoutMode::Tiled);
+}
+
+#[test]
+fn a_token_presented_121_seconds_after_the_detach_takes_nothing_back() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let second_tab = add_second_tab(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.zoom_pane(first_tab, root);
+        client.update_active_tab(second_tab);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+
+    let back = attach_with_token(
+        &mut server,
+        Some(leaving.resume_token),
+        detached_at + Duration::from_secs(121),
+    );
+
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the minted client");
+    assert_eq!(client.active_tab(), first_tab);
+    assert_eq!(client.layout_mode(first_tab), LayoutMode::Tiled);
+}
+
+#[test]
+fn a_view_whose_tab_was_closed_while_it_stood_comes_back_on_the_first_tab() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, _root) = booted_parts(&server, client_id);
+    let second_tab = add_second_tab(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_mut(leaving.client_id)
+        .expect("the client that is about to leave")
+        .update_active_tab(second_tab);
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .tabs
+        .remove(&second_tab);
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    assert_eq!(
+        server.sessions[&session_id]
+            .clients
+            .get(back.client_id)
+            .expect("the client the token attached")
+            .active_tab(),
+        first_tab
+    );
+}
+
+#[test]
+fn a_view_whose_zoomed_pane_was_closed_while_it_stood_comes_back_tiled() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let split = split_booted_pane(&mut server, client_id, root);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.update_focused_pane(first_tab, root);
+        client.zoom_pane(first_tab, split);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .panes
+        .remove(split);
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the client the token attached");
+    assert_eq!(client.layout_mode(first_tab), LayoutMode::Tiled);
+    assert_eq!(client.focused_pane(first_tab), Some(root));
+}
+
+#[test]
+fn a_view_whose_focused_pane_was_closed_while_it_stood_comes_back_unfocused_there() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let (second_tab, second_pane) = add_second_tab_with_pane(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.update_focused_pane(first_tab, root);
+        client.update_focused_pane(second_tab, second_pane);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .panes
+        .remove(second_pane);
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the client the token attached");
+    assert_eq!(client.focused_pane(second_tab), None);
+    assert_eq!(client.focused_pane(first_tab), Some(root));
+}
+
+#[test]
+fn taking_a_zoom_back_resizes_the_tabs_panes() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let _split = split_booted_pane(&mut server, client_id, root);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    // A tab's panes are solved once per viewer and each pane takes its smallest
+    // rect across them, so the client whose zoom comes back is left as the
+    // tab's only viewer, and it is left tiled until the restore zooms it.
+    let _ = server.handle_client_detach(client_id);
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.update_focused_pane(first_tab, root);
+        client.zoom_pane(first_tab, root);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+    let rx = server.subscribe(ClientId::new(), EventFilter::All);
+
+    let _back = attach_with_token(&mut server, Some(leaving.resume_token), detached_at);
+
+    let resized: Vec<Event> = rx
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::Event(event @ Event::PtyResized(_)) => Some(event),
+            _ => None,
+        })
+        .collect();
+    // The zoomed pane fills the tab: 80x24 less the tabline and hint rows is
+    // 80x22, less the one-cell border on each side is 78x20.
+    assert_eq!(
+        resized,
+        vec![Event::PtyResized(PtyResized {
+            pane_id: root,
+            size: PtySize { cols: 78, rows: 20 },
+        })]
+    );
+}
+
+#[test]
+fn a_client_the_restart_grace_still_holds_files_no_view_and_keeps_its_token() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(client_id)
+            .expect("the booted client");
+        client.update_focused_pane(first_tab, root);
+        client.set_scroll_offset(root, 500);
+    }
+    let token = server.saved_views.mint(client_id);
+    let now = SystemTime::now();
+    server.awaiting_reconnect.insert(client_id);
+
+    server.save_view_of(client_id, now);
+
+    assert_eq!(server.saved_views.take(&token, now), None);
+    // The hash still stands, so the restart path decides this record's fate.
+    server.awaiting_reconnect.remove(&client_id);
+    server.save_view_of(client_id, now);
+    assert_eq!(
+        server.saved_views.take(&token, now),
+        Some(SavedView {
+            active_tab: first_tab,
+            focus_by_tab: HashMap::from([(first_tab, root)]),
+            zoom_by_tab: HashMap::new(),
+            scroll_by_pane: HashMap::from([(root, 500)]),
+        })
+    );
+}
+
+#[test]
+fn a_claim_that_wins_keeps_its_record_and_drops_the_presented_tokens_view() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let second_tab = add_second_tab(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.zoom_pane(first_tab, root);
+        client.set_scroll_offset(root, 500);
+        client.update_active_tab(second_tab);
+    }
+    let detached_at = SystemTime::now();
+    server.save_view_of(leaving.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving.client_id);
+
+    // The booted client's record is still held and no connection streams for
+    // it, so the claim wins and the token names a view of another client.
+    let back = server
+        .handle_ipc_attach(
+            Some(client_id),
+            Some(leaving.resume_token.clone()),
+            VIEWPORT,
+            EventFilter::All,
+            detached_at,
+            false,
+        )
+        .expect("the session hands the record back");
+
+    assert_eq!(back.client_id, client_id);
+    let client = server.sessions[&session_id]
+        .clients
+        .get(client_id)
+        .expect("the record the claim took");
+    assert_eq!(client.active_tab(), first_tab);
+    assert_eq!(client.layout_mode(first_tab), LayoutMode::Tiled);
+    assert_eq!(client.scroll_offset(root), 0);
+    // The token is spent either way, so presenting it again takes nothing.
+    assert_eq!(
+        server.saved_views.take(&leaving.resume_token, detached_at),
+        None
+    );
+}
+
+#[test]
+fn a_detach_with_no_view_filed_leaves_its_token_taking_nothing_back() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let second_tab = add_second_tab(&mut server, session_id);
+    let leaving = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .sessions
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_mut(leaving.client_id)
+            .expect("the client that is about to leave");
+        client.zoom_pane(first_tab, root);
+        client.update_active_tab(second_tab);
+    }
+    let now = SystemTime::now();
+    // The `core:detach` and `core:quit` path: the record goes with no view
+    // filed for it.
+    let _ = server.handle_client_detach(leaving.client_id);
+
+    let back = attach_with_token(&mut server, Some(leaving.resume_token), now);
+
+    let client = server.sessions[&session_id]
+        .clients
+        .get(back.client_id)
+        .expect("the minted client");
+    assert_eq!(client.active_tab(), first_tab);
+    assert_eq!(client.layout_mode(first_tab), LayoutMode::Tiled);
+    assert_eq!(client.scroll_offset(root), 0);
+}
+
+#[test]
+fn an_attach_that_finds_no_session_spends_no_token() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let now = SystemTime::now();
+    let leaving = attach_with_token(&mut server, None, now);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_mut(leaving.client_id)
+        .expect("the client that just attached")
+        .set_scroll_offset(root, 42);
+    server.save_view_of(leaving.client_id, now);
+
+    // The process is past its last session, so there is nothing to attach to.
+    server.sessions.clear();
+    let refused = server.handle_ipc_attach(
+        None,
+        Some(leaving.resume_token.clone()),
+        VIEWPORT,
+        EventFilter::All,
+        now,
+        false,
+    );
+
+    assert!(refused.is_none(), "no session is left to join");
+    assert_eq!(
+        server.saved_views.take(&leaving.resume_token, now),
+        Some(SavedView {
+            active_tab: first_tab,
+            focus_by_tab: HashMap::from([(first_tab, root)]),
+            zoom_by_tab: HashMap::new(),
+            scroll_by_pane: HashMap::from([(root, 42)]),
+        }),
+        "the refused attach read no token and spent none"
+    );
+}
+
+#[test]
+fn a_connection_that_never_reached_its_stream_files_no_view() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, _first_tab, root) = booted_parts(&server, client_id);
+    let now = SystemTime::now();
+    let undelivered = attach_with_token(&mut server, None, now);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_mut(undelivered.client_id)
+        .expect("the client that just attached")
+        .set_scroll_offset(root, 12);
+
+    server.saved_views.forget(undelivered.client_id);
+    server.save_view_of(undelivered.client_id, now);
+
+    assert_eq!(
+        server.saved_views.take(&undelivered.resume_token, now),
+        None,
+        "the token never reached that client, so its view is not filed"
+    );
+}
+
+#[test]
+fn a_client_the_session_no_longer_holds_files_no_view_and_drops_its_token() {
+    let (mut server, client_id) = booted_server();
+    let (session_id, first_tab, root) = booted_parts(&server, client_id);
+    let gone = attach_with_token(&mut server, None, SystemTime::now());
+    let now = SystemTime::now();
+    let _ = server.handle_client_detach(gone.client_id);
+
+    server.save_view_of(gone.client_id, now);
+
+    assert_eq!(server.saved_views.take(&gone.resume_token, now), None);
+    // The store still takes the next mint and files against it.
+    let next = attach_with_token(&mut server, None, now);
+    server
+        .sessions
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_mut(next.client_id)
+        .expect("the client that just attached")
+        .set_scroll_offset(root, 500);
+    server.save_view_of(next.client_id, now);
+    assert_eq!(
+        server.saved_views.take(&next.resume_token, now),
+        Some(SavedView {
+            active_tab: first_tab,
+            focus_by_tab: HashMap::from([(first_tab, root)]),
+            zoom_by_tab: HashMap::new(),
+            scroll_by_pane: HashMap::from([(root, 500)]),
+        })
     );
 }
 
@@ -1092,6 +1715,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
     let _held = server
         .handle_ipc_attach(
             Some(client_id),
+            None,
             VIEWPORT,
             EventFilter::All,
             SystemTime::now(),
@@ -1403,6 +2027,7 @@ fn an_attach_claiming_a_client_whose_tab_is_gone_mints_a_new_one_and_leaves_that
     let accepted = server
         .handle_ipc_attach(
             Some(client_id),
+            None,
             REMOTE_VIEWPORT,
             EventFilter::All,
             SystemTime::now(),

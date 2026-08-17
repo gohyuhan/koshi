@@ -13,7 +13,8 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 the whole app file for that launch.
 
 Settings use blocks. `theme`, `allow-beta-features`, `allow-other-users`,
-`remote-listen`, `shared-sessions-dir` and `auto-close-session` are top-level.
+`remote-listen`, `remote-reconnect`, `shared-sessions-dir` and
+`auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -165,6 +166,26 @@ that are marked beta next.
 |---|---|---|---|
 | `allow-beta-features` | boolean — run features still marked beta | `#false` | ≥ 0.2.0 |
 
+## `remote-reconnect`
+
+Each terminal reads this for itself. It applies only to a terminal viewing a
+session on another machine, reached with `koshi attach --remote`.
+
+On, a link that drops draws `RECONNECTING` on the tab strip and dials that
+machine again — after 1 second, then 2, 4, 8, and 8 before every dial after
+that — for up to 120 seconds. Joining again puts back the tab you were on, the
+focused pane of each tab, the fullscreened pane of each tab, and the scroll
+offset of each pane. Keys typed while the link is down are dropped; a resize is
+kept.
+
+Off, a dropped link ends the terminal, printing how to attach again by hand.
+
+A link to a session on this machine ends the terminal either way.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `remote-reconnect` | boolean — dial a session on another machine again when the link drops | `#true` | ≥ 0.3.0 |
+
 ## `auto-close-session`
 
 A terminal leaving a session normally leaves the session running with nothing
@@ -283,6 +304,7 @@ allow-other-users #false
 // remote-listen "0.0.0.0:7654"  // sets the address; opens no port on its own
 // shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
+remote-reconnect #true
 
 pane {
     min-cols 2

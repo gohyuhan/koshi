@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs,
-    FocusPaneArgs, FocusTarget, NewPaneArgs, NewTabArgs,
+    FocusPaneArgs, FocusTabArgs, FocusTarget, NewPaneArgs, NewTabArgs, TabTarget,
 };
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
@@ -33,10 +33,12 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    ConnectionToken, EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
+    WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
+use koshi_layout::mode::LayoutMode;
+use koshi_layout::tree::LayoutNode;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProvider, Storage};
@@ -196,7 +198,12 @@ fn open(runtime_dir: &Path, session_id: SessionId) -> Connection {
 fn attach(
     connection: &mut Connection,
     request_id: u64,
-) -> (ClientId, SessionId, AttachedSessionStructureSnapshot) {
+) -> (
+    ClientId,
+    SessionId,
+    AttachedSessionStructureSnapshot,
+    Option<ConnectionToken>,
+) {
     attach_sized(connection, request_id, VIEWPORT)
 }
 
@@ -206,7 +213,28 @@ fn attach_sized(
     connection: &mut Connection,
     request_id: u64,
     viewport: Size,
-) -> (ClientId, SessionId, AttachedSessionStructureSnapshot) {
+) -> (
+    ClientId,
+    SessionId,
+    AttachedSessionStructureSnapshot,
+    Option<ConnectionToken>,
+) {
+    attach_with_token(connection, request_id, viewport, None)
+}
+
+/// [`attach_sized`] presenting `resume_token`, so a test can ask the session
+/// for the view the token's client left behind.
+fn attach_with_token(
+    connection: &mut Connection,
+    request_id: u64,
+    viewport: Size,
+    resume_token: Option<ConnectionToken>,
+) -> (
+    ClientId,
+    SessionId,
+    AttachedSessionStructureSnapshot,
+    Option<ConnectionToken>,
+) {
     connection
         .send(&IpcRequest {
             request_id,
@@ -214,6 +242,7 @@ fn attach_sized(
                 viewport,
                 filter: EventFilterSpec::All,
                 resume: None,
+                resume_token,
             },
         })
         .expect("send attach");
@@ -223,11 +252,12 @@ fn attach_sized(
         client_id,
         session_id,
         structure,
+        resume_token,
     } = reply.result
     else {
         panic!("expected an attach reply, got {:?}", reply.result);
     };
-    (client_id, session_id, structure)
+    (client_id, session_id, structure, resume_token)
 }
 
 /// Add one tab to the running session over `connection`, and return its id.
@@ -386,7 +416,7 @@ fn one_attach_registers_the_client_the_server_minted() {
     let (server, _fake, (session_id, client_id, structure)) =
         served("registers", |dir, session_id, _fake| {
             let mut viewer = open(&dir, session_id);
-            let (client_id, replied_session, structure) = attach(&mut viewer, 2);
+            let (client_id, replied_session, structure, _) = attach(&mut viewer, 2);
             assert_eq!(replied_session, session_id);
             (vec![viewer], (session_id, client_id, structure))
         });
@@ -471,7 +501,7 @@ fn the_structure_reply_is_written_before_the_first_event_frame() {
 
             // Frame one on this connection decodes as a response, so no event
             // frame was written ahead of the reply.
-            let (_, _, structure) = attach(&mut viewer, 2);
+            let (_, _, structure, _) = attach(&mut viewer, 2);
             assert_eq!(structure.tabs.len(), 1);
 
             // Everything after it is an event frame. Reading one blocks with no
@@ -508,7 +538,7 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
     let (server, _fake, (session_id, first_client, second_client)) =
         served("reattach", |dir, session_id, _fake| {
             let mut first = open(&dir, session_id);
-            let (first_client, _, before) = attach(&mut first, 2);
+            let (first_client, _, before, _) = attach(&mut first, 2);
             assert_eq!(before.tabs.len(), 1);
             let first_tab = before.tabs[0].id;
 
@@ -516,7 +546,7 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
             let second_tab = new_tab(&mut caller, session_id, 3);
 
             let mut second = open(&dir, session_id);
-            let (second_client, _, after) = attach(&mut second, 4);
+            let (second_client, _, after, _) = attach(&mut second, 4);
             assert_ne!(second_client, first_client);
             assert_eq!(
                 after.tabs.iter().map(|tab| tab.id).collect::<Vec<TabId>>(),
@@ -579,7 +609,7 @@ fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, req
 fn the_event_stream_ends_with_the_quit_frame() {
     let (server, _fake, session_id) = served("quit-ends-stream", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, _, structure) = attach(&mut viewer, 2);
+        let (_, _, structure, _) = attach(&mut viewer, 2);
         let only_tab = structure.tabs[0].id;
 
         let mut caller = open(&dir, session_id);
@@ -619,7 +649,7 @@ fn the_stream_carries_a_pane_exit_while_the_session_keeps_serving() {
         "pane-exit-on-stream",
         |dir, session_id, fake| {
             let mut viewer = open(&dir, session_id);
-            let (client_id, _, structure) = attach(&mut viewer, 2);
+            let (client_id, _, structure, _) = attach(&mut viewer, 2);
             let first = structure.panes[0].id;
 
             let mut caller = open(&dir, session_id);
@@ -681,7 +711,7 @@ fn the_stream_carries_a_pane_exit_while_the_session_keeps_serving() {
 fn the_event_stream_ends_with_the_quit_frame_when_the_only_program_exits() {
     let (server, _fake, session_id) = served("quit-on-program-exit", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, _, structure) = attach(&mut viewer, 2);
+        let (_, _, structure, _) = attach(&mut viewer, 2);
         let only_pane = structure.panes[0].id;
 
         // A dying program closes its terminal and then exits, and the forwarder
@@ -709,7 +739,7 @@ fn dropping_an_attached_connection_removes_its_client_record() {
     let (server, _fake, (session_id, client_id, tab_id, pane_id)) =
         served("disconnect", |dir, session_id, _fake| {
             let mut viewer = open(&dir, session_id);
-            let (client_id, _, structure) = attach(&mut viewer, 2);
+            let (client_id, _, structure, _) = attach(&mut viewer, 2);
             let tab_id = structure.tabs[0].id;
             let pane_id = structure.panes[0].id;
             let mut caller = open(&dir, session_id);
@@ -763,9 +793,9 @@ fn detaching_one_client_leaves_every_other_stream_running() {
     let (server, _fake, (session_id, first_client, second_client, added_tab)) =
         served("detach-one", |dir, session_id, _fake| {
             let mut first = open(&dir, session_id);
-            let (first_client, _, _) = attach(&mut first, 2);
+            let (first_client, _, _, _) = attach(&mut first, 2);
             let mut second = open(&dir, session_id);
-            let (second_client, _, _) = attach(&mut second, 2);
+            let (second_client, _, _, _) = attach(&mut second, 2);
 
             // The caller never attaches, so nothing it does rides an event
             // stream of its own.
@@ -827,11 +857,11 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
         served("detach-all", |dir, session_id, _fake| {
             let first = {
                 let mut connection = open(&dir, session_id);
-                let (client_id, _, structure) = attach(&mut connection, 2);
+                let (client_id, _, structure, _) = attach(&mut connection, 2);
                 (connection, client_id, structure)
             };
             let mut second = open(&dir, session_id);
-            let (second_client, _, _) = attach(&mut second, 2);
+            let (second_client, _, _, _) = attach(&mut second, 2);
 
             let mut caller = open(&dir, session_id);
             assert_eq!(attached_client_count(&mut caller, 3), 2);
@@ -896,7 +926,7 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
         // effective tab size is the smallest viewport of every client viewing
         // it, so the pane's PTY shrinks.
         let mut narrow = open(&dir, session_id);
-        let (narrow_client, _, structure) = attach_sized(&mut narrow, 2, NARROW);
+        let (narrow_client, _, structure, _) = attach_sized(&mut narrow, 2, NARROW);
         let pane_id = structure.panes[0].id;
 
         let mut wide = open(&dir, session_id);
@@ -950,7 +980,7 @@ fn dropping_a_smaller_client_connection_grows_the_tabs_pty_back() {
         // effective tab size is the smallest viewport of every client viewing
         // it, so the pane's PTY shrinks.
         let mut narrow = open(&dir, session_id);
-        let (_narrow_client, _, structure) = attach_sized(&mut narrow, 2, NARROW);
+        let (_narrow_client, _, structure, _) = attach_sized(&mut narrow, 2, NARROW);
         let pane_id = structure.panes[0].id;
 
         let mut wide = open(&dir, session_id);
@@ -1000,7 +1030,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
 
     let (_server, fake, pane_id) = served("types-and-resizes", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
-        let (client_id, replied_session, structure) = attach(&mut viewer, 2);
+        let (client_id, replied_session, structure, _) = attach(&mut viewer, 2);
         assert_eq!(replied_session, session_id);
         let tab_id = structure.tabs[0].id;
         let pane_id = structure.panes[0].id;
@@ -1195,7 +1225,7 @@ const REPORT: &[u8] = b"\x1b[<0;1;1M";
 fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
     let (_server, fake, pane_id) = served("mouse-forward", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, replied_session, structure) = attach(&mut viewer, 2);
+        let (_, replied_session, structure, _) = attach(&mut viewer, 2);
         assert_eq!(replied_session, session_id);
         let pane_id = structure.panes[0].id;
 
@@ -1232,7 +1262,7 @@ fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
     // back until the round in flight is answered.
     let (_server, _fake, ()) = served("mouse-answer", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, _, structure) = attach(&mut viewer, 2);
+        let (_, _, structure, _) = attach(&mut viewer, 2);
         let pane_id = structure.panes[0].id;
 
         let mut viewer = wait_for_mouse_tracking(&fake, pane_id, viewer);
@@ -1262,7 +1292,7 @@ fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
 
     let (_server, _fake, ()) = served("mouse-scroll", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, _, structure) = attach(&mut viewer, 2);
+        let (_, _, structure, _) = attach(&mut viewer, 2);
         let pane_id = structure.panes[0].id;
 
         let (mut viewer, top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
@@ -1305,7 +1335,7 @@ fn a_border_move_round_answers_with_the_cells_the_wall_left_it() {
 
     let (_server, _fake, ()) = served("mouse-border", |dir, session_id, _fake| {
         let mut viewer = open(&dir, session_id);
-        let (client_id, _, structure) = attach(&mut viewer, 2);
+        let (client_id, _, structure, _) = attach(&mut viewer, 2);
         let pane_id = structure.panes[0].id;
 
         // The neighbour whose room the border move eats into, split off the
@@ -1365,7 +1395,7 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
     let (server, fake, (session_id, client_id, tab_id, pane_id)) =
         served("mouse-round", |dir, session_id, fake| {
             let mut viewer = open(&dir, session_id);
-            let (client_id, _, structure) = attach(&mut viewer, 2);
+            let (client_id, _, structure, _) = attach(&mut viewer, 2);
             let tab_id = structure.tabs[0].id;
             let pane_id = structure.panes[0].id;
 
@@ -1470,7 +1500,7 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
 
     let (_server, _fake, ()) = served("mouse-order", |dir, session_id, fake| {
         let mut viewer = open(&dir, session_id);
-        let (_, _, structure) = attach(&mut viewer, 2);
+        let (_, _, structure, _) = attach(&mut viewer, 2);
         let pane_id = structure.panes[0].id;
 
         let (mut viewer, top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
@@ -1512,4 +1542,127 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
 
         (vec![viewer], ())
     });
+}
+
+/// Submit a command over `connection` as the keybinding of `client_id`, and
+/// return the events it emitted. Panics unless the session applied it.
+fn submit_as_client(
+    connection: &mut Connection,
+    client_id: ClientId,
+    command: Command,
+    request_id: u64,
+) -> Vec<Event> {
+    let envelope = CommandEnvelope::new(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        SystemTime::UNIX_EPOCH,
+        command,
+    );
+    connection
+        .send(&IpcRequest {
+            request_id,
+            kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+        })
+        .expect("send command");
+    let reply: IpcResponse = connection.recv().expect("command reply");
+    let IpcResult::CommandResult(CommandResult::Ok {
+        command_id: _,
+        emitted_events,
+    }) = reply.result
+    else {
+        panic!("expected the command to apply, got {:?}", reply.result);
+    };
+    emitted_events
+}
+
+#[test]
+fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
+    // Lines of history to print, and how far up the round scrolls.
+    const RETAINED: usize = 40;
+    const LINES: usize = 5;
+
+    let (server, _fake, (session_id, left, came_back, first_tab, added_tab, pane_id)) =
+        served("resume-view", |dir, session_id, fake| {
+            let mut viewer = open(&dir, session_id);
+            let (left, _, structure, token) = attach(&mut viewer, 2);
+            let first_tab = structure.tabs[0].id;
+            let pane_id = structure.panes[0].id;
+            let token = token.expect("the attach minted a token");
+
+            // Every command rides a connection that never attaches, so the
+            // viewer's own stream carries frames alone.
+            let mut caller = open(&dir, session_id);
+
+            // Scroll the pane five lines up, zoom it, then switch tabs.
+            let (mut viewer, _top_row) = fill_scrollback(&fake, pane_id, RETAINED, viewer);
+            viewer
+                .send(&IpcRequest {
+                    request_id: 4,
+                    kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                        pane: pane_id,
+                        up: true,
+                        lines: LINES,
+                    }]),
+                })
+                .expect("send mouse round");
+            let (viewer, _frames) = read_to_mouse_answer(viewer, 4);
+            submit_as_client(&mut caller, left, Command::TogglePaneFullscreen, 5);
+            // Adding a tab moves the client that asked for it onto that tab.
+            let added_tab = new_tab(&mut caller, session_id, 6);
+            submit_as_client(
+                &mut caller,
+                left,
+                Command::FocusTab(FocusTabArgs {
+                    target: TabTarget::Id(added_tab),
+                    client: Some(left),
+                }),
+                7,
+            );
+
+            // The link breaks. The session files the view under the token this
+            // attach minted.
+            drop(viewer);
+            wait_for_client_count(&mut caller, 0, 8);
+
+            let mut second = open(&dir, session_id);
+            let (came_back, replied_session, structure, _) =
+                attach_with_token(&mut second, 2, VIEWPORT, Some(token));
+            assert_eq!(replied_session, session_id);
+            assert_eq!(
+                structure.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                vec![first_tab, added_tab],
+            );
+            let LayoutNode::Pane(added_pane) = structure.tabs[1].layout else {
+                panic!("the added tab holds one pane, got {:?}", structure.tabs[1]);
+            };
+            let mut both = vec![pane_id, added_pane];
+            both.sort();
+            assert_eq!(
+                structure
+                    .panes
+                    .iter()
+                    .map(|pane| pane.id)
+                    .collect::<Vec<_>>(),
+                both,
+            );
+
+            (
+                vec![caller, second],
+                (session_id, left, came_back, first_tab, added_tab, pane_id),
+            )
+        });
+
+    assert_ne!(came_back, left, "the token attaches as a fresh client");
+    let session = server.sessions().get(&session_id).expect("session running");
+    let client = session
+        .clients
+        .get(came_back)
+        .expect("the client the token attached");
+    assert_eq!(client.active_tab(), added_tab);
+    assert_eq!(client.focused_pane(first_tab), Some(pane_id));
+    assert_eq!(
+        client.layout_mode(first_tab),
+        LayoutMode::Fullscreen { focused: pane_id }
+    );
+    assert_eq!(client.scroll_offset(pane_id), LINES);
 }

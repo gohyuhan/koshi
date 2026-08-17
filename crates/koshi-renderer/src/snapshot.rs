@@ -22,9 +22,10 @@
 //! number its top visible row is. A viewer copies them into a [`MouseFrame`] as
 //! it paints and answers the next mouse event from that.
 //!
-//! Two things about a frame come from the viewer instead, as a
-//! [`ViewerChrome`]: the pane its pointer is over, and where its tab strip is
-//! scrolled to. The session stores neither.
+//! Three things about a frame come from the viewer instead, as a
+//! [`ViewerChrome`]: the pane its pointer is over, where its tab strip is
+//! scrolled to, and whether it is dialing the session again. The session
+//! stores none of them.
 
 use std::sync::Arc;
 
@@ -68,7 +69,7 @@ pub struct RenderSnapshot {
 
 impl RenderSnapshot {
     /// Borrow the parts of this frame that say where things sit, with `viewer`
-    /// supplying the two the session does not hold.
+    /// supplying what the session does not hold.
     #[must_use]
     pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {
@@ -120,12 +121,13 @@ pub enum Delivery {
     SwitchTo(SessionId),
 }
 
-/// The two things about a frame the viewer decides, not the session: which pane
-/// its pointer is over, and where its tab strip is scrolled to.
+/// The three things about a frame the viewer decides, not the session: which
+/// pane its pointer is over, where its tab strip is scrolled to, and whether it
+/// is dialing the session again.
 ///
-/// Both belong to one viewer and change on a pointer move. Neither is stored on
-/// the session or carried in a snapshot; the viewer hands them in when it
-/// hit-tests a frame and again when it paints one.
+/// All three belong to one viewer. None is stored on the session or carried in
+/// a snapshot; the viewer hands them in when it hit-tests a frame and again
+/// when it paints one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ViewerChrome {
     /// The pane the viewer's pointer is over, or `None` over koshi's own chrome.
@@ -138,6 +140,9 @@ pub struct ViewerChrome {
     /// without changing focus. The renderer windows the tab list from this and
     /// clamps an index past the last tab.
     pub tabline_offset: Option<usize>,
+    /// `true` while the viewer has no link to the session and is dialing it
+    /// again. The tabline draws a `RECONNECTING` tag while it is set.
+    pub reconnecting: bool,
 }
 
 /// Where a frame's surfaces sit, borrowed: the session with its solved active
@@ -158,7 +163,7 @@ pub struct FrameLayout<'a> {
     pub session: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client: &'a ClientSnapshot,
-    /// The viewer's pointer and tab-strip state.
+    /// The viewer's pointer, tab-strip, and link state.
     pub viewer: ViewerChrome,
 }
 
@@ -207,7 +212,7 @@ pub struct MouseFrame {
 
 impl MouseFrame {
     /// Borrow the parts of this frame that say where things sit, with `viewer`
-    /// supplying the two the session does not hold.
+    /// supplying what the session does not hold.
     #[must_use]
     pub fn layout(&self, viewer: ViewerChrome) -> FrameLayout<'_> {
         FrameLayout {

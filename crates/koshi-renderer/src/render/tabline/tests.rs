@@ -67,6 +67,7 @@ fn snap(
         chrome: ViewerChrome {
             hovered_pane: None,
             tabline_offset,
+            reconnecting: false,
         },
     }
 }
@@ -451,6 +452,29 @@ fn draw_paints_the_lock_tag_in_locked_mode() {
     assert_eq!(cell(&buf, tag + 3), "C");
     assert_eq!(cell(&buf, tag + 4), "K");
     assert_eq!(cell(&buf, tag + 5), " ");
+}
+
+#[test]
+fn draw_paints_the_reconnecting_tag_while_the_viewer_has_no_link() {
+    let width = 30 + BADGE;
+    let mut frame = snap("s", &[("a", true)], None, LockMode::Normal, false);
+    frame.chrome.reconnecting = true;
+    let buf = draw(&frame, width);
+    // " RECONNECTING " fills the row's last 14 cells.
+    let tag = width - 14;
+    let text: String = (tag..width).map(|x| cell(&buf, x)).collect();
+    assert_eq!(text, " RECONNECTING ");
+}
+
+#[test]
+fn draw_paints_the_base_tag_while_the_viewer_has_a_link() {
+    let width = 30 + BADGE;
+    let frame = snap("s", &[("a", true)], None, LockMode::Normal, false);
+    let buf = draw(&frame, width);
+    // The same row with the link up ends in the 6-cell " BASE " block.
+    let tag = width - 6;
+    let text: String = (tag..width).map(|x| cell(&buf, x)).collect();
+    assert_eq!(text, " BASE ");
 }
 
 #[test]

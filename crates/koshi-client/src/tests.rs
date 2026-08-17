@@ -993,3 +993,30 @@ fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
     assert_eq!(client.lock_mode(), LockMode::Normal, "the event won");
     assert!(client.mouse_select(), "and the frame's own value stands");
 }
+
+#[test]
+fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
+    let (mut client, _tx) = new_client();
+    let tab = TabId::new();
+    assert!(
+        !client.chrome(tab).reconnecting,
+        "a joined viewer is linked"
+    );
+
+    client.set_reconnecting(true);
+    assert!(client.chrome(tab).reconnecting);
+
+    client.set_reconnecting(false);
+    assert!(!client.chrome(tab).reconnecting);
+}
+
+#[test]
+fn taking_a_new_client_id_moves_the_id_the_viewers_commands_carry() {
+    let (mut client, _tx) = new_client();
+    let minted = ClientId::new();
+    assert_ne!(client.id(), minted);
+
+    client.set_id(minted);
+
+    assert_eq!(client.id(), minted);
+}

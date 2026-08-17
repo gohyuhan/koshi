@@ -16,8 +16,9 @@ pub mod app;
 
 /// The attached client: join a running session over its control socket and
 /// read its event stream. A switch re-attaches the same terminal to the named
-/// session; a detach, the session ending, or a broken connection ends the
-/// client.
+/// session; a broken link to a session on a server dials that server again for
+/// up to 120 seconds while `remote-reconnect` is on; a detach, the session
+/// ending, and a broken link to a session on this machine end the client.
 pub mod attach;
 
 pub mod input;
@@ -136,6 +137,9 @@ pub struct Client {
     /// or off every pane. The renderer draws an unfocused hovered pane in the
     /// hover color, so the wheel's target is visible before the wheel turns.
     hovered_pane: Option<PaneId>,
+    /// `true` while this viewer has no link to the session and is dialing it
+    /// again. The tabline draws a `RECONNECTING` tag while it is set.
+    reconnecting: bool,
     /// Restores the outer terminal when the client ends or the process
     /// panics.
     cleanup_guard: TerminalCleanupGuard,
@@ -180,6 +184,7 @@ impl Client {
             selection_drag: None,
             scroll_from_top: None,
             hovered_pane: None,
+            reconnecting: false,
             cleanup_guard,
         }
     }
@@ -244,6 +249,19 @@ impl Client {
     #[must_use]
     pub fn id(&self) -> ClientId {
         self.id
+    }
+
+    /// Record `id`, the id the session minted for this viewer's current attach.
+    /// Every command this viewer submits afterwards carries it.
+    pub fn set_id(&mut self, id: ClientId) {
+        self.id = id;
+    }
+
+    /// Record whether this viewer has no link to the session and is dialing it
+    /// again. The tabline draws a `RECONNECTING` tag while `reconnecting` is
+    /// `true`.
+    pub fn set_reconnecting(&mut self, reconnecting: bool) {
+        self.reconnecting = reconnecting;
     }
 
     /// The client's own outer-terminal size in cells.

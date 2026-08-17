@@ -663,10 +663,12 @@ fn serve_connection(
                 viewport,
                 filter,
                 resume,
+                resume_token,
             } => {
                 let answer =
                     ask_dispatcher(&served.intake, inbox_tx, |reply| RuntimeEvent::IpcAttach {
                         resume,
+                        resume_token,
                         viewport,
                         filter: filter.into(),
                         attached_at: SystemTime::now(),
@@ -685,6 +687,7 @@ fn serve_connection(
                         client_id: accepted.client_id,
                         session_id: accepted.session_id,
                         structure: accepted.structure,
+                        resume_token: Some(accepted.resume_token),
                     },
                 };
                 if connection.send(&attached).is_err() {
@@ -692,6 +695,8 @@ fn serve_connection(
                         inbox_tx,
                         RuntimeEvent::ClientDetached {
                             client_id: accepted.client_id,
+                            detached_at: SystemTime::now(),
+                            streamed: false,
                         },
                     );
                     return;
@@ -886,7 +891,14 @@ fn stream_events(
                 }
             }
         }
-        writer_intake.hand_over(&writer_inbox, RuntimeEvent::ClientDetached { client_id });
+        writer_intake.hand_over(
+            &writer_inbox,
+            RuntimeEvent::ClientDetached {
+                client_id,
+                detached_at: SystemTime::now(),
+                streamed: true,
+            },
+        );
         ending_notice.writer_ended();
     });
 
@@ -941,9 +953,14 @@ fn stream_events(
             break;
         }
     }
-    served
-        .intake
-        .hand_over(inbox_tx, RuntimeEvent::ClientDetached { client_id });
+    served.intake.hand_over(
+        inbox_tx,
+        RuntimeEvent::ClientDetached {
+            client_id,
+            detached_at: SystemTime::now(),
+            streamed: true,
+        },
+    );
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build

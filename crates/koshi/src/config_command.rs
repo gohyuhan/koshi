@@ -82,6 +82,12 @@ const FIELDS: &[FieldHelp] = &[
         "End the session when its last client leaves.",
     ),
     field(
+        "koshi.remote-reconnect",
+        "koshi.kdl",
+        "#true",
+        "Dial a session on another machine again when the link drops.",
+    ),
+    field(
         "koshi.pane.min-cols",
         "koshi.kdl",
         "2",

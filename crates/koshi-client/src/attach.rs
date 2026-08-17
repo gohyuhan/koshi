@@ -38,6 +38,22 @@
 //! paints the same panes back, so the screen does not flicker. A session that
 //! moves this client to another session comes back the same way.
 //!
+//! A dropped link to a session on a server is not a way out either, while
+//! `remote-reconnect` is on. The viewer
+//! draws `RECONNECTING` on its tab strip and dials that server again — after 1
+//! second, then 2, 4, 8, and 8 seconds before every dial after that — until it
+//! joins or 120 seconds pass. Each dial presents the secret the last attach
+//! minted, and the session hands that attach's view back for it: the same
+//! active tab, the same focused and zoomed pane of each tab, and the same
+//! scroll offset of each pane. A session that no longer holds that view mints a
+//! fresh client, and the viewer takes that id as its own. Everything typed
+//! while the viewer had no link is dropped and never sent. On the new link the
+//! viewer reads the terminal's size again and reports it. The screen keeps the
+//! last frame it drew, at the size it was drawn for, until the viewer joins
+//! again — a terminal resized over that stretch repaints when the first frame
+//! of the new link arrives. With `remote-reconnect` off, and for a session on
+//! this machine, a dropped link ends the client.
+//!
 //! From there the connection carries traffic both ways. The session composes
 //! this terminal's own frame — at this terminal's size and scroll position —
 //! and pushes it down the event stream, which this loop paints. This terminal's
@@ -150,6 +166,18 @@ const RESTART_POLL: Duration = Duration::from_millis(25);
 /// TLS, the secret, and the scope check — so it is paced wider than the read of
 /// a local endpoint file.
 const REMOTE_RESTART_POLL: Duration = Duration::from_millis(250);
+
+/// How long the first redial after a remote viewer's link dropped waits before
+/// it dials: 1 second.
+const FIRST_REDIAL_WAIT: Duration = Duration::from_secs(1);
+
+/// The longest one redial waits before it dials: 8 seconds.
+const MAX_REDIAL_WAIT: Duration = Duration::from_secs(8);
+
+/// How long a remote viewer keeps redialing after its link dropped: 120
+/// seconds, which is how long a session holds a detached client's view under
+/// its resume token.
+const REDIAL_WINDOW: Duration = Duration::from_secs(120);
 
 /// How long a bare `koshi attach` waits for the saved servers to answer with
 /// their sessions. It is one deadline over all of them at once, so an
@@ -448,6 +476,9 @@ struct Joined {
     /// session's endpoint token, which changes every time that session binds a
     /// new socket, and on a server the secret that server admitted.
     token: ConnectionToken,
+    /// The secret this attach minted, presented on the next attach to get this
+    /// attach's view back. `None` from a session server that mints none.
+    resume_token: Option<ConnectionToken>,
 }
 
 /// Resolve what the user typed to one running session, and report where it
@@ -691,6 +722,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         client_id,
         session_id,
         token,
+        resume_token,
     } = dial(home, target)?;
 
     // The session accepted the client, so the terminal may change mode now.
@@ -781,6 +813,7 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
         session_id,
         client_id,
         token,
+        resume_token,
         &mut client,
         &mut screen,
         &mut uplink,
@@ -808,15 +841,29 @@ fn attach_once(home: &Home, target: &SessionSelector) -> Result<Option<SessionId
 /// comes back through [`come_back`], which re-enters `home` the way that home
 /// is entered.
 ///
+/// A remote viewer whose link breaks comes back through [`redial`]: it paints
+/// the `RECONNECTING` tag, dials the server again on a widening pause, and
+/// drops everything typed while it had no link. A local viewer whose link
+/// breaks ends the loop, as it always has.
+///
 /// `token` is the token the open connection was opened under, which
 /// [`come_back`] reads and stamps with the token of the connection this client
 /// comes back on.
+///
+/// `client_id` is the client the open connection joined as. A redial that a
+/// session answers with a fresh client replaces it, and the viewer's own id
+/// with it.
+///
+/// `resume_token` is the secret the open connection's attach minted, presented
+/// on the next redial to get that attach's view back. Every reconnection
+/// stamps it with the secret its own attach minted.
 #[allow(clippy::too_many_arguments)]
 fn run_attachment<B: Backend>(
     home: &Home,
     session_id: SessionId,
-    client_id: ClientId,
+    mut client_id: ClientId,
     mut token: ConnectionToken,
+    mut resume_token: Option<ConnectionToken>,
     client: &mut Client,
     screen: &mut Screen<B>,
     uplink: &mut Uplink,
@@ -936,18 +983,59 @@ fn run_attachment<B: Backend>(
             }
         }
         if let Some(ending) = ended {
-            if ending != Ending::Restarting {
-                break ending;
-            }
-            // The session is replacing its own process image. The terminal
-            // keeps every mode it is in and the screen is left alone; the
-            // session's first frame on the new connection paints the panes
-            // again.
-            //
-            // The last request on this connection. The queue is written in
-            // order, so it leaves behind every key already on it.
-            uplink.send(IpcRequestKind::Leaving);
-            let Some((reader, writer)) = come_back(home, session_id, client_id, &mut token) else {
+            let halves = match ending {
+                Ending::Restarting => {
+                    // The session is replacing its own process image. The
+                    // terminal keeps every mode it is in and the screen is left
+                    // alone; the session's first frame on the new connection
+                    // paints the panes again.
+                    //
+                    // The last request on this connection. The queue is written
+                    // in order, so it leaves behind every key already on it.
+                    uplink.send(IpcRequestKind::Leaving);
+                    come_back(home, session_id, client_id, &mut token, &mut resume_token)
+                }
+                // The link broke. A viewer of a session on a server, with
+                // `remote-reconnect` on, dials that server again while the
+                // tabline reads `RECONNECTING`; nothing typed over that
+                // stretch is sent. A viewer with it off, and a viewer of a
+                // session on this machine, end here.
+                Ending::Died => match home {
+                    Home::Remote { server } if client.config().remote_reconnect => {
+                        client.set_reconnecting(true);
+                        screen.refresh(
+                            client,
+                            last_frame.as_ref().map(|frame| frame.client.active_tab),
+                        );
+                        let joined = redial(server, session_id, resume_token.as_ref());
+                        client.set_reconnecting(false);
+                        match joined {
+                            Some(joined) => {
+                                client_id = joined.client_id;
+                                client.set_id(joined.client_id);
+                                resume_token = joined.resume_token;
+                                client.end_mouse_gestures();
+                                pending.clear();
+                                // The panes the old frame placed may be gone.
+                                // Mouse events wait for the new connection's
+                                // first frame to be placed against.
+                                last_frame = None;
+                                if drop_input_from_the_blackout(&incoming_rx) {
+                                    break Ending::TerminalGone;
+                                }
+                                Some((joined.reader, joined.writer))
+                            }
+                            None => None,
+                        }
+                    }
+                    Home::Remote { .. } | Home::Local { .. } => None,
+                },
+                Ending::Detached
+                | Ending::SessionEnded
+                | Ending::TerminalGone
+                | Ending::Switch(_) => None,
+            };
+            let Some((reader, writer)) = halves else {
                 break ending;
             };
             current_connection += 1;
@@ -956,6 +1044,7 @@ fn run_attachment<B: Backend>(
             // is what ends that thread.
             uplink.requests = spawn_uplink_writer(writer);
             uplink.next_request_id = FIRST_LOOP_REQUEST_ID;
+            report_terminal_size(client, uplink);
             // The new connection numbers its rounds from the start, so no
             // answer to a border move written on the old one can arrive. The
             // next move asks for its whole distance from the drag anchor.
@@ -1002,7 +1091,8 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
             };
             let endpoint = ipc_client::read_endpoint(runtime_dir, session_id)?;
             let mut connection = ipc_client::connect(&endpoint, session_id)?;
-            let (client_id, session_id) = join(&mut connection, &endpoint.token, None)?;
+            let (client_id, session_id, resume_token) =
+                join(&mut connection, &endpoint.token, None)?;
             let (reader, writer) = connection.split();
             Ok(Joined {
                 reader,
@@ -1010,9 +1100,10 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
                 client_id,
                 session_id,
                 token: endpoint.token,
+                resume_token,
             })
         }
-        Home::Remote { server } => dial_remote(server, target, None),
+        Home::Remote { server } => dial_remote(server, target, None, None),
     }
 }
 
@@ -1021,8 +1112,9 @@ fn dial(home: &Home, target: &SessionSelector) -> Result<Joined, CliError> {
 ///
 /// The serving machine presents that session's endpoint token and writes the
 /// Hello on this client's behalf, so the first frame read back is the session
-/// server's answer to that Hello. The Attach after it is this client's own, and
-/// `resume` names the client record to come back as.
+/// server's answer to that Hello. The Attach after it is this client's own,
+/// `resume` names the client record to come back as, and `resume_token` is the
+/// secret the last attach minted, presented to get that attach's view back.
 ///
 /// # Errors
 /// [`CliError::Runtime`] when the server does not admit the secret, when the
@@ -1032,15 +1124,16 @@ fn dial_remote(
     server: &ServerArg,
     target: &SessionSelector,
     resume: Option<ClientId>,
+    resume_token: Option<&ConnectionToken>,
 ) -> Result<Joined, CliError> {
     // The join is held to JOIN_WAIT; the clock comes off once it is joined.
     let (link, saved) = remote_client::connect_saved(server, None, Some(remote_client::JOIN_WAIT))?;
     let (mut reader, mut writer) = remote_client::attach_remote(link, target.clone())?;
     settle_forwarded_hello(&mut reader, target)?;
     writer
-        .send(&attach_request(resume))
+        .send(&attach_request(resume, resume_token))
         .map_err(talk::talk_failed)?;
-    let (client_id, session_id) = take_attached(reader.recv().map_err(talk::talk_failed)?)?;
+    let (client_id, session_id, minted) = take_attached(reader.recv().map_err(talk::talk_failed)?)?;
 
     // Joined: both halves block for as long as it takes from here.
     reader.set_deadline(None);
@@ -1051,6 +1144,7 @@ fn dial_remote(
         client_id,
         session_id,
         token: saved.secret,
+        resume_token: minted,
     })
 }
 
@@ -1102,6 +1196,14 @@ fn target_name(target: &SessionSelector) -> String {
 /// and the pause comes first, so the dial meets the session's new image rather
 /// than the one it is replacing.
 ///
+/// `resume_token` is stamped with the secret the attach this client came back
+/// on minted: the local rejoin records none, and a fresh dial of a server
+/// records the one that dial minted.
+///
+/// The Attach presents no resume token either way: this client comes back by
+/// naming `client_id`, and a session that still holds that record hands its
+/// view straight back.
+///
 /// `None` for every way the client cannot come back, including a session that
 /// no longer holds this client's record. The caller reports each of them as the
 /// session ending unexpectedly.
@@ -1110,18 +1212,25 @@ fn come_back(
     session_id: SessionId,
     client_id: ClientId,
     token: &mut ConnectionToken,
+    resume_token: &mut Option<ConnectionToken>,
 ) -> Option<(FrameReader, FrameWriter)> {
     match home {
         Home::Local { runtime_dir } => {
             let (endpoint, connection) = rejoin(runtime_dir, session_id, client_id, token)?;
             *token = endpoint.token;
+            *resume_token = None;
             Some(connection.split())
         }
         Home::Remote { server } => {
             let deadline = Instant::now() + RESTART_WINDOW;
             loop {
                 thread::sleep(REMOTE_RESTART_POLL);
-                match dial_remote(server, &SessionSelector::Id(session_id), Some(client_id)) {
+                match dial_remote(
+                    server,
+                    &SessionSelector::Id(session_id),
+                    Some(client_id),
+                    None,
+                ) {
                     Ok(joined) if joined.client_id != client_id => {
                         tracing::warn!(
                             %session_id,
@@ -1131,6 +1240,7 @@ fn come_back(
                     }
                     Ok(joined) => {
                         *token = joined.token;
+                        *resume_token = joined.resume_token;
                         return Some((joined.reader, joined.writer));
                     }
                     Err(error) => {
@@ -1143,6 +1253,100 @@ fn come_back(
             }
         }
     }
+}
+
+/// Dial `server` for `session_id` again after a remote viewer's link dropped,
+/// and hand back the connection it joined on.
+///
+/// The pause comes before each dial and widens as
+/// [`next_redial_wait`] says: 1 second, 2, 4, 8, then 8 before every dial after
+/// that. A pause that would end past [`REDIAL_WINDOW`] — 120 seconds from the
+/// first pause — is not taken, and no dial follows it: the answer is `None`,
+/// naming the last dial's refusal. A dial already under way runs to its own
+/// timeout, so that answer can arrive after the window closes.
+///
+/// `resume_token` is the secret the last attach minted. The session hands that
+/// attach's view back for it — the active tab, each tab's focused and zoomed
+/// pane, and each pane's scroll offset. The session drops that view 120 seconds
+/// after it saw the link end, which is earlier than this window starts, so a
+/// dial late in the window joins with a fresh view instead.
+///
+/// A session that no longer holds the view mints a fresh client, and the
+/// returned [`Joined`] names it: the viewer takes that client id as its own and
+/// keeps running.
+fn redial(
+    server: &ServerArg,
+    session_id: SessionId,
+    resume_token: Option<&ConnectionToken>,
+) -> Option<Joined> {
+    let started = Instant::now();
+    let mut wait = FIRST_REDIAL_WAIT;
+    let mut refusal = None;
+    while pause_fits(started.elapsed(), wait) {
+        thread::sleep(wait);
+        match dial_remote(server, &SessionSelector::Id(session_id), None, resume_token) {
+            Ok(joined) => return Some(joined),
+            Err(error) => {
+                refusal = Some(error);
+                wait = next_redial_wait(wait);
+            }
+        }
+    }
+    tracing::warn!(?refusal, %session_id, "could not reach the session again");
+    None
+}
+
+/// Whether a pause of `wait`, begun `elapsed` after the first one, ends inside
+/// [`REDIAL_WINDOW`].
+///
+/// `elapsed` 111 seconds with an 8-second `wait` ends at 119 and fits;
+/// 112 seconds with the same `wait` ends at 120 and does not.
+fn pause_fits(elapsed: Duration, wait: Duration) -> bool {
+    elapsed + wait < REDIAL_WINDOW
+}
+
+/// The wait one failed redial hands the next: `wait` doubled, held at
+/// [`MAX_REDIAL_WAIT`].
+///
+/// From [`FIRST_REDIAL_WAIT`] that walks 1 second → 2 → 4 → 8 → 8, and stays at
+/// 8 seconds however many dials follow.
+fn next_redial_wait(wait: Duration) -> Duration {
+    (wait * 2).min(MAX_REDIAL_WAIT)
+}
+
+/// Read the terminal's size, record it on `client`, and report it on `uplink`'s
+/// connection.
+///
+/// The Attach that opened that connection carried the size read when it was
+/// written. Both copies of the size hold what this read returns.
+fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
+    let size = viewport();
+    client.set_viewport(size);
+    uplink.send(IpcRequestKind::Resize { viewport: size });
+}
+
+/// Take everything this terminal typed while the link was down off the loop's
+/// channel and answer whether the terminal went away.
+///
+/// Every event on the channel is dropped, keys, pastes, mouse events and
+/// resizes alike, and none is sent. Frames read from the connection that broke
+/// are dropped too. The terminal's size is read again once the new connection
+/// is up.
+///
+/// `true` when a [`RuntimeEvent::Quit`] was among them, which is this terminal
+/// going away. The drain still runs to the end, so nothing typed before it is
+/// left on the channel.
+fn drop_input_from_the_blackout(incoming_rx: &mpsc::Receiver<Incoming>) -> bool {
+    let mut terminal_gone = false;
+    while let Ok(received) = incoming_rx.try_recv() {
+        let Incoming::Input(event) = received else {
+            continue;
+        };
+        if matches!(*event, RuntimeEvent::Quit) {
+            terminal_gone = true;
+        }
+    }
+    terminal_gone
 }
 
 /// The session a listing settles on, picked from the sessions running for this
@@ -1279,10 +1483,11 @@ fn selector_of(selector: &str) -> SessionSelector {
 
 /// Join the session on an open connection: write the Hello and the Attach back
 /// to back, then read both replies in order. Returns the client the server
-/// minted for this terminal and the session it says that client joined.
+/// minted for this terminal, the session it says that client joined, and the
+/// secret this attach minted.
 ///
 /// The client names no identity of its own — the server mints the client id
-/// and answers with it — so both values come from the reply.
+/// and answers with it — so every value comes from the reply.
 ///
 /// `resume` names the client record to come back as: a client returning after
 /// the session replaced its own process image carries it, and a first join
@@ -1290,18 +1495,21 @@ fn selector_of(selector: &str) -> SessionSelector {
 /// the tab that record was viewing still exists, and no connection is
 /// streaming for it, and mints a fresh client otherwise, so the returned id is
 /// the one the caller holds from here either way.
+///
+/// The Attach presents no resume token: a join over a connection this machine
+/// opened names the client record it comes back as instead.
 fn join(
     connection: &mut Connection,
     token: &ConnectionToken,
     resume: Option<ClientId>,
-) -> Result<(ClientId, SessionId), CliError> {
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
     let hello = IpcRequest {
         request_id: 1,
         kind: IpcRequestKind::hello(token.clone()),
     };
     connection.send(&hello).map_err(talk::talk_failed)?;
     connection
-        .send(&attach_request(resume))
+        .send(&attach_request(resume, None))
         .map_err(talk::talk_failed)?;
 
     settle_version(connection.recv().map_err(talk::talk_failed)?)?;
@@ -1312,14 +1520,17 @@ fn join(
 /// Hello on every connection into a session.
 ///
 /// `resume` names the client record to come back as, and is `None` on a first
-/// join.
-fn attach_request(resume: Option<ClientId>) -> IpcRequest {
+/// join. `resume_token` is the secret the last attach minted, presented to get
+/// that attach's view back, and is `None` on a first join and whenever no
+/// token was minted.
+fn attach_request(resume: Option<ClientId>, resume_token: Option<&ConnectionToken>) -> IpcRequest {
     IpcRequest {
         request_id: 2,
         kind: IpcRequestKind::Attach {
             viewport: viewport(),
             filter: EventFilterSpec::All,
             resume,
+            resume_token: resume_token.cloned(),
         },
     }
 }
@@ -1336,15 +1547,19 @@ fn settle_version(reply: IncomingResponse) -> Result<(), CliError> {
     }
 }
 
-/// The client the server minted for this terminal and the session it says that
-/// client joined, out of an Attach answer.
-fn take_attached(reply: IncomingResponse) -> Result<(ClientId, SessionId), CliError> {
+/// The client the server minted for this terminal, the session it says that
+/// client joined, and the secret this attach minted, out of an Attach answer.
+/// The secret is `None` from a session server that mints none.
+fn take_attached(
+    reply: IncomingResponse,
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
     match talk::SESSION.take_result(reply)? {
         IpcResult::Attached {
             client_id,
             session_id,
+            resume_token,
             ..
-        } => Ok((client_id, session_id)),
+        } => Ok((client_id, session_id, resume_token)),
         IpcResult::Error(refusal) => Err(talk::refused(&refusal)),
         other => Err(talk::SESSION.unexpected_reply(&other)),
     }
@@ -1384,7 +1599,7 @@ fn rejoin(
     let mut connection = ipc_client::connect(&endpoint, session_id)
         .inspect_err(|error| tracing::warn!(%error, "could not reach the restarted session"))
         .ok()?;
-    let (rejoined, _) = join(&mut connection, &endpoint.token, Some(client_id))
+    let (rejoined, _, _) = join(&mut connection, &endpoint.token, Some(client_id))
         .inspect_err(|error| tracing::warn!(%error, "the restarted session refused this client"))
         .ok()?;
     if rejoined != client_id {

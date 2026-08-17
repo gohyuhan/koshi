@@ -7,7 +7,7 @@ use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::ConfigError;
 use crate::layer::PartialKoshiConfig;
-use crate::types::WheelScroll;
+use crate::types::{ClientConfig, WheelScroll};
 
 use super::{parse_app_config, AppConfigFile};
 
@@ -543,6 +543,43 @@ fn mouse_section_parses_every_field() {
     assert_eq!(mouse.border_resize, Some(false));
     assert_eq!(mouse.scroll_lines, Some(5));
     assert_eq!(mouse.wheel, Some(WheelScroll::Ignore));
+}
+
+#[test]
+fn remote_reconnect_records_what_it_is_set_to() {
+    assert_eq!(parse("remote-reconnect #true").remote_reconnect, Some(true));
+    assert_eq!(
+        parse("remote-reconnect #false").remote_reconnect,
+        Some(false)
+    );
+}
+
+#[test]
+fn an_absent_remote_reconnect_leaves_dialing_again_on() {
+    // Absent leaves the field unset, so the built-in `true` stands and a
+    // dropped link to another machine is dialed again.
+    assert_eq!(parse("").remote_reconnect, None);
+    assert!(ClientConfig::default().remote_reconnect);
+}
+
+#[test]
+fn a_non_boolean_remote_reconnect_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("remote-reconnect \"yes\"");
+    assert_eq!(layer.remote_reconnect, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `remote-reconnect`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
+fn a_repeated_remote_reconnect_line_keeps_the_first_and_warns() {
+    let (layer, warnings) = parse_with_warnings("remote-reconnect #false\nremote-reconnect #true");
+    assert_eq!(layer.remote_reconnect, Some(false));
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `remote-reconnect` section".to_string()]
+    );
 }
 
 #[test]
