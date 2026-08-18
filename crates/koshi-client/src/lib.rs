@@ -49,7 +49,7 @@ use koshi_core::{
     ids::{ClientId, PaneId, TabId},
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
-use koshi_renderer::snapshot::Delivery;
+use koshi_renderer::snapshot::{Delivery, Reconnecting};
 use koshi_renderer::theme::Theme;
 
 use crate::mouse::{LastPress, ResizeDrag, SelectionDrag, TablineDrag};
@@ -137,9 +137,11 @@ pub struct Client {
     /// or off every pane. The renderer draws an unfocused hovered pane in the
     /// hover color, so the wheel's target is visible before the wheel turns.
     hovered_pane: Option<PaneId>,
-    /// `true` while this viewer has no link to the session and is dialing it
-    /// again. The tabline draws a `RECONNECTING` tag while it is set.
-    reconnecting: bool,
+    /// Where this viewer's dialing stands while it has no link to the session,
+    /// and `None` while it has one. The tabline draws
+    /// `RECONNECTING (attempt 4, retry in 8s)` while it holds a
+    /// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`.
+    reconnecting: Option<Reconnecting>,
     /// Restores the outer terminal when the client ends or the process
     /// panics.
     cleanup_guard: TerminalCleanupGuard,
@@ -184,7 +186,7 @@ impl Client {
             selection_drag: None,
             scroll_from_top: None,
             hovered_pane: None,
-            reconnecting: false,
+            reconnecting: None,
             cleanup_guard,
         }
     }
@@ -257,10 +259,10 @@ impl Client {
         self.id = id;
     }
 
-    /// Record whether this viewer has no link to the session and is dialing it
-    /// again. The tabline draws a `RECONNECTING` tag while `reconnecting` is
-    /// `true`.
-    pub fn set_reconnecting(&mut self, reconnecting: bool) {
+    /// Record where this viewer's dialing stands, or `None` once it has a link
+    /// again. The tabline draws `RECONNECTING (attempt 4, retry in 8s)` for a
+    /// `Some(Reconnecting { attempt: 4, retry_in_seconds: 8 })`.
+    pub fn set_reconnecting(&mut self, reconnecting: Option<Reconnecting>) {
         self.reconnecting = reconnecting;
     }
 

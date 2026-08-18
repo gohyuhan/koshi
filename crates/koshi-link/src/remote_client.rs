@@ -125,6 +125,25 @@ pub struct RemoteLink {
     pub fingerprint: String,
 }
 
+/// Why one dial did not hand back a connection.
+#[derive(Debug)]
+pub enum DialError {
+    /// The path to the server failed, and dialling again can succeed.
+    Unreachable(CliError),
+    /// The server — or the pinned-certificate check — answered, and every
+    /// identical dial after it gets the same answer.
+    Refused(CliError),
+}
+
+/// The [`CliError`] the variant carries, unchanged.
+impl From<DialError> for CliError {
+    fn from(error: DialError) -> Self {
+        match error {
+            DialError::Unreachable(inner) | DialError::Refused(inner) => inner,
+        }
+    }
+}
+
 /// What asking one saved server for its sessions produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reach {
@@ -354,17 +373,17 @@ fn prompt_failed(error: io::Error) -> CliError {
 /// carries no timeout.
 ///
 /// # Errors
-/// [`CliError::Runtime`] when the server did not admit the secret, naming the
-/// address. [`CliError::IpcUnavailable`] when the connection could not be
-/// opened, the certificate changed, the exchange ran out of time, or the
-/// server answered something else.
+/// [`DialError::Unreachable`] when the connection could not be opened or the
+/// exchange ran out of time. [`DialError::Refused`] when the certificate
+/// changed, the server did not admit the secret, the doorway version it
+/// settled on is one this build does not speak, or it answered something else.
 pub fn connect(
     address: &str,
     secret: &ConnectionToken,
     pinned: Option<&str>,
     timeout: Duration,
     reply_wait: Option<Duration>,
-) -> Result<RemoteLink, CliError> {
+) -> Result<RemoteLink, DialError> {
     let hello = RemoteClientFrame::Hello {
         min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
         max_remote_version: REMOTE_PROTOCOL_VERSION,
@@ -373,29 +392,67 @@ pub fn connect(
         token: secret.clone(),
     };
     let (reader, writer, fingerprint, answer) =
-        remote_wire::open(address, pinned, &hello, timeout, reply_wait).map_err(talk_failed)?;
+        remote_wire::open(address, pinned, &hello, timeout, reply_wait).map_err(dial_failed)?;
+    check_answer(address, &answer)?;
+    Ok(RemoteLink {
+        reader,
+        writer,
+        fingerprint,
+    })
+}
+
+/// How one dial's transport failure classifies: a certificate that does not
+/// match the pinned one is [`DialError::Refused`], every other transport
+/// failure is [`DialError::Unreachable`]. The message is
+/// [`talk_failed`](crate::talk::talk_failed)'s either way.
+fn dial_failed(error: IpcError) -> DialError {
+    match error {
+        IpcError::CertificateChanged { .. } => DialError::Refused(talk_failed(error)),
+        _ => DialError::Unreachable(talk_failed(error)),
+    }
+}
+
+/// `Ok(())` when `answer` is a `Welcome` carrying a doorway version between
+/// [`MIN_REMOTE_PROTOCOL_VERSION`] and [`REMOTE_PROTOCOL_VERSION`], else the
+/// [`DialError::Refused`] to report.
+///
+/// A `Refused` frame carrying
+/// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) reads as a
+/// rejected or revoked token and names both ways to replace it. Any other
+/// message is the server's own sentence with `address` after it.
+///
+/// Example — a `Refused` frame carrying `"the session is gone"` from
+/// `desk.local:7654` reads `"the session is gone (server desk.local:7654)"`.
+fn check_answer(address: &str, answer: &RemoteServerFrame) -> Result<(), DialError> {
     match answer {
         RemoteServerFrame::Welcome { remote_version }
-            if (MIN_REMOTE_PROTOCOL_VERSION..=REMOTE_PROTOCOL_VERSION)
-                .contains(&remote_version) =>
+            if (MIN_REMOTE_PROTOCOL_VERSION..=REMOTE_PROTOCOL_VERSION).contains(remote_version) =>
         {
-            Ok(RemoteLink {
-                reader,
-                writer,
-                fingerprint,
-            })
+            Ok(())
         }
-        RemoteServerFrame::Welcome { remote_version } => Err(CliError::Runtime {
-            detail: format!(
-                "server {address} settled on remote doorway {remote_version}, which this koshi \
-                 does not speak: it speaks {MIN_REMOTE_PROTOCOL_VERSION} to \
-                 {REMOTE_PROTOCOL_VERSION}"
-            ),
-        }),
-        RemoteServerFrame::Refused { message } => Err(CliError::Runtime {
+        RemoteServerFrame::Welcome { remote_version } => {
+            Err(DialError::Refused(CliError::Runtime {
+                detail: format!(
+                    "server {address} settled on remote doorway {remote_version}, which this \
+                     koshi does not speak: it speaks {MIN_REMOTE_PROTOCOL_VERSION} to \
+                     {REMOTE_PROTOCOL_VERSION}"
+                ),
+            }))
+        }
+        RemoteServerFrame::Refused { message } if message == remote_wire::REMOTE_REFUSED => {
+            Err(DialError::Refused(CliError::Runtime {
+                detail: format!(
+                    "the server {address} did not admit the connection: the token was rejected \
+                     or revoked. re-grant it on that machine with `koshi share grant`; store \
+                     the new secret with `koshi remote set-secret` for a saved server, or \
+                     give it when the next dial asks"
+                ),
+            }))
+        }
+        RemoteServerFrame::Refused { message } => Err(DialError::Refused(CliError::Runtime {
             detail: format!("{message} (server {address})"),
-        }),
-        RemoteServerFrame::Sessions { .. } => Err(unexpected_answer(address)),
+        })),
+        RemoteServerFrame::Sessions { .. } => Err(DialError::Refused(unexpected_answer(address))),
     }
 }
 
@@ -419,26 +476,27 @@ pub fn connect(
 /// The saved record comes back alongside the connection.
 ///
 /// # Errors
+/// Whatever [`connect`] reports. [`DialError::Refused`] carrying
 /// [`CliError::InvalidArgs`] when `save_as` names a server that is already
-/// saved, and when the name cannot be given to that address. Whatever
-/// [`connect`] reports, and [`CliError::IpcUnavailable`] when a server reached
-/// for the first time could not be saved.
+/// saved, when the name cannot be given to that address, and when no secret was
+/// given; carrying [`CliError::IpcUnavailable`] when a server reached for the
+/// first time could not be saved.
 pub fn connect_saved(
     arg: &ServerArg,
     save_as: Option<&str>,
     reply_wait: Option<Duration>,
-) -> Result<(RemoteLink, SavedServer), CliError> {
+) -> Result<(RemoteLink, SavedServer), DialError> {
     match arg {
         ServerArg::Saved(record) => {
             if let Some(name) = save_as {
-                return Err(CliError::InvalidArgs {
+                return Err(DialError::Refused(CliError::InvalidArgs {
                     detail: format!(
                         "{} is already saved, so --save-as {name} would change nothing; \
                          run `koshi remote forget {}` first to save it under another name",
                         label_of(record),
                         label_of(record)
                     ),
-                });
+                }));
             }
             let link = connect(
                 &record.address,
@@ -463,9 +521,9 @@ pub fn connect_saved(
         }
         ServerArg::New { address } => {
             if let Some(name) = save_as {
-                check_save_as(name, address)?;
+                check_save_as(name, address).map_err(DialError::Refused)?;
             }
-            let secret = secret_for(address)?;
+            let secret = secret_for(address).map_err(DialError::Refused)?;
             let link = connect(address, &secret, None, DIAL_WAIT, reply_wait)?;
             let now = SystemTime::now();
             let saved = SavedServer {
@@ -476,13 +534,15 @@ pub fn connect_saved(
                 added_at: now,
                 last_used_at: Some(now),
             };
-            let (path, mut store) = read_store()?;
-            store
-                .save(saved.clone())
-                .map_err(|taken| CliError::InvalidArgs {
+            let (path, mut store) = read_store().map_err(DialError::Refused)?;
+            store.save(saved.clone()).map_err(|taken| {
+                DialError::Refused(CliError::InvalidArgs {
                     detail: taken.to_string(),
-                })?;
-            store.write(&path).map_err(store_failed)?;
+                })
+            })?;
+            store
+                .write(&path)
+                .map_err(|error| DialError::Refused(store_failed(error)))?;
             Ok((link, saved))
         }
     }
@@ -689,8 +749,10 @@ fn probe(record: &SavedServer, deadline: Instant) -> Reach {
         Some(left),
     ) {
         Ok(link) => link,
-        Err(CliError::Runtime { .. }) => return Reach::Refused { server },
-        Err(_) => return Reach::Unreachable,
+        Err(error) => match CliError::from(error) {
+            CliError::Runtime { .. } => return Reach::Refused { server },
+            _ => return Reach::Unreachable,
+        },
     };
     match list_remote_sessions(&mut link) {
         Ok(rows) => Reach::Reached { server, rows },

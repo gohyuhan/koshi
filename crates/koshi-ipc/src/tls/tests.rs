@@ -1,8 +1,8 @@
 //! Tests for the TLS stream: the certificate fingerprint, what the pinning
 //! verifier accepts and refuses, the frames that cross a real loopback stream,
-//! and the deadline a handshake, an opening exchange and a read finish inside,
-//! against a peer that answers nothing and against one that sends a byte at a
-//! time.
+//! the cause a failed dial carries and the words it prints, and the deadline a
+//! handshake, an opening exchange and a read finish inside, against a peer that
+//! answers nothing and against one that sends a byte at a time.
 //!
 //! The loopback tests bind `127.0.0.1:0`, so the operating system picks a free
 //! port and two runs of the suite never meet on one address.
@@ -125,6 +125,66 @@ fn the_pinned_fingerprint_is_taken_and_every_other_one_is_refused() {
 }
 
 #[test]
+fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
+    // The operating system picks a free port. The listener goes before the
+    // dial, and nothing holds that port when the connection arrives.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("read the bound address");
+    drop(listener);
+
+    let failure = dial(&address.to_string(), None, LOOPBACK_WAIT)
+        .expect_err("a port nothing listens on refuses the connection");
+
+    let printed = failure.to_string();
+    let IpcError::ConnectRefused { address: named } = failure else {
+        panic!("a refused connection is its own failure, not a transport failure");
+    };
+    assert_eq!(named, address.to_string());
+    assert_eq!(
+        printed,
+        format!(
+            "{address} refused the connection: nothing is listening on that port. \
+             if remote access is not enabled on that machine, run `koshi share grant` \
+             there and answer yes to the offer to open the port"
+        )
+    );
+}
+
+#[test]
+fn a_dial_with_no_time_left_times_out_before_it_connects() {
+    // A zero timeout leaves no time after the name lookup. The dial ends
+    // before it opens a socket, and no bytes reach the address.
+    let address = "127.0.0.1:1";
+
+    let failure =
+        dial(address, None, Duration::ZERO).expect_err("a dial with no time left never connects");
+
+    let printed = failure.to_string();
+    let IpcError::ConnectTimedOut { address: named } = failure else {
+        panic!("a connect with no time left is a timeout, not a transport failure");
+    };
+    assert_eq!(named, address);
+    assert_eq!(
+        printed,
+        "connecting to 127.0.0.1:1 timed out: nothing answered. check that the machine is up, \
+         the address and port are right, and the network path allows it"
+    );
+}
+
+#[test]
+fn a_failed_handshake_names_the_address_and_the_reason() {
+    assert_eq!(
+        IpcError::TlsHandshakeFailed {
+            address: "laptop.local:7654".to_string(),
+            detail: "the TLS handshake did not finish in time".to_string(),
+        }
+        .to_string(),
+        "the TLS handshake with laptop.local:7654 failed: \
+         the TLS handshake did not finish in time"
+    );
+}
+
+#[test]
 fn a_server_that_answers_nothing_ends_the_dial_at_the_deadline() {
     // Bound and never accepted: the operating system's backlog completes the
     // TCP connection, so the dial reaches the handshake and waits there.
@@ -136,15 +196,15 @@ fn a_server_that_answers_nothing_ends_the_dial_at_the_deadline() {
         .expect_err("a server that sends nothing never finishes the handshake");
     let waited = started.elapsed();
 
-    let IpcError::Transport { detail } = failure else {
-        panic!("a dial that ran out of time is a transport failure");
-    };
-    assert_eq!(
+    let IpcError::TlsHandshakeFailed {
+        address: named,
         detail,
-        format!(
-            "the TLS handshake with {address} failed: the TLS handshake did not finish in time"
-        )
-    );
+    } = failure
+    else {
+        panic!("a handshake that ran out of time is a handshake failure");
+    };
+    assert_eq!(named, address.to_string());
+    assert_eq!(detail, "the TLS handshake did not finish in time");
     assert!(
         waited < SHORT_TIMEOUT + SLACK,
         "the dial returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} timeout"
@@ -168,15 +228,15 @@ fn a_server_that_sends_one_byte_at_a_time_ends_the_dial_at_the_deadline() {
         .expect_err("a server that drips its bytes never finishes the handshake");
     let waited = started.elapsed();
 
-    let IpcError::Transport { detail } = failure else {
-        panic!("a dial that ran out of time is a transport failure");
-    };
-    assert_eq!(
+    let IpcError::TlsHandshakeFailed {
+        address: named,
         detail,
-        format!(
-            "the TLS handshake with {address} failed: the TLS handshake did not finish in time"
-        )
-    );
+    } = failure
+    else {
+        panic!("a handshake that ran out of time is a handshake failure");
+    };
+    assert_eq!(named, address.to_string());
+    assert_eq!(detail, "the TLS handshake did not finish in time");
     assert!(
         waited < SHORT_TIMEOUT + SLACK,
         "the dial returned {waited:?} after it started, inside its {SHORT_TIMEOUT:?} timeout, \

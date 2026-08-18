@@ -327,6 +327,22 @@ fingerprint and last-used time of each saved server, and never a secret. Once
 the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
 replaces the saved one; it reads the new secret the same way a connection does.
 
+A token is full access to every session it reaches. `koshi share grant alice`
+reaches every session on the serving machine, including the sessions started
+after that grant. `koshi share grant alice --session quiet-lake` reaches that
+one session. Typing into a shell of one of those sessions acts as the user who
+runs the session — the same as sitting at that machine and typing there. Hand a
+token to somebody only when you would hand them that account.
+
+`koshi share revoke alice` takes effect at once. It ends every live connection a
+token of alice's admitted, whether that connection attached to a session or not,
+and every connection presenting one of those tokens afterwards is refused.
+
+The token store on the serving machine holds the sha256 of each token it
+granted, never the token itself. A token is printed once, by the grant that made
+it. A token nobody kept is replaced by a fresh `koshi share grant`, and is never
+read back out of the store.
+
 Bare `koshi attach` lists the sessions on every reachable saved server beside
 this machine's own, each row naming the server it belongs to. The remote check
 waits two seconds in total, not two seconds per server, so one unreachable

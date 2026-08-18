@@ -2,8 +2,9 @@
 //!
 //! The crate holds an event-sequence recorder, an in-memory fake PTY
 //! (pseudo-terminal, the virtual terminal a shell process runs inside)
-//! backend, and layout invariant assertions. [`fixtures`] is a placeholder
-//! module reserved for future shared test fixtures.
+//! backend, layout invariant assertions, and a rate-bounded byte pump.
+//! [`fixtures`] is a placeholder module reserved for future shared test
+//! fixtures.
 
 /// Deterministic event-sequence recorder for command-transaction tests.
 ///
@@ -26,3 +27,10 @@ pub mod fixtures;
 /// Validates that placed panes maintain geometric invariants: exact tiling of
 /// the tab area, no overlaps, no spills, and respect for minimum cell sizes.
 pub mod layout_assert;
+
+/// Rate-bounded byte pump for tests that need a slow link.
+///
+/// [`throttle::pump_throttled`] copies bytes from one stream to another on its
+/// own thread, at most a fixed number of bytes per time slice, and stops at a
+/// deadline.
+pub mod throttle;

@@ -37,8 +37,8 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::snapshot::{
-    ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, RenderSnapshot,
-    SelectionSpans, ViewerChrome,
+    ClientSnapshot, CursorStyle, FrameLayout, KeymapHints, PaneSnapshot, Reconnecting,
+    RenderSnapshot, SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_hint_bar;
 use crate::theme::Theme;
@@ -492,18 +492,26 @@ fn header_title(snapshot: &RenderSnapshot, pane: PaneId) -> &str {
 
 /// The mode indicator shown in the tabline: every active mode label joined with
 /// ` · `, or `BASE` when the client is in plain mode with the mouse ungrabbed
-/// and `reconnecting` is `false`.
+/// and `reconnecting` is `None`.
 ///
 /// The labels compose from independent axes, always in this order:
-/// `reconnecting` adds `RECONNECTING`, the `lock_mode` layer contributes at
-/// most one tag (nothing when `Normal`), and `mouse_select` adds `SELECT`. So a
-/// reconnecting client that is locked and grabbing the mouse reads
-/// `RECONNECTING · LOCK · SELECT`, and a plain one grabbing it reads `SELECT`.
-/// A `reconnecting` client never reads `BASE`.
-fn mode_tags(client: &ClientSnapshot, reconnecting: bool) -> String {
-    let mut tags: Vec<&'static str> = Vec::new();
-    if reconnecting {
-        tags.push("RECONNECTING");
+/// `reconnecting` adds `RECONNECTING (attempt 4, retry in 8s)` from a
+/// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`, the `lock_mode` layer
+/// contributes at most one tag (nothing when `Normal`), and `mouse_select` adds
+/// `SELECT`. So that same client, locked and grabbing the mouse, reads
+/// `RECONNECTING (attempt 4, retry in 8s) · LOCK · SELECT`, and a plain one
+/// grabbing it reads `SELECT`. A client with `reconnecting` set never reads
+/// `BASE`.
+fn mode_tags(client: &ClientSnapshot, reconnecting: Option<Reconnecting>) -> String {
+    let reconnect_tag = reconnecting.map(|r| {
+        format!(
+            "RECONNECTING (attempt {}, retry in {}s)",
+            r.attempt, r.retry_in_seconds
+        )
+    });
+    let mut tags: Vec<&str> = Vec::new();
+    if let Some(tag) = reconnect_tag.as_deref() {
+        tags.push(tag);
     }
     if let Some(tag) = lock_mode_tag(client.lock_mode) {
         tags.push(tag);

@@ -140,9 +140,26 @@ pub struct ViewerChrome {
     /// without changing focus. The renderer windows the tab list from this and
     /// clamps an index past the last tab.
     pub tabline_offset: Option<usize>,
-    /// `true` while the viewer has no link to the session and is dialing it
-    /// again. The tabline draws a `RECONNECTING` tag while it is set.
-    pub reconnecting: bool,
+    /// Where the viewer's dialing stands while it has no link to the session,
+    /// and `None` while it has one. The tabline draws
+    /// `RECONNECTING (attempt 4, retry in 8s)` from a
+    /// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`.
+    pub reconnecting: Option<Reconnecting>,
+}
+
+/// How far a viewer with no link has got: which dial comes next, and how many
+/// seconds are left before it goes out.
+///
+/// The viewer replaces this once a second while it waits, so the tag it draws
+/// counts down: `retry_in_seconds` 3, then 2, then 1, then the dial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reconnecting {
+    /// Which dial comes next, counting from 1. Drawn as the `attempt 4` part of
+    /// `RECONNECTING (attempt 4, retry in 8s)`.
+    pub attempt: u32,
+    /// Whole seconds left before that dial goes out. Drawn as the `retry in 8s`
+    /// part of `RECONNECTING (attempt 4, retry in 8s)`.
+    pub retry_in_seconds: u32,
 }
 
 /// Where a frame's surfaces sit, borrowed: the session with its solved active

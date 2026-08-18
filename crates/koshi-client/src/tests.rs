@@ -998,16 +998,21 @@ fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
 fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
     let (mut client, _tx) = new_client();
     let tab = TabId::new();
-    assert!(
-        !client.chrome(tab).reconnecting,
+    assert_eq!(
+        client.chrome(tab).reconnecting,
+        None,
         "a joined viewer is linked"
     );
 
-    client.set_reconnecting(true);
-    assert!(client.chrome(tab).reconnecting);
+    let dialing = Reconnecting {
+        attempt: 1,
+        retry_in_seconds: 5,
+    };
+    client.set_reconnecting(Some(dialing));
+    assert_eq!(client.chrome(tab).reconnecting, Some(dialing));
 
-    client.set_reconnecting(false);
-    assert!(!client.chrome(tab).reconnecting);
+    client.set_reconnecting(None);
+    assert_eq!(client.chrome(tab).reconnecting, None);
 }
 
 #[test]

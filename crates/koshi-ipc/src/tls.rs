@@ -409,9 +409,13 @@ impl ServerCertVerifier for PinVerifier {
 /// the window once the caller is past that exchange.
 ///
 /// # Errors
-/// [`IpcError::Transport`] naming what failed: the lookup, the connect, or
-/// the handshake. A fingerprint that does not match the pinned one is
-/// [`IpcError::CertificateChanged`].
+/// [`IpcError::ConnectRefused`] when nothing accepts the connection,
+/// [`IpcError::ConnectTimedOut`] when the connect is unanswered at the
+/// deadline, and [`IpcError::TlsHandshakeFailed`] when the handshake on an
+/// open connection does not finish. A fingerprint that does not match the
+/// pinned one is [`IpcError::CertificateChanged`]. [`IpcError::Transport`]
+/// names the rest: the lookup, a connect that failed for another reason, a
+/// server that presented no certificate, and a stream that did not split.
 pub fn dial(
     address: &str,
     expected_fingerprint: Option<&str>,
@@ -425,10 +429,20 @@ pub fn dial(
         .ok_or_else(|| failed(format!("{address} names no address")))?;
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
-        return Err(failed(format!("connecting to {address} ran out of time")));
+        return Err(IpcError::ConnectTimedOut {
+            address: address.to_string(),
+        });
     }
-    let mut sock = TcpStream::connect_timeout(&resolved, left)
-        .map_err(|error| failed(format!("{address} could not be reached: {error}")))?;
+    let mut sock =
+        TcpStream::connect_timeout(&resolved, left).map_err(|error| match error.kind() {
+            io::ErrorKind::ConnectionRefused => IpcError::ConnectRefused {
+                address: address.to_string(),
+            },
+            io::ErrorKind::TimedOut => IpcError::ConnectTimedOut {
+                address: address.to_string(),
+            },
+            _ => failed(format!("{address} could not be reached: {error}")),
+        })?;
 
     let verifier = Arc::new(PinVerifier::new(expected_fingerprint));
     let config = ClientConfig::builder()
@@ -455,7 +469,10 @@ pub fn dial(
                     presented,
                 }
             }
-            _ => failed(format!("the TLS handshake with {address} failed: {error}")),
+            _ => IpcError::TlsHandshakeFailed {
+                address: address.to_string(),
+                detail: error.to_string(),
+            },
         });
     }
     let presented = verifier

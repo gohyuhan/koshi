@@ -13,8 +13,9 @@
 //! client record this terminal holds, and every way back that fails reporting
 //! the death a broken connection already reports. It also covers a remote
 //! viewer whose link broke: the pause each redial waits, that dialing again
-//! moves what the viewer paints, and what the drain of the stretch with no link
-//! keeps and what it drops.
+//! moves what the viewer paints, what the drain of the stretch with no link
+//! keeps and what it drops, and what a viewer that stopped dialing prints and
+//! exits with.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -390,8 +391,9 @@ fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
         error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
-             run `koshi list-sessions --remote work`; if session {session_id} is still listed, \
-             reattach with `koshi attach --remote work {session_id}`"
+             run `koshi attach --remote work` to see that server's sessions; \
+             if session {session_id} is among them, reattach with \
+             `koshi attach --remote work {session_id}`"
         )
     );
     assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
@@ -410,11 +412,77 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
         error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
-             run `koshi list-sessions --remote laptop.local:7654`; if session {session_id} \
-             is still listed, reattach with \
+             run `koshi attach --remote laptop.local:7654` to see that server's sessions; \
+             if session {session_id} is among them, reattach with \
              `koshi attach --remote laptop.local:7654 {session_id}`"
         )
     );
+}
+
+#[test]
+fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_back() {
+    let session_id = SessionId::new();
+    let cause = CliError::Runtime {
+        detail: "the token this server saved does not reach session 7".to_string(),
+    };
+    let error = report(
+        &remote_home(),
+        Ending::LinkLost(Box::new(cause)),
+        session_id,
+    )
+    .expect_err("a lost link is an error");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the token this server saved does not reach session 7\n  \
+             the session continues without you\n  \
+             run `koshi attach --remote work` to see that server's sessions; \
+             if session {session_id} is among them, reattach with \
+             `koshi attach --remote work {session_id}`"
+        )
+    );
+    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+}
+
+#[test]
+fn two_lost_links_are_equal_only_when_their_causes_print_the_same_text() {
+    let lost = |detail: &str| {
+        Ending::LinkLost(Box::new(CliError::Runtime {
+            detail: detail.to_string(),
+        }))
+    };
+
+    assert_eq!(lost("connection refused"), lost("connection refused"));
+    assert_ne!(lost("connection refused"), lost("connection timed out"));
+    assert_ne!(lost("connection refused"), Ending::Died);
+    assert_ne!(Ending::Died, lost("connection refused"));
+}
+
+#[test]
+fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
+    let mut client = viewer();
+    let mut screen = test_screen();
+    let mut dials = 0_u32;
+    let Err(cause) = redial_with(
+        || {
+            dials += 1;
+            Err(DialError::Refused(CliError::Runtime {
+                detail: "the server desk.local:7654 did not admit the connection".to_string(),
+            }))
+        },
+        SessionId::new(),
+        &mut client,
+        &mut screen,
+        None,
+    ) else {
+        panic!("a refused dial never joins");
+    };
+    assert_eq!(dials, 1);
+    assert_eq!(
+        cause.to_string(),
+        "the server desk.local:7654 did not admit the connection"
+    );
+    assert_eq!(client.reconnecting, None);
 }
 
 #[test]
@@ -2685,11 +2753,15 @@ fn dialing_again_moves_what_the_viewer_paints() {
     let tab = TabId::new();
     let before = ViewerPaint::read(&client, tab);
 
-    client.set_reconnecting(true);
+    let dialing = Reconnecting {
+        attempt: 1,
+        retry_in_seconds: 5,
+    };
+    client.set_reconnecting(Some(dialing));
 
     let after = ViewerPaint::read(&client, tab);
-    assert!(!before.chrome.reconnecting);
-    assert!(after.chrome.reconnecting);
+    assert_eq!(before.chrome.reconnecting, None);
+    assert_eq!(after.chrome.reconnecting, Some(dialing));
     assert_ne!(after, before);
 }
 
