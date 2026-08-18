@@ -204,6 +204,23 @@ An absent `--session` reads one way on `grant` and another way on `revoke`.
 this machine. `koshi share revoke alice` stops every grant alice holds: the one
 that reaches every session, and each one that reaches a single session.
 
+`koshi share revoke alice --session quiet-lake` stops the grant scoped to that
+session. A host-wide grant reaches `quiet-lake` too, and no revoke stops a
+host-wide grant for one session alone, so when alice holds one this asks before
+it stops anything:
+
+```text
+alice also holds a host-wide grant, which reaches quiet-lake.
+stopping the grant on quiet-lake alone leaves alice reaching it through the
+host-wide one.
+stopping both leaves alice reaching no session on this machine, not just
+quiet-lake.
+stop both the grant on that session and alice's host-wide grant? [y/N]
+```
+
+A yes stops both. A no stops neither and prints `nothing was revoked.`. Grants
+alice holds on other sessions are untouched either way.
+
 `koshi share list --session quiet-lake` lists every grant that reaches the
 session `quiet-lake` — the grants scoped to that session, and the grants that
 reach every session on this machine, whose `scope` column reads `host`. It
@@ -269,8 +286,8 @@ used to connect yet.
 
 `koshi share revoke alice` ends the connections alice's tokens opened, at once.
 Her connection stops and no further frame reaches her; her next command is not
-merely refused. Granting alice again on the same scope ends the old
-connection the same way, since the replaced token stopped working. A token that
+merely refused. Granting alice again on the same scope replaces her token and
+ends the connections the replaced token opened, the same way. A token that
 runs out on its own is different: it stops a new connection from opening and
 never interrupts one already attached.
 
@@ -361,6 +378,46 @@ work` is not carried to the other machine; both are refused:
 ```text
 --remote needs a command, such as `koshi attach --remote <server>`
 ```
+
+A pane is the other way in, and that way is closed too. `koshi share grant`
+prints the new token's secret, and `koshi share list` prints every identity
+holding one. Inside a koshi pane the session paints that pane to every client
+viewing its tab, so a client on another machine reads what it printed.
+
+So `koshi share grant`, `koshi share revoke` and `koshi share list` run inside
+a koshi pane are refused while any client is attached to that pane's session
+from another machine:
+
+```text
+koshi: command not permitted
+  someone is attached to this session from another machine, and they see this
+  pane. Run `koshi share` from a terminal outside koshi.
+```
+
+A verb run in a pane asks that one session who is attached to it. It asks
+before it resolves `--session` and before it asks the router anything. A
+session that cannot answer is refused the same way, and the refusal carries
+the failure it hit:
+
+```text
+koshi: command not permitted
+  this session could not say who is attached to it, so whether anyone sees
+  this pane from another machine is unknown: <reason>. Run `koshi share` from
+  a terminal outside koshi.
+```
+
+A session server too old to say where a client connected from lists that
+client with no origin. Such a row is refused the same as a client from another
+machine.
+
+Both refusals exit 1 and print nothing on standard output. No token is
+granted, revoked or listed, and the token store is neither read nor written.
+
+`KOSHI` in the environment is what marks a koshi pane. A `koshi share` verb run
+outside every koshi pane always reaches the router, whoever is attached to
+whatever session. To run a share verb while somebody is attached to your pane's
+session from another machine, run it from a terminal outside koshi, or detach
+them first.
 
 Tokens are granted only from the machine holding the sessions.
 

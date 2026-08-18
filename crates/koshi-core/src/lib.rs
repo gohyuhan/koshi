@@ -12,6 +12,7 @@
 //! commands.
 
 pub mod action;
+pub mod client;
 pub mod command;
 pub mod compat;
 pub mod constant;

@@ -112,10 +112,12 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Share { command }) = &cli.command {
-        // Every share verb asks the router, which owns the token store, so it
-        // reads no pane environment and behaves the same inside a pane and
-        // outside one.
-        return share::run(command);
+        // Every share verb asks the router, which owns the token store, over
+        // this machine's own socket; no connection from another machine reaches
+        // it. A run outside every pane is never refused. A run in a pane is
+        // refused while anyone is attached to that pane's session from another
+        // machine: the session paints that pane to them too.
+        return share::run(command, InSessionContext::from_env()?.as_ref());
     }
 
     if let Some(CliCommand::Remote { command }) = &cli.command {

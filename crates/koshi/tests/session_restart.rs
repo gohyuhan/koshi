@@ -534,7 +534,7 @@ impl Stream {
                     if wanted(&event) {
                         return event;
                     }
-                    seen.push(kind_of(&event));
+                    seen.push(event.name());
                 }
                 Ok(Err(error)) => panic!("the event stream ended before the event: {error}"),
                 Err(RecvTimeoutError::Timeout) => panic!(
@@ -705,30 +705,6 @@ fn pane_rows(frame: &PaintedFrame, pane: PaneId) -> Vec<String> {
         rows.pop();
     }
     rows
-}
-
-/// The name of `event`'s kind, for a failure message.
-fn kind_of(event: &SessionEvent) -> &'static str {
-    match event {
-        SessionEvent::Painted { .. } => "Painted",
-        SessionEvent::PaneCreated { .. } => "PaneCreated",
-        SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
-        SessionEvent::PaneClosing { .. } => "PaneClosing",
-        SessionEvent::PaneRemoved { .. } => "PaneRemoved",
-        SessionEvent::PaneFocused { .. } => "PaneFocused",
-        SessionEvent::LayoutChanged { .. } => "LayoutChanged",
-        SessionEvent::TabCreated { .. } => "TabCreated",
-        SessionEvent::TabClosed { .. } => "TabClosed",
-        SessionEvent::TabFocused { .. } => "TabFocused",
-        SessionEvent::TabMoved { .. } => "TabMoved",
-        SessionEvent::Quit => "Quit",
-        SessionEvent::Restarting => "Restarting",
-        SessionEvent::Detached => "Detached",
-        SessionEvent::Resync { .. } => "Resync",
-        SessionEvent::MouseAnswer { .. } => "MouseAnswer",
-        SessionEvent::HostWrite { .. } => "HostWrite",
-        SessionEvent::SwitchTo { .. } => "SwitchTo",
-    }
 }
 
 /// Every pane in `frame`, each with the rows it shows, for a failure message.

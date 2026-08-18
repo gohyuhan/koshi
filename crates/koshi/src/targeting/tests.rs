@@ -2,6 +2,7 @@
 //! `--session`/`--tab` flags resolve — count rules, explicit targets, and
 //! every refusal, checked against hand-built session overviews.
 
+use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::SystemTime;
@@ -73,6 +74,7 @@ fn overview(
                 active_tab: tabs[0].0,
                 focused_pane: None,
                 lock_state: LockMode::Normal,
+                origin: Some(ClientOrigin::Local),
             })
             .collect(),
     }

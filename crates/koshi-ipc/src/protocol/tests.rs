@@ -4,7 +4,9 @@
 //! prints nor compares carelessly.
 
 use std::path::PathBuf;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use koshi_core::client::ClientOrigin;
 
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
@@ -19,12 +21,14 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneKind;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
 use crate::attach::{PaneStructure, TabStructure};
 use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
+use crate::router::RouterRequestKind;
+use crate::wire::WireVariants;
 
 use super::*;
 
@@ -168,6 +172,7 @@ fn populated_overview() -> SessionOverview {
             active_tab: tab_id,
             focused_pane: Some(pane_id),
             lock_state: LockMode::Normal,
+            origin: Some(ClientOrigin::Local),
         }],
     }
 }
@@ -264,11 +269,15 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
     //
     // Two builds only understand each other's bytes when they agree on this
     // shape, and the version in the Hello is the only thing that catches a
-    // pair that does not. So a change here is a change to the wire: add,
-    // remove, or rename anything below and `PROTOCOL_VERSION` goes up in the
-    // same commit — otherwise a build at the old shape passes the handshake
-    // and then fails to decode the answer, which reads to the user as a
-    // session that is not running.
+    // pair that does not. Retype or repurpose a field below and
+    // `PROTOCOL_VERSION` goes up in the same commit. Left at the same number,
+    // a build at the old shape passes the handshake and then reads the answer
+    // wrongly, which reads to the user as a session that is not running.
+    //
+    // A field added or removed that both shapes still decode leaves the number
+    // where it is, which is the cadence rule in `koshi_core::compat`.
+    // `a_client_row_decodes_across_the_shape_that_added_origin` holds the
+    // decoding half of that.
     //
     // Shape as of protocol version 2. Round-trip tests cannot catch this:
     // one build encoding and decoding its own structs always agrees with
@@ -308,10 +317,70 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
                 "viewport_size": { "cols": 80, "rows": 24 },
                 "active_tab": "00000000-0000-0000-0000-000000000001",
                 "focused_pane": "00000000-0000-0000-0000-000000000001",
-                "lock_state": "Normal"
+                "lock_state": "Normal",
+                "origin": "Local"
             }]
         })
     );
+}
+
+#[test]
+fn the_plane_a_remote_client_reaches_names_no_token_verb() {
+    // The remote doorway bridges a client to a session server, so the session
+    // plane is every word a remote client can say. The three token verbs live
+    // on the router's plane, which that client never reaches — a `share` verb
+    // has no spelling to travel in.
+    for verb in ["GrantToken", "RevokeToken", "ListTokens"] {
+        assert!(
+            RouterRequestKind::VARIANTS.contains(&verb),
+            "{verb} is a control-plane verb"
+        );
+        assert!(
+            !IpcRequestKind::VARIANTS.contains(&verb),
+            "{verb} must stay off the plane a remote client speaks"
+        );
+    }
+}
+
+#[test]
+fn a_client_row_decodes_across_the_shape_that_added_origin() {
+    // A build without `origin` and a build with it must read each other's
+    // client rows, which is what keeps `PROTOCOL_VERSION` at 2.
+    let without_origin = json!({
+        "id": "00000000-0000-0000-0000-000000000001",
+        "session_id": "00000000-0000-0000-0000-000000000001",
+        "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
+        "viewport_size": { "cols": 80, "rows": 24 },
+        "active_tab": "00000000-0000-0000-0000-000000000001",
+        "focused_pane": null,
+        "lock_state": "Normal"
+    });
+    let decoded: ClientInfo =
+        serde_json::from_value(without_origin).expect("a row from a build without origin decodes");
+    assert_eq!(
+        decoded.origin, None,
+        "a build that names no origin answered the question with nothing"
+    );
+
+    // The other direction: a row this build writes, read by a shape that has
+    // no `origin` field. `OldClientInfo` stands in for that build.
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct OldClientInfo {
+        id: ClientId,
+        session_id: SessionId,
+        attached_at: SystemTime,
+        viewport_size: Size,
+        active_tab: TabId,
+        focused_pane: Option<PaneId>,
+        lock_state: LockMode,
+    }
+    let mut written = populated_overview().clients.remove(0);
+    written.origin = Some(ClientOrigin::Remote);
+    let written = serde_json::to_value(written).expect("a client row encodes");
+    let old: OldClientInfo =
+        serde_json::from_value(written).expect("the older shape reads a row carrying origin");
+    assert_eq!(old.lock_state, LockMode::Normal);
 }
 
 #[test]

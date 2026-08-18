@@ -122,6 +122,34 @@ pub fn render_share_revoke(scopes: &[TokenScope]) -> String {
     rendered
 }
 
+/// Render the warning a `share revoke --session` asks before it stops
+/// anything, when `identity` also holds a host-wide grant.
+///
+/// `session` is the session the revoke narrowed to. Names the wider grant that
+/// reaches it, and what stopping both costs: a host-wide grant reaches every
+/// session on this machine, so stopping it stops them all.
+///
+/// Example — `alice` and session `quiet-lake` render:
+///
+/// ```text
+/// alice also holds a host-wide grant, which reaches quiet-lake.
+/// stopping the grant on quiet-lake alone leaves alice reaching it through the
+/// host-wide one.
+/// stopping both leaves alice reaching no session on this machine, not just
+/// quiet-lake.
+/// ```
+#[must_use]
+pub fn render_revoke_host_wide_warning(identity: &str, session: &TokenScope) -> String {
+    let session = scope_cell(session);
+    format!(
+        "{identity} also holds a host-wide grant, which reaches {session}.\n\
+         stopping the grant on {session} alone leaves {identity} reaching it through the \
+         host-wide one.\n\
+         stopping both leaves {identity} reaching no session on this machine, not just \
+         {session}.\n"
+    )
+}
+
 /// Render a `share list` answer.
 #[must_use]
 pub fn render_share_list(entries: &[TokenEntry], format: FormatArg) -> String {

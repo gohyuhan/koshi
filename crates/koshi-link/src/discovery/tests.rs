@@ -1,6 +1,7 @@
 //! Tests for the discovery answers: row building across sessions, `inspect`
 //! lookups, and the endpoint sweep that removes what a session left behind.
 
+use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -142,6 +143,7 @@ fn overview(name: &str, tabs: &[(&str, usize)]) -> SessionOverview {
             active_tab: TabId::new(),
             focused_pane: None,
             lock_state: LockMode::Normal,
+            origin: Some(ClientOrigin::Local),
         }],
     }
 }

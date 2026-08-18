@@ -6,9 +6,14 @@ use super::*;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
-use koshi_core::ids::SessionId;
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_core::client::ClientOrigin;
+use koshi_core::discovery::{ClientInfo, SessionInfo, SessionOverview};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_tokens::TokenEntry;
+use koshi_link::in_session::InSessionContext;
 use uuid::Uuid;
 
 use crate::cli::{parse_expiry, Cli, CliCommand, FormatArg};
@@ -598,5 +603,409 @@ fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
         "anyone holding this token can run anything you can.\n\
          f00d\n",
         "the whole secret block was flushed before the offer ran"
+    );
+}
+
+// --- Where a share verb may run ---
+
+/// One attached client row at `id`, connected from `origin`.
+fn client_row(id: ClientId, origin: Option<ClientOrigin>) -> ClientInfo {
+    ClientInfo {
+        id,
+        session_id: SessionId::new(),
+        attached_at: SystemTime::UNIX_EPOCH,
+        viewport_size: Size { cols: 80, rows: 24 },
+        active_tab: TabId::new(),
+        focused_pane: None,
+        lock_state: LockMode::Normal,
+        origin,
+    }
+}
+
+/// One session overview holding `clients`, with no tabs and no panes.
+fn overview_holding(session_id: SessionId, clients: Vec<ClientInfo>) -> SessionOverview {
+    SessionOverview {
+        session: SessionInfo {
+            id: session_id,
+            name: "quiet-lake".to_string(),
+            created_at: SystemTime::UNIX_EPOCH,
+            attached_clients: clients.iter().map(|client| client.id).collect(),
+            pane_count: 0,
+        },
+        tabs: Vec::new(),
+        panes: Vec::new(),
+        clients,
+    }
+}
+
+/// A pane environment naming `session_id` and no designated client, which is
+/// what a session server's first pane carries.
+fn pane_in(session_id: SessionId) -> InSessionContext {
+    InSessionContext {
+        session_id,
+        client_id: None,
+        pane_id: PaneId::new(),
+        socket: None,
+    }
+}
+
+#[test]
+fn a_pane_of_a_session_nobody_watches_from_elsewhere_keeps_share() {
+    let session_id = SessionId::new();
+    let overview = overview_holding(
+        session_id,
+        vec![
+            client_row(ClientId::new(), Some(ClientOrigin::Local)),
+            client_row(ClientId::new(), Some(ClientOrigin::Local)),
+        ],
+    );
+
+    refuse_while_watched_from_another_machine(&pane_in(session_id), |_| Ok(overview.clone()))
+        .expect("a session nobody reaches over the network keeps `koshi share`");
+}
+
+#[test]
+fn a_pane_of_a_remotely_watched_session_refuses_share() {
+    let session_id = SessionId::new();
+    let overview = overview_holding(
+        session_id,
+        vec![
+            client_row(ClientId::new(), Some(ClientOrigin::Local)),
+            client_row(ClientId::new(), Some(ClientOrigin::Remote)),
+        ],
+    );
+
+    let error = refuse_while_watched_from_another_machine(&pane_in(session_id), |asked| {
+        assert_eq!(asked, session_id, "the pane's own session is the one asked");
+        Ok(overview.clone())
+    })
+    .expect_err("a remotely watched session refuses the verb");
+
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejection, got {error:?}");
+    };
+    assert_eq!(reason, RejectReason::Unauthorized);
+    assert!(
+        help.expect("the refusal names why")
+            .contains("someone is attached to this session from another machine"),
+        "the refusal names who sees the pane"
+    );
+}
+
+#[test]
+fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
+    // A session server built before the origin field serves rows with no
+    // origin. That is not a row saying `Local`.
+    let session_id = SessionId::new();
+    let overview = overview_holding(session_id, vec![client_row(ClientId::new(), None)]);
+
+    let error =
+        refuse_while_watched_from_another_machine(&pane_in(session_id), |_| Ok(overview.clone()))
+            .expect_err("an unanswered origin refuses the verb");
+
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejection, got {error:?}");
+    };
+    assert_eq!(reason, RejectReason::Unauthorized);
+    assert!(
+        help.expect("the refusal names why")
+            .contains("someone is attached to this session from another machine"),
+        "an unanswered origin takes the same branch a remote row takes"
+    );
+}
+
+#[test]
+fn a_pane_of_a_session_nobody_is_attached_to_keeps_share() {
+    let session_id = SessionId::new();
+
+    refuse_while_watched_from_another_machine(&pane_in(session_id), |_| {
+        Ok(overview_holding(session_id, Vec::new()))
+    })
+    .expect("a session with no attached client keeps `koshi share`");
+}
+
+#[test]
+fn a_session_that_cannot_be_asked_refuses_share() {
+    // The session server paints the pane and the router serves `share`; they
+    // are separate processes. One being unreachable says nothing about whether
+    // anyone is watching this pane.
+    let session_id = SessionId::new();
+
+    let error = refuse_while_watched_from_another_machine(&pane_in(session_id), |_| {
+        Err(CliError::SessionNotFound {
+            session: session_id.to_string(),
+        })
+    })
+    .expect_err("a session that cannot be asked refuses the verb");
+
+    let CliError::CommandRejected { reason, help } = error else {
+        panic!("expected a rejection, got {error:?}");
+    };
+    assert_eq!(reason, RejectReason::Unauthorized);
+    assert!(
+        help.expect("the refusal names why")
+            .contains("this session could not say who is attached to it"),
+        "the refusal names what could not be answered"
+    );
+}
+
+/// A stand-in router: answers control-plane requests from canned data and
+/// records the scope each `RevokeToken` named.
+///
+/// Opens no socket and starts no process, so it behaves the same on every
+/// platform and can never reach `spawn_router_detached`.
+struct StandInRouter {
+    entries: Vec<TokenEntry>,
+    refuse_host_wide: bool,
+    revokes: Vec<Option<TokenScope>>,
+}
+
+impl StandInRouter {
+    /// A router holding `entries`, answering every `RevokeToken`.
+    fn new(entries: Vec<TokenEntry>) -> Self {
+        StandInRouter {
+            entries,
+            refuse_host_wide: false,
+            revokes: Vec::new(),
+        }
+    }
+
+    /// The same router, refusing a `RevokeToken` that names
+    /// [`TokenScope::HostWide`].
+    fn refusing_host_wide(mut self) -> Self {
+        self.refuse_host_wide = true;
+        self
+    }
+
+    /// Answer one request, recording the scope of every `RevokeToken`.
+    ///
+    /// `ListTokens` answers with the held entries. `RevokeToken` answers with
+    /// the scope of each held grant it stopped, by the rule
+    /// [`TokenStore::revoke`](koshi_ipc::remote_tokens::TokenStore::revoke)
+    /// uses: the identity matches, the grant still stands, and a named scope
+    /// matches exactly. A request that matches nothing answers `Revoked([])`,
+    /// which is what the router sends when a `--session` revoke finds no grant
+    /// scoped to that session.
+    fn ask(&mut self, kind: RouterRequestKind) -> Result<RouterResult, CliError> {
+        match kind {
+            RouterRequestKind::ListTokens { .. } => Ok(RouterResult::Tokens(self.entries.clone())),
+            RouterRequestKind::RevokeToken { identity, scope } => {
+                self.revokes.push(scope.clone());
+                if self.refuse_host_wide && scope == Some(TokenScope::HostWide) {
+                    return Ok(RouterResult::Error(IpcErrorPayload {
+                        code: IpcErrorCode::Unknown,
+                        message: "the token store could not be written".to_string(),
+                    }));
+                }
+                let now = SystemTime::now();
+                let stopped: Vec<TokenScope> = self
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.identity == identity
+                            && entry.is_live(now)
+                            && scope.as_ref().is_none_or(|wanted| *wanted == entry.scope)
+                    })
+                    .map(|entry| entry.scope.clone())
+                    .collect();
+                self.entries.retain(|entry| {
+                    entry.identity != identity
+                        || scope.as_ref().is_some_and(|wanted| *wanted != entry.scope)
+                });
+                Ok(RouterResult::Revoked(stopped))
+            }
+            other => panic!("unexpected control-plane request: {other:?}"),
+        }
+    }
+}
+
+/// One token listing row, live unless `expires_at` is already past.
+fn token_entry(identity: &str, scope: TokenScope, expires_at: Option<SystemTime>) -> TokenEntry {
+    TokenEntry {
+        identity: identity.to_string(),
+        scope,
+        issued_at: SystemTime::UNIX_EPOCH,
+        expires_at,
+        last_used_at: None,
+        revoked_at: None,
+    }
+}
+
+// --- A revoke that narrowed to one session ---
+
+#[test]
+fn the_host_wide_warning_names_the_grant_and_what_stopping_both_costs() {
+    let rendered = crate::output::render_revoke_host_wide_warning("alice", &TokenScope::HostWide);
+
+    assert_eq!(
+        rendered,
+        "alice also holds a host-wide grant, which reaches host.\n\
+         stopping the grant on host alone leaves alice reaching it through the host-wide one.\n\
+         stopping both leaves alice reaching no session on this machine, not just host.\n"
+    );
+}
+
+/// Run [`revoke`] for `identity` narrowed to `session` against `router`,
+/// answering the confirm with `answer`, and hand back the scope each
+/// `RevokeToken` named.
+fn revoke_against(
+    identity: &str,
+    session: TokenScope,
+    mut router: StandInRouter,
+    answer: bool,
+) -> Vec<Option<TokenScope>> {
+    revoke(
+        identity,
+        Some(&session),
+        |_| answer,
+        |kind| router.ask(kind),
+    )
+    .expect("the router answers");
+    router.revokes
+}
+
+#[test]
+fn a_confirmed_session_revoke_stops_the_host_wide_grant_with_it() {
+    let session = TokenScope::Session(SessionId::new());
+    let served = revoke_against(
+        "alice",
+        session.clone(),
+        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
+        true,
+    );
+
+    assert_eq!(
+        served,
+        vec![Some(session), Some(TokenScope::HostWide)],
+        "the session grant stops first, then the host-wide one that reaches it"
+    );
+}
+
+#[test]
+fn a_session_revoke_that_stops_nothing_still_cascades_to_the_host_wide_grant() {
+    // The identity holds only a host-wide grant, so the router answers the
+    // session revoke with `Revoked([])`. The cascade is decided by what the
+    // listing holds, not by what the first revoke stopped.
+    let session = TokenScope::Session(SessionId::new());
+    let served = revoke_against(
+        "alice",
+        session.clone(),
+        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
+        true,
+    );
+
+    assert_eq!(
+        served,
+        vec![Some(session), Some(TokenScope::HostWide)],
+        "nothing stopped on the session scope, and the host-wide grant still stopped"
+    );
+}
+
+#[test]
+fn a_refused_confirm_stops_neither_grant() {
+    let served = revoke_against(
+        "alice",
+        TokenScope::Session(SessionId::new()),
+        StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]),
+        false,
+    );
+
+    assert_eq!(served, Vec::new(), "a no leaves both grants standing");
+}
+
+#[test]
+fn a_session_revoke_with_no_host_wide_grant_asks_nothing_and_stops_that_one() {
+    let session = TokenScope::Session(SessionId::new());
+    let served = revoke_against(
+        "alice",
+        session.clone(),
+        StandInRouter::new(vec![token_entry("bob", TokenScope::HostWide, None)]),
+        false,
+    );
+
+    assert_eq!(
+        served,
+        vec![Some(session)],
+        "another identity's host-wide grant prompts nothing, and the answer is not asked for"
+    );
+}
+
+#[test]
+fn a_revoked_host_wide_grant_prompts_nothing() {
+    let session = TokenScope::Session(SessionId::new());
+    let mut entry = token_entry("alice", TokenScope::HostWide, None);
+    entry.revoked_at = Some(SystemTime::UNIX_EPOCH);
+    let served = revoke_against(
+        "alice",
+        session.clone(),
+        StandInRouter::new(vec![entry]),
+        false,
+    );
+
+    assert_eq!(served, vec![Some(session)]);
+}
+
+#[test]
+fn an_expired_host_wide_grant_prompts_nothing() {
+    let session = TokenScope::Session(SessionId::new());
+    let expired = SystemTime::now() - Duration::from_secs(60);
+    let served = revoke_against(
+        "alice",
+        session.clone(),
+        StandInRouter::new(vec![token_entry(
+            "alice",
+            TokenScope::HostWide,
+            Some(expired),
+        )]),
+        false,
+    );
+
+    assert_eq!(served, vec![Some(session)]);
+}
+
+#[test]
+fn a_refused_second_revoke_reports_the_grant_left_standing() {
+    // The session grant stopped, then the router refused the host-wide one. The
+    // operator is half done, so the answer names what still stands and the
+    // command that finishes it.
+    let session = TokenScope::Session(SessionId::new());
+    let mut router = StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)])
+        .refusing_host_wide();
+
+    let error = revoke("alice", Some(&session), |_| true, |kind| router.ask(kind))
+        .expect_err("the second revoke was refused");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("alice's host-wide grant is still standing"),
+        "the answer names what survived: {message}"
+    );
+    assert!(
+        message.contains("run `koshi share revoke alice` to stop it"),
+        "the answer names the command that finishes it: {message}"
+    );
+    assert_eq!(
+        router.revokes,
+        vec![Some(session), Some(TokenScope::HostWide)],
+        "both revokes were attempted"
+    );
+}
+
+#[test]
+fn a_revoke_naming_no_session_stops_everything_without_asking() {
+    let mut router = StandInRouter::new(vec![token_entry("alice", TokenScope::HostWide, None)]);
+
+    revoke(
+        "alice",
+        None,
+        |_| panic!("a bare revoke asks nothing"),
+        |kind| router.ask(kind),
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        router.revokes,
+        vec![None],
+        "one request, naming no scope, which stops every grant the identity holds"
     );
 }
