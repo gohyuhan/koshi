@@ -3,12 +3,23 @@
 
 use super::*;
 
+use std::path::PathBuf;
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
-use koshi_core::ids::SessionId;
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_core::client::ClientOrigin;
+use koshi_core::command::CommandResult;
+use koshi_core::discovery::{ClientInfo, SessionInfo, SessionOverview};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
+use koshi_ipc::endpoint::EndpointFile;
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+};
 use koshi_ipc::remote_tokens::TokenEntry;
+use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
 
 use crate::cli::{parse_expiry, Cli, CliCommand, FormatArg};
@@ -599,4 +610,255 @@ fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
          f00d\n",
         "the whole secret block was flushed before the offer ran"
     );
+}
+
+// --- Which client a share verb acts as ---
+
+/// One attached client row, at `id`, connected from `origin`.
+fn client_row(id: ClientId, origin: ClientOrigin) -> ClientInfo {
+    ClientInfo {
+        id,
+        session_id: SessionId::new(),
+        attached_at: SystemTime::UNIX_EPOCH,
+        viewport_size: Size { cols: 80, rows: 24 },
+        active_tab: TabId::new(),
+        focused_pane: None,
+        lock_state: LockMode::Normal,
+        origin,
+    }
+}
+
+#[test]
+fn the_client_a_pane_names_decides_the_verb_and_no_other_viewer_does() {
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    let watched = vec![
+        client_row(alice, ClientOrigin::Local),
+        client_row(bob, ClientOrigin::Remote),
+    ];
+
+    assert!(
+        !is_remote(&watched, alice),
+        "a local user keeps `koshi share` while a remote viewer watches the same session"
+    );
+    assert!(
+        is_remote(&watched, bob),
+        "the remote viewer's own pane is refused"
+    );
+}
+
+#[test]
+fn a_client_the_session_no_longer_lists_is_not_remote() {
+    let gone = ClientId::new();
+    let listed = vec![client_row(ClientId::new(), ClientOrigin::Remote)];
+
+    assert!(!is_remote(&listed, gone));
+    assert!(!is_remote(&[], gone), "no attached client is no refusal");
+}
+
+#[test]
+fn a_session_that_cannot_be_asked_refuses_nobody() {
+    // A runtime directory that was never created answers no discovery, so the
+    // guard lets the verb proceed and detaches nobody.
+    let session_id = SessionId::new();
+    let never_created = std::env::temp_dir().join(format!("koshi-share-guard-{session_id}"));
+    let context = InSessionContext {
+        session_id,
+        client_id: Some(ClientId::new()),
+        pane_id: PaneId::new(),
+        socket: None,
+    };
+
+    refuse_remote_client(&never_created, &context)
+        .expect("a session that cannot be asked refuses nobody");
+}
+
+// --- The refusal, driven over a stand-in session's socket ---
+
+/// A fresh runtime directory for one test, wiped of any earlier run's leftovers.
+fn test_runtime_dir(tag: &str) -> PathBuf {
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    let dir = base.join(format!("koshi-share-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create runtime dir");
+    dir
+}
+
+/// One session overview at `session_id` holding exactly `clients`, with no
+/// tabs and no panes.
+fn overview_holding(session_id: SessionId, clients: Vec<ClientInfo>) -> SessionOverview {
+    SessionOverview {
+        session: SessionInfo {
+            id: session_id,
+            name: "stand-in".to_string(),
+            created_at: SystemTime::UNIX_EPOCH,
+            attached_clients: clients.iter().map(|client| client.id).collect(),
+            pane_count: 0,
+        },
+        tabs: Vec::new(),
+        panes: Vec::new(),
+        clients,
+    }
+}
+
+/// Send one scripted reply back over `connection`.
+fn reply(connection: &mut Connection, request_id: u64, result: IpcResult) {
+    connection
+        .send(&IpcResponse {
+            request_id: Some(request_id),
+            result,
+        })
+        .expect("send scripted reply");
+}
+
+/// A stand-in session: it advertises an endpoint file in `runtime_dir` and
+/// answers one exchange per connection — a discovery exchange with `overview`,
+/// a submitted command with a plain `Ok`. A connection that closes without
+/// speaking ends it; [`end_session`] opens that connection. The handle joins
+/// to every command that was submitted, in arrival order.
+fn serve_session(runtime_dir: &Path, overview: SessionOverview) -> JoinHandle<Vec<Command>> {
+    let session_id = overview.session.id;
+    let socket = koshi_ipc::endpoint::socket_addr(runtime_dir, session_id);
+    let token = ConnectionToken::generate();
+    let listener = Listener::bind(&socket).expect("stand-in session binds");
+    EndpointFile {
+        socket,
+        token: token.clone(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(runtime_dir, session_id))
+    .expect("endpoint file written");
+
+    std::thread::spawn(move || {
+        let mut overview = Some(overview);
+        let mut submitted = Vec::new();
+        loop {
+            let mut connection = listener.accept().expect("accept");
+            let Ok(hello) = connection.recv::<IpcRequest>() else {
+                break;
+            };
+            let request: IpcRequest = connection
+                .recv()
+                .expect("read the request behind the hello");
+            assert!(matches!(
+                &hello.kind,
+                IpcRequestKind::Hello { token: presented, .. } if presented == &token
+            ));
+            reply(
+                &mut connection,
+                hello.request_id,
+                IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            );
+            match request.kind {
+                IpcRequestKind::Discovery => {
+                    let overview = overview.take().expect("one discovery exchange");
+                    reply(
+                        &mut connection,
+                        request.request_id,
+                        IpcResult::Overview(overview),
+                    );
+                }
+                IpcRequestKind::SubmitCommand(envelope) => {
+                    reply(
+                        &mut connection,
+                        request.request_id,
+                        IpcResult::CommandResult(CommandResult::Ok {
+                            command_id: envelope.id,
+                            emitted_events: Vec::new(),
+                        }),
+                    );
+                    submitted.push(envelope.command);
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        }
+        submitted
+    })
+}
+
+/// End the stand-in session: open one connection and close it unspoken.
+fn end_session(runtime_dir: &Path, session_id: SessionId) {
+    let socket = koshi_ipc::endpoint::socket_addr(runtime_dir, session_id);
+    drop(Connection::connect(&socket).expect("reach the stand-in session"));
+}
+
+#[test]
+fn a_verb_from_a_remote_client_is_refused_and_that_client_is_detached() {
+    let session_id = SessionId::new();
+    let remote = ClientId::new();
+    let runtime_dir = test_runtime_dir("refuse-remote");
+    let overview = overview_holding(session_id, vec![client_row(remote, ClientOrigin::Remote)]);
+    let server = serve_session(&runtime_dir, overview);
+
+    let context = InSessionContext {
+        session_id,
+        client_id: Some(remote),
+        pane_id: PaneId::new(),
+        socket: None,
+    };
+    let error = refuse_remote_client(&runtime_dir, &context)
+        .expect_err("a remote client's verb is refused");
+
+    match error {
+        CliError::CommandRejected { reason, help } => {
+            assert_eq!(reason, RejectReason::Unauthorized);
+            assert_eq!(
+                help.as_deref(),
+                Some(
+                    "`koshi share` only runs on the machine hosting the session; \
+                     run it in a shell there"
+                )
+            );
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+
+    end_session(&runtime_dir, session_id);
+    assert_eq!(
+        server.join().expect("the stand-in session exits"),
+        vec![Command::Detach(DetachArgs {
+            client: Some(remote),
+            reason: DetachReason::HostOnlyRefusal,
+        })],
+        "the refusal detached the client it names, and did nothing else"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_verb_from_a_local_client_proceeds_while_a_remote_viewer_watches() {
+    let session_id = SessionId::new();
+    let local = ClientId::new();
+    let runtime_dir = test_runtime_dir("local-proceeds");
+    let overview = overview_holding(
+        session_id,
+        vec![
+            client_row(local, ClientOrigin::Local),
+            client_row(ClientId::new(), ClientOrigin::Remote),
+        ],
+    );
+    let server = serve_session(&runtime_dir, overview);
+
+    let context = InSessionContext {
+        session_id,
+        client_id: Some(local),
+        pane_id: PaneId::new(),
+        socket: None,
+    };
+    refuse_remote_client(&runtime_dir, &context)
+        .expect("a local client keeps `koshi share` while a remote viewer watches");
+
+    end_session(&runtime_dir, session_id);
+    assert_eq!(
+        server.join().expect("the stand-in session exits"),
+        Vec::new(),
+        "no detach was submitted"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_dir);
 }

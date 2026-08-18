@@ -475,6 +475,7 @@ fn sample_events() -> Vec<SessionEvent> {
             answers: Vec::new(),
         },
         SessionEvent::HostWrite { bytes: Vec::new() },
+        SessionEvent::HostOnlyRefusal,
         SessionEvent::SwitchTo {
             session_id: SessionId::new(),
         },

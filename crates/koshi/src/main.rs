@@ -18,7 +18,7 @@ use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi::version;
 use koshi_client::attach;
-use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
+use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs, DetachReason};
 use koshi_daemon::pty_supervisor;
 use koshi_daemon::router;
 use koshi_daemon::session_server::{self, ResumeSupport};
@@ -112,10 +112,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Share { command }) = &cli.command {
-        // Every share verb asks the router, which owns the token store, so it
-        // reads no pane environment and behaves the same inside a pane and
-        // outside one.
-        return share::run(command);
+        // Every share verb asks the router, which owns the token store. The
+        // pane environment decides one thing before that: a share verb typed by
+        // a client viewing the session from another machine is refused, and
+        // that client is detached.
+        return share::run(command, InSessionContext::from_env()?.as_ref());
     }
 
     if let Some(CliCommand::Remote { command }) = &cli.command {
@@ -309,7 +310,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 })?;
                 finish_command(ipc_client::submit_in_session(
                     context,
-                    Command::Detach(DetachArgs { client: None }),
+                    Command::Detach(DetachArgs {
+                        client: None,
+                        reason: DetachReason::Requested,
+                    }),
                 )?)
             }
             (Some(raw), false) => finish_command(session_control::detach_client_or_session(raw)?),

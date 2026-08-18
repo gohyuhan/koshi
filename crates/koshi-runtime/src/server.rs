@@ -41,7 +41,7 @@ use crate::{
     resume::{CarriedPane, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT},
     runtime::{
         bus::{EventBus, EventFilter},
-        event::RuntimeEvent,
+        event::{GoodbyeNotice, RuntimeEvent},
         reload::{fold_client, fold_server},
         render_schedule::RenderScheduler,
         saved_view::SavedViewStore,
@@ -163,6 +163,9 @@ pub struct Server {
     /// that same frame, and a mouse round's answer goes to the subscriber that
     /// views the client whose viewer sent the round.
     pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
+    /// Each attached client's goodbye frame, shared with its writing thread.
+    /// An entry lives from the client's subscription to its detach.
+    goodbyes: HashMap<ClientId, Arc<GoodbyeNotice>>,
     /// Source of render snapshots for attach.
     snapshot_provider: Arc<dyn SnapshotProvider>,
     /// Session persistence backend.
@@ -267,6 +270,7 @@ impl Server {
             pty_sizes: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
+            goodbyes: HashMap::new(),
             snapshot_provider,
             storage,
             ipc_server: None,
@@ -462,6 +466,25 @@ impl Server {
         rx
     }
 
+    /// This client's [`GoodbyeNotice`], shared with its writing thread, made on
+    /// the first ask and kept until the client detaches.
+    pub fn goodbye_of(&mut self, client_id: ClientId) -> Arc<GoodbyeNotice> {
+        Arc::clone(self.goodbyes.entry(client_id).or_default())
+    }
+
+    /// Make `client_id`'s goodbye frame name the `koshi share` verb refused for
+    /// a client connected from another machine. The detach that follows closes
+    /// its queue, and its writing thread writes that frame instead of
+    /// [`SessionEvent::Detached`](koshi_ipc::event::SessionEvent::Detached).
+    ///
+    /// A client with no subscription of its own changes nothing: it has no
+    /// writing thread to read the notice.
+    pub(crate) fn refuse_host_only_verb(&self, client_id: ClientId) {
+        if let Some(goodbye) = self.goodbyes.get(&client_id) {
+            goodbye.refuse_host_only();
+        }
+    }
+
     /// Drop every subscription registered as viewing `client_id`, closing the
     /// sending end of each one's queue. Called when the client detaches: the
     /// frames those subscribers are resynced from are built from the client's
@@ -472,6 +495,7 @@ impl Server {
     /// the terminal that was to be written to is gone.
     pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
         self.host_writes.remove(&client_id);
+        self.goodbyes.remove(&client_id);
         let bus = &mut self.event_bus;
         self.subscriptions.retain(|&(id, viewed)| {
             if viewed == client_id {

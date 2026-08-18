@@ -19,8 +19,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs, FocusTabArgs, LockModeArgs,
-    NewTabArgs, SwitchSessionArgs, TabTarget,
+    Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs, DetachReason, FocusTabArgs,
+    LockModeArgs, NewTabArgs, SwitchSessionArgs, TabTarget,
 };
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::{Event, InputMode, InputModeChanged, PtyResized};
@@ -425,6 +425,7 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             session_id,
             Command::Detach(DetachArgs {
                 client: Some(short_client),
+                reason: DetachReason::Requested,
             }),
             4,
         );

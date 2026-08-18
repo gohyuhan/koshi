@@ -4,10 +4,11 @@ use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::discovery::PaneState;
 use koshi_core::geometry::{Direction, Size};
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::ids::{ClientId, CommandId, SessionId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
@@ -146,4 +147,36 @@ fn a_command_pane_reports_its_argv_program_first() {
     );
     assert_eq!(overview.session.pane_count, 2);
     assert_eq!(overview.tabs[0].pane_count, 2);
+}
+
+#[test]
+fn the_overview_reports_where_each_client_connected_from() {
+    let (mut runtime, _tx) = new_runtime();
+    let session_id = SessionId::new();
+    let now = SystemTime::UNIX_EPOCH;
+    let local = runtime
+        .bootstrap_local(session_id, VIEWPORT, now)
+        .expect("bootstrap");
+    let tab = runtime.sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .copied()
+        .expect("the genesis tab");
+    let remote = ClientId::new();
+    runtime.handle_client_attach(session_id, remote, VIEWPORT, tab, now, true);
+
+    let overview = runtime.build_overview().expect("one session is running");
+    let origin_of = |id: ClientId| {
+        overview
+            .clients
+            .iter()
+            .find(|client| client.id == id)
+            .map(|client| client.origin)
+    };
+
+    // `koshi share` reads this row and nothing else to decide whether the
+    // client that typed it is on this machine.
+    assert_eq!(origin_of(local), Some(ClientOrigin::Local));
+    assert_eq!(origin_of(remote), Some(ClientOrigin::Remote));
 }

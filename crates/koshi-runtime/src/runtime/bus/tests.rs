@@ -8,7 +8,7 @@
 //! painted frame: it lands on a live subscriber's queue and is refused by a
 //! desynced one. Then a round's mouse answers, which ride the same queue and
 //! desync the subscriber when they do not fit. Then bytes for the terminal a
-//! subscriber's client runs in, and the session a subscriber's client moves to,
+//! subscriber's client runs in and the session a subscriber's client moves to,
 //! which ride it the same way.
 //!
 //! Then the two wire conversions: the filter an attaching client sent becomes

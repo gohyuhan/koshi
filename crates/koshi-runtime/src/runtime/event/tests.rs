@@ -1,4 +1,5 @@
-//! Construction coverage for every [`RuntimeEvent`] variant.
+//! Construction coverage for every [`RuntimeEvent`] variant, and the frame
+//! each client's [`GoodbyeNotice`] names.
 
 use super::*;
 use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
@@ -138,4 +139,33 @@ fn plugin_carries_its_envelope() {
         panic!("expected Plugin");
     };
     assert_eq!(carried, &env);
+}
+
+#[test]
+fn a_goodbye_names_the_plain_detach_until_a_host_only_verb_is_refused() {
+    let goodbye = GoodbyeNotice::default();
+    assert_eq!(goodbye.frame(), SessionEvent::Detached);
+
+    goodbye.refuse_host_only();
+    assert_eq!(goodbye.frame(), SessionEvent::HostOnlyRefusal);
+
+    // Reading the frame never clears it: the writing thread reads it at
+    // whichever goodbye it reaches.
+    assert_eq!(goodbye.frame(), SessionEvent::HostOnlyRefusal);
+}
+
+#[test]
+fn a_session_ending_leaves_the_refused_client_s_goodbye_naming_the_refusal() {
+    // The refusal and the session's own ending land in the same turn when the
+    // refused client was the session's last one and `auto-close-session` is
+    // set. The writing thread drops everything queued for that client and
+    // writes its goodbye frame, which still names the refusal.
+    let goodbye = GoodbyeNotice::default();
+    goodbye.refuse_host_only();
+
+    let ending = EndingNotice::default();
+    ending.raise(SessionEnding::Quit);
+
+    assert_eq!(ending.raised(), Some(SessionEnding::Quit));
+    assert_eq!(goodbye.frame(), SessionEvent::HostOnlyRefusal);
 }

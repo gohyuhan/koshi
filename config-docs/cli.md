@@ -362,6 +362,22 @@ work` is not carried to the other machine; both are refused:
 --remote needs a command, such as `koshi attach --remote <server>`
 ```
 
+A pane is the other way in, and that way is closed too. A person viewing a
+session from another machine gets a shell in that session's panes, and
+`koshi share` typed in one of those panes is refused. Nothing is granted,
+revoked or listed, and that viewer is detached at once. Their terminal reads:
+
+```text
+koshi: `koshi share` only runs on the machine hosting the session
+  nothing was granted or revoked, and this viewer is detached
+  run it in a shell on that machine, then run `koshi attach --remote work` to
+  see that server's sessions; if session <ID> is among them, reattach with
+  `koshi attach --remote work <ID>`
+```
+
+The session keeps running for everybody else, and a person sitting at the
+serving machine keeps `koshi share` while a remote viewer watches.
+
 Tokens are granted only from the machine holding the sessions.
 
 ## Versions

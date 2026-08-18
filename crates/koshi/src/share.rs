@@ -17,6 +17,11 @@
 use std::io::{self, Write};
 use std::path::Path;
 
+use koshi_core::client::ClientOrigin;
+use koshi_core::command::{Command, DetachArgs, DetachReason};
+use koshi_core::discovery::ClientInfo;
+use koshi_core::event::RejectReason;
+use koshi_core::ids::ClientId;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
@@ -26,10 +31,71 @@ use crate::cli::{Expiry, SessionRef, ShareCommand};
 use crate::output::RemoteReady;
 use crate::{output, targeting};
 use koshi_link::error::CliError;
+use koshi_link::in_session::InSessionContext;
 use koshi_link::{ipc_client, router_client};
 
 #[cfg(test)]
 mod tests;
+
+/// Whether `clients` holds a row at `client_id` whose origin is
+/// [`ClientOrigin::Remote`].
+///
+/// `false` when no row carries that id; a remote row for another client does
+/// not make it `true`.
+fn is_remote(clients: &[ClientInfo], client_id: ClientId) -> bool {
+    clients
+        .iter()
+        .any(|client| client.id == client_id && client.origin == ClientOrigin::Remote)
+}
+
+/// Refuse every `share` verb for a client viewing this session from another
+/// machine, and detach that client.
+///
+/// `context` is the pane environment the calling CLI inherited. The pane's
+/// designated client (`KOSHI_CLIENT_ID`) is the client this run acts as; the
+/// session names that client's [`ClientOrigin`] in its discovery answer, which
+/// the session sets at accept and no client can fill in.
+///
+/// `Ok(())` — the run may proceed. Four cases reach it: the pane names no
+/// designated client, the session cannot be asked, the session no longer
+/// lists that client, and the client is [`ClientOrigin::Local`].
+///
+/// # Errors
+/// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] for a
+/// [`ClientOrigin::Remote`] client. The token store is not read or written, and
+/// that client is detached first through [`Command::Detach`] carrying
+/// [`DetachReason::HostOnlyRefusal`], which tells it what was refused. A detach
+/// that fails changes nothing here: the verb is refused either way.
+fn refuse_remote_client(runtime_dir: &Path, context: &InSessionContext) -> Result<(), CliError> {
+    let Some(client_id) = context.client_id else {
+        return Ok(());
+    };
+    let Ok(overview) = ipc_client::fetch_overview(runtime_dir, context.session_id) else {
+        return Ok(());
+    };
+    if !is_remote(&overview.clients, client_id) {
+        return Ok(());
+    }
+
+    if let Err(error) = ipc_client::submit_external_via_runtime_dir(
+        runtime_dir,
+        context.session_id,
+        Command::Detach(DetachArgs {
+            client: Some(client_id),
+            reason: DetachReason::HostOnlyRefusal,
+        }),
+    ) {
+        tracing::warn!(%client_id, %error, "the refused remote client could not be detached");
+    }
+    Err(CliError::CommandRejected {
+        reason: RejectReason::Unauthorized,
+        help: Some(
+            "`koshi share` only runs on the machine hosting the session; \
+             run it in a shell there"
+                .to_string(),
+        ),
+    })
+}
 
 /// Run one `share` verb: resolve the scope it names, ask the router, and
 /// print the rendered answer.
@@ -38,8 +104,11 @@ mod tests;
 /// revoke or a listing with no `--session` covers every scope. A router that
 /// refuses the request is [`CliError::Runtime`] carrying the router's own
 /// message.
-pub fn run(command: &ShareCommand) -> Result<(), CliError> {
+pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
+    if let Some(context) = context {
+        refuse_remote_client(&runtime_dir, context)?;
+    }
     match command {
         ShareCommand::Grant {
             identity,

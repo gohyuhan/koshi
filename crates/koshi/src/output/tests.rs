@@ -3,6 +3,7 @@
 //! stable scripting surface) and exact table/field renderings, all over fixed
 //! fake data.
 
+use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -117,6 +118,7 @@ fn client_info() -> ClientInfo {
         active_tab: TabId::from_uuid(fixed_uuid()),
         focused_pane: None,
         lock_state: LockMode::Normal,
+        origin: ClientOrigin::Local,
     }
 }
 
@@ -310,7 +312,8 @@ fn client_json_schema_is_stable() {
   },
   "active_tab": "00000000-0000-0000-0000-000000000001",
   "focused_pane": null,
-  "lock_state": "Normal"
+  "lock_state": "Normal",
+  "origin": "Local"
 }
 "#;
     assert_eq!(render_client(&client_info(), FormatArg::Json), expected);
@@ -1388,7 +1391,8 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
                 "viewport_size": { "cols": 120, "rows": 40 },
                 "active_tab": "00000000-0000-0000-0000-000000000001",
                 "focused_pane": null,
-                "lock_state": "Normal"
+                "lock_state": "Normal",
+                "origin": "Local"
             }]
         }])
     );

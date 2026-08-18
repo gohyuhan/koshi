@@ -500,6 +500,35 @@ fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
 }
 
 #[test]
+fn a_host_only_refusal_ends_the_stream_and_never_waits_for_the_detach_behind_it() {
+    assert_eq!(
+        classify(&Ok(SessionEvent::HostOnlyRefusal)),
+        Some(Ending::HostOnlyRefusal)
+    );
+}
+
+#[test]
+fn a_host_only_refusal_names_what_was_refused_and_the_machine_to_run_it_on() {
+    let session_id = SessionId::new();
+    let error = report(&remote_home(), Ending::HostOnlyRefusal, session_id)
+        .expect_err("a refusal exits non-zero");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("`koshi share` only runs on the machine hosting the session"),
+        "the refusal names the command and where it runs: {message}"
+    );
+    assert!(
+        message.contains("nothing was granted or revoked, and this viewer is detached"),
+        "the refusal names what it did and did not do: {message}"
+    );
+    assert!(
+        message.contains("koshi attach --remote work"),
+        "the refusal names the way back: {message}"
+    );
+}
+
+#[test]
 fn a_switch_names_the_session_to_join_next() {
     let target = SessionId::new();
     assert_eq!(

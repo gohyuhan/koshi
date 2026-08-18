@@ -357,6 +357,23 @@ pub struct DetachArgs {
     /// [`NewPaneArgs::client`].
     #[serde(default)]
     pub client: Option<ClientId>,
+    /// What the client is told the detach was for. A session server built
+    /// before this field existed reads every detach as
+    /// [`DetachReason::Requested`].
+    #[serde(default)]
+    pub reason: DetachReason,
+}
+
+/// What a [`Command::Detach`] tells the departing client it was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DetachReason {
+    /// Somebody asked for the detach. The client reports the session it left
+    /// and nothing else.
+    #[default]
+    Requested,
+    /// The client ran a command that only runs on the machine hosting the
+    /// session. The client is told what was refused before it is dropped.
+    HostOnlyRefusal,
 }
 
 /// Arguments for [`Command::SwitchSession`].

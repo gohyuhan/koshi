@@ -13,7 +13,7 @@ use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, CommandKind, CommandSource, CopyArgs, CopyTarget,
+    ClosePaneArgs, CloseTabArgs, CommandKind, CommandSource, CopyArgs, CopyTarget, DetachReason,
     EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPos, LockModeArgs, MoveTabArgs, NewPaneArgs,
     NewTabArgs, PluginCommand, ResizePaneArgs, RunCommandPaneArgs, Selection, SelectionKind,
     TabTarget, VisualCommand, WriteToPaneArgs,
@@ -23,6 +23,7 @@ use koshi_core::geometry::{Direction, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::naming;
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
+use koshi_ipc::event::SessionEvent;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::MIN_PANE_SIZE;
@@ -420,7 +421,10 @@ fn command_for(kind: CommandKind, tab: TabId, pane: PaneId) -> Command {
             index: 1,
         }),
         CommandKind::Quit => Command::Quit,
-        CommandKind::Detach => Command::Detach(DetachArgs { client: None }),
+        CommandKind::Detach => Command::Detach(DetachArgs {
+            client: None,
+            reason: DetachReason::Requested,
+        }),
         CommandKind::DetachAll => Command::DetachAll,
         CommandKind::SwitchSession => Command::SwitchSession(SwitchSessionArgs {
             client: None,
@@ -607,6 +611,7 @@ fn a_command_naming_a_client_of_another_session_is_refused_and_changes_nothing()
         CommandSource::key_binding(first_client),
         Command::Detach(DetachArgs {
             client: Some(second_client),
+            reason: DetachReason::Requested,
         }),
     );
     let command_id = env.id;
@@ -10043,7 +10048,10 @@ fn a_detach_command_ends_the_session_under_auto_close() {
     // connection drop does.
     let env = envelope_from(
         CommandSource::in_session_cli(sid, Some(client), pane, PathBuf::from("/sock")),
-        Command::Detach(DetachArgs { client: None }),
+        Command::Detach(DetachArgs {
+            client: None,
+            reason: DetachReason::Requested,
+        }),
     );
     let command_id = env.id;
 
@@ -11808,6 +11816,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
         CommandSource::external_cli(Some(sid)),
         Command::Detach(DetachArgs {
             client: Some(client),
+            reason: DetachReason::Requested,
         }),
     );
     let command_id = env.id;
@@ -11832,6 +11841,69 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     );
     assert!(rt.pty_handles.contains_key(&pane));
     drop(events);
+}
+
+#[test]
+fn a_host_only_refusal_names_itself_in_the_refused_client_s_goodbye_frame() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let size = Size { cols: 80, rows: 24 };
+    let watcher = rt
+        .bootstrap_local(SessionId::new(), size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (sid, tab, _pane) = only_slot(&rt);
+    let refused = ClientId::new();
+    rt.handle_client_attach(sid, refused, size, tab, SystemTime::now(), true);
+    let _refused_events = rt.subscribe(refused, EventFilter::All);
+    let _watcher_events = rt.subscribe(watcher, EventFilter::All);
+    let refused_goodbye = rt.goodbye_of(refused);
+    let watcher_goodbye = rt.goodbye_of(watcher);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs {
+            client: Some(refused),
+            reason: DetachReason::HostOnlyRefusal,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    // One frame ends the refused client's stream, and it names the refusal.
+    assert_eq!(refused_goodbye.frame(), SessionEvent::HostOnlyRefusal);
+    assert_eq!(rt.sessions[&sid].clients.get(refused).map(Client::id), None);
+
+    // The refusal names one client, not the session: every other viewer keeps
+    // its plain goodbye and its place in the session.
+    assert_eq!(watcher_goodbye.frame(), SessionEvent::Detached);
+    assert_eq!(
+        rt.sessions[&sid].clients.get(watcher).map(Client::id),
+        Some(watcher)
+    );
+}
+
+#[test]
+fn a_requested_detach_leaves_the_plain_goodbye_frame() {
+    let (mut rt, _fake, _tx) = new_runtime_with_fake();
+    let client = rt
+        .bootstrap_local(
+            SessionId::new(),
+            Size { cols: 80, rows: 24 },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+    let (sid, _tab, _pane) = only_slot(&rt);
+    let _events = rt.subscribe(client, EventFilter::All);
+    let goodbye = rt.goodbye_of(client);
+
+    let env = envelope_from(
+        CommandSource::external_cli(Some(sid)),
+        Command::Detach(DetachArgs {
+            client: Some(client),
+            reason: DetachReason::Requested,
+        }),
+    );
+    assert!(matches!(rt.dispatch(env), CommandResult::Ok { .. }));
+
+    assert_eq!(goodbye.frame(), SessionEvent::Detached);
 }
 
 #[test]
@@ -11890,6 +11962,7 @@ fn detach_naming_a_client_that_is_not_attached_is_not_found() {
         CommandSource::external_cli(Some(sid)),
         Command::Detach(DetachArgs {
             client: Some(ClientId::new()),
+            reason: DetachReason::Requested,
         }),
     );
     let command_id = env.id;
@@ -11922,7 +11995,10 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
     // An external CLI names no client of its own, and two are attached.
     let env = envelope_from(
         CommandSource::external_cli(Some(sid)),
-        Command::Detach(DetachArgs { client: None }),
+        Command::Detach(DetachArgs {
+            client: None,
+            reason: DetachReason::Requested,
+        }),
     );
     let command_id = env.id;
 
@@ -11959,7 +12035,10 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
 
     let env = envelope_from(
         CommandSource::external_cli(Some(sid)),
-        Command::Detach(DetachArgs { client: None }),
+        Command::Detach(DetachArgs {
+            client: None,
+            reason: DetachReason::Requested,
+        }),
     );
     let command_id = env.id;
 

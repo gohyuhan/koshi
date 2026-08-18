@@ -119,6 +119,7 @@ fn spawn_attaching_dispatcher(
                         session_id,
                         structure: attached_structure(session_id),
                         events: events_rx,
+                        goodbye: Arc::default(),
                         ending_notice: Arc::clone(&ending_notice),
                         resume_token: ConnectionToken::new(MINTED_TOKEN),
                     }));
@@ -148,6 +149,7 @@ fn spawn_ending_dispatcher(
     client_id: ClientId,
     session_id: SessionId,
     events: Receiver<Delivery>,
+    goodbye: Arc<GoodbyeNotice>,
     ending_notice: Arc<EndingNotice>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -162,6 +164,7 @@ fn spawn_ending_dispatcher(
                     session_id,
                     structure: attached_structure(session_id),
                     events,
+                    goodbye: Arc::clone(&goodbye),
                     ending_notice: Arc::clone(&ending_notice),
                     resume_token: ConnectionToken::new(MINTED_TOKEN),
                 }));
@@ -207,8 +210,14 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_restarting() {
     assert_eq!(notice.raised(), Some(SessionEnding::Restarting));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::default(),
+        Arc::clone(&notice),
+    );
     let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_dir, session, client);
@@ -260,8 +269,14 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
     assert_eq!(notice.raised(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::default(),
+        Arc::clone(&notice),
+    );
     let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_dir, session, client);
@@ -313,8 +328,14 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     assert_eq!(notice.raised(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::default(),
+        Arc::clone(&notice),
+    );
     let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_dir, session, client);
@@ -329,6 +350,120 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
         wait_for_writers_to_end(&notice),
         0,
         "the writing thread must end once the client holds the detach frame"
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_refused_client_reads_the_refusal_as_the_one_frame_that_ends_its_stream() {
+    // The session keeps running: the refusal closes this client's queue alone.
+    // Its writing thread writes what was already queued, then the goodbye frame
+    // the refusal named, and ends.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, EventFilter};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let tab = TabId::new();
+    let runtime_dir = test_runtime_dir("refuse-while-running");
+
+    let mut bus = EventBus::new();
+    let (subscriber, events) = bus.subscribe(EventFilter::All);
+    bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
+    let goodbye: Arc<GoodbyeNotice> = Arc::default();
+    goodbye.refuse_host_only();
+    bus.unsubscribe(subscriber);
+    let notice = Arc::clone(bus.ending_notice());
+    assert_eq!(notice.raised(), None, "the session keeps running");
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::clone(&goodbye),
+        Arc::clone(&notice),
+    );
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    // What was queued before the close still arrives, and the refusal is the
+    // frame that ends the stream.
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the queued frame arrives"),
+        SessionEvent::TabCreated { tab_id: tab },
+    );
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::HostOnlyRefusal,
+    );
+
+    drop(connection);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}
+
+#[test]
+fn a_refused_client_reads_the_refusal_even_when_the_session_ends_in_the_same_turn() {
+    // The refused client was the session's last one and `auto-close-session` is
+    // set, so the notice is raised in the same turn the detach closes the
+    // queue. The writing thread drops what is queued and writes this client's
+    // goodbye frame, which names the refusal.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, EventFilter};
+
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("refuse-then-quit");
+
+    let mut bus = EventBus::new();
+    let (subscriber, events) = bus.subscribe(EventFilter::All);
+    bus.publish(&Event::TabCreated(TabCreated {
+        tab_id: TabId::new(),
+    }));
+    let goodbye: Arc<GoodbyeNotice> = Arc::default();
+    goodbye.refuse_host_only();
+    bus.unsubscribe(subscriber);
+    let notice = Arc::clone(bus.ending_notice());
+    bus.publish(&Event::Quit);
+    assert_eq!(notice.raised(), Some(SessionEnding::Quit));
+
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::clone(&goodbye),
+        Arc::clone(&notice),
+    );
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let mut connection = attach_to(&runtime_dir, session, client);
+
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the client is told"),
+        SessionEvent::HostOnlyRefusal,
+    );
+    assert_eq!(
+        wait_for_writers_to_end(&notice),
+        0,
+        "the writing thread must end once the client holds the refusal frame"
     );
 
     drop(connection);
@@ -366,8 +501,14 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     assert_eq!(notice.raised(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+    let dispatcher = spawn_ending_dispatcher(
+        inbox_rx,
+        client,
+        session,
+        events,
+        Arc::default(),
+        Arc::clone(&notice),
+    );
     let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_dir, session, client);
