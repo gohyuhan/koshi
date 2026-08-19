@@ -74,7 +74,7 @@ fn overview(
                 active_tab: tabs[0].0,
                 focused_pane: None,
                 lock_state: LockMode::Normal,
-                origin: ClientOrigin::Local,
+                origin: Some(ClientOrigin::Local),
             })
             .collect(),
     }

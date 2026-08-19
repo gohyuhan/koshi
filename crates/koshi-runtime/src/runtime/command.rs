@@ -31,10 +31,10 @@ use crate::server::Server;
 use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
-        CommandSource, CopyArgs, DetachArgs, DetachReason, FocusPaneArgs, FocusTabArgs,
-        FocusTarget, GridPos, LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs,
-        TabTarget, ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPos,
+        LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
+        Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
@@ -531,12 +531,6 @@ impl Server {
     ///
     /// The client is resolved through
     /// [`Server::resolve_target_client`], the same call validation made.
-    ///
-    /// [`DetachReason::HostOnlyRefusal`] makes that client's goodbye frame
-    /// [`SessionEvent::HostOnlyRefusal`](koshi_ipc::event::SessionEvent::HostOnlyRefusal)
-    /// instead of
-    /// [`SessionEvent::Detached`](koshi_ipc::event::SessionEvent::Detached).
-    /// The one frame that ends its stream names what was refused.
     fn handle_detach(
         &mut self,
         command_id: CommandId,
@@ -546,9 +540,6 @@ impl Server {
         let session = Self::require_session(self.acting_session(source)?)?;
         let client_id = Self::resolve_target_client(args.client, source, session)?;
 
-        if args.reason == DetachReason::HostOnlyRefusal {
-            self.refuse_host_only_verb(client_id);
-        }
         let events = self.handle_client_detach(client_id);
         Ok(Self::commit_events(&mut self.event_bus, command_id, events))
     }

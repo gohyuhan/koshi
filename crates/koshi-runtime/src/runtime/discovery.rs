@@ -57,7 +57,7 @@ impl Server {
                 active_tab: client.active_tab(),
                 focused_pane: client.focused_pane(client.active_tab()),
                 lock_state: client.lock_mode(),
-                origin: client.origin(),
+                origin: Some(client.origin()),
             })
             .collect();
 

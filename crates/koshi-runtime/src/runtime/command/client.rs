@@ -110,7 +110,6 @@ impl Server {
         self.publish_events(&emitted);
 
         let events = self.subscribe(client_id, filter);
-        let goodbye = self.goodbye_of(client_id);
         let resume_token = self.saved_views.mint(client_id);
         let session = self
             .sessions
@@ -121,7 +120,6 @@ impl Server {
             session_id,
             structure: session_structure(session),
             events,
-            goodbye,
             ending_notice: Arc::clone(self.event_bus.ending_notice()),
             resume_token,
         })

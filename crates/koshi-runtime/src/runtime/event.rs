@@ -15,7 +15,7 @@
 //! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
 //! that crosses the IPC socket.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
@@ -30,7 +30,6 @@ use koshi_core::{
     process::ExitStatus,
 };
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
-use koshi_ipc::event::SessionEvent;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
 use koshi_renderer::snapshot::Delivery;
@@ -254,9 +253,6 @@ pub struct AttachAccepted {
     pub structure: AttachedSessionStructureSnapshot,
     /// The client's event queue. Dropping it ends the subscription.
     pub events: Receiver<Delivery>,
-    /// Shared with the session, so this client's writing thread writes the
-    /// goodbye frame the session named when it closed the queue above.
-    pub goodbye: Arc<GoodbyeNotice>,
     /// Shared with the session, so this client's writing thread learns that the
     /// session is ending even when the queue above is full, and so the session
     /// learns when that thread has written the last frame.
@@ -275,51 +271,6 @@ pub enum SessionEnding {
     /// The session is replacing its own process image. A client that reads this
     /// waits for the session's new socket and attaches again on it.
     Restarting,
-}
-
-/// What the session and one client's writing thread share about that client's
-/// goodbye frame.
-///
-/// A detach the server starts closes that client's queue, and its writing
-/// thread writes the frame this names as its last. Unset, the frame is
-/// [`SessionEvent::Detached`]. [`refuse_host_only`](Self::refuse_host_only)
-/// makes it [`SessionEvent::HostOnlyRefusal`], which also ends the stream and
-/// names what was refused.
-///
-/// The server sets it before it closes the queue. The frame carries the
-/// refusal at either goodbye the writing thread reaches: draining a queue the
-/// session's own ending emptied, or reading that queue to its close.
-///
-/// Before → after: a remote client runs `koshi share grant bob` in a pane and
-/// is the session's only client with `auto-close-session` set → the session
-/// ends in the same turn and the writing thread drops what is queued, and the
-/// client still reads [`SessionEvent::HostOnlyRefusal`] rather than a bare
-/// `the session ended`.
-#[derive(Debug, Default)]
-pub struct GoodbyeNotice {
-    /// `true` once [`refuse_host_only`](Self::refuse_host_only) ran.
-    host_only_refusal: AtomicBool,
-}
-
-impl GoodbyeNotice {
-    /// Make this client's goodbye frame name the `koshi share` verb refused for
-    /// a client connected from another machine.
-    pub fn refuse_host_only(&self) {
-        self.host_only_refusal.store(true, Ordering::SeqCst);
-    }
-
-    /// The frame that ends this client's stream:
-    /// [`SessionEvent::HostOnlyRefusal`] after
-    /// [`refuse_host_only`](Self::refuse_host_only), else
-    /// [`SessionEvent::Detached`].
-    #[must_use]
-    pub fn frame(&self) -> SessionEvent {
-        if self.host_only_refusal.load(Ordering::SeqCst) {
-            SessionEvent::HostOnlyRefusal
-        } else {
-            SessionEvent::Detached
-        }
-    }
 }
 
 /// What the session and every attached client's writing thread share about the

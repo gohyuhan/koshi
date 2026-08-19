@@ -8,9 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koshi_core::client::ClientOrigin;
 
-use koshi_core::command::{
-    Command, CommandSource, DetachArgs, DetachReason, NewPaneArgs, ToggleLockModeArgs,
-};
+use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::{ClientInfo, PaneInfo, PaneState, SessionInfo, TabInfo};
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -174,7 +172,7 @@ fn populated_overview() -> SessionOverview {
             active_tab: tab_id,
             focused_pane: Some(pane_id),
             lock_state: LockMode::Normal,
-            origin: ClientOrigin::Local,
+            origin: Some(ClientOrigin::Local),
         }],
     }
 }
@@ -360,9 +358,8 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
     let decoded: ClientInfo =
         serde_json::from_value(without_origin).expect("a row from a build without origin decodes");
     assert_eq!(
-        decoded.origin,
-        ClientOrigin::Local,
-        "a build that names no origin serves no remote client"
+        decoded.origin, None,
+        "a build that names no origin answered the question with nothing"
     );
 
     // The other direction: a row this build writes, read by a shape that has
@@ -379,37 +376,11 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
         lock_state: LockMode,
     }
     let mut written = populated_overview().clients.remove(0);
-    written.origin = ClientOrigin::Remote;
+    written.origin = Some(ClientOrigin::Remote);
     let written = serde_json::to_value(written).expect("a client row encodes");
     let old: OldClientInfo =
         serde_json::from_value(written).expect("the older shape reads a row carrying origin");
     assert_eq!(old.lock_state, LockMode::Normal);
-}
-
-#[test]
-fn a_detach_command_decodes_across_the_shape_that_added_reason() {
-    // A build without `reason` and a build with it must read each other's
-    // detach arguments, which is what keeps `PROTOCOL_VERSION` at 2.
-    let without_reason = json!({ "client": null });
-    let decoded: DetachArgs = serde_json::from_value(without_reason)
-        .expect("arguments from a build without reason decode");
-    assert_eq!(decoded.reason, DetachReason::Requested);
-    assert_eq!(decoded.client, None);
-
-    // The other direction: arguments this build writes, read by a shape that
-    // has no `reason` field. `OldDetachArgs` stands in for that build.
-    #[derive(Deserialize)]
-    struct OldDetachArgs {
-        client: Option<ClientId>,
-    }
-    let written = serde_json::to_value(DetachArgs {
-        client: None,
-        reason: DetachReason::HostOnlyRefusal,
-    })
-    .expect("detach arguments encode");
-    let old: OldDetachArgs =
-        serde_json::from_value(written).expect("the older shape reads arguments carrying reason");
-    assert_eq!(old.client, None);
 }
 
 #[test]

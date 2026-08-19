@@ -119,10 +119,11 @@ pub struct ClientInfo {
     pub focused_pane: Option<PaneId>,
     /// The client's modal input state.
     pub lock_state: LockMode,
-    /// Where the client connected from. A row from a session server built
-    /// before this field existed decodes as [`ClientOrigin::Local`].
+    /// Where the client connected from, or `None` from a session server built
+    /// before this field existed. `None` is not [`ClientOrigin::Local`]: that
+    /// server did not answer the question.
     #[serde(default)]
-    pub origin: ClientOrigin,
+    pub origin: Option<ClientOrigin>,
 }
 
 /// One session described in full: itself, its tabs, every pane across those

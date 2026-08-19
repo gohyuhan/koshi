@@ -12,16 +12,29 @@
 //! it on and opens the port on a yes, so one command hands out a token and
 //! makes it usable. The token is minted first and the offer follows it, so a
 //! grant that fails never opens a port. The secret is printed whatever the
-//! offer does, since a granted token is live and its secret is readable once.
+//! offer does, and that printing is the only one: a granted token stands from
+//! the moment it is made, and nothing prints its secret again.
+//!
+//! A verb run outside every pane is never refused: the router's socket is this
+//! machine's own, no connection from another machine reaches it, and koshi
+//! paints no terminal there. That covers the revoke that cuts a live
+//! connection.
+//!
+//! A verb run in a pane is refused while any client is attached to that pane's
+//! session from another machine: the session paints that pane to them too.
+//!
+//! A revoke naming one session, for an identity that also holds a host-wide
+//! grant, asks before it stops anything: a yes stops both grants, a no stops
+//! neither.
 
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::SystemTime;
 
 use koshi_core::client::ClientOrigin;
-use koshi_core::command::{Command, DetachArgs, DetachReason};
-use koshi_core::discovery::ClientInfo;
+use koshi_core::discovery::{ClientInfo, SessionOverview};
 use koshi_core::event::RejectReason;
-use koshi_core::ids::ClientId;
+use koshi_core::ids::SessionId;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
@@ -37,61 +50,55 @@ use koshi_link::{ipc_client, router_client};
 #[cfg(test)]
 mod tests;
 
-/// Whether `clients` holds a row at `client_id` whose origin is
-/// [`ClientOrigin::Remote`].
+/// Whether any client attached to the session is on another machine.
 ///
-/// `false` when no row carries that id; a remote row for another client does
-/// not make it `true`.
-fn is_remote(clients: &[ClientInfo], client_id: ClientId) -> bool {
+/// True for a row naming [`ClientOrigin::Remote`], and for a row naming no
+/// origin at all: a session server built before that field existed serves such
+/// a row, and it does not say the client is local.
+fn watched_from_another_machine(clients: &[ClientInfo]) -> bool {
     clients
         .iter()
-        .any(|client| client.id == client_id && client.origin == ClientOrigin::Remote)
+        .any(|client| client.origin != Some(ClientOrigin::Local))
 }
 
-/// Refuse every `share` verb for a client viewing this session from another
-/// machine, and detach that client.
+/// Refuse a `share` verb run in a pane of a session anyone is attached to from
+/// another machine.
 ///
-/// `context` is the pane environment the calling CLI inherited. The pane's
-/// designated client (`KOSHI_CLIENT_ID`) is the client this run acts as; the
-/// session names that client's [`ClientOrigin`] in its discovery answer, which
-/// the session sets at accept and no client can fill in.
+/// `grant` prints the new token's secret and `list` prints every identity
+/// holding one. The session paints that pane to every client viewing its tab,
+/// so a client on another machine reads whatever they printed. A pane of a
+/// session nobody watches from elsewhere prints to that machine alone.
 ///
-/// `Ok(())` — the run may proceed. Four cases reach it: the pane names no
-/// designated client, the session cannot be asked, the session no longer
-/// lists that client, and the client is [`ClientOrigin::Local`].
+/// `context` is the pane environment the calling CLI inherited. [`run`] calls
+/// this only when it has one: a run outside every pane prints to a terminal
+/// koshi does not paint, and is never refused. `look_up` asks one session to
+/// describe itself; the command passes [`ipc_client::fetch_overview`].
 ///
 /// # Errors
-/// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] for a
-/// [`ClientOrigin::Remote`] client. The token store is not read or written, and
-/// that client is detached first through [`Command::Detach`] carrying
-/// [`DetachReason::HostOnlyRefusal`], which tells it what was refused. A detach
-/// that fails changes nothing here: the verb is refused either way.
-fn refuse_remote_client(runtime_dir: &Path, context: &InSessionContext) -> Result<(), CliError> {
-    let Some(client_id) = context.client_id else {
+/// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] on two
+/// conditions: the session lists a client that is not
+/// [`ClientOrigin::Local`], and `look_up` fails. Nothing is read from or
+/// written to the token store.
+fn refuse_while_watched_from_another_machine(
+    context: &InSessionContext,
+    look_up: impl FnOnce(SessionId) -> Result<SessionOverview, CliError>,
+) -> Result<(), CliError> {
+    let overview = look_up(context.session_id).map_err(|error| CliError::CommandRejected {
+        reason: RejectReason::Unauthorized,
+        help: Some(format!(
+            "this session could not say who is attached to it, so whether anyone sees this \
+             pane from another machine is unknown: {error}. Run `koshi share` from a terminal \
+             outside koshi."
+        )),
+    })?;
+    if !watched_from_another_machine(&overview.clients) {
         return Ok(());
-    };
-    let Ok(overview) = ipc_client::fetch_overview(runtime_dir, context.session_id) else {
-        return Ok(());
-    };
-    if !is_remote(&overview.clients, client_id) {
-        return Ok(());
-    }
-
-    if let Err(error) = ipc_client::submit_external_via_runtime_dir(
-        runtime_dir,
-        context.session_id,
-        Command::Detach(DetachArgs {
-            client: Some(client_id),
-            reason: DetachReason::HostOnlyRefusal,
-        }),
-    ) {
-        tracing::warn!(%client_id, %error, "the refused remote client could not be detached");
     }
     Err(CliError::CommandRejected {
         reason: RejectReason::Unauthorized,
         help: Some(
-            "`koshi share` only runs on the machine hosting the session; \
-             run it in a shell there"
+            "someone is attached to this session from another machine, and they see this \
+             pane. Run `koshi share` from a terminal outside koshi."
                 .to_string(),
         ),
     })
@@ -107,7 +114,9 @@ fn refuse_remote_client(runtime_dir: &Path, context: &InSessionContext) -> Resul
 pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
     if let Some(context) = context {
-        refuse_remote_client(&runtime_dir, context)?;
+        refuse_while_watched_from_another_machine(context, |session_id| {
+            ipc_client::fetch_overview(&runtime_dir, session_id)
+        })?;
     }
     match command {
         ShareCommand::Grant {
@@ -140,17 +149,9 @@ pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result
         }
         ShareCommand::Revoke { identity, session } => {
             let scope = scope_of(&runtime_dir, session.as_ref())?;
-            let kind = RouterRequestKind::RevokeToken {
-                identity: identity.clone(),
-                scope,
-            };
-            match router_client::router_request(&runtime_dir, kind)? {
-                RouterResult::Revoked(scopes) => {
-                    print!("{}", output::render_share_revoke(&scopes));
-                    Ok(())
-                }
-                other => Err(refusal(&other)),
-            }
+            revoke(identity, scope.as_ref(), prompt_yes, |kind| {
+                router_client::router_request(&runtime_dir, kind)
+            })
         }
         ShareCommand::List { session, format } => {
             let scope = scope_of(&runtime_dir, session.as_ref())?;
@@ -166,6 +167,119 @@ pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result
             }
         }
     }
+}
+
+/// Stop the grants `identity` holds, narrowed to one session when `scope`
+/// names one, and print what stopped.
+///
+/// A revoke naming no session stops every grant the identity holds, so nothing
+/// wider can survive it.
+///
+/// A revoke naming one session first asks the router for `identity`'s grants. A
+/// host-wide grant still standing reaches that session too, and no revoke stops
+/// a host-wide grant for one session alone, so this names it and asks whether to
+/// stop both. A yes stops the session grant and then the host-wide one, in two
+/// requests. A no stops neither and prints `nothing was revoked.`; the grants
+/// are left exactly as they were.
+///
+/// Grants on other sessions are never touched: each request names one scope.
+///
+/// `confirm` is asked once, with the question to print; `prompt_yes` is what
+/// the command passes. `ask` carries one control-plane request to the router
+/// and hands back its answer; the command passes
+/// [`router_client::router_request`].
+///
+/// # Errors
+/// Whatever the router reports for the listing, and for the first revoke. A
+/// refusal of the second revoke prints what the first one stopped, then reports
+/// that the host-wide grant is still standing and names the command that stops
+/// it.
+fn revoke(
+    identity: &str,
+    scope: Option<&TokenScope>,
+    confirm: impl FnOnce(&str) -> bool,
+    mut ask: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+) -> Result<(), CliError> {
+    let Some(session @ TokenScope::Session(_)) = scope else {
+        print!(
+            "{}",
+            output::render_share_revoke(&revoke_scope(&mut ask, identity, scope)?)
+        );
+        return Ok(());
+    };
+    if !holds_live_host_wide(&mut ask, identity)? {
+        print!(
+            "{}",
+            output::render_share_revoke(&revoke_scope(&mut ask, identity, Some(session))?)
+        );
+        return Ok(());
+    }
+
+    print!(
+        "{}",
+        output::render_revoke_host_wide_warning(identity, session)
+    );
+    if !confirm(&format!(
+        "stop both the grant on that session and {identity}'s host-wide grant? [y/N] "
+    )) {
+        println!("nothing was revoked.");
+        return Ok(());
+    }
+    let stopped = revoke_scope(&mut ask, identity, Some(session))?;
+    match revoke_scope(&mut ask, identity, Some(&TokenScope::HostWide)) {
+        Ok(host_wide) => {
+            let all: Vec<TokenScope> = stopped.into_iter().chain(host_wide).collect();
+            print!("{}", output::render_share_revoke(&all));
+            Ok(())
+        }
+        Err(error) => {
+            print!("{}", output::render_share_revoke(&stopped));
+            Err(CliError::Runtime {
+                detail: format!(
+                    "{identity}'s host-wide grant is still standing, and still reaches that \
+                     session: {error}\n  run `koshi share revoke {identity}` to stop it"
+                ),
+            })
+        }
+    }
+}
+
+/// Ask the router to stop `identity`'s grants, narrowed to `scope` when it
+/// names one, and hand back the scope of each grant that stopped.
+///
+/// # Errors
+/// Whatever the router answers other than [`RouterResult::Revoked`].
+fn revoke_scope(
+    ask: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+    identity: &str,
+    scope: Option<&TokenScope>,
+) -> Result<Vec<TokenScope>, CliError> {
+    let kind = RouterRequestKind::RevokeToken {
+        identity: identity.to_string(),
+        scope: scope.cloned(),
+    };
+    match ask(kind)? {
+        RouterResult::Revoked(scopes) => Ok(scopes),
+        other => Err(refusal(&other)),
+    }
+}
+
+/// Whether `identity` holds a host-wide grant that still stands right now.
+///
+/// # Errors
+/// Whatever the router answers other than [`RouterResult::Tokens`].
+fn holds_live_host_wide(
+    ask: &mut impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+    identity: &str,
+) -> Result<bool, CliError> {
+    let held = match ask(RouterRequestKind::ListTokens { scope: None })? {
+        RouterResult::Tokens(entries) => entries,
+        other => return Err(refusal(&other)),
+    };
+    let now = SystemTime::now();
+    Ok(held.iter().any(|entry| {
+        entry.identity == identity && entry.scope == TokenScope::HostWide && entry.is_live(now)
+    }))
 }
 
 /// Write a grant to `out`: the secret first, then what it can reach.

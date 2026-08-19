@@ -177,6 +177,6 @@ fn the_overview_reports_where_each_client_connected_from() {
 
     // `koshi share` reads this row and nothing else to decide whether the
     // client that typed it is on this machine.
-    assert_eq!(origin_of(local), Some(ClientOrigin::Local));
-    assert_eq!(origin_of(remote), Some(ClientOrigin::Remote));
+    assert_eq!(origin_of(local), Some(Some(ClientOrigin::Local)));
+    assert_eq!(origin_of(remote), Some(Some(ClientOrigin::Remote)));
 }

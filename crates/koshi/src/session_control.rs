@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use koshi_core::command::{Command, CommandResult, DetachArgs, DetachReason};
+use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, SessionId};
 
@@ -128,10 +128,7 @@ fn detach_client_or_session_in(runtime_dir: &Path, raw: &str) -> Result<CommandR
     ipc_client::submit_external_via_runtime_dir(
         runtime_dir,
         session_id,
-        Command::Detach(DetachArgs {
-            client,
-            reason: DetachReason::Requested,
-        }),
+        Command::Detach(DetachArgs { client }),
     )
 }
 

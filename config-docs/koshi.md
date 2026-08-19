@@ -64,7 +64,7 @@ what one terminal's view does, but the session applies it from its own
 
 ## `mouse`
 
-Each terminal reads these for itself, since the mouse is its own.
+Each terminal reads these for itself.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

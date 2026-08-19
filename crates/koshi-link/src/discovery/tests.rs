@@ -143,7 +143,7 @@ fn overview(name: &str, tabs: &[(&str, usize)]) -> SessionOverview {
             active_tab: TabId::new(),
             focused_pane: None,
             lock_state: LockMode::Normal,
-            origin: ClientOrigin::Local,
+            origin: Some(ClientOrigin::Local),
         }],
     }
 }

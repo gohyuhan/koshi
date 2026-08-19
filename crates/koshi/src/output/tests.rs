@@ -118,7 +118,7 @@ fn client_info() -> ClientInfo {
         active_tab: TabId::from_uuid(fixed_uuid()),
         focused_pane: None,
         lock_state: LockMode::Normal,
-        origin: ClientOrigin::Local,
+        origin: Some(ClientOrigin::Local),
     }
 }
 

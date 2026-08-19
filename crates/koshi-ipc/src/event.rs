@@ -156,12 +156,6 @@ pub enum SessionEvent {
         /// The bytes to write, in the order the session queued them.
         bytes: Vec<u8>,
     },
-    /// This client ran a command that only runs on the machine hosting the
-    /// session. The command did nothing, and the server detached this client.
-    /// The last frame the server writes on this connection, in place of
-    /// [`SessionEvent::Detached`]; the session keeps running and the client may
-    /// attach again.
-    HostOnlyRefusal,
     /// The client drops this session and attaches to the named one.
     SwitchTo {
         /// The session to attach to. The client reads that session's socket
@@ -194,7 +188,6 @@ impl SessionEvent {
             SessionEvent::Resync { .. } => "Resync",
             SessionEvent::MouseAnswer { .. } => "MouseAnswer",
             SessionEvent::HostWrite { .. } => "HostWrite",
-            SessionEvent::HostOnlyRefusal => "HostOnlyRefusal",
             SessionEvent::SwitchTo { .. } => "SwitchTo",
         }
     }
@@ -221,7 +214,6 @@ impl WireVariants for SessionEvent {
         "Resync",
         "MouseAnswer",
         "HostWrite",
-        "HostOnlyRefusal",
         "SwitchTo",
     ];
 }

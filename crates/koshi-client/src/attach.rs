@@ -374,9 +374,6 @@ enum Ending {
     /// A remote viewer's link broke and [`redial`] gave up, carrying the cause it
     /// gave up on. The session keeps running without this viewer.
     LinkLost(Box<CliError>),
-    /// This client ran a command that only runs on the machine hosting the
-    /// session. The command did nothing and the server detached this client.
-    HostOnlyRefusal,
 }
 
 /// Two endings are equal when they are the same variant carrying the same
@@ -390,8 +387,7 @@ impl PartialEq for Ending {
             | (Ending::SessionEnded, Ending::SessionEnded)
             | (Ending::Died, Ending::Died)
             | (Ending::TerminalGone, Ending::TerminalGone)
-            | (Ending::Restarting, Ending::Restarting)
-            | (Ending::HostOnlyRefusal, Ending::HostOnlyRefusal) => true,
+            | (Ending::Restarting, Ending::Restarting) => true,
             (Ending::Switch(left), Ending::Switch(right)) => left == right,
             (Ending::LinkLost(left), Ending::LinkLost(right)) => {
                 left.to_string() == right.to_string()
@@ -1075,8 +1071,7 @@ fn run_attachment<B: Backend>(
                 | Ending::SessionEnded
                 | Ending::TerminalGone
                 | Ending::Switch(_)
-                | Ending::LinkLost(_)
-                | Ending::HostOnlyRefusal => None,
+                | Ending::LinkLost(_) => None,
             };
             let Some((reader, writer)) = halves else {
                 break ending;
@@ -2329,7 +2324,6 @@ fn adopt_frame(client: &mut Client, snapshot: &RenderSnapshot) {
 fn classify(frame: &Result<SessionEvent, IpcError>) -> Option<Ending> {
     match frame {
         Ok(SessionEvent::Detached) => Some(Ending::Detached),
-        Ok(SessionEvent::HostOnlyRefusal) => Some(Ending::HostOnlyRefusal),
         Ok(SessionEvent::Quit) => Some(Ending::SessionEnded),
         Ok(SessionEvent::Restarting) => Some(Ending::Restarting),
         Ok(SessionEvent::SwitchTo { session_id }) => Some(Ending::Switch(*session_id)),
@@ -2375,14 +2369,6 @@ fn report(
         Ending::LinkLost(cause) => Err(CliError::Runtime {
             detail: format!(
                 "{cause}\n  the session continues without you\n  {}",
-                way_back(home, session_id)
-            ),
-        }),
-        Ending::HostOnlyRefusal => Err(CliError::Runtime {
-            detail: format!(
-                "`koshi share` only runs on the machine hosting the session\n  \
-                 nothing was granted or revoked, and this viewer is detached\n  \
-                 run it in a shell on that machine, then {}",
                 way_back(home, session_id)
             ),
         }),

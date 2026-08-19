@@ -74,7 +74,7 @@ use koshi_ipc::wire::MaybeKnown;
 use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::bus::wire_event;
-use crate::runtime::event::{EndingNotice, GoodbyeNotice, RuntimeEvent, SessionEnding};
+use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 
 /// How long the accept loop pauses after a failed accept before trying
 /// again, so a persistent accept error (say, the process is out of file
@@ -707,7 +707,6 @@ fn serve_connection(
                     connection,
                     accepted.client_id,
                     accepted.events,
-                    accepted.goodbye,
                     accepted.ending_notice,
                     inbox_tx,
                     live_setting,
@@ -804,9 +803,9 @@ fn serve_connection(
 /// client already gone changes nothing.
 ///
 /// A detach the server starts closes the client's queue: the writing thread
-/// writes what is already queued, then the frame `goodbye` names as its last,
-/// and ends. A session ending at the same moment drops what is queued, and the
-/// goodbye is still what this client reads. The reading half keeps
+/// writes what is already queued, then [`SessionEvent::Detached`] as its last
+/// frame, and ends. A session ending at the same moment drops what is queued,
+/// and the goodbye is still what this client reads. The reading half keeps
 /// reading until the client closes its end, and that close reads as end of
 /// stream — a second detach for a client already gone. A `Leaving` request ends
 /// the reading half the same way: the client says it sends nothing more, and
@@ -816,8 +815,8 @@ fn serve_connection(
 /// [`EndingNotice`]. The writing thread reads it at the top of each turn and
 /// writes the frame it names, [`SessionEvent::Quit`] or
 /// [`SessionEvent::Restarting`], dropping anything still queued. A client whose
-/// queue the server closed before that reads its own `goodbye` frame instead:
-/// it left before the session did. The thread counts itself on the
+/// queue the server closed before that reads [`SessionEvent::Detached`]
+/// instead: it left before the session did. The thread counts itself on the
 /// notice for as long as it runs.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
@@ -829,15 +828,10 @@ fn serve_connection(
 /// connection's read direction through it, and counts this connection while the
 /// reading half runs. The client's record stays as it is, so the image swap that
 /// cut the connection carries it across.
-// Carries the whole of one attached connection: the socket, the client it
-// serves, its queue, the two notices that name its last frame, the setting
-// read before each of its requests, and its intake entry.
-#[allow(clippy::too_many_arguments)]
 fn stream_events(
     connection: Connection,
     client_id: ClientId,
     events: Receiver<Delivery>,
-    goodbye: Arc<GoodbyeNotice>,
     ending_notice: Arc<EndingNotice>,
     inbox_tx: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
@@ -866,7 +860,7 @@ fn stream_events(
                                 SessionEnding::Restarting => SessionEvent::Restarting,
                             }
                         }
-                        Err(mpsc::TryRecvError::Disconnected) => break goodbye.frame(),
+                        Err(mpsc::TryRecvError::Disconnected) => break SessionEvent::Detached,
                     }
                 };
                 let _ = writer.send(&frame);
@@ -876,7 +870,7 @@ fn stream_events(
                 // The queue closed, which the server does when it detaches this
                 // client. `recv` hands back everything queued before the close,
                 // so the goodbye follows the events that preceded it.
-                let _ = writer.send(&goodbye.frame());
+                let _ = writer.send(&SessionEvent::Detached);
                 break;
             };
             if let Some(event) = wire_event(&delivery) {

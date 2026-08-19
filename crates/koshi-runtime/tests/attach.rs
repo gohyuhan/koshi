@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
-    CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs, DetachReason,
+    CloseTabArgs, Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs,
     FocusPaneArgs, FocusTabArgs, FocusTarget, NewPaneArgs, NewTabArgs, TabTarget,
 };
 use koshi_core::discovery::SessionOverview;
@@ -807,7 +807,6 @@ fn detaching_one_client_leaves_every_other_stream_running() {
                 session_id,
                 Command::Detach(DetachArgs {
                     client: Some(first_client),
-                    reason: DetachReason::Requested,
                 }),
                 4,
             );
@@ -943,7 +942,6 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
             session_id,
             Command::Detach(DetachArgs {
                 client: Some(narrow_client),
-                reason: DetachReason::Requested,
             }),
             4,
         );
@@ -1103,7 +1101,6 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
             session_id,
             Command::Detach(DetachArgs {
                 client: Some(client_id),
-                reason: DetachReason::Requested,
             }),
             6,
         );
