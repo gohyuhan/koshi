@@ -1146,9 +1146,10 @@ fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
     }
 }
 
-/// Parse an entity id as koshi prints it (`<prefix>-<uuid>`) or as a bare
-/// UUID. A mismatched prefix does not strip, so an id of the wrong kind is
-/// rejected rather than silently accepted.
+// Each id parser takes the id exactly as koshi prints it (`<prefix>-<uuid>`)
+// or as a bare UUID. A mismatched prefix does not strip, so an id of the wrong
+// kind is rejected rather than silently accepted.
+
 /// Parse a session id argument into a [`SessionId`].
 fn parse_session_id(value: &str) -> Result<SessionId, String> {
     parse_prefixed_uuid(value, "session").map(SessionId::from_uuid)

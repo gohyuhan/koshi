@@ -645,7 +645,6 @@ fn in_session_command_with_no_flags_routes_home_without_probing() {
         session_id: SessionId::new(),
         client_id: None,
         pane_id: PaneId::new(),
-        socket: None,
     };
     let command = CliCommand::ClosePane {
         pane: None,
@@ -661,7 +660,6 @@ fn in_session_tab_id_routes_home_and_rides_into_the_command() {
         session_id: SessionId::new(),
         client_id: None,
         pane_id: PaneId::new(),
-        socket: None,
     };
     let tab = TabId::new();
     let command = CliCommand::CloseTab {
@@ -695,7 +693,6 @@ fn in_session_move_tab_by_id_routes_home_and_rides_into_the_command() {
         session_id: SessionId::new(),
         client_id: None,
         pane_id: PaneId::new(),
-        socket: None,
     };
     let tab = TabId::new();
     let command = CliCommand::MoveTab {
@@ -727,7 +724,6 @@ fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
         session_id: SessionId::new(),
         client_id: None,
         pane_id: PaneId::new(),
-        socket: None,
     };
     let tab = TabId::new();
     let command = CliCommand::FocusTab {

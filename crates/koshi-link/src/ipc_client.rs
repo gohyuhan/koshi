@@ -471,9 +471,6 @@ fn exchange(
     talk::SESSION.take_result(reply)
 }
 
-/// Check the version the session settled on against the range this build sent.
-///
-/// The session picks from the range the Hello named. A version outside that
 /// How to reach `session_id`: the endpoint file in `runtime_dir`, or — for a
 /// session another local user started — what the shared directory advertises
 /// for it.

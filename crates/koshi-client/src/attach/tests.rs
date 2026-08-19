@@ -38,7 +38,10 @@ use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
-use koshi_ipc::router::{router_endpoint_path, router_socket_addr, RouterRequest, RouterResponse};
+use koshi_ipc::router::{
+    router_endpoint_path, router_socket_addr, RouterRequest, RouterResponse,
+    ROUTER_PROTOCOL_VERSION,
+};
 use koshi_ipc::transport::{Listener, MAX_FRAME_LEN};
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
@@ -166,11 +169,12 @@ fn test_runtime_dir() -> TempDir {
     TempDir::new_in(base).expect("a temporary runtime directory")
 }
 
-/// A stand-in router that records the name of every request it is asked and
-/// refuses each one, so a caller that does ask never waits for an answer.
+/// A stand-in router that records the name of every request it is asked. It
+/// answers a Hello with the settled protocol version and refuses every other
+/// request with `BadToken`.
 ///
-/// It serves one connection and records each request before it refuses it, so
-/// a caller that has its refusal is a caller whose request is already in the
+/// It serves one connection and records each request before it answers it, so
+/// a caller that has its answer is a caller whose request is already in the
 /// returned list. That ordering is what lets a test read the list once its
 /// caller has returned, without joining the thread.
 fn recording_router(runtime_dir: &Path) -> Arc<Mutex<Vec<&'static str>>> {
@@ -195,12 +199,21 @@ fn recording_router(runtime_dir: &Path) -> Arc<Mutex<Vec<&'static str>>> {
                 .lock()
                 .expect("the list outlives every panic")
                 .push(request.kind.name());
+            let result = match request.kind {
+                RouterRequestKind::Hello { .. } => RouterResult::Hello {
+                    protocol_version: ROUTER_PROTOCOL_VERSION,
+                    version: String::new(),
+                },
+                _ => RouterResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::BadToken,
+                    message: String::from(
+                        "the stand-in router refuses every request after the Hello",
+                    ),
+                }),
+            };
             let _ = connection.send(&RouterResponse {
                 request_id: Some(request.request_id),
-                result: RouterResult::Error(IpcErrorPayload {
-                    code: IpcErrorCode::BadToken,
-                    message: String::from("the stand-in router refuses every request"),
-                }),
+                result,
             });
         }
     });
@@ -229,6 +242,31 @@ fn attaching_by_id_skips_the_selector_lookup() {
         panic!("expected SessionNotFound, got {error:?}");
     };
     assert_eq!(session, session_id.to_string());
+}
+
+/// A lookup by display name dials the router: the stand-in answers the Hello,
+/// records both requests, and its refusal of the lookup comes back as the
+/// error.
+#[test]
+fn looking_up_a_name_asks_the_selector_lookup() {
+    let runtime_dir = test_runtime_dir();
+    let router = recording_router(runtime_dir.path());
+
+    let error = lookup(runtime_dir.path(), "quiet-lake")
+        .expect_err("the stand-in router refuses the lookup");
+
+    let asked = router
+        .lock()
+        .expect("the list outlives every panic")
+        .clone();
+    assert_eq!(asked, vec!["Hello", "AttachLookup"]);
+    let CliError::IpcUnavailable { detail } = error else {
+        panic!("expected IpcUnavailable, got {error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the stand-in router refuses every request after the Hello"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! A `koshi` CLI run inside a koshi pane inherits the identity variables the
 //! runtime injected at pane spawn: `KOSHI` (the in-session marker),
 //! `KOSHI_SESSION_ID`, `KOSHI_PANE_ID`, and — when known at spawn —
-//! `KOSHI_CLIENT_ID` and `KOSHI_SOCKET`.
+//! `KOSHI_CLIENT_ID`.
 //! [`InSessionContext::from_env`](crate::in_session::InSessionContext::from_env) reads
 //! them once at startup. `KOSHI` absent means the CLI runs outside any
 //! session (external mode). `KOSHI` present means the CLI claims in-session
@@ -34,10 +34,6 @@ pub struct InSessionContext {
     pub client_id: Option<ClientId>,
     /// The pane the CLI runs inside (`KOSHI_PANE_ID`).
     pub pane_id: PaneId,
-    /// The session's control-socket address as injected at spawn
-    /// (`KOSHI_SOCKET`); absent when the spawning machine had no resolvable
-    /// runtime directory.
-    pub socket: Option<String>,
 }
 
 impl InSessionContext {
@@ -65,12 +61,10 @@ impl InSessionContext {
             parse_required(&get, "KOSHI_SESSION_ID", "session").map(SessionId::from_uuid)?;
         let client_id = parse_optional(&get, "KOSHI_CLIENT_ID", "client")?.map(ClientId::from_uuid);
         let pane_id = parse_required(&get, "KOSHI_PANE_ID", "pane").map(PaneId::from_uuid)?;
-        let socket = get("KOSHI_SOCKET");
         Ok(Some(InSessionContext {
             session_id,
             client_id,
             pane_id,
-            socket,
         }))
     }
 }
