@@ -10,6 +10,7 @@ use std::{
     time::SystemTime,
 };
 
+pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
     geometry::Size,
@@ -27,16 +28,6 @@ pub const fn pane_viewport(viewport: Size) -> Size {
         cols: viewport.cols,
         rows: viewport.rows.saturating_sub(2),
     }
-}
-
-/// Where a client connected from. The server sets it at attach, never from
-/// anything the client sends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClientOrigin {
-    /// Connected over this machine's own unix socket or named pipe.
-    Local,
-    /// Connected from another machine.
-    Remote,
 }
 
 /// One attached client: a single terminal connected to a session, holding the

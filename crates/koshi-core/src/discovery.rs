@@ -18,6 +18,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::client::ClientOrigin;
 use crate::geometry::Size;
 use crate::ids::{ClientId, PaneId, SessionId, TabId};
 use crate::lock::LockMode;
@@ -118,6 +119,11 @@ pub struct ClientInfo {
     pub focused_pane: Option<PaneId>,
     /// The client's modal input state.
     pub lock_state: LockMode,
+    /// Where the client connected from, or `None` from a session server built
+    /// before this field existed. `None` is not [`ClientOrigin::Local`]: that
+    /// server did not answer the question.
+    #[serde(default)]
+    pub origin: Option<ClientOrigin>,
 }
 
 /// One session described in full: itself, its tabs, every pane across those

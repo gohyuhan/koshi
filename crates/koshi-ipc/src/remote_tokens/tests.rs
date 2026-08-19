@@ -812,3 +812,68 @@ fn this_build_writes_token_store_format_one() {
     // koshi stops reading this machine's grants.
     assert_eq!(TOKEN_STORE_FORMAT, 1);
 }
+
+// --- Whether a listed grant still stands ---
+
+/// One listing row at `expires_at`, revoked at `revoked_at`.
+fn entry_at(expires_at: Option<SystemTime>, revoked_at: Option<SystemTime>) -> TokenEntry {
+    TokenEntry {
+        identity: "alice".to_string(),
+        scope: TokenScope::HostWide,
+        issued_at: SystemTime::UNIX_EPOCH,
+        expires_at,
+        last_used_at: None,
+        revoked_at,
+    }
+}
+
+#[test]
+fn a_listed_grant_stands_until_it_is_revoked_or_its_expiry_passes() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let earlier = now - Duration::from_secs(1);
+    let later = now + Duration::from_secs(1);
+
+    assert!(
+        entry_at(None, None).is_live(now),
+        "never expires, not revoked"
+    );
+    assert!(entry_at(Some(later), None).is_live(now), "expires later");
+
+    assert!(!entry_at(Some(earlier), None).is_live(now), "expiry passed");
+    assert!(
+        !entry_at(Some(now), None).is_live(now),
+        "the expiry instant itself is past: the check is `expiry > now`"
+    );
+    assert!(!entry_at(None, Some(earlier)).is_live(now), "revoked");
+    assert!(
+        !entry_at(Some(later), Some(earlier)).is_live(now),
+        "revoked beats an expiry still ahead"
+    );
+}
+
+#[test]
+fn a_listed_grant_stands_exactly_when_the_record_it_came_from_does() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    for expires_at in [
+        None,
+        Some(now - Duration::from_secs(1)),
+        Some(now + Duration::from_secs(1)),
+    ] {
+        for revoked_at in [None, Some(now - Duration::from_secs(1))] {
+            let record = TokenRecord {
+                identity: "alice".to_string(),
+                hash: "a".repeat(64),
+                scope: TokenScope::HostWide,
+                issued_at: SystemTime::UNIX_EPOCH,
+                expires_at,
+                last_used_at: None,
+                revoked_at,
+            };
+            assert_eq!(
+                record.entry().is_live(now),
+                record.is_live(now),
+                "the row and its record answer alike for {expires_at:?} / {revoked_at:?}"
+            );
+        }
+    }
+}

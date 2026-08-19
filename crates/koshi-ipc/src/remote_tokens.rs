@@ -92,11 +92,25 @@ pub struct TokenRecord {
     pub revoked_at: Option<SystemTime>,
 }
 
+/// Whether a grant stamped `revoked_at` and `expires_at` still stands at
+/// `now`: nobody revoked it, and it either never expires or expires after
+/// `now`.
+///
+/// Example — `revoked_at` `None` with `expires_at` one second before `now`
+/// gives `false`.
+fn still_stands(
+    revoked_at: Option<SystemTime>,
+    expires_at: Option<SystemTime>,
+    now: SystemTime,
+) -> bool {
+    revoked_at.is_none() && expires_at.is_none_or(|expiry| expiry > now)
+}
+
 impl TokenRecord {
     /// Whether this record still stands at `now`: nobody revoked it, and it
     /// either never expires or expires after `now`.
     fn is_live(&self, now: SystemTime) -> bool {
-        self.revoked_at.is_none() && self.expires_at.is_none_or(|expiry| expiry > now)
+        still_stands(self.revoked_at, self.expires_at, now)
     }
 
     /// This record without its hash.
@@ -134,6 +148,15 @@ pub struct TokenEntry {
     pub last_used_at: Option<SystemTime>,
     /// When an operator stopped the grant, or `None` while it still stands.
     pub revoked_at: Option<SystemTime>,
+}
+
+impl TokenEntry {
+    /// Whether this grant still stands at `now`: nobody revoked it, and it
+    /// either never expires or expires after `now`.
+    #[must_use]
+    pub fn is_live(&self, now: SystemTime) -> bool {
+        still_stands(self.revoked_at, self.expires_at, now)
+    }
 }
 
 /// What a presented secret reached.

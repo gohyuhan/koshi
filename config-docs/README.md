@@ -5,7 +5,7 @@ apply. Every present file must declare a supported `version`.
 
 | File | What it sets | Reference |
 |---|---|---|
-| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, and other-user access settings | [koshi.md](koshi.md) |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings | [koshi.md](koshi.md) |
 | `themes/<name>.kdl` | Interface colors selected by `theme "<name>"` | [theme.md](theme.md) |
 | `keybinding.kdl` | Key bindings and the modes they live in | [keybinding.md](keybinding.md) |
 | `profile/<name>.kdl` | A saved layout: tabs, panes, commands, opened with `koshi --profile <name>` | [profile.md](profile.md) |
