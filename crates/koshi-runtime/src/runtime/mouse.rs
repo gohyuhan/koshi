@@ -43,8 +43,6 @@ use crate::server::Server;
 
 impl Server {
     /// Envelope and dispatch a command attributed to `client_id`'s mouse,
-    /// returning the runtime's result.
-    /// Envelope and dispatch a command attributed to `client_id`'s mouse,
     /// returning the runtime's result and the cells a resize refused at a pane
     /// minimum can still take.
     fn dispatch_mouse_command(

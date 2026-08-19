@@ -31,7 +31,6 @@ fn full_environment_builds_the_full_identity() {
             "client-0192f0c1-0000-7000-8000-000000000002",
         ),
         ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
-        ("KOSHI_SOCKET", "/run/koshi/session-x.sock"),
     ]))
     .expect("full environment parses");
     assert_eq!(
@@ -40,7 +39,6 @@ fn full_environment_builds_the_full_identity() {
             session_id: SessionId::from_uuid(SESSION_UUID.parse().expect("uuid")),
             client_id: Some(ClientId::from_uuid(CLIENT_UUID.parse().expect("uuid"))),
             pane_id: PaneId::from_uuid(PANE_UUID.parse().expect("uuid")),
-            socket: Some("/run/koshi/session-x.sock".to_string()),
         })
     );
 }
@@ -149,7 +147,6 @@ fn absent_client_id_is_allowed() {
             "session-0192f0c1-0000-7000-8000-000000000001",
         ),
         ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
-        ("KOSHI_SOCKET", "/run/koshi/session-x.sock"),
     ]))
     .expect("absent client id parses")
     .expect("in-session");
@@ -174,22 +171,6 @@ fn malformed_client_id_is_rejected() {
         "broken in-session environment: `KOSHI_CLIENT_ID` is `client-not-a-uuid`: \
          expected `client-<uuid>` or a bare UUID"
     );
-}
-
-/// The optional socket address may be absent; the identity still builds.
-#[test]
-fn absent_socket_is_allowed() {
-    let context = InSessionContext::from_lookup(lookup(&[
-        ("KOSHI", "1"),
-        (
-            "KOSHI_SESSION_ID",
-            "session-0192f0c1-0000-7000-8000-000000000001",
-        ),
-        ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
-    ]))
-    .expect("absent socket parses")
-    .expect("in-session");
-    assert_eq!(context.socket, None);
 }
 
 /// Bare UUID values without the entity prefix are accepted.

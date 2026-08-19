@@ -1,5 +1,5 @@
-//! `koshi-storage` — persistence: session snapshots, layout files, state
-//! migrations, and atomic writes.
+//! `koshi-storage` — atomic file replacement: a write lands whole or not at
+//! all, so a reader finds the old file or the new one, never a torn middle.
 
 pub mod atomic;
 pub mod error;

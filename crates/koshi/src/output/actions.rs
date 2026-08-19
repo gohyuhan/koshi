@@ -192,5 +192,3 @@ fn cli_verb_runnable_bare(name: &str) -> bool {
 
     crate::cli::Cli::try_parse_from(["koshi", name]).is_ok()
 }
-
-// --- Keybinding introspection ---

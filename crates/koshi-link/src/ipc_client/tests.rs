@@ -48,7 +48,6 @@ fn context(session_id: SessionId) -> InSessionContext {
         session_id,
         client_id: None,
         pane_id: PaneId::new(),
-        socket: None,
     }
 }
 

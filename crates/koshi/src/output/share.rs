@@ -1,6 +1,8 @@
-//! Renderers for the three `share` answers: the grant block printed once
-//! after a token is handed out, the lines naming each grant a revoke stopped,
-//! and the listing of every grant this machine has made.
+//! Renderers for the `share` answers: the grant block printed once after a
+//! token is handed out, the block naming what a fresh grant can reach, the
+//! lines naming each grant a revoke stopped, the warning a `share revoke
+//! --session` asks before it stops anything, and the listing of every grant
+//! this machine has made.
 
 use super::*;
 use koshi_ipc::protocol::ConnectionToken;
