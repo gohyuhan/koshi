@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
-koshi-core = { version = "0.2.0", path = "../koshi-core" }
+koshi-core = { version = "0.3.0-pr.1", path = "../koshi-core" }
 
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
-koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
+koshi-test-support = { version = "0.3.0-pr.1", path = "../koshi-test-support" }
