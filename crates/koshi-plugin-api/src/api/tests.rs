@@ -1,1 +1,1 @@
-//! Tests. Placeholder per standard source layout.
+//! Tests. This module is empty.

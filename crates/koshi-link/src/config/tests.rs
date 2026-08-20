@@ -499,6 +499,25 @@ fn logging_params_take_the_level_and_format_the_config_names() {
     assert_eq!(params.session_id, session_id);
 }
 
+// --- The direction a pane-opening verb uses with no `--direction` ---
+
+#[test]
+fn a_pane_with_no_direction_named_anywhere_opens_rightward() {
+    assert_eq!(new_pane_direction(None), Direction::Right);
+}
+
+#[test]
+fn a_pane_with_no_direction_named_takes_the_one_the_config_names() {
+    let app = PartialKoshiConfig {
+        layout: Some(koshi_config::layer::PartialLayoutDefaults {
+            new_pane_direction: Some(Direction::Left),
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(new_pane_direction(Some(app)), Direction::Left);
+}
+
 // --- Who may reach a session's control socket ---
 
 /// A `koshi.kdl` layer setting `allow-other-users` to `allowed` and naming no

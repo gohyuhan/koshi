@@ -48,28 +48,18 @@ pub struct Cell {
     style: Style,
 }
 
-/// Holds [`Cell`] to the size the type is built around.
+/// Fails the build when [`Cell`] is not exactly 32 bytes on a 64-bit target.
 ///
-/// A cell is the most multiplied value in koshi. One exists per grid slot, and
-/// one more per column of every row history keeps: an 80×24 pane is 1 920 grid
-/// cells, and its scrollback adds up to 10 000 rows on top of that. A few open
-/// panes hold cells in the hundreds of thousands, for the whole life of the
-/// session. Whatever a cell weighs is paid that many times over.
-///
-/// So 32 is not a budget someone picked — it is what the fields currently add
-/// up to, kept here as a tripwire. Adding a `u64` to [`Cell`] is a one-line
-/// edit that no test fails and nothing reports, and it makes every pane's cell
-/// memory a quarter larger. This turns that silent edit into a build error, in
-/// the file where it was made.
+/// One cell exists per grid slot and one per column of every row history
+/// keeps: an 80×24 pane is 1 920 grid cells, and its scrollback adds up to
+/// 10 000 rows on top of that.
 ///
 /// **When it fires, the answer is usually [`CellExtra`], not a bigger number.**
-/// That is what `combining` does: a plain cell pays eight bytes for a null
-/// pointer instead of carrying a `Vec` inline, so data that almost no cell has
-/// costs almost nothing. Per-cell data that is rare belongs there, and a new
-/// boolean attribute belongs in one of
-/// [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raise the figure only
-/// when the growth genuinely has to sit in every cell — and raise it in the
-/// [`Cell`] doc in the same edit, so the two cannot disagree.
+/// That is what `combining` does: a plain cell holds eight bytes of null
+/// pointer instead of a `Vec` inline. Rare per-cell data goes there, and a new
+/// boolean attribute goes in one of
+/// [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raising the figure
+/// obligates raising it in the [`Cell`] doc in the same edit.
 ///
 /// A 32-bit target holds that pointer in four bytes rather than eight, so this
 /// is a 64-bit figure.

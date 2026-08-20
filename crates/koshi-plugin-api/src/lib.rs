@@ -1,16 +1,13 @@
-//! Plugin SDK for koshi. A plugin uses this crate.
+//! Plugin SDK for koshi. A plugin depends on this crate.
 //!
-//! This crate is empty. It will hold the ABI data types, the event
-//! subscription types, the command request types, and the capability
-//! definitions.
+//! Scope: the ABI data types, the event subscription types, the command
+//! request types, and the capability definitions. Every module is empty.
 //!
-//! This crate must not depend on `wasmtime`.
+//! `cargo xtask dep-guard` fails if this crate declares `wasmtime` as a
+//! direct dependency.
 
-/// Error types.
 pub mod error;
 
-/// Shared types.
 pub mod types;
 
-/// API surface.
 pub mod api;

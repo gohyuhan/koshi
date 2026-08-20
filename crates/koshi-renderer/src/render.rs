@@ -2,9 +2,9 @@
 //!
 //! [`render_frame`] paints one [`RenderSnapshot`] into a ratatui [`Buffer`] as
 //! three fixed zones: a **tabline** on the top row (session name, the running
-//! koshi version, and the tab list on the left, a right-aligned status
-//! section — scroll position and mode tag), the **pane area** in the middle (a
-//! bordered box per visible pane, the focused pane's border highlighted), and
+//! koshi version, and the tab list on the left, the right-aligned mode tag),
+//! the **pane area** in the middle (a bordered box per visible pane, the
+//! focused pane's border highlighted), and
 //! the **keybinding hint bar** on the bottom row — a koshi-owned row painted by
 //! [`crate::statusline_hints`] from the per-mode keybinding data the caller
 //! passes in. Both chrome rows are filled with the theme's bar background
@@ -13,8 +13,8 @@
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
 //! content rect. The focused pane's cursor cell is reported separately by
-//! [`cursor_position`] for the caller to place the terminal's hardware cursor,
-//! since the buffer itself carries no cursor. When the active tab has no room
+//! [`cursor_position`] for the caller to place the terminal's hardware cursor;
+//! the buffer itself carries no cursor. When the active tab has no room
 //! for any pane, a centered "terminal too small" overlay replaces the pane
 //! render for that frame. When the client's viewport is larger than the size
 //! the layout was solved for, the whole frame is centered and the surrounding

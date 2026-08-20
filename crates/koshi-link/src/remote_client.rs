@@ -163,17 +163,17 @@ pub enum Reach {
     Unreachable,
 }
 
-/// The private data directory holding the saved-server store, or
-/// [`CliError::IpcUnavailable`] when the machine has none.
-fn dialling_data_dir() -> Result<PathBuf, CliError> {
-    koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
-        detail: "no data directory found".to_string(),
-    })
-}
-
-/// The saved-server store and the path it came from.
+/// The saved-server store and the path it came from, under the private data
+/// directory.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the machine has no data directory, and
+/// when the store could not be read.
 fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
-    let path = store_path(&dialling_data_dir()?);
+    let data_dir = koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
+        detail: "no data directory found".to_string(),
+    })?;
+    let path = store_path(&data_dir);
     let store = ServerStore::read(&path).map_err(store_failed)?;
     Ok((path, store))
 }
@@ -191,9 +191,8 @@ fn store_failed(error: IpcError) -> CliError {
 /// Example — `work` matches the record the user named `work`, and
 /// `laptop.local:7654` with no matching record is [`ServerArg::New`].
 ///
-/// A selector that matches more than one record is refused rather than taken
-/// for a server this machine has not seen: that would dial with no pinned
-/// certificate and save whichever one was presented.
+/// A selector that matches more than one record is refused, and no dial is
+/// made.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when `arg` matches no record and is not an
@@ -658,13 +657,7 @@ fn one_request(
     let (mut reader, mut writer) = attach_remote(link, SessionSelector::Id(session))?;
 
     let hello_reply: IncomingResponse = reader.recv().map_err(talk_failed)?;
-    match talk::SESSION.take_result(hello_reply)? {
-        IpcResult::Hello {
-            protocol_version, ..
-        } => talk::SESSION.settled_version(protocol_version)?,
-        IpcResult::Error(refusal) => return Err(refused(&refusal)),
-        other => return Err(talk::SESSION.unexpected_reply(&other)),
-    }
+    talk::session_hello_version(hello_reply)?;
 
     writer.send(&request).map_err(talk_failed)?;
     let reply: IncomingResponse = reader.recv().map_err(talk_failed)?;
@@ -736,10 +729,7 @@ pub fn reach_all(timeout: Duration) -> Vec<Reach> {
 /// The time left until `deadline` is given to the dial and again to the reply,
 /// so this returns up to twice that after `deadline` passes. Writes no file.
 fn probe(record: &SavedServer, deadline: Instant) -> Reach {
-    let server = record
-        .name
-        .clone()
-        .unwrap_or_else(|| record.address.clone());
+    let server = label_of(record);
     let left = deadline.saturating_duration_since(Instant::now());
     let mut link = match connect(
         &record.address,

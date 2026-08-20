@@ -10,8 +10,8 @@ use crate::state::ReportedCwd;
 /// Parse an OSC 7 cwd URI (`file://host/path`) into a [`ReportedCwd`], or
 /// `None` when it is not a `file://` URI or carries no path.
 ///
-/// The `host` component (between `//` and the next `/`) is kept on the result —
-/// the spawn layer needs it to tell a local report from a remote one. An empty
+/// The `host` component (between `//` and the next `/`) lands on the result;
+/// the spawn layer reads it to tell a local report from a remote one. An empty
 /// authority (`file:///path`) yields no host. The path keeps its leading `/`
 /// and is percent-decoded (`%20` → space, `%C3%A9` → `é`) before being turned
 /// into a [`PathBuf`] by [`bytes_to_path`]; a decoded NUL byte (which cannot
@@ -31,9 +31,7 @@ pub(super) fn parse_osc7_cwd(uri: &[u8]) -> Option<ReportedCwd> {
         bytes => Some(String::from_utf8_lossy(bytes).into_owned()),
     };
     let decoded = percent_decode(&rest[slash..]).collect::<Vec<u8>>();
-    // A NUL cannot appear in a real path; reject so a malformed report never
-    // stores an unusable directory (and never silently truncates at a later
-    // filesystem call).
+    // A NUL cannot appear in a real path; reject the whole report.
     if decoded.contains(&0) {
         return None;
     }

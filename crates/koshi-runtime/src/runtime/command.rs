@@ -6,10 +6,9 @@
 //! state, then routes it via an exhaustive `match` on [`Command`] — one arm per
 //! variant. Validation runs first: a command whose source may not issue it, or
 //! whose target does not resolve, is rejected before any handler runs. A
-//! command whose handler has not landed yet still rejects cleanly with
-//! [`RejectReason::InvalidState`] and a diagnostic hint. The exhaustive match
-//! is the point: a new `Command` variant cannot be added without giving it an
-//! arm here, and each handler replaces its arm in place as it ships.
+//! command with no handler rejects with [`RejectReason::InvalidState`] and a
+//! hint naming it. The match is exhaustive, so every `Command` variant has an
+//! arm here.
 //!
 //! This file holds the dispatch table, target resolution types, the helpers
 //! every handler shares, and the handlers for the commands that end a session
@@ -17,7 +16,7 @@
 //! client to another session. The rest live in submodules by what they act on:
 //! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -76,10 +75,8 @@ use koshi_session::session::{
 /// single-pane layout, take the root's content rect, and clamp it to a PTY size.
 /// Shared by the new-tab path and genesis so both size the root pane identically.
 ///
-/// Callers that gate on minimum size (the new-tab command) check
-/// [`fits`] first; genesis has no gate, and the
-/// solver always places a single leaf, so the `unwrap_or` fallback is a floor,
-/// not a real path.
+/// A pane the solve gives no content rect falls back to the whole `viewport`
+/// rect.
 pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, min: Size) -> PtySize {
     let candidate = LayoutNode::Pane(pane_id);
     let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
@@ -118,6 +115,24 @@ fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
     let start = a_start.max(b_start);
     let end = (a_start + a_len).min(b_start + b_len);
     end.saturating_sub(start)
+}
+
+/// The per-axis smaller of two sizes: the smaller column count and the smaller
+/// row count, each taken on its own. `80x24` and `100x10` give `80x10`.
+fn min_size(a: Size, b: Size) -> Size {
+    Size {
+        cols: a.cols.min(b.cols),
+        rows: a.rows.min(b.rows),
+    }
+}
+
+/// The tab named by the first [`Event::TabFocused`] in `events`, or `None` when
+/// `events` holds none.
+fn tab_focused_in(events: &[Event]) -> Option<TabId> {
+    events.iter().find_map(|event| match event {
+        Event::TabFocused(focused) => Some(focused.tab_id),
+        _ => None,
+    })
 }
 
 /// A validation failure: the reason a command was rejected, plus an optional
@@ -299,9 +314,10 @@ impl Server {
         }
     }
 
-    /// Build a rejection for a command with no handler wired yet, keyed back to
-    /// its originating envelope by `command_id`, and log it. `label` names the
-    /// command in both the human-facing hint and the log line.
+    /// Build a rejection for a command with no handler, keyed back to its
+    /// originating envelope by `command_id`, and log it at `warn`. `label` names
+    /// the command in the log line and in the hint, which reads
+    /// `"<label> not yet implemented"`.
     fn reject(&self, command_id: CommandId, label: &str) -> CommandResult {
         tracing::warn!(
             command_id = %command_id,
@@ -665,9 +681,7 @@ impl Server {
     /// **A pane's PTY has exactly one size, but its viewers may disagree about
     /// its rect** — zoom is per-client, so client A can have pane X filling the
     /// tab while client B has it tiled in a corner. The size handed to X's child
-    /// is therefore the **smallest** rect among the clients who actually draw X,
-    /// which is the largest grid every one of them can show in full: nobody is
-    /// ever shown a grid too big to fit, so no client has to crop.
+    /// is the **smallest** rect among the clients who actually draw X.
     ///
     /// A client zoomed on some *other* pane draws X not at all, so it is not
     /// one of the viewers this minimum is taken over. It still bounds X
@@ -709,9 +723,7 @@ impl Server {
             .collect();
 
         // No viewer: no client draws any of these panes, so none of them is
-        // resized and every PTY keeps the size it has. Unreachable from the
-        // callers, which all resolve a `tab_viewport` first — and that is `Some`
-        // only when this same filter finds a viewer.
+        // resized and every PTY keeps the size it has.
         let Some(first) = per_viewer.first() else {
             return Vec::new();
         };
@@ -730,13 +742,7 @@ impl Server {
                 };
                 let entry = smallest.entry(pane_id).or_insert(Some(rect));
                 *entry = Some(match *entry {
-                    Some(current) => Rect::new(
-                        current.origin,
-                        Size {
-                            cols: current.size.cols.min(rect.size.cols),
-                            rows: current.size.rows.min(rect.size.rows),
-                        },
-                    ),
+                    Some(current) => Rect::new(current.origin, min_size(current.size, rect.size)),
                     None => rect,
                 });
             }
@@ -845,8 +851,8 @@ fn is_local_host(host: Option<&str>) -> bool {
     let Some(host) = host else {
         return true;
     };
-    // The URI form brackets an IPv6 literal (`file://[::1]/…`); sloppy shell
-    // hooks write it bare. Both mean this machine.
+    // An IPv6 loopback literal matches both bracketed, as the URI form writes
+    // it (`file://[::1]/…`), and bare.
     if host.eq_ignore_ascii_case("localhost")
         || host == "127.0.0.1"
         || host == "::1"

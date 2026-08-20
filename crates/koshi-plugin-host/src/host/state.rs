@@ -1,1 +1,1 @@
-//! Instance state. Placeholder per standard source layout.
+//! Instance state. This module is empty.

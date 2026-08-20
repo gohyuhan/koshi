@@ -1,5 +1,21 @@
-//! `koshi-ipc` — control channel: local socket/named pipe transport, versioned IPC
-//! messages, ownership checks, and CLI-to-session command forwarding.
+//! `koshi-ipc` — the messages koshi's processes send each other, and the links
+//! those messages travel on.
+//!
+//! Three request protocols share one frame shape — a 4-byte big-endian length,
+//! then that many bytes of JSON: a client to a session server, a client to the
+//! router, and a session server to the supervisor holding its panes. Each opens
+//! with a Hello that settles the version both ends speak and presents a secret,
+//! and each refuses a request kind this build has no name for without closing
+//! the link.
+//!
+//! A link on this machine is a Unix socket or a Windows named pipe. A link from
+//! another machine is TLS, and the dialling side pins the certificate the server
+//! presented on the first connection.
+//!
+//! The crate also holds the records these processes keep on disk: the endpoint
+//! file a session advertises its socket in, the remote access token store, the
+//! servers a dialling user has saved, this machine's own certificate, and the
+//! record that the operator switched remote access on.
 
 /// The session structure a client receives when it attaches.
 pub mod attach;
@@ -44,7 +60,8 @@ pub mod supervisor;
 /// The TLS stream a remote client and the machine serving it talk over, and
 /// the certificate pinning that recognises a server on the second connection.
 pub mod tls;
-/// Transport layer.
+/// Framed messages over a local socket or named pipe, and the same frame shape
+/// on any other pair of byte streams.
 pub mod transport;
 /// Shared types.
 pub mod types;

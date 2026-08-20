@@ -9,11 +9,10 @@
 //!
 //! A session another local user started advertises no endpoint file here. It
 //! is found by name in the machine-wide shared directory instead, and reached
-//! with an empty token, because that session asks another user for none.
+//! with the empty token that session asks another user for.
 //!
 //! Asking a running session to restart is one more such exchange. A session
-//! that is not listening reads as `NotRunning` rather than an error, so a
-//! caller can walk every advertised session and report each result.
+//! that is not listening reads as `NotRunning` rather than an error.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -99,12 +98,10 @@ pub fn submit_external_via_runtime_dir(
 }
 
 /// Fill a pane-creating command's unset working directory with this CLI
-/// process's own, captured here at send time: the CLI inherited it from the
-/// shell it was typed in, so the new pane opens where the command was run.
-/// A command that already names a directory is left alone, and every other
-/// command carries none.
-fn capture_cwd(command: Command) -> Command {
-    let mut command = command;
+/// process's own, read here at send time, so the new pane opens where the
+/// command was run. A command that already names a directory is left alone,
+/// and every other command carries none.
+fn capture_cwd(mut command: Command) -> Command {
     let cwd = match &mut command {
         Command::NewPane(args) => &mut args.cwd,
         Command::NewTab(args) => &mut args.cwd,
@@ -303,17 +300,7 @@ pub fn running_session_version(
     };
     connection.send(&hello).map_err(talk_failed)?;
     let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-    match talk::SESSION.take_result(reply)? {
-        IpcResult::Hello {
-            protocol_version,
-            version,
-        } => {
-            talk::SESSION.settled_version(protocol_version)?;
-            Ok(Some(version))
-        }
-        IpcResult::Error(refusal) => Err(refused(&refusal)),
-        other => Err(talk::SESSION.unexpected_reply(&other)),
-    }
+    talk::session_hello_version(reply).map(Some)
 }
 
 /// Every session with an endpoint file in `runtime_dir`, in no particular
@@ -459,13 +446,7 @@ fn exchange(
     connection.send(&request).map_err(talk_failed)?;
 
     let hello_reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
-    match talk::SESSION.take_result(hello_reply)? {
-        IpcResult::Hello {
-            protocol_version, ..
-        } => talk::SESSION.settled_version(protocol_version)?,
-        IpcResult::Error(refusal) => return Err(refused(&refusal)),
-        other => return Err(talk::SESSION.unexpected_reply(&other)),
-    }
+    talk::session_hello_version(hello_reply)?;
 
     let reply: IncomingResponse = connection.recv().map_err(talk_failed)?;
     talk::SESSION.take_result(reply)
@@ -498,9 +479,9 @@ pub fn read_endpoint(runtime_dir: &Path, session_id: SessionId) -> Result<Endpoi
     }
 }
 
-/// Connect to the advertised socket. An address nothing listens on is a
-/// leftover from a session that is gone, so it reports the session as not
-/// running rather than a transport fault.
+/// Connect to the advertised socket. An address nothing listens on reports the
+/// session as not running ([`CliError::SessionNotFound`]); every other
+/// transport failure is [`CliError::IpcUnavailable`].
 pub fn connect(endpoint: &EndpointFile, session_id: SessionId) -> Result<Connection, CliError> {
     Connection::connect(&endpoint.socket).map_err(|error| match error {
         IpcError::NoListener { .. } => CliError::SessionNotFound {

@@ -1868,6 +1868,122 @@ fn an_attach_that_arrives_after_the_cut_is_refused_rather_than_bridged() {
 }
 
 #[test]
+fn a_secret_on_one_session_is_shown_that_session_and_no_other() {
+    // A grant on one session is the whole reach of the secret behind it. The
+    // listing is the first thing an admitted caller asks for, so a session
+    // outside the grant must not even be named back.
+    let reached = SessionId::new();
+    let beside_it = SessionId::new();
+    let registry = registry_of(&[(reached, "S-quiet-lake"), (beside_it, "S-loud-river")]);
+
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::Session(reached)),
+        vec![RemoteSessionRow {
+            id: reached,
+            name: "S-quiet-lake".to_string(),
+        }]
+    );
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::Session(SessionId::new())),
+        Vec::<RemoteSessionRow>::new(),
+        "a grant on a session this machine does not run is shown nothing"
+    );
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::HostWide),
+        vec![
+            RemoteSessionRow {
+                id: beside_it,
+                name: "S-loud-river".to_string(),
+            },
+            RemoteSessionRow {
+                id: reached,
+                name: "S-quiet-lake".to_string(),
+            },
+        ],
+        "a host-wide grant is shown every session, in name order"
+    );
+    assert_eq!(
+        remote_rows(&Registry::new(), &TokenScope::HostWide),
+        Vec::<RemoteSessionRow>::new(),
+        "and a machine running nothing is shown nothing"
+    );
+}
+
+#[test]
+fn two_sessions_carrying_one_name_are_listed_in_id_order() {
+    // Names come from a walk that never hands out a name the list holds, so
+    // two sessions share one only when one of them was started by another
+    // local user. The id settles the order, and without it the answer is
+    // whatever order the list happens to be in.
+    let mut twins = [SessionId::new(), SessionId::new()];
+    twins.sort();
+    let [first, second] = twins;
+    let registry = registry_of(&[(second, "S-quiet-lake"), (first, "S-quiet-lake")]);
+
+    assert_eq!(
+        remote_rows(&registry, &TokenScope::HostWide),
+        vec![
+            RemoteSessionRow {
+                id: first,
+                name: "S-quiet-lake".to_string(),
+            },
+            RemoteSessionRow {
+                id: second,
+                name: "S-quiet-lake".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_attach_to_a_session_the_secret_does_not_reach_is_refused() {
+    // The connection stands and the session is running, so the scope is the
+    // one thing that refuses this attach. Without it a grant on one session
+    // would carry a caller into every session on the machine.
+    let reached = SessionId::new();
+    let beside_it = SessionId::new();
+    let runtime_dir = test_runtime_dir();
+    let registry = registry_of(&[(reached, "S-quiet-lake"), (beside_it, "S-loud-river")]);
+    let mut remote = no_remote();
+    let (_caller, served) = loopback_pair();
+    remote.live.push(LiveRemote {
+        hash: "c".repeat(64),
+        stream: served,
+        id: 3,
+    });
+    let located = |scope: &TokenScope, selector: &SessionSelector| {
+        locate_remote(runtime_dir.path(), &registry, &remote, scope, 3, selector)
+    };
+
+    assert_eq!(
+        located(&TokenScope::Session(reached), &SessionSelector::Id(reached)),
+        Some(EndpointFile::path(runtime_dir.path(), reached)),
+        "the session the grant names is reached"
+    );
+    assert_eq!(
+        located(
+            &TokenScope::Session(reached),
+            &SessionSelector::Id(beside_it)
+        ),
+        None,
+        "the session beside it is outside the grant"
+    );
+    assert_eq!(
+        located(
+            &TokenScope::Session(reached),
+            &SessionSelector::Name("S-loud-river".to_string())
+        ),
+        None,
+        "and naming that session instead reaches nothing either"
+    );
+    assert_eq!(
+        located(&TokenScope::HostWide, &SessionSelector::Id(beside_it)),
+        Some(EndpointFile::path(runtime_dir.path(), beside_it)),
+        "a host-wide grant reaches both"
+    );
+}
+
+#[test]
 fn a_caller_speaking_no_doorway_version_this_build_has_is_told_both_ranges() {
     // The version is settled before the secret is looked at, so this needs no
     // grant and no dispatcher. This refusal names both ranges instead of
@@ -2170,6 +2286,46 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
     };
     assert!(enabled, "the operator did say yes");
     assert!(!listening, "and this run is holding no port");
+}
+
+#[test]
+fn the_status_names_this_machines_certificate_and_how_many_connections_it_holds() {
+    // The operator reads the fingerprint to hand to a caller, and the count to
+    // decide whether a revoke is worth making. A machine holding a certificate
+    // it made has still not said yes until the record is written.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let (_cert, fingerprint) = load_or_make_cert(&data_dir).expect("this machine's certificate");
+    let mut remote = RemoteState {
+        address: Some("127.0.0.1:7654".to_string()),
+        data_dir: Some(data_dir),
+        listening: true,
+        live: Vec::new(),
+        next_id: 0,
+        said_full: Occasional::new(),
+    };
+    let _far_ends: Vec<TcpStream> = (0..3u64)
+        .map(|id| {
+            let (near, far) = loopback_pair();
+            remote.live.push(LiveRemote {
+                hash: "d".repeat(64),
+                stream: near,
+                id,
+            });
+            far
+        })
+        .collect();
+
+    assert_eq!(
+        remote_status(&remote),
+        RouterResult::RemoteStatus {
+            address: Some("127.0.0.1:7654".to_string()),
+            enabled: false,
+            listening: true,
+            fingerprint: Some(fingerprint),
+            remote_connections: Some(3),
+        }
+    );
 }
 
 #[test]

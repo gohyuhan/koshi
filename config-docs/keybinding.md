@@ -21,9 +21,9 @@ once beside the `mode` blocks.
 |---|---|---|---|
 | `chord-timeout-ms` | integer — ms to wait for the next key in a multi-key shortcut before giving up | `500` | ≥ 0.1.0 |
 | `which-key-delay-ms` | integer — ms before the hint bar shows the keys that continue a shortcut | `300` | ≥ 0.1.0 |
-| `max-chord-depth` | integer — most keys a single shortcut may chain (must be ≥ 1) | `4` | ≥ 0.1.0 |
+| `max-chord-depth` | integer 0–255 — most keys a single shortcut may chain. A shortcut longer than this can never fire, and `koshi keys conflicts` reports it | `4` | ≥ 0.1.0 |
 | `leader` | string — the key `<leader>` stands for in bindings; a modifier run like `"C-"` or a single chord like `"<Space>"` | `"C-"` (the Ctrl modifier run) | ≥ 0.1.0 |
-| `unlock-alternative` | string — an extra chord that leaves locked mode | (none) | ≥ 0.1.0 |
+| `unlock-alternative` | string — the chord that leaves locked mode, in place of `<C-l>`. Setting it frees `<C-l>` to rebind, and the whole file is rejected unless the `locked` block also binds this chord to `core:unlock`. A chord plain typing produces is rejected | (none) | ≥ 0.1.0 |
 
 ## Key grammar
 
@@ -62,7 +62,7 @@ chord-timeout-ms 500
 which-key-delay-ms 300
 max-chord-depth 4
 leader "C-"                      // the leader = the Ctrl modifier run (default)
-// unlock-alternative "<A-u>"    // optional extra unlock chord; off by default
+// unlock-alternative "<A-u>"    // replaces <C-l>; also bind it to core:unlock in "locked"
 
 mode "normal" {
     // reserved lock/unlock chord — explicit, never moves with the leader

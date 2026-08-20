@@ -1,1 +1,1 @@
-//! Shared types — currently empty; reserved for cross-module type definitions.
+//! Shared types. This module holds no items.

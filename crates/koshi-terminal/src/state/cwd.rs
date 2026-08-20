@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 /// A working directory reported by the shell via OSC 7: the decoded `path`
 /// together with the `host` the shell named in the URI authority.
 ///
-/// The host is kept so the pane-spawn layer can compare it to the local machine
-/// and refuse to inherit a directory reported from a remote host — a shell over
-/// SSH reports `file://remote/…`. The parser stores the report verbatim and
-/// makes no local/remote decision; that check lives at the spawn layer.
+/// The parser stores the report verbatim and makes no local/remote decision.
+/// The pane-spawn layer compares `host` to the local machine and refuses to
+/// inherit a directory a remote host reported — a shell over SSH reports
+/// `file://remote/…`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedCwd {
     /// The URI authority (the part between `//` and the path), or `None` when

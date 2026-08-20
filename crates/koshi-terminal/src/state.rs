@@ -527,6 +527,17 @@ fn default_tab_stops(columns: u16) -> Vec<bool> {
     (0..columns).map(|column| column % 8 == 0).collect()
 }
 
+/// `cell` rebuilt with display `width`, keeping its character, combining
+/// marks, and style. `Cell::new('가', 2, style)` with a `~` combining mark
+/// re-widthed to 1 gives the same character, mark, and style in one column.
+fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
+    let mut out = Cell::new(cell.ch(), width, cell.style());
+    for mark in cell.combining() {
+        out.push_combining(*mark);
+    }
+    out
+}
+
 /// Normalize every row to exactly `cols` cells: truncate on the right or pad
 /// with blanks in `fill`. A wide glyph whose right (width-0) half falls past
 /// the new edge leaves its base as the last cell; that dangling base is

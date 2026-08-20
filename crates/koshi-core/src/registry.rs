@@ -191,9 +191,8 @@ impl ActionRegistry {
             return Err(RegistryError::NamespaceMismatch { action });
         }
 
-        // 3. The handler must route back through `caller`'s own host call, so
-        // every command the action performs passes that plugin's capability
-        // check.
+        // 3. The handler must be `caller`'s own host call — no core command, no
+        // sequence, and no other plugin's host call.
         if metadata.handler != ActionHandlerRef::PluginHostCall(caller) {
             return Err(RegistryError::InvalidHandler { action });
         }

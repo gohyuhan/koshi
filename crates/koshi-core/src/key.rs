@@ -356,17 +356,13 @@ impl fmt::Display for KeySequence {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 /// One incomplete multi-chord keybinding: the chords typed into it so far, and
 /// the instant an ambiguous one resolves.
 ///
-/// The chords are Koshi's, not the pane's. A sequence that is open captures the
-/// keyboard until it resolves, so no chord held here is ever written to a pane —
-/// it fires a binding, or it is dropped when the sequence is left. That is why
-/// the pane a chord was typed into, and the byte form it would have taken there,
-/// are not kept: nothing will ever send them.
+/// The chords are Koshi's, not the pane's. A chord held here is never written
+/// to a pane: it fires a binding, or it is dropped when the sequence is left.
+/// The pane a chord was typed into, and the byte form it would have taken
+/// there, are not kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.
@@ -377,3 +373,6 @@ pub struct PendingKeySequence {
     /// the next chord indefinitely.
     pub deadline: Option<Instant>,
 }
+
+#[cfg(test)]
+mod tests;

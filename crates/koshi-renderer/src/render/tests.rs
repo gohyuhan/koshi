@@ -622,6 +622,41 @@ fn each_pane_shows_its_own_scroll_position() {
     assert!(bottom.contains("7/50"), "pane B's own count: {bottom:?}");
 }
 
+/// A scrolled-back pane whose box is `width` wide, in a viewport of the same
+/// width: one tabline row, four box rows, one hint row.
+fn narrow_scrolled_snap(width: u16) -> RenderSnapshot {
+    let pane = PaneId::new();
+    let mut snap = build(
+        "s",
+        &[("t", true)],
+        &[(pane, rect(0, 1, width, 4), true)],
+        Some(pane),
+        LockMode::Normal,
+        Size {
+            cols: width,
+            rows: 6,
+        },
+    );
+    snap.panes[0].grid_view = Some(GridView {
+        grid: Arc::new(Grid::blank(2, width - 2, TermStyle::default())),
+        view_offset: 3,
+    });
+    snap.panes[0].scrollback.retained_lines = 100;
+    snap
+}
+
+#[test]
+fn a_box_too_narrow_for_the_scroll_position_shows_none_of_it() {
+    // ` 3/100 ` takes seven cells and never covers a corner glyph, so it needs
+    // a box nine cells wide. An eight-wide box keeps its bottom border whole.
+    let buf = render(&narrow_scrolled_snap(8), 8, 6);
+    assert_eq!(row_text(&buf, 4), "└──────┘");
+
+    // One cell wider, and it sits between the two corners.
+    let buf = render(&narrow_scrolled_snap(9), 9, 6);
+    assert_eq!(row_text(&buf, 4), "└ 3/100 ┘");
+}
+
 #[test]
 fn reused_buffer_is_blanked_before_painting() {
     let pane = PaneId::new();
@@ -969,6 +1004,50 @@ fn combining_marks_join_the_base_into_one_symbol() {
     let buf = render(&snap, 40, 8);
 
     assert_eq!(buf[(1, 2)].symbol(), "e\u{0301}");
+}
+
+#[test]
+fn every_cell_attribute_maps_to_its_own_modifier() {
+    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut every = TermStyle::default();
+    every.set_bold(true);
+    every.set_faint(true);
+    every.set_italic(true);
+    every.set_underline(UnderlineStyle::Single);
+    every.set_blink(true);
+    every.set_conceal(true);
+    every.set_strike(true);
+    every.set_reverse(true);
+    *grid.cell_mut(0, 0).unwrap() = Cell::new('a', 1, every);
+
+    // A curly underline is one of the five underline styles ratatui cannot tell
+    // apart; it draws as the single underline ratatui has.
+    let mut curly = TermStyle::default();
+    curly.set_underline(UnderlineStyle::Curly);
+    *grid.cell_mut(0, 1).unwrap() = Cell::new('b', 1, curly);
+
+    // Overline and underline color have no ratatui modifier and draw nothing.
+    let mut lines = TermStyle::default();
+    lines.set_overline(true);
+    lines.set_underline_color(Some(TermColor::Indexed(9)));
+    *grid.cell_mut(0, 2).unwrap() = Cell::new('c', 1, lines);
+
+    let snap = content_snap(grid, rect(0, 1, 40, 6), false, Size { cols: 40, rows: 8 });
+    let buf = render(&snap, 40, 8);
+
+    assert_eq!(
+        buf[(1, 2)].modifier,
+        Modifier::BOLD
+            | Modifier::DIM
+            | Modifier::ITALIC
+            | Modifier::UNDERLINED
+            | Modifier::SLOW_BLINK
+            | Modifier::HIDDEN
+            | Modifier::CROSSED_OUT
+            | Modifier::REVERSED
+    );
+    assert_eq!(buf[(2, 2)].modifier, Modifier::UNDERLINED);
+    assert_eq!(buf[(3, 2)].modifier, Modifier::empty());
 }
 
 #[test]

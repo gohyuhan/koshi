@@ -286,6 +286,134 @@ fn a_refusal_that_is_not_an_unknown_kind_is_left_as_the_router_wrote_it() {
     router.join().expect("the stand-in router exits");
 }
 
+// --- Counting the connections from another machine --------------------------
+
+/// A remote-status answer reporting `remote_connections`, with the rest of the
+/// answer fixed so only the count varies between tests.
+fn remote_status(remote_connections: Option<usize>) -> RouterResult {
+    RouterResult::RemoteStatus {
+        address: Some("0.0.0.0:7654".to_string()),
+        enabled: true,
+        listening: true,
+        fingerprint: Some("aa".repeat(32)),
+        remote_connections,
+    }
+}
+
+#[test]
+fn the_count_of_connections_from_another_machine_comes_back_as_the_router_sent_it() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(remote_status(Some(3))),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::Answered(Some(3))
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_router_holding_no_such_connection_answers_a_count_of_zero() {
+    // A count of zero and a build reporting no count at all are different
+    // answers: one says none are held, the other says nothing.
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(remote_status(Some(0))),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::Answered(Some(0))
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_router_whose_build_reports_no_count_answers_no_count() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(remote_status(None)),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::Answered(None)
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn no_running_router_reports_nothing_running_rather_than_a_count() {
+    let runtime_dir = test_runtime_dir();
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::NotRunning
+    );
+    assert!(!router_endpoint_path(runtime_dir.path()).exists());
+}
+
+#[test]
+fn a_router_with_no_such_request_kind_reads_as_an_older_build() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this build has no request kind named RemoteStatus".to_string(),
+        })),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::OlderBuild
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn any_other_refusal_of_the_count_carries_the_sentence_the_router_gave() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: "the bytes received are not a request this build can read".to_string(),
+        })),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::NoAnswer {
+            detail: "the bytes received are not a request this build can read".to_string(),
+        }
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_reply_that_answers_no_count_is_reported_as_unexpected() {
+    let runtime_dir = test_runtime_dir();
+    let router = fake_router(
+        runtime_dir.path(),
+        Script::AcceptAndAnswer(RouterResult::Sessions(Vec::new())),
+    );
+
+    assert_eq!(
+        running_router_remote_connections(runtime_dir.path()),
+        RemoteConnections::NoAnswer {
+            detail: "IPC unavailable: the router answered with an unexpected Sessions reply"
+                .to_string(),
+        }
+    );
+    router.join().expect("the stand-in router exits");
+}
+
 /// Serve one Hello-only connection as a router would: bind the router's
 /// address, write the endpoint file advertising it, accept one caller, and
 /// answer its Hello with `version`. The thread ends when the caller hangs up.

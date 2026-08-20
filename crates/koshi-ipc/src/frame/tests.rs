@@ -380,3 +380,67 @@ fn a_cell_value_this_build_has_no_name_for_falls_back() {
         "an underline style with no name here draws as no underline"
     );
 }
+
+/// A row that soft-wrapped must arrive soft-wrapped. A viewer that reads a
+/// soft wrap as a hard one breaks the logical line when its text is copied
+/// out, and the wire form leaves the default off, so only the two wrapped
+/// endings travel at all.
+#[test]
+fn a_wrapped_row_carries_its_ending_and_an_ended_row_leaves_it_off() {
+    let encoded =
+        |end| serde_json::to_value(FrameRow::from_cells(&[blank()], end)).expect("a row encodes");
+
+    assert_eq!(encoded(FrameRowEnd::Soft)["end"], json!("Soft"));
+    assert_eq!(encoded(FrameRowEnd::SoftWide)["end"], json!("SoftWide"));
+    assert_eq!(encoded(FrameRowEnd::Hard).get("end"), None);
+}
+
+#[test]
+fn a_row_reads_back_with_the_ending_it_was_written_with() {
+    for end in [FrameRowEnd::Hard, FrameRowEnd::Soft, FrameRowEnd::SoftWide] {
+        let text =
+            serde_json::to_string(&FrameRow::from_cells(&[blank()], end)).expect("a row encodes");
+
+        let read: FrameRow = serde_json::from_str(&text).expect("a row decodes");
+
+        assert_eq!(read.end, end);
+        assert_eq!(read.cells(), vec![blank()]);
+    }
+}
+
+#[test]
+fn a_row_ending_this_build_has_no_name_for_reads_as_hard() {
+    let read: FrameRow = serde_json::from_str(r#"{"runs":[],"end":"SoftDouble"}"#)
+        .expect("an ending with no name here falls back, it does not fail");
+
+    assert_eq!(read.end, FrameRowEnd::Hard);
+}
+
+/// The two optional presentation values fall back the same way the colours
+/// do: to nothing at all, leaving the user's own cursor and the foreground
+/// colour standing.
+#[test]
+fn a_cursor_shape_and_an_underline_colour_with_no_name_here_read_as_none() {
+    let mut encoded = serde_json::to_value(frame()).expect("frame encodes");
+    encoded["panes"][0]["cursor"]["shape"] = json!("Beam");
+    encoded["panes"][0]["window"]["rows"][0]["runs"][0]["cell"]["style"]["underline_color"] =
+        json!("Neon");
+
+    // Decoded from text, the way the transport does it.
+    let decoded: PaintedFrame = serde_json::from_str(&encoded.to_string())
+        .expect("a value with no name here falls back, it does not fail");
+
+    assert_eq!(decoded.panes[0].cursor.shape, None);
+    assert_eq!(
+        decoded.panes[0]
+            .window
+            .as_ref()
+            .expect("the pane has a window")
+            .rows[0]
+            .runs[0]
+            .cell
+            .style
+            .underline_color,
+        None
+    );
+}

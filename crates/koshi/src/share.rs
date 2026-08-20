@@ -42,7 +42,7 @@ use koshi_ipc::wire::WireName;
 
 use crate::cli::{Expiry, SessionRef, ShareCommand};
 use crate::output::RemoteReady;
-use crate::{output, targeting};
+use crate::{output, prompt, targeting};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::{ipc_client, router_client};
@@ -149,7 +149,7 @@ pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result
         }
         ShareCommand::Revoke { identity, session } => {
             let scope = scope_of(&runtime_dir, session.as_ref())?;
-            revoke(identity, scope.as_ref(), prompt_yes, |kind| {
+            revoke(identity, scope.as_ref(), prompt::yes, |kind| {
                 router_client::router_request(&runtime_dir, kind)
             })
         }
@@ -184,7 +184,7 @@ pub fn run(command: &ShareCommand, context: Option<&InSessionContext>) -> Result
 ///
 /// Grants on other sessions are never touched: each request names one scope.
 ///
-/// `confirm` is asked once, with the question to print; `prompt_yes` is what
+/// `confirm` is asked once, with the question to print; `prompt::yes` is what
 /// the command passes. `ask` carries one control-plane request to the router
 /// and hands back its answer; the command passes
 /// [`router_client::router_request`].
@@ -359,7 +359,7 @@ fn remote_ready(runtime_dir: &Path) -> Result<RemoteReady, CliError> {
         println!("remote access is off.");
         format!("turn it on and open {address}? [y/N] ")
     };
-    if !prompt_yes(&question) {
+    if !prompt::yes(&question) {
         return Ok(if enabled {
             RemoteReady::Blocked { address }
         } else {
@@ -371,18 +371,6 @@ fn remote_ready(runtime_dir: &Path) -> Result<RemoteReady, CliError> {
         RouterResult::Error(_) => Ok(RemoteReady::Blocked { address }),
         other => Err(refusal(&other)),
     }
-}
-
-/// Print `prompt` and read one line, answering true only for a typed yes. A
-/// terminal that cannot be read answers no.
-fn prompt_yes(prompt: &str) -> bool {
-    print!("{prompt}");
-    let _ = io::stdout().flush();
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
 /// The scope a `--session` flag names: `None` when the flag is absent, else

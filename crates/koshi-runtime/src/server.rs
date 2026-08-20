@@ -149,10 +149,10 @@ pub struct Server {
     /// a per-pane forwarder thread owns the handle's receivers and pushes the
     /// child's output and exit into the inbox.
     pub(crate) pty_handles: HashMap<PaneId, PtyHandle>,
-    /// The last size each live pane's PTY was set to, keyed by pane id. Kept in
-    /// sync by every path that resizes a PTY, so a reflow can resize (and emit
-    /// [`Event::PtyResized`] only for panes
-    /// whose size actually changed — never re-solving to a stale reference.
+    /// The last size each live pane's PTY was set to, keyed by pane id. Every
+    /// path that resizes a PTY writes the new size here. A reflow resizes, and
+    /// emits [`Event::PtyResized`], only for the panes whose solved size
+    /// differs from this record.
     pub(crate) pty_sizes: HashMap<PaneId, PtySize>,
     /// Event fan-out hub: every emitted [`Event`] is delivered to each
     /// subscriber over its own bounded queue.
@@ -495,12 +495,12 @@ impl Server {
             return;
         }
         for id in self.event_bus.desynced() {
-            let viewed = self
+            let Some(client_id) = self
                 .subscriptions
                 .iter()
                 .find(|&&(subscriber, _)| subscriber == id)
-                .map(|&(_, client_id)| client_id);
-            let Some(client_id) = viewed else {
+                .map(|&(_, client_id)| client_id)
+            else {
                 tracing::warn!(
                     subscriber = %id,
                     "paused subscriber views no client; unsubscribing"
@@ -540,9 +540,8 @@ impl Server {
     /// offers a newer one. A subscriber the send removed — its receiver is gone
     /// — takes its `subscriptions` entry with it.
     pub fn push_frames(&mut self) {
-        // The list is taken out for the walk and put back after it: building a
-        // frame and queueing it both need `self`. Nothing in the loop touches
-        // `subscriptions` itself.
+        // The list is taken out for the walk and put back after it. Nothing in
+        // the loop touches `subscriptions` itself.
         let subscriptions = std::mem::take(&mut self.subscriptions);
         for &(id, client_id) in &subscriptions {
             if let Some(bytes) = self.host_writes.remove(&client_id) {
@@ -774,6 +773,7 @@ impl Server {
             rows: self.config.pane.min_rows.max(MIN_PANE_SIZE.rows),
         }
     }
+
     /// Borrow the shared PTY backend.
     pub fn pty_backend(&self) -> &Arc<dyn PtyBackend> {
         &self.pty_backend

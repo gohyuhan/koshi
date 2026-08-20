@@ -1,7 +1,10 @@
 //! Tests for mouse hit-testing: chrome rows win over the pane area, a click maps
-//! to the pane content, its border side, a stack header, or a tab, the layout is
-//! centered and the letterbox margin hits nothing, two clients of different
-//! sizes hit-test independently, and degenerate frames are safe.
+//! to the pane content, its border side, a stack header, or a tab, a border
+//! corner reads as its vertical side, the layout is centered and the letterbox
+//! margin hits nothing, a pane's content rect and the cell inside it — counted
+//! from one, or clamped from zero — follow that centering, the tab strip reports
+//! the window it draws, two clients of different sizes hit-test independently,
+//! and degenerate frames are safe.
 
 use super::*;
 
@@ -344,6 +347,166 @@ fn degenerate_frames_hit_nothing() {
         &[],
     );
     assert_eq!(hit_test(zero.layout(chrome()), at(0, 0)), HitRegion::None);
+}
+
+/// A border corner cell reads as the left or right edge, never the top or
+/// bottom one.
+#[test]
+fn a_border_corner_reads_as_its_vertical_side() {
+    let pane = PaneId::new();
+    // Centered, so the pane's own top and bottom rows sit clear of the chrome
+    // rows and all four corners are reachable: the box spans (2, 2)–(41, 11).
+    let s = snap(
+        Size { cols: 44, rows: 14 },
+        Size { cols: 40, rows: 10 },
+        &[(pane, rect(0, 0, 40, 10), true)],
+        &[],
+        &[],
+    );
+    let corner = |x, y| hit_test(s.layout(chrome()), at(x, y));
+
+    assert_eq!(
+        corner(2, 2),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Left
+        }
+    );
+    assert_eq!(
+        corner(2, 11),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Left
+        }
+    );
+    assert_eq!(
+        corner(41, 2),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Right
+        }
+    );
+    assert_eq!(
+        corner(41, 11),
+        HitRegion::PaneBorder {
+            pane_id: pane,
+            side: Direction::Right
+        }
+    );
+}
+
+/// A 40x10 layout centered in a 44x14 viewport, with one visible pane filling
+/// it and one hidden pane beside it.
+fn centered_snap(visible: PaneId, hidden: PaneId) -> RenderSnapshot {
+    snap(
+        Size { cols: 44, rows: 14 },
+        Size { cols: 40, rows: 10 },
+        &[
+            (visible, rect(0, 0, 40, 10), true),
+            (hidden, rect(0, 0, 6, 4), false),
+        ],
+        &[],
+        &[],
+    )
+}
+
+/// A pane's content rect is its border inset, shifted into the centered layout.
+#[test]
+fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
+    let pane = PaneId::new();
+    let hidden = PaneId::new();
+    let s = centered_snap(pane, hidden);
+
+    // The layout origin is (2, 2); the pane's content starts one cell further
+    // in on both axes and loses one cell on each side.
+    assert_eq!(
+        pane_content_rect(s.layout(chrome()), pane),
+        Some(rect(3, 3, 38, 8))
+    );
+    // A hidden pane and a pane that is not in this frame have no content rect.
+    assert_eq!(pane_content_rect(s.layout(chrome()), hidden), None);
+    assert_eq!(pane_content_rect(s.layout(chrome()), PaneId::new()), None);
+
+    // The too-small overlay draws no pane at all.
+    let mut suppressed = centered_snap(pane, hidden);
+    suppressed.session.active_tab.all_suppressed = true;
+    assert_eq!(pane_content_rect(suppressed.layout(chrome()), pane), None);
+
+    // A zero-size viewport has nowhere to put it.
+    let mut zero = centered_snap(pane, hidden);
+    zero.client.viewport = Size { cols: 0, rows: 0 };
+    assert_eq!(pane_content_rect(zero.layout(chrome()), pane), None);
+}
+
+/// A cell inside a pane's content names the program's own cell, counting from
+/// `(1, 1)`; a cell outside that content names none.
+#[test]
+fn a_pane_local_cell_counts_from_one_and_refuses_a_cell_outside_the_pane() {
+    let pane = PaneId::new();
+    let s = centered_snap(pane, PaneId::new());
+    let local = |x, y| pane_local_cell(s.layout(chrome()), pane, at(x, y));
+
+    // The content rect spans columns 3–40 and rows 3–10.
+    assert_eq!(local(3, 3), Some((1, 1)));
+    assert_eq!(local(40, 10), Some((38, 8)));
+    // One cell past each far edge, and one cell before each near edge.
+    assert_eq!(local(41, 10), None);
+    assert_eq!(local(40, 11), None);
+    assert_eq!(local(2, 3), None);
+    assert_eq!(local(3, 2), None);
+}
+
+/// A cell outside a pane's content is pulled to the nearest edge cell of it,
+/// counted from `(0, 0)`.
+#[test]
+fn a_pane_cell_clamped_pulls_an_outside_cell_to_the_nearest_edge() {
+    let pane = PaneId::new();
+    let s = centered_snap(pane, PaneId::new());
+    let clamped = |x, y| pane_cell_clamped(s.layout(chrome()), pane, at(x, y));
+
+    // The content rect spans columns 3–40 and rows 3–10, so its own cells run
+    // (0, 0) to (37, 7).
+    assert_eq!(clamped(3, 3), Some((0, 0)));
+    assert_eq!(clamped(40, 10), Some((37, 7)));
+    // Past the far corner, and before the near corner: both pull inside.
+    assert_eq!(clamped(200, 200), Some((37, 7)));
+    assert_eq!(clamped(0, 0), Some((0, 0)));
+    // Off one axis only: that axis clamps, the other keeps its cell.
+    assert_eq!(clamped(1, 7), Some((0, 4)));
+    assert_eq!(clamped(20, 13), Some((17, 7)));
+    // A pane that is not drawn this frame names no cell at all.
+    assert_eq!(
+        pane_cell_clamped(s.layout(chrome()), PaneId::new(), at(3, 3)),
+        None
+    );
+}
+
+/// The first-visible index is the window the tabline actually draws: the peek
+/// the viewer set, clamped to the last tab, or the active tab's own window.
+#[test]
+fn tabline_first_visible_reports_the_window_the_strip_draws() {
+    let ids: Vec<TabId> = (0..8).map(|_| TabId::new()).collect();
+    let tabs: Vec<(TabId, &str)> = ids.iter().map(|&id| (id, "tab")).collect();
+    // The same row width the scroll-arrow test uses: eight tabs do not fit, so
+    // the strip scrolls.
+    let cols = badge_cols() + 21;
+    let s = snap(
+        Size { cols, rows: 8 },
+        Size { cols, rows: 8 },
+        &[],
+        &[],
+        &tabs,
+    );
+    let peek = |index| ViewerChrome {
+        tabline_offset: Some(index),
+        ..ViewerChrome::default()
+    };
+
+    assert_eq!(tabline_first_visible(s.layout(peek(2))), 2);
+    // An index past the last tab clamps to it.
+    assert_eq!(tabline_first_visible(s.layout(peek(99))), 7);
+    // Following the active tab, which is the first one, starts at the start.
+    assert_eq!(tabline_first_visible(s.layout(chrome())), 0);
 }
 
 /// Two clients viewing the same layout at different sizes hit-test in their own

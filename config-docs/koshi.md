@@ -96,8 +96,9 @@ that decides what they are told.
 
 Neither side owns these: every koshi process reads them for its own log file.
 
-Koshi writes `logs/koshi-log-<session-id>.log` below the state directory.
-Disabled logging creates no log file.
+Koshi writes `logs/koshi-log-<uuid>.log` below the state directory, one file
+per session, named by the session's bare UUID. Disabled logging creates no log
+file.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

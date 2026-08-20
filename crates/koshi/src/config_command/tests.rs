@@ -349,3 +349,49 @@ fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
         "version 1\nmigrated #true\n"
     );
 }
+
+#[test]
+fn check_of_a_directory_holding_no_config_file_says_so_and_names_the_directory() {
+    let dir = TempDir::new().unwrap();
+
+    let output = check(dir.path()).unwrap();
+
+    assert_eq!(
+        output,
+        format!("no config files found in {}\n", dir.path().display())
+    );
+}
+
+#[test]
+fn migrate_of_a_directory_holding_no_config_file_says_so_and_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let mut written: Vec<PathBuf> = Vec::new();
+
+    let output = migrate_in_dir_with(dir.path(), fake_migrate, |path, _| {
+        written.push(path.to_path_buf());
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        output,
+        format!("no config files found in {}\n", dir.path().display())
+    );
+    assert_eq!(written, Vec::<PathBuf>::new());
+}
+
+/// A `themes` entry that is not a `.kdl` file is left out of the scan, so a
+/// directory holding only such a file reads as holding no config file.
+#[test]
+fn a_themes_entry_that_is_not_kdl_is_left_out_of_the_scan() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("themes")).unwrap();
+    fs::write(dir.path().join("themes").join("notes.md"), "not config").unwrap();
+
+    let output = check(dir.path()).unwrap();
+
+    assert_eq!(
+        output,
+        format!("no config files found in {}\n", dir.path().display())
+    );
+}

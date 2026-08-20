@@ -33,8 +33,8 @@ fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
     let cli = Cli::parse();
 
-    // Every path funnels through one result, so a single conversion maps the
-    // outcome to the process exit code.
+    // A failure prints `koshi: <error>` on standard error before the process
+    // exits with that error's code.
     let code = match run(&cli) {
         Ok(()) => CliExitCode::Success,
         Err(err) => {
@@ -60,33 +60,29 @@ fn main() -> ExitCode {
 /// target from that machine's sessions instead, by the same rules. A verb the
 /// socket does not serve yet reports IPC unavailable.
 fn run(cli: &Cli) -> Result<(), CliError> {
-    // An entry point marked `#[beta_feature]` reads a process-wide flag and
-    // takes no gate argument, so the flag is set before any verb dispatches:
-    // one `allow-beta-features` answer covers the CLI verbs and the
-    // interactive launch alike.
+    // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
+    // entry point reads. It runs before any verb dispatches, so one
+    // `allow-beta-features` answer covers the CLI verbs and the interactive
+    // launch alike.
     let app = config::load_app_layer();
     config::apply_beta_gate(app.clone());
 
-    // This CLI is a client, so it reads its own `layout.new-pane-direction`
-    // out of `koshi.kdl` and puts it on the pane-opening verbs that were given
-    // no `--direction`. The session holds no split direction to fall back on.
+    // `layout.new-pane-direction` from this machine's `koshi.kdl`. A
+    // pane-opening verb given no `--direction` splits toward it; the session
+    // holds no direction of its own.
     let new_pane_direction = config::new_pane_direction(app);
 
-    // The action verbs travel a socket as commands; the remaining verbs
-    // (discovery listings, lifecycle) have their own serving layers. The
-    // probe with default targets only asks "is this an action verb" — the
-    // real command is built after routing resolves the targets.
+    // `to_action` with default targets answers only whether this is an action
+    // verb. The command that travels the socket is built after routing
+    // resolves the targets.
     let is_action = cli.command.as_ref().is_some_and(|command| {
         command
             .to_action(&ResolvedTargets::default(), new_pane_direction)
             .is_some()
     });
 
-    // `--remote` names the machine an invocation runs against, so it needs an
-    // invocation that can run there: `attach`, or an action verb dispatched to
-    // that machine. Every other verb answers from this machine alone, a bare
-    // `koshi --remote <server>` names nothing to run, and `--headless` would
-    // create a session here rather than there.
+    // `--remote` runs with `attach` and with an action verb. Every other verb,
+    // `--headless`, and a bare `koshi --remote <server>` are refused.
     if cli.remote.is_some() && !is_action && !matches!(cli.command, Some(CliCommand::Attach { .. }))
     {
         return Err(CliError::InvalidArgs {
@@ -96,8 +92,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Actions { command }) = &cli.command {
-        // `actions` introspects the static action table, so it renders locally
-        // rather than being served over IPC like the session verbs.
+        // `actions` renders from the static action table on this machine and
+        // asks nothing over IPC.
         return run_actions(command);
     }
 
@@ -113,16 +109,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     if let Some(CliCommand::Share { command }) = &cli.command {
         // Every share verb asks the router, which owns the token store, over
-        // this machine's own socket; no connection from another machine reaches
-        // it. A run outside every pane is never refused. A run in a pane is
-        // refused while anyone is attached to that pane's session from another
-        // machine: the session paints that pane to them too.
+        // this machine's own socket. A run outside every pane is never
+        // refused. A run in a pane is refused while anyone is attached to that
+        // pane's session from another machine.
         return share::run(command, InSessionContext::from_env()?.as_ref());
     }
 
     if let Some(CliCommand::Remote { command }) = &cli.command {
         // Every remote verb reads or writes the saved-server store on this
-        // machine, so it opens no connection and asks no running koshi.
+        // machine. It opens no connection and asks no running koshi.
         return remote_cmd::run(command);
     }
 
@@ -223,7 +218,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Version { format }) = &cli.command {
-        // This program's own build, so nothing is asked over a socket.
+        // This program's own build. Nothing is asked over a socket.
         print!(
             "{}",
             output::render_client_version(&version::ClientVersion::of_this_build(), *format)
@@ -232,9 +227,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::ServerVersion { session, format }) = &cli.command {
-        // Each koshi server names its own build in its greeting, so this
-        // dispatches no command and renders locally. The rows print whether or
-        // not every server answered, and the exit code carries the gap.
+        // Each koshi server names its own build in its greeting; this
+        // dispatches no command. The rows print whether or not every server
+        // answered, and the exit code carries the gap.
         let rows = version::server_version_rows(session.as_ref())?;
         print!("{}", output::render_server_versions(&rows, *format));
         return match version::unreachable_servers(&rows) {
@@ -245,8 +240,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
 
     if let Some(command) = cli.command.as_ref().filter(|command| is_discovery(command)) {
         // The discovery queries read every running session's state and render
-        // locally; they dispatch no command, so they never enter the routing
-        // layer the action verbs use.
+        // it here. They dispatch no command and never enter the routing layer
+        // the action verbs use.
         return run_discovery(command);
     }
 
@@ -259,8 +254,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if cli.headless {
-        // The session is created and left running with nothing attached, so
-        // the id it prints is how the shell reaches it again.
+        // The session is created and left running with nothing attached. Its
+        // id prints as `[SESSION ID]: <id>` on standard output.
         let runtime_dir = ipc_client::runtime_dir()?;
         let session_id = session_control::request_headless_session(
             &runtime_dir,
@@ -272,14 +267,15 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     }
 
     if cli.is_interactive_launch() {
-        // Offer a newer release before entering raw mode, so the prompt is a
-        // plain stdin read; failures never block the launch.
+        // The update offer runs before the terminal enters raw mode, and reads
+        // its answer from plain standard input. A failure never blocks the
+        // launch.
         updater::maybe_prompt_startup_update();
         return koshi_client::app::run(cli.profile.as_deref());
     }
 
-    // Session verbs read the in-session identity first, so a broken pane
-    // environment reports itself rather than as a missing daemon.
+    // The in-session identity is read before any session verb dispatches, so a
+    // broken pane environment reports itself rather than a missing daemon.
     let in_session = InSessionContext::from_env()?;
 
     // Attach is not an action verb, so it dispatches here rather than through
@@ -287,8 +283,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     // the named session; typed outside one it joins that session in this
     // terminal.
     if let Some(CliCommand::Attach { session, save_as }) = &cli.command {
-        // `--remote` names the machine, so a pane identity on this one decides
-        // nothing: the session is resolved and joined on the named machine.
+        // With `--remote` the session is resolved and joined on the named
+        // machine; a pane identity on this one is not read.
         if let Some(server) = &cli.remote {
             return attach::run_remote(server, save_as.as_deref(), session.as_deref());
         }
@@ -339,8 +335,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         .as_ref()
         .expect("an action verb is always a parsed subcommand");
 
-    // `--remote` names the machine, so the pane identity on this one decides
-    // nothing: the target is picked from the sessions on the named machine.
+    // With `--remote` the target is picked from the sessions on the named
+    // machine; the pane identity on this one is not read.
     let result = match &cli.remote {
         Some(server) => targeting::submit_remote(server, cli_command, new_pane_direction)?,
         None => match targeting::route(cli_command, in_session.as_ref())? {
@@ -463,13 +459,8 @@ fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
     };
     print!("{rendered}");
 
-    let listing = matches!(
-        command,
-        CliCommand::ListSessions { .. }
-            | CliCommand::ListTabs { .. }
-            | CliCommand::ListPanes { .. }
-            | CliCommand::ListClients { .. }
-    );
+    // Every discovery query other than an `inspect` is a listing.
+    let listing = !matches!(command, CliCommand::Inspect { .. });
     match found.incomplete_listing() {
         Some(error) if listing => Err(error),
         _ => Ok(()),

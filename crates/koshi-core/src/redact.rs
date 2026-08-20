@@ -16,9 +16,8 @@ pub const REDACTED: &str = "***";
 /// A key is redacted if it *contains* any of these.
 const SENSITIVE_KEY_FRAGMENTS: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH"];
 
-/// The in-session capability token. Any process in a pane inherits it and can
-/// act as that pane, so it is always redacted — by this name and by the `TOKEN`
-/// fragment in [`SENSITIVE_KEY_FRAGMENTS`].
+/// The in-session capability token. Redacted by this exact name, and by the
+/// `TOKEN` fragment in [`SENSITIVE_KEY_FRAGMENTS`].
 const ALWAYS_HIDDEN_KEY: &str = "KOSHI_CONTEXT_TOKEN";
 
 /// An environment value after redaction. A `Hidden` value never reveals its
@@ -62,8 +61,7 @@ impl Marker {
     }
 }
 
-// A marker holds a real secret, so its `Debug` must never reveal the literal:
-// tracing a struct that carries markers, or an assertion failure, prints `***`.
+// Writes `***`, never the marker's literal.
 impl std::fmt::Debug for Marker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(REDACTED)

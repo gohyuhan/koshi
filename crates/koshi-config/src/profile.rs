@@ -253,14 +253,13 @@ impl Walker<'_> {
             self.error(node.span(), "`version` takes no children");
             return;
         }
-        let [entry] = node.entries() else {
-            self.error(node.span(), "`version` takes exactly one integer argument");
-            return;
+        let entry = match node.entries() {
+            [entry] if entry.name().is_none() => entry,
+            _ => {
+                self.error(node.span(), "`version` takes exactly one integer argument");
+                return;
+            }
         };
-        if entry.name().is_some() {
-            self.error(node.span(), "`version` takes exactly one integer argument");
-            return;
-        }
         let Some(found) = entry
             .value()
             .as_integer()
@@ -663,7 +662,7 @@ impl Walker<'_> {
                 "a collapsed stack member cannot hold focus; mark it `expanded`",
             );
         }
-        let weights = members.iter().map(|_| SizeWeight::default()).collect();
+        let weights = vec![SizeWeight::default(); members.len()];
         let children = members
             .into_iter()
             .enumerate()

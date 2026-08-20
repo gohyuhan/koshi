@@ -14,11 +14,10 @@
 //! token from the session's endpoint file (`EndpointFile` in `koshi-ipc`)
 //! when it connects.
 
-use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::ids::{parse_prefixed_uuid, ClientId, PaneId, SessionId};
 use uuid::Uuid;
 
 use crate::error::CliError;
-use koshi_core::ids::parse_prefixed_uuid;
 
 /// The in-session identity a `koshi` CLI inherits from its pane's
 /// environment.

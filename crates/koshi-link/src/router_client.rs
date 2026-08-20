@@ -101,8 +101,8 @@ pub fn router_request(
 /// Sends exactly one Restart exchange and never starts a router. `Ok(false)`
 /// means no router was running, so nothing restarted.
 ///
-/// A router that refuses the request is [`CliError::IpcUnavailable`]. An older
-/// router refuses it that way, by name, because its build has no such kind.
+/// A router that refuses the request is [`CliError::IpcUnavailable`]. A router
+/// whose build has no such kind refuses it that way, by name.
 pub fn restart_running_router(runtime_dir: &Path) -> Result<bool, CliError> {
     match exchange(runtime_dir, &RouterRequestKind::Restart)? {
         None => Ok(false),
@@ -171,35 +171,32 @@ pub fn running_router_remote_connections(runtime_dir: &Path) -> RemoteConnection
 /// answered but predates the version field. Sends nothing besides the Hello;
 /// never starts a router.
 pub fn running_router_version(runtime_dir: &Path) -> Result<Option<String>, CliError> {
-    let endpoint = match EndpointFile::read(&router_endpoint_path(runtime_dir)) {
-        Ok(endpoint) => endpoint,
-        Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
-        Err(error) => return Err(talk_failed(error)),
+    let Some((mut connection, endpoint)) = open_router(runtime_dir)? else {
+        return Ok(None);
     };
-    let mut connection = match Connection::connect(&endpoint.socket) {
-        Ok(connection) => connection,
-        Err(IpcError::NoListener { .. }) => return Ok(None),
-        Err(error) => return Err(talk_failed(error)),
-    };
-
     let hello = RouterRequest {
         request_id: 1,
         kind: RouterRequestKind::hello(endpoint.token),
     };
     connection.send(&hello).map_err(talk_failed)?;
     let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    match talk::ROUTER.take_result(reply)? {
-        RouterResult::Hello {
-            protocol_version,
-            version,
-        } => {
-            talk::ROUTER.settled_version(protocol_version)?;
-            Ok(Some(version))
-        }
-        RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
-            detail: refusal.message,
-        }),
-        other => Err(talk::ROUTER.unexpected_reply(&other)),
+    talk::router_hello_version(reply).map(Some)
+}
+
+/// A connection to the running router, with the endpoint file that named it.
+///
+/// `Ok(None)` means no router is running — the endpoint file is missing, or
+/// nothing listens at the address it names. Nothing is sent.
+fn open_router(runtime_dir: &Path) -> Result<Option<(Connection, EndpointFile)>, CliError> {
+    let endpoint = match EndpointFile::read(&router_endpoint_path(runtime_dir)) {
+        Ok(endpoint) => endpoint,
+        Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
+        Err(error) => return Err(talk_failed(error)),
+    };
+    match Connection::connect(&endpoint.socket) {
+        Ok(connection) => Ok(Some((connection, endpoint))),
+        Err(IpcError::NoListener { .. }) => Ok(None),
+        Err(error) => Err(talk_failed(error)),
     }
 }
 
@@ -212,17 +209,9 @@ fn exchange(
     runtime_dir: &Path,
     kind: &RouterRequestKind,
 ) -> Result<Option<RouterResult>, CliError> {
-    let endpoint = match EndpointFile::read(&router_endpoint_path(runtime_dir)) {
-        Ok(endpoint) => endpoint,
-        Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
-        Err(error) => return Err(talk_failed(error)),
+    let Some((mut connection, endpoint)) = open_router(runtime_dir)? else {
+        return Ok(None);
     };
-    let mut connection = match Connection::connect(&endpoint.socket) {
-        Ok(connection) => connection,
-        Err(IpcError::NoListener { .. }) => return Ok(None),
-        Err(error) => return Err(talk_failed(error)),
-    };
-
     let hello = RouterRequest {
         request_id: 1,
         kind: RouterRequestKind::hello(endpoint.token),
@@ -235,21 +224,7 @@ fn exchange(
     connection.send(&request).map_err(talk_failed)?;
 
     let hello_reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
-    let router_version = match talk::ROUTER.take_result(hello_reply)? {
-        RouterResult::Hello {
-            protocol_version,
-            version,
-        } => {
-            talk::ROUTER.settled_version(protocol_version)?;
-            version
-        }
-        RouterResult::Error(refusal) => {
-            return Err(CliError::IpcUnavailable {
-                detail: refusal.message,
-            })
-        }
-        other => return Err(talk::ROUTER.unexpected_reply(&other)),
-    };
+    let router_version = talk::router_hello_version(hello_reply)?;
 
     let reply: IncomingRouterResponse = connection.recv().map_err(talk_failed)?;
     talk::ROUTER
@@ -260,8 +235,7 @@ fn exchange(
 /// A request kind the router does not have, restated to name both builds.
 ///
 /// Only [`IpcErrorCode::UnsupportedKind`] is restated, and only when the
-/// router reports a build other than this one: that pairing is a request this
-/// koshi has and the running router does not. Every other answer, every other
+/// router reports a build other than this one. Every other answer, every other
 /// refusal, and every refusal from a router on this build passes through
 /// unchanged.
 ///
@@ -294,8 +268,8 @@ fn name_other_build(result: RouterResult, router_version: &str) -> RouterResult 
 /// Start the router as a detached process serving `runtime_dir`.
 ///
 /// It gets no standard input, output, or error, and a process group of its
-/// own, so it keeps running after the shell that started it goes away and
-/// writes nothing over the caller's terminal.
+/// own: it keeps running after the shell that started it goes away, and writes
+/// nothing over the caller's terminal.
 fn spawn_router_detached(runtime_dir: &Path) -> Result<(), CliError> {
     let exe = std::env::current_exe().map_err(|error| CliError::IpcUnavailable {
         detail: format!("this binary's own path could not be read: {error}"),

@@ -97,18 +97,14 @@ impl FakePtyBackend {
     /// Deliver `bytes` as a chunk of child output on `pane`'s handle.
     ///
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned. If the
-    /// handle has been dropped the bytes are discarded silently, mirroring a
-    /// real child writing to a closed reader.
+    /// handle has been dropped the bytes are discarded and the call still
+    /// returns `Ok(())`.
     pub fn push_output(&self, pane: PaneId, bytes: impl Into<Vec<u8>>) -> Result<()> {
-        let state = self.state.lock().unwrap();
-        let record = state
-            .panes
-            .get(&pane)
-            .ok_or(PtyError::UnknownPane { pane })?;
-        if let Some(output_tx) = &record.output_tx {
-            let _ = output_tx.send(bytes.into());
-        }
-        Ok(())
+        self.with_record(pane, |record| {
+            if let Some(output_tx) = &record.output_tx {
+                let _ = output_tx.send(bytes.into());
+            }
+        })
     }
 
     /// Close a pane's output channel, which models its PTY reaching EOF once the
@@ -131,13 +127,9 @@ impl FakePtyBackend {
     ///
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn trigger_child_exit(&self, pane: PaneId, status: ExitStatus) -> Result<()> {
-        let state = self.state.lock().unwrap();
-        let record = state
-            .panes
-            .get(&pane)
-            .ok_or(PtyError::UnknownPane { pane })?;
-        let _ = record.exit_tx.send(status);
-        Ok(())
+        self.with_record(pane, |record| {
+            let _ = record.exit_tx.send(status);
+        })
     }
 
     /// The panes spawned so far, in spawn order.
@@ -146,10 +138,12 @@ impl FakePtyBackend {
         self.state.lock().unwrap().spawn_order.clone()
     }
 
-    /// Read one part of a pane's record.
+    /// Run `read` on a pane's record while the state lock is held, and return
+    /// its value.
     ///
-    /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
-    fn read_record<T>(&self, pane: PaneId, read: impl FnOnce(&PaneRecord) -> T) -> Result<T> {
+    /// Returns [`PtyError::UnknownPane`] if the pane was never spawned; `read`
+    /// then does not run.
+    fn with_record<T>(&self, pane: PaneId, read: impl FnOnce(&PaneRecord) -> T) -> Result<T> {
         let state = self.state.lock().unwrap();
         state
             .panes
@@ -158,24 +152,28 @@ impl FakePtyBackend {
             .ok_or(PtyError::UnknownPane { pane })
     }
 
-    /// The [`SpawnSpec`] a pane was spawned with.
+    /// The [`SpawnSpec`] a pane was spawned with, or
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn spawn_spec(&self, pane: PaneId) -> Result<SpawnSpec> {
-        self.read_record(pane, |record| record.spec.clone())
+        self.with_record(pane, |record| record.spec.clone())
     }
 
-    /// Every write made to a pane, in order.
+    /// Every write made to a pane, in order, or [`PtyError::UnknownPane`] if
+    /// the pane was never spawned.
     pub fn writes(&self, pane: PaneId) -> Result<Vec<Vec<u8>>> {
-        self.read_record(pane, |record| record.writes.clone())
+        self.with_record(pane, |record| record.writes.clone())
     }
 
-    /// Every resize applied to a pane, in order.
+    /// Every resize applied to a pane, in order — the spawn size first — or
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
     pub fn resizes(&self, pane: PaneId) -> Result<Vec<PtySize>> {
-        self.read_record(pane, |record| record.resizes.clone())
+        self.with_record(pane, |record| record.resizes.clone())
     }
 
-    /// Every kill requested for a pane, in order.
+    /// Every kill requested for a pane, in order, or [`PtyError::UnknownPane`]
+    /// if the pane was never spawned.
     pub fn kills(&self, pane: PaneId) -> Result<Vec<KillPolicy>> {
-        self.read_record(pane, |record| record.kills.clone())
+        self.with_record(pane, |record| record.kills.clone())
     }
 }
 
@@ -186,6 +184,9 @@ impl PtyBackend for FakePtyBackend {
     /// appends `pane_id` to the spawn order. The handle carries the same id. It
     /// receives the output and exit status a test drives with
     /// [`push_output`](Self::push_output) and [`trigger_child_exit`](Self::trigger_child_exit).
+    ///
+    /// Returns the error set by [`fail_spawns_with`](Self::fail_spawns_with),
+    /// when one is set.
     ///
     /// # Panics
     ///
@@ -221,6 +222,10 @@ impl PtyBackend for FakePtyBackend {
     ///
     /// Appends the new size to the pane's resize history. The initial size
     /// from spawn is already recorded; subsequent resizes are added in order.
+    ///
+    /// Returns the error set by [`fail_resizes_on`](Self::fail_resizes_on)
+    /// when it names `pane`, else [`PtyError::UnknownPane`] if the pane was
+    /// never spawned.
     fn resize(&self, pane: PaneId, size: PtySize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         if let Some((failing, error)) = &state.resize_error {
@@ -240,6 +245,10 @@ impl PtyBackend for FakePtyBackend {
     ///
     /// Appends the byte slice to the pane's write history. Calls are
     /// captured in order; a test asserts on them via [`writes`](Self::writes).
+    ///
+    /// Returns the error set by [`fail_writes_on`](Self::fail_writes_on) when
+    /// it names `pane`, else [`PtyError::UnknownPane`] if the pane was never
+    /// spawned.
     fn write(&self, pane: PaneId, bytes: &[u8]) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         if let Some((failing, error)) = &state.write_error {
@@ -259,6 +268,10 @@ impl PtyBackend for FakePtyBackend {
     ///
     /// Appends the kill policy to the pane's kill history. Calls are
     /// captured in order; a test asserts on them via [`kills`](Self::kills).
+    /// The pane's record stays, so a write or resize after a kill still
+    /// records.
+    ///
+    /// Returns [`PtyError::UnknownPane`] if the pane was never spawned.
     fn kill(&self, pane: PaneId, kill_policy: KillPolicy) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let record = state

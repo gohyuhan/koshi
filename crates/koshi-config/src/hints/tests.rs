@@ -103,6 +103,92 @@ fn prefix_labels_carry_the_shipped_names() {
 }
 
 #[test]
+fn a_complete_binding_reports_an_exact_match_and_no_longer_sequence() {
+    let matched = catalog().match_sequence(LockMode::Normal, &KeySequence::from(ctrl('q')));
+    assert_eq!(
+        matched.exact,
+        Some(BoundAction {
+            action: ActionRef::core("quit").expect("`core:quit` is a valid action name"),
+            args: koshi_core::resolve::ActionArgs::None,
+        })
+    );
+    assert!(
+        !matched.prefix,
+        "nothing shipped continues past `<C-q>`, so it is not a prefix of a longer binding"
+    );
+}
+
+#[test]
+fn a_prefix_chord_reports_no_exact_match() {
+    let matched = catalog().match_sequence(LockMode::Normal, &KeySequence::from(ctrl('p')));
+    assert_eq!(matched.exact, None);
+    assert!(matched.prefix);
+}
+
+#[test]
+fn an_unbound_sequence_matches_nothing() {
+    let catalog = catalog();
+    assert_eq!(
+        catalog.match_sequence(LockMode::Normal, &KeySequence::from(ctrl('y'))),
+        KeyMatch::default()
+    );
+    // A mode nothing binds in holds no map at all.
+    assert_eq!(
+        catalog.match_sequence(LockMode::Resize, &KeySequence::from(ctrl('q'))),
+        KeyMatch::default()
+    );
+}
+
+#[test]
+fn the_configured_unlock_alternative_becomes_the_escape_chord() {
+    let alt_u = KeyChord::new(ModFlags::ALT, Key::Char('u'));
+    let config = KeybindingsConfig {
+        chord_timeout_ms: 1234,
+        unlock_alternative: Some(alt_u),
+        ..KeybindingsConfig::default()
+    };
+
+    let catalog = KeymapHintCatalog::from_parts(
+        &keymap_layers(None, Leader::default()),
+        &config,
+        &ActionRegistry::new(),
+    );
+
+    assert_eq!(catalog.unlock_chord(), alt_u);
+    assert_eq!(catalog.chord_timeout(), Duration::from_millis(1234));
+}
+
+#[test]
+fn the_unlock_chord_is_the_reserved_one_when_the_config_names_no_alternative() {
+    assert_eq!(catalog().unlock_chord(), KeybindingsConfig::RESERVED_UNLOCK);
+    assert_eq!(catalog().chord_timeout(), Duration::from_millis(500));
+}
+
+#[test]
+fn a_rebound_leader_moves_the_prefix_labels() {
+    let config = KeybindingsConfig {
+        leader: Leader::Mods(ModFlags::ALT),
+        ..KeybindingsConfig::default()
+    };
+
+    let hints = KeymapHintCatalog::from_parts(
+        &keymap_layers(None, Leader::Mods(ModFlags::ALT)),
+        &config,
+        &ActionRegistry::new(),
+    )
+    .hints_for(LockMode::Normal);
+
+    assert_eq!(
+        hints
+            .prefix_labels
+            .get(&KeyChord::new(ModFlags::ALT, Key::Char('p')))
+            .map(String::as_str),
+        Some("PANE")
+    );
+    assert_eq!(hints.prefix_labels.get(&ctrl('p')), None);
+}
+
+#[test]
 fn reverted_defaults_to_false() {
     assert!(!catalog().hints_for(LockMode::Normal).reverted);
 }

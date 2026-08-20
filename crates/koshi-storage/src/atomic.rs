@@ -84,8 +84,8 @@ pub fn write_atomic(dst: &Path, data: &[u8]) -> Result<(), StorageError> {
         .map_err(|e| io_err(format!("create temp in {}: {e}", dir.display())))?;
     tmp.write_all(data)
         .map_err(|e| io_err(format!("write temp for {}: {e}", dst.display())))?;
-    // Set the final mode before the fsync, so the durable inode carries it. The
-    // renamed file is never readable by anyone the final mode excludes.
+    // The mode goes on before the fsync, so the durable inode carries it. The
+    // renamed file is never readable by anyone that mode excludes.
     if let Some(perms) = target_mode {
         fs::set_permissions(tmp.path(), perms)
             .map_err(|e| io_err(format!("set perms for {}: {e}", dst.display())))?;

@@ -1,18 +1,16 @@
 //! The keymap hint catalog: one resolved lookup table serving both the hint
 //! bar and keyboard resolution.
 //!
-//! A keymap is answered from twice per keystroke — "what does this chord fire"
-//! and "what should the hint bar show" — so it is folded once here rather than
-//! at each question: fold the layers with [`merge_keymaps`], join every
-//! surviving binding to its action's display name from the [`ActionRegistry`],
-//! and file the results per mode behind [`Arc`]s. Reading a mode's hints then
-//! costs two `Arc` clones, not a re-merge.
+//! [`KeymapHintCatalog::from_parts`] builds the catalog at startup from the
+//! keybinding layers and the action table: it folds the layers with
+//! [`merge_keymaps`], joins every surviving binding to its action's display
+//! name from the [`ActionRegistry`], and files the result per mode behind
+//! [`Arc`]s. [`KeymapHintCatalog::hints_for`] then hands one mode's data out
+//! as `Arc` clones, and [`KeymapHintCatalog::match_sequence`] answers one
+//! pending key sequence from the same folded map.
 //!
-//! [`HintBinding`] and [`KeymapHints`] describe the *keymap*. The renderer
-//! re-exports both, so a frame's fields resolve from one place.
-//!
-//! The catalog is built at startup by [`KeymapHintCatalog::from_parts`], from
-//! the folded keybinding layers and the action table.
+//! [`HintBinding`] and [`KeymapHints`] describe the keymap; the renderer
+//! re-exports both.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -63,9 +61,8 @@ pub struct HintBinding {
     /// Whether a user surface authored the winning entry (a default shows
     /// `false`). Any `true` entry under a prefix voids the prefix's label.
     pub user_set: bool,
-    /// Whether the bar must keep this hint visible ahead of every other —
-    /// set on the reserved unlock binding in locked mode, which truncation
-    /// never drops.
+    /// Whether the hint sorts ahead of the unpinned hints in its own modifier
+    /// group — set on every locked-mode entry firing `core:unlock`.
     pub pinned: bool,
 }
 
@@ -108,11 +105,11 @@ impl KeymapHintCatalog {
     /// Resolve the hint catalog from `layers` and the effective keybinding
     /// config, whose timing fields and unlock alternative carry into lookups.
     ///
-    /// Folds the layers with [`merge_keymaps`], so the hint bar honors the
-    /// firing model: a binding whose action the resolver refuses
-    /// (unregistered, or not yet implemented) never yields a hint. In locked
-    /// mode the entry firing `core:unlock` is pinned, so truncation keeps
-    /// the escape hint visible.
+    /// Folds the layers with [`merge_keymaps`]: a binding whose action the
+    /// resolver refuses (unregistered, or not yet implemented) yields no
+    /// hint. In locked mode every entry firing `core:unlock` is flagged
+    /// pinned; the hint bar sorts pinned hints before unpinned ones in the
+    /// same modifier group.
     pub fn from_parts(
         layers: &[KeyMapLayer],
         config: &KeybindingsConfig,
@@ -215,8 +212,8 @@ pub struct KeyMatch {
 ///
 /// Walks the mode's user-set entries and surviving defaults (steal already
 /// resolved by the merge, so the two never hold the same key), reads each
-/// action's display name from the registry, and flags the locked-mode
-/// unlock binding pinned.
+/// action's display name from the registry, and flags every locked-mode
+/// binding firing `unlock` pinned.
 fn mode_entries(
     merged: &MergedModeMap,
     registry: &ActionRegistry,

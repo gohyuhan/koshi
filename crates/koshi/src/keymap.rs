@@ -108,6 +108,7 @@ pub fn view_from_partial(
         None => None,
     };
 
+    let modes = built_in_modes();
     let layers = keymap_layers(user_modes, config.leader);
     let report = detect_conflicts(
         &layers,
@@ -115,7 +116,7 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &built_in_modes(),
+        &modes,
     );
 
     // All-or-nothing: a refused user layer drops the whole section back to
@@ -132,7 +133,7 @@ pub fn view_from_partial(
         config.unlock_alternative,
         config.max_chord_depth,
         &registry,
-        &built_in_modes(),
+        &modes,
     );
     KeymapView {
         config,

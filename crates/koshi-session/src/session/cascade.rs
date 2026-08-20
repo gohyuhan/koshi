@@ -125,15 +125,15 @@ pub fn remove_pane_cascade(
                 let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, min);
                 let candidates =
                     focus_candidates(info.old_rect, &solved.panes, &solved.stack_headers);
+                // The verdict reads the tab, the registry and the candidates —
+                // nothing client-specific — so every repaired client inherits
+                // the same pane.
+                let verdict = repair_focus(tab, &session.panes, candidates, empty_tab_policy);
                 session
                     .clients
                     .list_attached()
                     .filter(|client| client.focused_pane(tab_id) == Some(pane_id))
-                    .map(|client| {
-                        let verdict =
-                            repair_focus(tab, &session.panes, candidates.clone(), empty_tab_policy);
-                        (client.id(), verdict)
-                    })
+                    .map(|client| (client.id(), verdict))
                     .collect()
             };
 
@@ -173,9 +173,8 @@ pub fn remove_pane_cascade(
             EmptyTabPolicy::CloseTab => {
                 events.extend(close_and_refocus_tab(session, tab_id));
             }
-            // Respawn a fresh shell into the now-empty tab instead of closing it.
-            // Spawning a replacement pane is the runtime's job; the session layer
-            // has no command/spawn path for it yet, so this arm is inert.
+            // `RespawnShell` leaves the empty tab in place and emits no events;
+            // spawning the replacement pane is the runtime's job.
             EmptyTabPolicy::RespawnShell => {}
         },
     }
@@ -226,14 +225,12 @@ pub fn on_child_exit(
     let policy = pane.exit_policy;
 
     match policy {
-        // Respawn in place: Running -> Exited -> Spawning. The actual process
-        // spawn is the runtime's job; here we only advance the lifecycle. An
-        // illegal step is a no-op (the pane was not Running), so applying the
-        // two events in sequence settles on the right state either way.
+        // Respawn in place: Running -> Exited -> Spawning. Only the lifecycle
+        // advances here; the runtime spawns the process. A pane that was not
+        // `Running` rejects the step and keeps the state it had, so the two
+        // events settle on the right state either way.
         PaneExitPolicy::RespawnShell => {
             if let Some(pane) = session.panes.get_mut(pane_id) {
-                // A rejected step is the intended no-op described above, so the
-                // two events settle on the right state either way; ignore both.
                 let _ = pane.update_lifecycle(PaneLifecycleEvent::ProcessExited {
                     code: exit_code,
                     at: exited_at,

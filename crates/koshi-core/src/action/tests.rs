@@ -243,8 +243,8 @@ fn lock_and_focus_seeds_are_client_scoped() {
     }
 }
 
-/// Pins which seeds are coming-soon: the selection, search, and plugin families
-/// and `quit` have no runtime handler, so each is seeded `ComingSoon` and every
+/// Pins which seeds are coming-soon: `core:copy-selection` and the six plugin
+/// actions have no runtime handler, so each is seeded `ComingSoon` and every
 /// other action is `Available`.
 #[test]
 fn coming_soon_seeds_are_pinned() {

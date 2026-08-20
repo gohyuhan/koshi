@@ -529,6 +529,204 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
+// --- Asking a session to restart --------------------------------------------
+
+#[test]
+fn a_restarting_reply_reports_the_session_restarting_and_asked_for_a_restart() {
+    let runtime_dir = test_runtime_dir("restart-ok");
+    let session = SessionId::new();
+    let (server, asked) = fake_layout_session(&runtime_dir, session, IpcResult::Restarting);
+
+    assert_eq!(
+        restart_running_session(&runtime_dir, session).expect("the exchange succeeds"),
+        SessionRestart::Restarting
+    );
+    assert_eq!(
+        asked.recv().expect("the session read one request"),
+        IpcRequestKind::Restart,
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_session_whose_build_has_no_restart_request_reads_as_too_old() {
+    let runtime_dir = test_runtime_dir("restart-too-old");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedKind,
+            message: "this build has no request kind named Restart".to_string(),
+        }),
+    );
+
+    assert_eq!(
+        restart_running_session(&runtime_dir, session).expect("a refusal by name is not an error"),
+        SessionRestart::TooOld
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence() {
+    let runtime_dir = test_runtime_dir("restart-refused");
+    let session = SessionId::new();
+    let (server, _asked) = fake_layout_session(
+        &runtime_dir,
+        session,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::BadToken,
+            message: "the token presented does not match this Koshi's".to_string(),
+        }),
+    );
+
+    let error = restart_running_session(&runtime_dir, session).expect_err("the restart is refused");
+
+    assert_eq!(
+        error.to_string(),
+        "IPC unavailable: the token presented does not match this Koshi's"
+    );
+
+    server.join().expect("fake session exits");
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn asking_a_session_with_no_endpoint_file_to_restart_restarts_nothing() {
+    let runtime_dir = test_runtime_dir("restart-no-endpoint");
+    let session = SessionId::new();
+
+    assert_eq!(
+        restart_running_session(&runtime_dir, session).expect("a missing session is not an error"),
+        SessionRestart::NotRunning
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn asking_a_session_nothing_listens_behind_to_restart_restarts_nothing() {
+    let runtime_dir = test_runtime_dir("restart-dead-socket");
+    let session = SessionId::new();
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, session),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, session))
+    .expect("write endpoint file");
+
+    assert_eq!(
+        restart_running_session(&runtime_dir, session).expect("a dead socket is not an error"),
+        SessionRestart::NotRunning
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+// --- Reading a running session's build --------------------------------------
+
+#[test]
+fn a_session_with_no_endpoint_file_reports_no_build() {
+    let runtime_dir = test_runtime_dir("version-no-endpoint");
+    let session = SessionId::new();
+
+    assert_eq!(
+        running_session_version(&runtime_dir, session).expect("a missing session is not an error"),
+        None
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_session_nothing_listens_behind_reports_no_build() {
+    let runtime_dir = test_runtime_dir("version-dead-socket");
+    let session = SessionId::new();
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, session),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, session))
+    .expect("write endpoint file");
+
+    assert_eq!(
+        running_session_version(&runtime_dir, session).expect("a dead socket is not an error"),
+        None
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+// --- Which file names a session, and under which suffix ---------------------
+
+#[test]
+fn an_endpoint_file_and_a_resume_file_are_told_apart_by_their_suffix() {
+    // Both names start `session-<uuid>`, so only the suffix separates the
+    // session that advertises a socket from the one that left a resume file.
+    let runtime_dir = test_runtime_dir("suffixes");
+    let advertised = SessionId::new();
+    let resumable = SessionId::new();
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, advertised),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, advertised))
+    .expect("write endpoint file");
+    std::fs::write(
+        runtime_dir.join(format!("{resumable}{RESUME_SUFFIX}")),
+        b"{}",
+    )
+    .expect("write resume file");
+
+    assert_eq!(advertised_sessions(&runtime_dir), vec![advertised]);
+    assert_eq!(sessions_with_resume_files(&runtime_dir), vec![resumable]);
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_file_that_names_no_session_is_passed_over() {
+    let runtime_dir = test_runtime_dir("suffixes-junk");
+    let advertised = SessionId::new();
+    EndpointFile {
+        socket: koshi_ipc::endpoint::socket_addr(&runtime_dir, advertised),
+        token: ConnectionToken::generate(),
+        pid: std::process::id(),
+    }
+    .write(&EndpointFile::path(&runtime_dir, advertised))
+    .expect("write endpoint file");
+    std::fs::write(runtime_dir.join("session-not-a-uuid.json"), b"{}").expect("bad uuid");
+    std::fs::write(runtime_dir.join("router.json"), b"{}").expect("no session prefix");
+    std::fs::write(runtime_dir.join(advertised.to_string()), b"{}").expect("no suffix");
+
+    assert_eq!(advertised_sessions(&runtime_dir), vec![advertised]);
+    assert_eq!(
+        sessions_with_resume_files(&runtime_dir),
+        Vec::<SessionId>::new()
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+#[test]
+fn a_runtime_directory_that_cannot_be_read_names_no_session() {
+    let runtime_dir = test_runtime_dir("suffixes-absent");
+    let absent = runtime_dir.join("absent");
+
+    assert_eq!(advertised_sessions(&absent), Vec::<SessionId>::new());
+    assert_eq!(sessions_with_resume_files(&absent), Vec::<SessionId>::new());
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
 // --- Sessions other local users started -------------------------------------
 
 /// A session describing itself as `name` and holding nothing.

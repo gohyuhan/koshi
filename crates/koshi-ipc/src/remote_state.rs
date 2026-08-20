@@ -14,7 +14,9 @@
 //!
 //! Both files sit inside the private koshi data directory, are restricted to
 //! the owning user, and are replaced through
-//! [`koshi_storage::atomic::write_atomic`].
+//! [`koshi_storage::atomic::write_atomic`]. The token store and the
+//! saved-server store are written the same way, through the same
+//! `write_owner_only` this module holds.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -166,6 +168,16 @@ fn read_private<T: DeserializeOwned>(file: RemoteFile, path: &Path) -> Result<T,
     serde_json::from_slice(&data).map_err(|error| unreadable(file, path, error.to_string()))
 }
 
+/// Encode `value` and write it at `path` as a file only the owning user
+/// reaches, naming the failure as [`IpcError::RemoteFileWrite`] on `file`.
+fn write_private<T: Serialize>(file: RemoteFile, path: &Path, value: &T) -> Result<(), IpcError> {
+    write_owner_only(path, value).map_err(|detail| IpcError::RemoteFileWrite {
+        file,
+        path: path.display().to_string(),
+        detail,
+    })
+}
+
 /// Encode `value` and write it at `path`, replacing whatever is there, and
 /// create the directory holding it when it is missing.
 ///
@@ -173,33 +185,31 @@ fn read_private<T: DeserializeOwned>(file: RemoteFile, path: &Path) -> Result<T,
 /// existing file before the replace so the new file carries it too. On Windows
 /// the file takes the data directory's owner-scoped ACLs. The directory itself
 /// gets mode `0700` on Unix.
-fn write_private<T: Serialize>(file: RemoteFile, path: &Path, value: &T) -> Result<(), IpcError> {
-    let write_failed = |detail: String| IpcError::RemoteFileWrite {
-        file,
-        path: path.display().to_string(),
-        detail,
-    };
+///
+/// # Errors
+/// The text of the first step that failed: creating the directory, setting a
+/// mode, encoding `value`, or replacing the file.
+pub(crate) fn write_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent).map_err(|error| write_failed(error.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| write_failed(error.to_string()))?;
+                .map_err(|error| error.to_string())?;
         }
     }
     #[cfg(unix)]
     if path.exists() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| write_failed(error.to_string()))?;
+            .map_err(|error| error.to_string())?;
     }
-    let data = serde_json::to_vec(value).map_err(|error| write_failed(error.to_string()))?;
-    koshi_storage::atomic::write_atomic(path, &data)
-        .map_err(|error| write_failed(error.to_string()))
+    let data = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    koshi_storage::atomic::write_atomic(path, &data).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

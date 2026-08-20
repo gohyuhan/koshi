@@ -9,8 +9,8 @@
 //! the right neighbor donates), and `resize(pane, Right, -5)` moves the
 //! same border inward (the pane donates, the right neighbor gains).
 //!
-//! Panes inside a stack resize as a unit: the stack's outer border is the
-//! one that moves, because collapsed children have no independent size.
+//! Panes inside a stack resize as a unit: the border that moves is the
+//! stack's outer one, never a border between two stack members.
 
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use crate::size::SizeWeight;
 use crate::solver::{directional_child_rects, slot_floor, MIN_PANE_SIZE};
-use crate::tree::LayoutNode;
+use crate::tree::{split_axis, LayoutNode};
 
 /// A rejected resize. The caller's tree is unchanged in every case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -93,12 +93,8 @@ pub fn resize_with_min(
         return Err(ResizeError::PaneNotFound { pane });
     };
 
-    let horizontal = matches!(direction, Direction::Left | Direction::Right);
-    let wanted = if horizontal {
-        SplitDirection::Horizontal
-    } else {
-        SplitDirection::Vertical
-    };
+    let wanted = split_axis(direction);
+    let horizontal = wanted == SplitDirection::Horizontal;
 
     // Deepest ancestor split on the right axis with a neighbor on the
     // resize side — that split owns the border being moved.
@@ -165,12 +161,7 @@ pub fn has_adjacent_border(tree: &LayoutNode, pane: PaneId, direction: Direction
     let Some(path) = tree.path_to(pane) else {
         return false;
     };
-    let wanted = if matches!(direction, Direction::Left | Direction::Right) {
-        SplitDirection::Horizontal
-    } else {
-        SplitDirection::Vertical
-    };
-    find_border(tree, &path, wanted, direction).is_some()
+    find_border(tree, &path, split_axis(direction), direction).is_some()
 }
 
 /// Find the deepest ancestor split with `wanted` direction where the path's

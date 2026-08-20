@@ -21,15 +21,30 @@ use crate::session::state::Session;
 
 /// What to record on a freshly created pane: the spawn request (working
 /// directory and command) the PTY (pseudo-terminal — the OS handle a shell
-/// process runs its input/output through) layer later honors. Bundled so the
-/// requested program and cwd are never silently dropped — the new pane's
-/// record is self-describing for restore and respawn.
+/// process runs its input/output through) layer later honors. The new pane's
+/// record carries both; a restore or respawn reads the same request back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewPaneSpec {
     /// Working directory; `None` inherits.
     pub cwd: Option<PathBuf>,
     /// Command to run; `None` launches the default shell.
     pub command: Option<SpawnSpec>,
+}
+
+/// Register `pane_id` in the session's pane registry as `Running`, carrying
+/// `spec`'s cwd and command and stamped `created_at`. An id already in the
+/// registry keeps its existing record.
+pub(crate) fn register_running_pane(
+    session: &mut Session,
+    pane_id: PaneId,
+    spec: NewPaneSpec,
+    created_at: SystemTime,
+) {
+    let mut record = PaneRecord::new(pane_id, created_at);
+    record.cwd = spec.cwd;
+    record.command = spec.command;
+    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
+    let _ = session.panes.insert(record);
 }
 
 /// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
@@ -47,11 +62,12 @@ pub struct NewPaneSpec {
 /// preflighted its fit against the sizing viewport, and spawned the child under
 /// `new_pane_id` — so this only commits state and registers the pane
 /// `Running`, the child already being live.
+///
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `spec` carries the cwd and
-/// command recorded on the new pane so a later restore or respawn can recover
-/// the request; `created_at` is supplied by the caller so the timestamp crosses
-/// the IPC boundary intact and tests stay deterministic.
+/// command recorded on the new pane, which a later restore or respawn reads
+/// back; `created_at` is the caller's timestamp, never read from the clock
+/// here.
 ///
 /// Returns the focused client's *previous* tab when this op switched it onto
 /// `tab_id` (so the caller can reflow the tab it left), and the events to emit —
@@ -93,14 +109,8 @@ pub fn commit_new_pane(
         }
     }
 
-    // Register the new pane. Its process is already live, so it enters `Running`
-    // straight away; the spawn request is recorded so a later restore or respawn
-    // can recover it.
-    let mut record = PaneRecord::new(new_pane_id, created_at);
-    record.cwd = spec.cwd;
-    record.command = spec.command;
-    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-    let _ = session.panes.insert(record);
+    // Register the new pane as `Running`, carrying its spawn request.
+    register_running_pane(session, new_pane_id, spec, created_at);
 
     // Swap in the pre-built tree and record focus history.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
@@ -110,37 +120,26 @@ pub fn commit_new_pane(
         }
     }
 
-    // A new pane must be seen by somebody, so a zoom that would hide it is
-    // dropped — but only the zoom of whoever is responsible for the split.
+    // Drop the zoom that would hide the new pane, then focus it:
     //
     // - **A client made the split** (a keybinding, the in-session CLI, or an
-    //   explicit `--client`): that client's zoom drops, so the new pane lands
-    //   visible in the tiled layout it was sized against. Every other client
-    //   keeps its zoom; one client splitting is not a reason to disturb another
-    //   client's view.
-    // - **No client made it** (an external caller naming only a tab): nobody owns
-    //   the edit, so there is no one client to un-zoom — and leaving every zoom
-    //   in place would add the pane underneath them, where no zoomed viewer would
-    //   ever see it and none of them focuses it. Every zoom of this tab drops
-    //   instead, so the pane the caller asked for actually appears.
+    //   explicit `--client`): that client's zoom drops and it focuses the new
+    //   pane. Every other client keeps its zoom and its focus.
+    // - **No client made it** (an external caller naming only a tab): every zoom
+    //   of this tab drops, so the new pane sits in the tiled layout every viewer
+    //   sees, and no client's focus moves.
+    let mut prior_pane = None;
     match focus {
         Some(client_id) => {
             if let Some(client) = session.clients.get_mut(client_id) {
                 client.clear_zoom(tab_id);
+                prior_pane = client.update_focused_pane(tab_id, new_pane_id);
             }
         }
         None => {
             for client in session.clients.list_attached_mut() {
                 client.clear_zoom(tab_id);
             }
-        }
-    }
-
-    // Auto-focus the resolved client on the new pane.
-    let mut prior_pane = None;
-    if let Some(client_id) = focus {
-        if let Some(client) = session.clients.get_mut(client_id) {
-            prior_pane = client.update_focused_pane(tab_id, new_pane_id);
         }
     }
 

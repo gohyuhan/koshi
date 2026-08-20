@@ -118,14 +118,12 @@ impl Tab {
 }
 
 /// The configuration a session captured when it started. A snapshot, not a
-/// live reference: a config reload builds a new snapshot for new sessions
-/// instead of rewriting a running one underneath its clients. Placeholder
-/// shell: the config model fills it in.
+/// live reference: a config reload builds a new snapshot for new sessions and
+/// leaves a running session's copy as it is. Carries no fields.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionConfig;
 
-/// Handle to a session's plugin runtime. Placeholder shell: the plugin
-/// host fills it in.
+/// Handle to a session's plugin runtime. Carries no fields.
 #[derive(Debug)]
 pub struct PluginRuntimeHandle;
 
@@ -218,8 +216,6 @@ impl Session {
     /// lifecycle unchanged.
     pub fn attach_client(&mut self, client: Client) -> Option<Client> {
         let displaced = self.clients.attach(client);
-        // `ClientAttached` only revives a `Detaching` session; from `Running`
-        // it is an expected no-op, so a rejected transition is not a fault here.
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
         displaced
     }
@@ -231,8 +227,8 @@ impl Session {
     pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
         let removed = self.clients.detach(client_id);
         if self.clients.is_empty() {
-            // Already stopping/stopped sessions reject the park; that is fine —
-            // a session winding down stays wound down when its last client goes.
+            // A `Stopping` or `Stopped` session rejects the park and keeps the
+            // state it had.
             let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
         removed
@@ -284,12 +280,10 @@ impl Session {
     /// Check every cross-store invariant and return *all* violations in one
     /// pass, or `Ok(())` when the session is internally consistent.
     ///
-    /// Run before a snapshot or render is built from the session: the tabs and
-    /// their layout trees, the pane registry, each attached client's focus, and
-    /// each tab's own identity can drift apart, and a corrupt state must be
-    /// caught — and named — before it reaches a client. Collecting rather than
-    /// failing fast means one call surfaces the whole picture, not just the
-    /// first fault. See [`SessionConsistencyError`] for the individual checks.
+    /// Checks the tabs and their layout trees, the pane registry, each attached
+    /// client's focus and zoom, and each tab's own identity against one
+    /// another. Callers run it before building a snapshot or a render from the
+    /// session. See [`SessionConsistencyError`] for the individual checks.
     pub fn validate(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf. Built once here,

@@ -107,8 +107,8 @@ pub struct Client {
     /// The pane a forwarded press captured, and the button that pressed it.
     /// While a button is held, its drags and its release go to this pane even as
     /// the pointer leaves it, and a drag or release with no capture is not
-    /// forwarded. Set once the session reports the press accepted for that
-    /// pane; cleared on the next release.
+    /// forwarded. Set when this viewer forwards the press; cleared on the next
+    /// release.
     ///
     /// The stored button is the reliable one — a press always names its button,
     /// while some terminals report every drag and release as the left button.
@@ -326,7 +326,7 @@ impl Client {
     /// Take everything the subscription has delivered and apply what the
     /// viewer must react to, returning how many deliveries were seen.
     ///
-    /// Today the events that matter are the session's reports that this
+    /// The events that matter are the session's reports that this
     /// viewer's input mode changed — which happens when `koshi lock --client`
     /// names it, or when its own lock binding fires — and that its mouse-select
     /// mode changed, which happens when its own `core:mouse-select` binding

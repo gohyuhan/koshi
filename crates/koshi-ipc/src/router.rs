@@ -41,9 +41,9 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::CONTROL_PROTOCOL`].
 ///
-/// Version 1 is what 0.2.0 speaks. Version 2 refuses a session the router does
-/// not have with [`NotFound`](crate::protocol::IpcErrorCode::NotFound), where
-/// version 1 sent
+/// On version 2 a session the router does not have is refused with
+/// [`NotFound`](crate::protocol::IpcErrorCode::NotFound); on version 1 the
+/// same case is
 /// [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest).
 pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
 
@@ -51,10 +51,8 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.max;
 /// highest is below this one is refused with
 /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
-/// The floor is 1, the version 0.2.0 speaks. No build before 0.2.0 has a
-/// router.
-///
-/// Raising this floor drops support for every build below it.
+/// The floor is 1, the version 0.2.0 speaks. Raising it drops support for
+/// every build below it.
 pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.min;
 
 /// Which session a request means: the id, or the generated display name.
@@ -172,11 +170,9 @@ pub enum RouterRequestKind {
 
 impl RouterRequestKind {
     /// The Hello this build opens a router connection with: the control-plane
-    /// versions it speaks, lowest first, and `token` read from the router's
+    /// versions it speaks, [`MIN_ROUTER_PROTOCOL_VERSION`] then
+    /// [`ROUTER_PROTOCOL_VERSION`], and `token` read from the router's
     /// endpoint file.
-    ///
-    /// Every caller builds its Hello here, so the two version fields are
-    /// filled in one place.
     #[must_use]
     pub fn hello(token: ConnectionToken) -> RouterRequestKind {
         RouterRequestKind::Hello {

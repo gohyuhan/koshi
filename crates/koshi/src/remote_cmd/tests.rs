@@ -166,3 +166,70 @@ fn a_server_that_is_not_saved_is_refused_naming_the_listing_command() {
         "invalid arguments: no saved server is named work; run `koshi remote list`"
     );
 }
+
+/// A store holding the two records `two_records` builds.
+fn store_of(records: Vec<SavedServer>) -> ServerStore {
+    let mut store = ServerStore::new();
+    store.records = records;
+    store
+}
+
+#[test]
+fn a_saved_server_is_found_by_its_name_and_by_its_address() {
+    let store = store_of(two_records());
+
+    assert_eq!(
+        named(&store, "work").expect("the name is saved").address,
+        "laptop.local:7654"
+    );
+    assert_eq!(
+        named(&store, "10.0.0.4:7654")
+            .expect("the address is saved")
+            .address,
+        "10.0.0.4:7654"
+    );
+}
+
+#[test]
+fn a_server_the_store_does_not_hold_is_refused_naming_the_listing_command() {
+    let store = store_of(two_records());
+
+    assert_eq!(
+        named(&store, "desk")
+            .expect_err("nothing is saved under desk")
+            .to_string(),
+        "invalid arguments: no saved server is named desk; run `koshi remote list`"
+    );
+}
+
+/// One word answering for two records — one record's chosen name, another
+/// record's address — is refused rather than resolved to either of them.
+#[test]
+fn a_word_naming_one_server_and_addressing_another_is_refused_as_ambiguous() {
+    let store = store_of(vec![
+        SavedServer {
+            name: Some("desk:7654".to_string()),
+            address: "laptop.local:7654".to_string(),
+            secret: ConnectionToken::new("f00d"),
+            fingerprint: "aa".repeat(32),
+            added_at: at(10),
+            last_used_at: None,
+        },
+        SavedServer {
+            name: None,
+            address: "desk:7654".to_string(),
+            secret: ConnectionToken::new("beef"),
+            fingerprint: "bb".repeat(32),
+            added_at: at(20),
+            last_used_at: None,
+        },
+    ]);
+
+    assert_eq!(
+        named(&store, "desk:7654")
+            .expect_err("two records answer to that word")
+            .to_string(),
+        "invalid arguments: desk:7654 is the name of one saved server and the address of \
+         another; run `koshi remote list` and name the one you mean"
+    );
+}

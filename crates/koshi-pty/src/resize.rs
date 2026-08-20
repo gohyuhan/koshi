@@ -7,8 +7,6 @@
 //! [`crate::backend::state::PtyBackend::resize`], reporting per pane what it did. It does **no**
 //! border math and does not depend on `koshi-layout` (the two are siblings).
 
-use std::cmp::max;
-
 use koshi_core::{geometry::Rect, ids::PaneId, process::PtySize};
 
 use crate::backend::state::PtyBackend;
@@ -26,8 +24,8 @@ const MIN_PTY_SIZE: PtySize = PtySize { cols: 2, rows: 1 };
 #[must_use]
 pub fn compute_pty_size(content: Rect) -> PtySize {
     PtySize {
-        cols: max(content.size.cols, MIN_PTY_SIZE.cols),
-        rows: max(content.size.rows, MIN_PTY_SIZE.rows),
+        cols: content.size.cols.max(MIN_PTY_SIZE.cols),
+        rows: content.size.rows.max(MIN_PTY_SIZE.rows),
     }
 }
 

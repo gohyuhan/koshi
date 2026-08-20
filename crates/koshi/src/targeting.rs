@@ -102,22 +102,7 @@ pub fn route(command: &CliCommand, context: Option<&InSessionContext>) -> Result
         _ => discovery::fetch_all(&runtime_dir),
     };
 
-    let overview = pick_session(
-        command.target_session(),
-        command.target_pane(),
-        command.target_tab(),
-        command.target_client(),
-        &found,
-    )?;
-    let tab = command
-        .target_tab()
-        .map(|tab_ref| resolve_tab(overview, tab_ref))
-        .transpose()?;
-    let session = overview.session.id;
-    let targets = ResolvedTargets {
-        session: Some(session),
-        tab,
-    };
+    let (session, targets) = resolve_targets(command, &found)?;
 
     // A probe can land back on the session this CLI runs inside (e.g.
     // `--session` naming it); then the command still travels as the pane's
@@ -161,22 +146,7 @@ pub fn submit_remote(
     let arg = ServerArg::Saved(saved);
     let found = remote_census(&arg, rows_to_ask(command.target_session(), rows));
 
-    let overview = pick_session(
-        command.target_session(),
-        command.target_pane(),
-        command.target_tab(),
-        command.target_client(),
-        &found,
-    )?;
-    let tab = command
-        .target_tab()
-        .map(|tab_ref| resolve_tab(overview, tab_ref))
-        .transpose()?;
-    let session = overview.session.id;
-    let targets = ResolvedTargets {
-        session: Some(session),
-        tab,
-    };
+    let (session, targets) = resolve_targets(command, &found)?;
 
     let (_, action) = command
         .to_action(&targets, new_pane_direction)
@@ -225,6 +195,37 @@ fn remote_census(arg: &ServerArg, rows: Vec<RemoteSessionRow>) -> Discovered {
             .then(a.session.id.cmp(&b.session.id))
     });
     found
+}
+
+/// The session `command` targets over the census `found`, and its
+/// `--session`/`--tab` flags resolved to ids.
+///
+/// [`pick_session`] picks the session; the resolved `session` field always
+/// carries that session's id, and `tab` carries the id a `--tab` flag names
+/// within it, or `None` when the flag is absent.
+fn resolve_targets(
+    command: &CliCommand,
+    found: &Discovered,
+) -> Result<(SessionId, ResolvedTargets), CliError> {
+    let overview = pick_session(
+        command.target_session(),
+        command.target_pane(),
+        command.target_tab(),
+        command.target_client(),
+        found,
+    )?;
+    let tab = command
+        .target_tab()
+        .map(|tab_ref| resolve_tab(overview, tab_ref))
+        .transpose()?;
+    let session = overview.session.id;
+    Ok((
+        session,
+        ResolvedTargets {
+            session: Some(session),
+            tab,
+        },
+    ))
 }
 
 /// Pick the one running session an external command targets. Precedence:

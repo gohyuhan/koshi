@@ -13,11 +13,20 @@
 //! normalize) live in sibling modules and return new trees; nothing here
 //! mutates in place.
 
-use koshi_core::geometry::SplitDirection;
+use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::PaneId;
 use serde::{Deserialize, Serialize};
 
 use crate::size::SizeWeight;
+
+/// The split axis a cardinal direction runs on: [`SplitDirection::Horizontal`]
+/// for `Left` and `Right`, [`SplitDirection::Vertical`] for `Up` and `Down`.
+pub(crate) fn split_axis(direction: Direction) -> SplitDirection {
+    match direction {
+        Direction::Left | Direction::Right => SplitDirection::Horizontal,
+        Direction::Up | Direction::Down => SplitDirection::Vertical,
+    }
+}
 
 /// A node in the layout tree: a single pane, or a split holding children.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,15 +92,13 @@ impl LayoutNode {
     /// collapsed member, cycling stack focus, appending a new member.
     pub fn stack_containing_mut(&mut self, pane: PaneId) -> Option<&mut SplitNode> {
         let path = self.path_to(pane)?;
-        let mut deepest = None;
-        for depth in 0..path.len() {
-            if let LayoutNode::Split(split) = self.node_at(&path[..depth]) {
-                if split.direction == SplitDirection::Stacked {
-                    deepest = Some(depth);
-                }
-            }
-        }
-        Some(self.split_at_mut(&path[..deepest?]))
+        let deepest = (0..path.len()).rev().find(|&depth| {
+            matches!(
+                self.node_at(&path[..depth]),
+                LayoutNode::Split(split) if split.direction == SplitDirection::Stacked
+            )
+        })?;
+        Some(self.split_at_mut(&path[..deepest]))
     }
 
     /// The child indices taken at each split from this node down to the

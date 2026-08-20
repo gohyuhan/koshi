@@ -39,25 +39,18 @@ use crate::tree::{LayoutChild, LayoutNode, SplitNode};
 /// tree was already canonical.
 #[must_use]
 pub fn normalize(tree: &LayoutNode, live_panes: &HashSet<PaneId>) -> Option<LayoutNode> {
-    normalize_node(tree, live_panes)
-}
-
-/// Recursively normalize the given node against live panes, dropping dead children
-/// and collapsing unneeded structures. Returns `None` if no live children survive.
-fn normalize_node(node: &LayoutNode, live: &HashSet<PaneId>) -> Option<LayoutNode> {
-    let split = match node {
+    let split = match tree {
         LayoutNode::Pane(id) => {
-            return live.contains(id).then(|| node.clone());
+            return live_panes.contains(id).then(|| tree.clone());
         }
         LayoutNode::Split(split) => split,
     };
 
-    // Children first, so every fix below sees already-canonical subtrees.
-    // Weights are re-paired by index here; a missing weight becomes the
-    // default share.
+    // Every child is normalized before the fixes below run. Weights are
+    // re-paired by index here; a missing weight becomes the default share.
     let mut entries: Vec<Entry> = Vec::with_capacity(split.children.len());
     for (index, child) in split.children.iter().enumerate() {
-        let Some(node) = normalize_node(&child.node, live) else {
+        let Some(node) = normalize(&child.node, live_panes) else {
             continue;
         };
         let weight = split.weights.get(index).copied().unwrap_or_default();

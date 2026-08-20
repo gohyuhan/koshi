@@ -333,9 +333,8 @@ fn hold_panes(listener: Listener, token: &ConnectionToken, idle_exit: Duration) 
     start_accept_thread(listener, links_tx);
 
     loop {
-        let connection = match links.recv_timeout(idle_exit) {
-            Ok(connection) => connection,
-            Err(_) => break,
+        let Ok(connection) = links.recv_timeout(idle_exit) else {
+            break;
         };
         let (reader, writer) = connection.split();
         sink.link_up(writer);

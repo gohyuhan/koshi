@@ -3,7 +3,7 @@
 //! control sequences move the cursor, style text, and switch modes. `vte`
 //! decodes UTF-8 upstream, so `print` receives a ready `char`.
 //!
-//! What each callback handles today:
+//! What each callback does:
 //!
 //! - `print` — printable glyphs. Each is translated through the active GL
 //!   charset (whichever of the `G0`–`G3` slots is selected for printing: DEC
@@ -28,8 +28,8 @@
 //!   working-directory report.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
-//!   ends a text run like any non-printing event); the payload and `put` are
-//!   not handled.
+//!   ends a text run like any non-printing event); the payload and `put`
+//!   change nothing.
 //!
 //! The performer's helpers are split across submodules by concern — charset
 //! translation ([`charset`]), device-query replies ([`device`]), grapheme
@@ -181,8 +181,9 @@ impl vte::Perform for TerminalState {
         // A control byte ends any text run, so no following glyph folds into it.
         self.reset_cluster();
         match byte {
-            // LF, VT, FF: line feed (VT/FF treated as LF).
-            0x0A..=0x0C => {
+            // LF, VT, FF, IND: move down one line, scrolling at the bottom
+            // margin (VT and FF act as LF).
+            0x0A..=0x0C | 0x84 => {
                 self.linefeed();
                 self.clear_wrap_latch();
             }
@@ -203,11 +204,6 @@ impl vte::Perform for TerminalState {
                 let col = self.active_cursor().col;
                 let next = next_tab_stop(&self.tab_stops, col, last_col);
                 self.active_cursor_mut().col = next;
-                self.clear_wrap_latch();
-            }
-            // IND: move down one line, scrolling at the bottom margin.
-            0x84 => {
-                self.linefeed();
                 self.clear_wrap_latch();
             }
             // NEL: move down one line, then return to column zero.
@@ -308,8 +304,8 @@ impl vte::Perform for TerminalState {
 
         // DEC private modes carry a `?` private marker, which vte collects into
         // `intermediates`. DECSET/DECRST take a parameter list (`CSI ? Pm h/l`),
-        // so apply every mode in the sequence; any mode not handled here is
-        // owned by a later task.
+        // so apply every mode in the sequence; a mode with no arm below
+        // changes nothing.
         if intermediates == b"?" {
             // Modes in one DECSET/DECRST list are applied left-to-right, each
             // taking effect immediately (as in xterm), so per-screen state like
@@ -332,8 +328,8 @@ impl vte::Perform for TerminalState {
             return;
         }
 
-        // Any other intermediate marks a sequence (DECSTR `!p`, DECSCA `"q`, …)
-        // owned by a later task — skip it.
+        // Any other intermediate (DECSCA `"q`, a non-DECSTR `!p`, …) is
+        // ignored.
         if !intermediates.is_empty() {
             return;
         }
@@ -586,8 +582,8 @@ impl vte::Perform for TerminalState {
             }
             // SD — scroll the region down by n; the cursor stays put. `CSI Ps T`
             // is the common form, but `CSI <5 params> T` is xterm highlight mouse
-            // tracking (a later task), so only T's 0/1-param form scrolls; `CSI Ps ^`
-            // is the unambiguous ECMA-48 form and always scrolls.
+            // tracking, so only T's 0/1-param form scrolls; `CSI Ps ^` is the
+            // unambiguous ECMA-48 form and always scrolls.
             'T' | '^' => {
                 if action == '^' || params.len() <= 1 {
                     let n = move_count(params);
@@ -622,7 +618,7 @@ impl vte::Perform for TerminalState {
                     self.clear_wrap_latch();
                 }
             }
-            // Any other CSI final byte is not handled yet, so it is ignored.
+            // Any other CSI final byte is ignored.
             _ => {}
         }
     }
@@ -644,7 +640,7 @@ impl vte::Perform for TerminalState {
             b")" => return self.designate_charset(1, byte),
             b"*" => return self.designate_charset(2, byte),
             b"+" => return self.designate_charset(3, byte),
-            // Any other intermediate marks an ESC form owned by a later task.
+            // Any other intermediate is ignored.
             [_, ..] => return,
             // No intermediate: fall through to the plain-ESC finals below.
             [] => {}
@@ -671,7 +667,7 @@ impl vte::Perform for TerminalState {
             b'M' => self.reverse_index(),
             // RIS — restore terminal display state to its initial values.
             b'c' => self.hard_reset(),
-            // Other ESC finals (charset selection, …) are not handled yet.
+            // Any other ESC final is ignored.
             _ => {}
         }
     }
@@ -704,7 +700,7 @@ impl vte::Perform for TerminalState {
                     self.reported_cwd = Some(cwd);
                 }
             }
-            // Any other OSC command is not handled yet.
+            // Any other OSC command is ignored.
             _ => {}
         }
     }
@@ -714,7 +710,7 @@ impl vte::Perform for TerminalState {
     /// the text run. A combining mark or variation selector after the DCS
     /// therefore does not fold onto the glyph before it. Clearing at DCS entry
     /// covers the whole string: the body bytes arrive through `put`, which
-    /// never prints. DCS payload handling is deferred.
+    /// never prints. The DCS payload changes nothing.
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
         self.reset_cluster();
     }

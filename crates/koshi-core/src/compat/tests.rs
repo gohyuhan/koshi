@@ -61,6 +61,26 @@ fn a_floor_above_the_ceiling_is_no_version_at_all() {
 }
 
 #[test]
+fn a_surface_breaking_both_rules_is_reported_on_its_floor_first() {
+    // The floor is above the ceiling AND the ceiling is two steps above the
+    // released value, so only the order of the two checks picks the message.
+    let doubly_broken = Surface {
+        name: "sample",
+        min: 5,
+        max: 4,
+        released: Some(1),
+    };
+
+    assert_eq!(
+        doubly_broken.version_problem(),
+        Some(
+            "the sample accepts 5 at the lowest and 4 at the highest, which is no version at all"
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn two_steps_above_the_released_value_is_a_problem() {
     // The real case this models: the control plane reached 3 on two bumps that
     // the rule does not allow, against a released value of 1.

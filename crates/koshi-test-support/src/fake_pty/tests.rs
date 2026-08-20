@@ -295,3 +295,108 @@ fn the_fake_is_usable_as_a_pty_backend_trait_object() {
         .unwrap();
     assert_eq!(handle.try_exit_status(), Some(ExitStatus::ExitCode(0)));
 }
+
+#[test]
+fn an_armed_spawn_failure_is_returned_and_registers_no_pane() {
+    let pty = FakePtyBackend::new();
+    let pane = PaneId::new();
+    pty.fail_spawns_with(PtyError::Spawn {
+        detail: "no such file".to_string(),
+    });
+
+    assert_eq!(
+        pty.spawn(pane, spec(), size(80, 24)).err(),
+        Some(PtyError::Spawn {
+            detail: "no such file".to_string()
+        })
+    );
+    // The failed spawn left nothing behind: the pane is unknown to every query.
+    assert_eq!(pty.spawned_panes(), Vec::<PaneId>::new());
+    assert_eq!(pty.spawn_spec(pane), Err(PtyError::UnknownPane { pane }));
+
+    // The failure stays armed for the next spawn too.
+    let other = PaneId::new();
+    assert_eq!(
+        pty.spawn(other, spec(), size(80, 24)).err(),
+        Some(PtyError::Spawn {
+            detail: "no such file".to_string()
+        })
+    );
+}
+
+#[test]
+fn an_armed_resize_failure_hits_only_the_pane_it_names() {
+    let pty = FakePtyBackend::new();
+    let failing = PaneId::new();
+    let healthy = PaneId::new();
+    pty.spawn(failing, spec(), size(80, 24)).unwrap();
+    pty.spawn(healthy, spec(), size(80, 24)).unwrap();
+    pty.fail_resizes_on(
+        failing,
+        PtyError::Io {
+            detail: "ioctl refused".to_string(),
+        },
+    );
+
+    assert_eq!(
+        pty.resize(failing, size(100, 30)),
+        Err(PtyError::Io {
+            detail: "ioctl refused".to_string()
+        })
+    );
+    pty.resize(healthy, size(100, 30)).unwrap();
+
+    // The refused resize is not recorded; the other pane's is.
+    assert_eq!(pty.resizes(failing).unwrap(), vec![size(80, 24)]);
+    assert_eq!(
+        pty.resizes(healthy).unwrap(),
+        vec![size(80, 24), size(100, 30)]
+    );
+}
+
+#[test]
+fn an_armed_write_failure_hits_only_the_pane_it_names() {
+    let pty = FakePtyBackend::new();
+    let failing = PaneId::new();
+    let healthy = PaneId::new();
+    pty.spawn(failing, spec(), size(80, 24)).unwrap();
+    pty.spawn(healthy, spec(), size(80, 24)).unwrap();
+    pty.fail_writes_on(
+        failing,
+        PtyError::Io {
+            detail: "broken pipe".to_string(),
+        },
+    );
+
+    assert_eq!(
+        pty.write(failing, b"ls\n"),
+        Err(PtyError::Io {
+            detail: "broken pipe".to_string()
+        })
+    );
+    pty.write(healthy, b"ls\n").unwrap();
+
+    // The refused write is not recorded; the other pane's is.
+    assert_eq!(pty.writes(failing).unwrap(), Vec::<Vec<u8>>::new());
+    assert_eq!(pty.writes(healthy).unwrap(), vec![b"ls\n".to_vec()]);
+}
+
+#[test]
+fn live_cwd_answers_the_directory_set_for_a_pane_and_none_for_every_other() {
+    let pty = FakePtyBackend::new();
+    let told = PaneId::new();
+    let untold = PaneId::new();
+    pty.spawn(told, spec(), size(80, 24)).unwrap();
+    pty.spawn(untold, spec(), size(80, 24)).unwrap();
+
+    pty.set_live_cwd(told, "/home/dev/work");
+
+    assert_eq!(pty.live_cwd(told), Some(PathBuf::from("/home/dev/work")));
+    assert_eq!(pty.live_cwd(untold), None);
+    // A pane that was never spawned answers `None` rather than erroring.
+    assert_eq!(pty.live_cwd(PaneId::new()), None);
+
+    // The latest directory set for a pane replaces the earlier one.
+    pty.set_live_cwd(told, "/tmp");
+    assert_eq!(pty.live_cwd(told), Some(PathBuf::from("/tmp")));
+}

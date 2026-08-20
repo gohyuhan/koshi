@@ -70,12 +70,11 @@ impl Widget for SnapshotWidget<'_> {
 pub(crate) fn register_terminal_restore(cleanup: &TerminalCleanupGuard) {
     cleanup.register_cleanup(Box::new(|| {
         let _ = disable_raw_mode();
-        // The cursor style koshi last copied out of a pane belongs to that pane,
-        // not to the shell koshi exits back to: quitting while vim was inserting
-        // would otherwise leave the user's own prompt wearing vim's blinking bar.
+        // Drops the cursor style koshi last copied out of a pane and puts the
+        // cursor back to the shape the user's own terminal is set to.
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
-        // Undo the mouse capture enabled at startup, so the terminal koshi exits
-        // back to has its native selection and scroll again.
+        // Releases the mouse capture enabled at startup: the terminal koshi
+        // exits back to has its own selection and scroll again.
         let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);

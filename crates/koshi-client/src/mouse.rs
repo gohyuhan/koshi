@@ -793,13 +793,14 @@ impl Client {
         }
     }
 
-    /// Capture the gesture `button` began in `pane`, after the session reported
-    /// the press accepted for that pane.
+    /// Capture the gesture `button` began in `pane`. The caller runs this for
+    /// every press it forwards, as it forwards it.
     ///
     /// The capture is what carries the rest of the gesture: the drags and the
     /// release that follow go to this same pane even as the pointer leaves it,
-    /// re-stamped with this button. Recording it on the session's report is what
-    /// keeps a press the pane refused from capturing anything.
+    /// re-stamped with this button. A press that is never forwarded — koshi's
+    /// own, or one the pane's tracking level does not ask for — captures
+    /// nothing.
     pub fn note_press_forwarded(&mut self, pane: PaneId, button: MouseButton) {
         self.mouse_capture = Some((pane, button));
     }
@@ -883,11 +884,11 @@ impl Client {
     /// A button gesture is captured: the press picks the focused pane under the
     /// pointer, and the drags and release that follow go to that same pane even
     /// as the pointer leaves it. The capture itself is recorded by
-    /// [`Client::note_press_forwarded`] once the session reports the press
-    /// accepted, so a press the pane refused captures nothing. A bare
-    /// move goes to the focused pane. A drag or release with no capture — the
-    /// press was koshi's, it focused nothing, or the pane refused it —
-    /// is dropped, so no program ever sees a release without its press.
+    /// [`Client::note_press_forwarded`], which the caller runs for every press
+    /// this returns. A bare move goes to the focused pane. A drag or release
+    /// with no capture — the press was koshi's, it focused nothing, or the
+    /// pane's tracking level did not ask for it — is dropped, so no program
+    /// ever sees a release without its press.
     ///
     /// A press or a bare move outside the pane's content reaches no program: it
     /// names no cell there. A captured drag or release does reach it, clamped to

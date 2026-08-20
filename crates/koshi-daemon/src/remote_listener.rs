@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
@@ -59,7 +59,7 @@ use koshi_ipc::remote_wire::{
 };
 use koshi_ipc::router::SessionSelector;
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
-use koshi_ipc::transport::{Connection, MAX_FRAME_LEN};
+use koshi_ipc::transport::{Connection, RawReader, RawWriter, ReadCloser, MAX_FRAME_LEN};
 
 use crate::router::RouterEvent;
 
@@ -447,25 +447,25 @@ fn serve_remote(
 
     reader.set_deadline(Some(deadline));
     writer.set_deadline(Some(deadline));
-    let opening = match read_client_frame(&mut reader, REMOTE_HELLO_MAX_LEN) {
-        Opening::Frame(RemoteClientFrame::Hello {
-            min_remote_version,
-            max_remote_version,
-            min_protocol_version,
-            max_protocol_version,
-            token,
-        }) => (
-            (min_remote_version, max_remote_version),
-            (min_protocol_version, max_protocol_version),
-            token,
-        ),
-        Opening::Frame(_) | Opening::Unreadable => {
-            refuse(&mut writer);
-            return;
-        }
-        Opening::Closed => return,
-    };
-    let ((min_remote, max_remote), versions, token) = opening;
+    let ((min_remote, max_remote), versions, token) =
+        match read_client_frame(&mut reader, REMOTE_HELLO_MAX_LEN) {
+            Opening::Frame(RemoteClientFrame::Hello {
+                min_remote_version,
+                max_remote_version,
+                min_protocol_version,
+                max_protocol_version,
+                token,
+            }) => (
+                (min_remote_version, max_remote_version),
+                (min_protocol_version, max_protocol_version),
+                token,
+            ),
+            Opening::Frame(_) | Opening::Unreadable => {
+                refuse(&mut writer);
+                return;
+            }
+            Opening::Closed => return,
+        };
 
     // The version is settled before the secret is looked at. This refusal names
     // both ranges instead of carrying REMOTE_REFUSED.
@@ -616,6 +616,26 @@ fn bridged_hello(token: ConnectionToken, versions: (u32, u32)) -> IpcRequest {
     }
 }
 
+/// Open the local connection to the session advertised at `endpoint_path` and
+/// send it the Hello carrying that session's endpoint token and `versions`.
+///
+/// Hands back the connection's two raw halves and the handle that closes its
+/// read direction.
+///
+/// `None` when the endpoint file cannot be read, its socket cannot be reached,
+/// the read direction cannot be made closable, or the Hello cannot be sent.
+fn open_session_bridge(
+    endpoint_path: &Path,
+    versions: (u32, u32),
+) -> Option<(RawReader, RawWriter, ReadCloser)> {
+    let endpoint = EndpointFile::read(endpoint_path).ok()?;
+    let mut local = Connection::connect(&endpoint.socket).ok()?;
+    let closer = local.read_closer().ok()?;
+    local.send(&bridged_hello(endpoint.token, versions)).ok()?;
+    let (from_session, to_session) = local.split_raw();
+    Some((from_session, to_session, closer))
+}
+
 /// Open the local connection to an admitted client's session and carry the
 /// bytes both ways.
 ///
@@ -641,28 +661,13 @@ fn bridge_to_session(
     versions: (u32, u32),
     admissions: &Sender<RouterEvent>,
 ) {
-    let Ok(endpoint) = EndpointFile::read(&endpoint_path) else {
+    let Some((mut from_session, mut to_session, closer)) =
+        open_session_bridge(&endpoint_path, versions)
+    else {
         refuse(&mut writer);
         report_ended(admissions, id);
         return;
     };
-    let Ok(mut local) = Connection::connect(&endpoint.socket) else {
-        refuse(&mut writer);
-        report_ended(admissions, id);
-        return;
-    };
-    let Ok(closer) = local.read_closer() else {
-        refuse(&mut writer);
-        report_ended(admissions, id);
-        return;
-    };
-    let hello = bridged_hello(endpoint.token, versions);
-    if local.send(&hello).is_err() {
-        refuse(&mut writer);
-        report_ended(admissions, id);
-        return;
-    }
-    let (mut from_session, mut to_session) = local.split_raw();
     let ended = Arc::new(EndReport::new(admissions.clone(), id));
 
     let Ok(inbound_control) = control.try_clone() else {

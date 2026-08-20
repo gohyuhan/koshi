@@ -88,8 +88,8 @@ pub enum HitRegion {
 /// the viewport with a letterbox margin that hits nothing.
 #[must_use]
 pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
-    let viewport = frame.client.viewport;
-    if viewport.cols == 0 || viewport.rows == 0 {
+    let area = viewport_area(frame);
+    if area.width == 0 || area.height == 0 {
         return HitRegion::None;
     }
 
@@ -100,19 +100,12 @@ pub fn hit_test(frame: FrameLayout<'_>, at: Point) -> HitRegion {
         return HitRegion::None;
     }
 
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: viewport.cols,
-        height: viewport.rows,
-    };
-
     // Chrome rows are painted last and cover the pane area beneath them, so a
     // click on those rows is chrome regardless of what the layout put there.
     if at.y == area.y {
         return tabline_region(frame, area, at.x);
     }
-    if viewport.rows >= 2 && at.y == area.bottom() - 1 {
+    if area.height >= 2 && at.y == area.bottom() - 1 {
         return HitRegion::Statusline;
     }
 
@@ -194,20 +187,14 @@ fn tabline_region(frame: FrameLayout<'_>, area: RatatuiRect, x: u16) -> HitRegio
 /// the cell the user clicked.
 #[must_use]
 pub fn pane_content_rect(frame: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
-    let viewport = frame.client.viewport;
-    if viewport.cols == 0 || viewport.rows == 0 {
+    let area = viewport_area(frame);
+    if area.width == 0 || area.height == 0 {
         return None;
     }
     let tab = &frame.session.active_tab;
     if tab.all_suppressed {
         return None;
     }
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: viewport.cols,
-        height: viewport.rows,
-    };
     let content = content_rect(area, tab.effective_size);
     let slot = tab
         .layout_solved
@@ -266,14 +253,19 @@ pub fn pane_cell_clamped(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> 
 /// [`hit_test`] classifies.
 #[must_use]
 pub fn tabline_first_visible(frame: FrameLayout<'_>) -> usize {
-    let viewport = frame.client.viewport;
-    let area = RatatuiRect {
+    tabline_layout(frame, viewport_area(frame)).first_visible
+}
+
+/// The viewing client's whole viewport as a screen rect, origin `(0, 0)`. A
+/// client 80 cells across and 24 rows tall gives `x: 0, y: 0, width: 80,
+/// height: 24`.
+fn viewport_area(frame: FrameLayout<'_>) -> RatatuiRect {
+    RatatuiRect {
         x: 0,
         y: 0,
-        width: viewport.cols,
-        height: viewport.rows,
-    };
-    tabline_layout(frame, area).first_visible
+        width: frame.client.viewport.cols,
+        height: frame.client.viewport.rows,
+    }
 }
 
 /// The side of `rect`'s one-cell border ring that `point` lies on. `point` is

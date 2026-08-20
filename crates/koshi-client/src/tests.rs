@@ -831,6 +831,50 @@ fn a_mouse_select_report_for_another_viewer_is_ignored() {
 }
 
 #[test]
+fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
+    // The viewer decides what a key means against its own copy of the mode, so
+    // `koshi lock --client` reaches it as this report and nothing else.
+    let (mut client, tx) = new_client();
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+
+    tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
+        client_id: client.id(),
+        mode: InputMode::Locked,
+    })))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert_eq!(client.lock_mode(), LockMode::Locked);
+
+    tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
+        client_id: client.id(),
+        mode: InputMode::Normal,
+    })))
+    .expect("the viewer's queue has room");
+    assert_eq!(client.apply_events(), 1);
+    assert_eq!(client.lock_mode(), LockMode::Normal);
+}
+
+#[test]
+fn a_lock_report_for_another_viewer_is_ignored() {
+    // The input mode is client-scoped, and a subscription carries every
+    // client's events. Locking one viewer must not lock the terminal beside it.
+    let (mut client, tx) = new_client();
+
+    tx.send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
+        client_id: ClientId::new(),
+        mode: InputMode::Locked,
+    })))
+    .expect("the viewer's queue has room");
+
+    assert_eq!(client.apply_events(), 1, "the event was seen");
+    assert_eq!(
+        client.lock_mode(),
+        LockMode::Normal,
+        "and it was not applied here"
+    );
+}
+
+#[test]
 fn setting_mouse_select_moves_the_viewers_copy_both_ways() {
     // An attached viewer reads the mode off the frame its own connection
     // carries, so the setter is the only thing that moves its copy.

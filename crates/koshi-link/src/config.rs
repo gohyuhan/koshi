@@ -18,10 +18,9 @@
 //! the whole file to defaults (a conflict in a file that *parses* is caught
 //! later, when the runtime applies it).
 //!
-//! `load` does not log its own warnings: it runs before the tracing
-//! subscriber is installed (so `logging.enabled` can decide whether that
-//! subscriber writes a file at all), so it returns each skip reason as a
-//! string for the caller to replay once tracing is up.
+//! `load` writes no log line of its own. It runs before the tracing
+//! subscriber is installed, and returns each skip reason as a string the
+//! caller replays once tracing is up.
 
 use std::fs;
 use std::io;
@@ -72,8 +71,8 @@ pub fn load() -> (LoadedConfig, Vec<String>) {
         warnings.push("no config directory found; using built-in defaults".to_string());
         return (LoadedConfig::default(), warnings);
     };
-    // `koshi.kdl` names the theme, so it is read first and the name it carries
-    // decides which theme file — if any — is read next.
+    // `koshi.kdl` is read first. The theme name it carries picks which theme
+    // file — if any — is read next.
     let (app, selected) = match load_app(&dir.join("koshi.kdl"), &mut warnings) {
         Some(file) => (Some(file.layer), file.theme),
         None => (None, None),
@@ -88,13 +87,10 @@ pub fn load() -> (LoadedConfig, Vec<String>) {
 
 /// Read and parse `koshi.kdl` alone, skipping the theme and the keymap.
 ///
-/// The `koshi` binary reads this file before it dispatches a verb: every path
-/// needs the top-level `allow-beta-features`, and the verb path also needs
-/// `layout.new-pane-direction`. `koshi.kdl` is the only file that can carry
-/// either, so a `koshi new-pane` reads that file and nothing else. Absent,
-/// unreadable, or unparseable yields `None`, which folds to the built-in
-/// defaults. Warnings are dropped: a CLI verb prints its command's result, not
-/// a config report.
+/// `koshi.kdl` is the only file carrying the top-level `allow-beta-features`
+/// and `layout.new-pane-direction`, so a `koshi new-pane` reads that file and
+/// nothing else. Absent, unreadable, or unparseable yields `None`, which folds
+/// to the built-in defaults. Warnings are dropped.
 #[must_use]
 pub fn load_app_layer() -> Option<PartialKoshiConfig> {
     let dir = koshi_paths::config_dir()?;
@@ -104,8 +100,8 @@ pub fn load_app_layer() -> Option<PartialKoshiConfig> {
 
 /// The tracing subscriber's settings for `session_id`: `app`'s `logging`
 /// section over the built-in defaults. The session server and every client
-/// attached to it build their params here, so one session's lines all land in
-/// one file.
+/// attached to it build their params here; one session's lines all land in one
+/// file.
 #[must_use]
 pub fn logging_params(app: Option<&PartialKoshiConfig>, session_id: SessionId) -> LoggingParams {
     let logging = app
@@ -246,8 +242,8 @@ fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Part
         return None;
     }
     // A theme name is a single file stem under `themes/`, held to the same
-    // rule as a profile name so `theme "../../secret"` cannot read a `.kdl`
-    // outside the theme directory.
+    // rule as a profile name: `theme "../../secret"` stops here, before any
+    // file is opened.
     if !is_plain_file_name(name) {
         return fall_back_to_default(
             warnings,
@@ -255,10 +251,7 @@ fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Part
         );
     }
     let path = dir.join("themes").join(format!("{name}.kdl"));
-    // Read once and take the reason off the error, rather than asking whether
-    // the file exists and then opening it: a named theme that is absent and one
-    // that is unreadable get different warnings, and reading once means the
-    // warning always matches what actually happened.
+    // One read: an absent file and an unreadable one give different warnings.
     let source = match fs::read_to_string(&path) {
         Ok(source) => source,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -296,9 +289,8 @@ fn load_theme(dir: &Path, name: &str, warnings: &mut Vec<String>) -> Option<Part
 /// which theme stands instead, and yields the `None` that leaves the built-in
 /// colors in place.
 ///
-/// Every theme failure ends here, so all of them read alike: a
-/// `theme "../../x"` gives "theme name `../../x` must be a plain name; using
-/// the default theme".
+/// Example — `theme "../../x"` gives "theme name `../../x` must be a plain
+/// name; using the default theme".
 fn fall_back_to_default(warnings: &mut Vec<String>, reason: String) -> Option<PartialThemeConfig> {
     warnings.push(format!("{reason}; using the {DEFAULT_THEME} theme"));
     None
@@ -330,15 +322,13 @@ fn push_field_warnings(path: &Path, field_warnings: &[String], warnings: &mut Ve
 /// Read and parse `profile/<name>.kdl` from the config directory. A missing,
 /// unreadable, or invalid profile is logged and returns `None`; the caller then
 /// starts a single shell. Profiles are all-or-nothing: any schema violation
-/// drops the whole file, since a half-applied profile would spawn some of its
-/// panes and silently omit others.
+/// drops the whole file, so no pane of a broken profile is started.
 #[must_use]
 pub fn load_profile(name: &str) -> Option<ProfileTemplate> {
     let dir = koshi_paths::config_dir()?;
-    // A profile name is a single file stem under `profile/`. Reject anything
-    // that is not one plain path component — an absolute path, a `..`, or an
-    // embedded separator — so `--profile ../secret` or `--profile /etc/x`
-    // cannot read a `.kdl` outside the profile directory.
+    // A profile name is a single file stem under `profile/`. An absolute path,
+    // a `..`, or an embedded separator is refused: `--profile ../secret` and
+    // `--profile /etc/x` both stop here, before any file is opened.
     if !is_plain_file_name(name) {
         tracing::warn!("profile name `{name}` must be a plain name; starting a single shell");
         return None;
@@ -348,8 +338,7 @@ pub fn load_profile(name: &str) -> Option<ProfileTemplate> {
         tracing::warn!(path = %path.display(), "profile `{name}` not found; starting a single shell");
         return None;
     }
-    // Genesis runs after tracing is up, so this path logs directly rather than
-    // returning warnings the way [`load`] does.
+    // Each read failure goes straight to the log, not to a returned warning.
     let mut warnings = Vec::new();
     let source = read(&path, &mut warnings);
     for warning in &warnings {

@@ -52,6 +52,81 @@ fn missing_version_is_rejected() {
     );
 }
 
+/// The `version` reason `validate_config` gives for `source`.
+fn version_reason(source: &str) -> String {
+    match validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), source).unwrap_err() {
+        MigrationError::Version { path, detail } => {
+            assert_eq!(path, "koshi.kdl");
+            detail
+        }
+        other => panic!("expected a version error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_second_version_declaration_is_rejected() {
+    assert_eq!(
+        version_reason("version 1\nversion 1\n"),
+        "`version` is declared more than once"
+    );
+}
+
+#[test]
+fn a_version_with_a_child_block_is_rejected() {
+    assert_eq!(
+        version_reason("version 1 {\n  extra 2\n}\n"),
+        "`version` takes no children"
+    );
+}
+
+#[test]
+fn a_version_with_no_argument_is_rejected() {
+    assert_eq!(
+        version_reason("version\n"),
+        "`version` takes exactly one integer argument"
+    );
+}
+
+#[test]
+fn a_version_with_two_arguments_is_rejected() {
+    assert_eq!(
+        version_reason("version 1 2\n"),
+        "`version` takes exactly one integer argument"
+    );
+}
+
+#[test]
+fn a_version_given_as_a_property_is_rejected() {
+    assert_eq!(
+        version_reason("version schema=1\n"),
+        "`version` takes an argument, not a property"
+    );
+}
+
+#[test]
+fn a_non_integer_version_is_rejected() {
+    assert_eq!(
+        version_reason("version \"1\"\n"),
+        "`version` must be an integer"
+    );
+}
+
+#[test]
+fn a_negative_version_is_rejected() {
+    assert_eq!(
+        version_reason("version -1\n"),
+        "`version` must be between 1 and 4294967295"
+    );
+}
+
+#[test]
+fn a_version_above_the_u32_ceiling_is_rejected() {
+    assert_eq!(
+        version_reason("version 4294967296\n"),
+        "`version` must be between 1 and 4294967295"
+    );
+}
+
 #[test]
 fn version_zero_is_rejected() {
     let error =
@@ -243,6 +318,61 @@ fn bad_migrated_schema_stops_the_chain() {
         MigrationError::Invalid {
             path: "koshi.kdl".to_string(),
             details: "missing required version 2 field".to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_registry_missing_a_supported_version_is_refused_before_any_work() {
+    let schemas = [Schema {
+        version: 2,
+        validate: valid_any,
+        migrate_to_next: None,
+    }];
+
+    let error = migrate_with_registry(
+        ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        "version 2\n",
+        &schemas,
+        2,
+    )
+    .unwrap_err();
+
+    assert_eq!(error, MigrationError::MissingSchema { version: 1 });
+}
+
+#[test]
+fn a_step_landing_on_the_wrong_version_stops_the_chain() {
+    // `migrate_two` rewrites `version 2` to `version 3`, so running it on the
+    // version 1 file leaves the version untouched at 1, not the required 2.
+    let schemas = [
+        Schema {
+            version: 1,
+            validate: valid_any,
+            migrate_to_next: Some(migrate_two),
+        },
+        Schema {
+            version: 2,
+            validate: valid_any,
+            migrate_to_next: None,
+        },
+    ];
+
+    let error = migrate_with_registry(
+        ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        "version 1\n",
+        &schemas,
+        2,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        MigrationError::Version {
+            path: "koshi.kdl".to_string(),
+            detail: "migration from version 1 produced version 1, expected 2".to_string(),
         }
     );
 }

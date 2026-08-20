@@ -708,3 +708,77 @@ fn missing_target_is_an_error_and_the_input_is_unchanged() {
     assert_eq!(err, SplitError::PaneNotFound { target: missing });
     assert_eq!(tree, snapshot);
 }
+
+#[test]
+fn a_removal_leaves_every_surviving_child_with_its_own_weight() {
+    use crate::size::SizeConstraint;
+
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut row =
+        SplitNode::with_equal_weights(SplitDirection::Horizontal, vec![leaf(a), leaf(b), leaf(c)]);
+    row.weights = vec![
+        SizeWeight::new(SizeConstraint::Flex(1)),
+        SizeWeight::new(SizeConstraint::Flex(2)),
+        SizeWeight::new(SizeConstraint::Flex(3)),
+    ];
+    let tree = LayoutNode::Split(row);
+    let wide = Rect::new(
+        Point { x: 0, y: 0 },
+        Size {
+            cols: 100,
+            rows: 24,
+        },
+    );
+
+    let (removed, _) = remove_pane(&tree, wide, b, MIN_PANE_SIZE).unwrap();
+    let LayoutNode::Split(row) = &removed else {
+        panic!("the row must survive");
+    };
+    // Dropping the middle child drops its weight with it: the shares that
+    // remain are 1 and 3, not 1 and 2.
+    assert_eq!(
+        row.weights,
+        [
+            SizeWeight::new(SizeConstraint::Flex(1)),
+            SizeWeight::new(SizeConstraint::Flex(3)),
+        ]
+    );
+    let widths: Vec<u16> = solve(&removed, wide)
+        .panes
+        .iter()
+        .map(|(_, rect)| rect.size.cols)
+        .collect();
+    assert_eq!(widths, [25, 75]);
+}
+
+#[test]
+fn a_directional_split_from_a_nested_stack_wraps_the_outermost_stack() {
+    let (a, b, c, new) = (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let inner = LayoutNode::Split(SplitNode::stack(vec![b, c], 0));
+    let tree = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutChild {
+                node: LayoutNode::Pane(a),
+                collapsed: true,
+            },
+            LayoutChild {
+                node: inner,
+                collapsed: false,
+            },
+        ],
+        weights: vec![SizeWeight::default(); 2],
+        active: 1,
+    });
+
+    // c sits two stacks deep. The new pane lands beside the whole outer
+    // stack, not beside the inner one.
+    let split = split_leaf(&tree, c, new, Direction::Right).unwrap();
+    let LayoutNode::Split(row) = &split else {
+        panic!("the root must become a split");
+    };
+    assert_eq!(row.direction, SplitDirection::Horizontal);
+    assert_eq!(row.children[0].node, tree);
+    assert_eq!(row.children[1].node, LayoutNode::Pane(new));
+    assert_eq!(split.leaf_panes(), [a, b, c, new]);
+}

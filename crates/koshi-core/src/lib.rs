@@ -1,15 +1,29 @@
-//! `koshi-core` — shared dependency-light types: IDs, commands, events, geometry,
-//! lifecycle states, protocol DTOs, input-privacy DTOs, error categories, and
-//! redaction helpers.
+//! `koshi-core` — the shared vocabulary every other koshi crate reads: what
+//! koshi can be asked to do, what it reports back, and the pieces both are
+//! written in. Its only dependencies are `serde` and `uuid`; it depends on no
+//! other koshi crate.
+//!
+//! - [`ids`] — one typed id per entity, [`geometry`] — cell coordinates and
+//!   rectangles, [`error`] — failure category and severity, [`constant`] —
+//!   numeric bounds several crates share.
+//! - [`command`] — every mutation that can be requested, with the envelope one
+//!   travels in; [`event`] — every completed fact the runtime emits, with the
+//!   privacy tier an input event carries.
+//! - [`action`] — the action names a user binds or types, [`registry`] — the
+//!   live table of them, [`resolve`] — turning one into a command.
+//! - [`key`] — keyboard chords, [`lock`] — a client's modal input state,
+//!   [`mouse`] — mouse events and the reporting level a pane's program asked
+//!   for.
+//! - [`process`] — spawn, kill, and exit types; [`naming`] — generated names
+//!   for sessions, tabs, and clients; [`client`] — where a client connected
+//!   from.
+//! - [`discovery`] — the read-only snapshots the list and inspect queries
+//!   answer with; [`redact`] — scrubbing secrets out of text; [`log`] — the
+//!   log level and format a config file names.
 //!
 //! [`compat`] holds the table of every versioned surface koshi carries — the
 //! wire protocols two builds speak and the files one build writes for another
 //! to read — with the cadence rule their numbers follow.
-//!
-//! Also home to keyboard chords and the client lock mode they interact with,
-//! generated names for sessions/tabs/panes, process spawn and exit types, and
-//! the action vocabulary's live registry plus its resolution into runtime
-//! commands.
 
 pub mod action;
 pub mod client;

@@ -474,3 +474,37 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(recovered_second.scroll_offset(pane_three), 3);
     assert_eq!(recovered_second.scroll_offset(pane_two), 0);
 }
+
+#[test]
+fn attaching_a_client_to_a_stopping_session_registers_it_without_reviving_it() {
+    // `ClientAttached` revives a `Detaching` session only. A client that
+    // connects while the session winds down is still registered — the transport
+    // holds it — but the shutdown is not undone.
+    let tab = TabId::new();
+    let mut session = Session::new(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.request_stop();
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+
+    let id = ClientId::new();
+    let client = Client::new(
+        id,
+        session.id,
+        SystemTime::UNIX_EPOCH,
+        Size { cols: 80, rows: 24 },
+        tab,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
+    let displaced = session.attach_client(client);
+
+    assert_eq!(displaced.map(|c| c.id()), None);
+    assert_eq!(session.clients.len(), 1);
+    assert_eq!(session.clients.get(id).map(Client::id), Some(id));
+    assert_eq!(*session.lifecycle(), SessionLifecycle::Stopping);
+}

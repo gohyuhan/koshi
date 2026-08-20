@@ -240,6 +240,65 @@ fn every_wire_enum_lists_the_variants_it_writes() {
     assert_listed(sample_supervisor_events());
 }
 
+/// Every wire enum's `VARIANTS` holds exactly the variants its type has.
+///
+/// [`every_wire_enum_lists_the_variants_it_writes`] weighs `VARIANTS` against a
+/// hand-written sample per variant, and a variant absent from both lists still
+/// passes it. The list here comes from the type's own decoder, so it follows the
+/// enum without being maintained.
+///
+/// A `VARIANTS` short of one name turns a payload of that name this build cannot
+/// read into [`MaybeKnown::Unknown`], which the caller answers and keeps reading,
+/// instead of the decoding error that ends the connection. A `VARIANTS` holding
+/// a name the enum dropped does the reverse, and
+/// `the_plane_a_remote_client_reaches_names_no_token_verb` reads
+/// `IpcRequestKind::VARIANTS` as the session plane's whole vocabulary.
+#[test]
+fn every_wire_enum_lists_exactly_the_variants_its_type_has() {
+    fn assert_matches<T: DeserializeOwned + WireVariants>(type_name: &str) {
+        let mut listed: Vec<String> = T::VARIANTS.iter().map(|name| (*name).to_string()).collect();
+        listed.sort();
+        let mut real = variants_of::<T>();
+        real.sort();
+        assert_eq!(listed, real, "{type_name}");
+    }
+
+    assert_matches::<IpcRequestKind>("IpcRequestKind");
+    assert_matches::<IpcResult>("IpcResult");
+    assert_matches::<SessionEvent>("SessionEvent");
+    assert_matches::<RouterRequestKind>("RouterRequestKind");
+    assert_matches::<RouterResult>("RouterResult");
+    assert_matches::<SupervisorRequestKind>("SupervisorRequestKind");
+    assert_matches::<SupervisorResult>("SupervisorResult");
+    assert_matches::<SupervisorEvent>("SupervisorEvent");
+}
+
+/// The variant names `T`'s decoder holds, read out of the refusal it writes for
+/// a name that is not one of them.
+///
+/// Example — for a `SupervisorEvent` the refusal reads ``unknown variant
+/// `koshi-no-such-variant`, expected `Output` or `Exited` at line 1 column 25``,
+/// and the names in backticks after the first are `Output` and `Exited`.
+fn variants_of<T: DeserializeOwned>() -> Vec<String> {
+    let refusal = serde_json::from_str::<T>("\"koshi-no-such-variant\"")
+        .err()
+        .expect("a name no variant carries is refused")
+        .to_string();
+    assert!(
+        refusal.starts_with("unknown variant `koshi-no-such-variant`, expected "),
+        "the refusal no longer names the variants it knows: {refusal}"
+    );
+    // Odd-numbered pieces of a split on the backtick are what sat between two
+    // of them. The first is the name that was refused; the rest are the names
+    // the decoder holds.
+    refusal
+        .split('`')
+        .skip(3)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
 /// One value per [`SupervisorRequestKind`] variant.
 fn sample_supervisor_kinds() -> Vec<SupervisorRequestKind> {
     use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};

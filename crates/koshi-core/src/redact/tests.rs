@@ -187,3 +187,27 @@ fn redact_argv_hides_every_argument_of_an_argv_that_is_all_secrets() {
 fn redact_argv_of_an_empty_argv_is_empty() {
     assert_eq!(redact_argv(&[]), Vec::<String>::new());
 }
+
+#[test]
+fn a_marker_matching_later_in_the_line_never_hides_an_earlier_one_instead() {
+    // The markers arrive in the reverse of the order their matches appear in
+    // the text: `root` sits at the end, `hunter2` in the middle.
+    let out = redact_string(
+        "pass=hunter2 user=root",
+        &[Marker::literal("root"), Marker::literal("hunter2")],
+    );
+    assert_eq!(out, "pass=*** user=***");
+}
+
+#[test]
+fn two_secrets_that_touch_are_hidden_as_one_marker() {
+    // `ab` ends exactly where `cd` starts, so the two spans join into one.
+    let out = redact_string("abcd", &[Marker::literal("ab"), Marker::literal("cd")]);
+    assert_eq!(out, "***");
+}
+
+#[test]
+fn two_secrets_with_one_character_between_them_are_hidden_separately() {
+    let out = redact_string("ab-cd", &[Marker::literal("ab"), Marker::literal("cd")]);
+    assert_eq!(out, "***-***");
+}

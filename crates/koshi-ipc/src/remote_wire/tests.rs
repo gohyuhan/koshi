@@ -261,3 +261,17 @@ fn a_server_frame_reads_back_as_the_frame_that_was_written() {
         assert_eq!(read, frame);
     }
 }
+
+/// The one refusal that is not [`REMOTE_REFUSED`] names the caller's range
+/// first and this build's second, so an operator reading it knows which end
+/// is behind.
+#[test]
+fn a_doorway_version_refusal_names_the_callers_range_then_this_builds() {
+    assert_eq!(
+        version_refusal(2, 3),
+        format!(
+            "the caller speaks remote doorway 2 to 3, this koshi speaks \
+             {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
+        )
+    );
+}

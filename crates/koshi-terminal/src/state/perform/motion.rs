@@ -7,19 +7,11 @@ use crate::state::{RenderState, SavedCursor, Screen, TerminalState};
 use crate::style::Style;
 
 impl TerminalState {
-    /// The scroll-region margins for the active screen.
-    fn active_scroll_region(&self) -> Option<(u16, u16)> {
-        match self.active {
-            Screen::Primary => self.primary_scroll_region,
-            Screen::Alternate => self.alternate_scroll_region,
-        }
-    }
-
     /// The scroll-region margins as 0-based inclusive `(top, bottom)` rows,
     /// resolving `None` to the whole active grid.
     pub(super) fn region_bounds(&self) -> (u16, u16) {
         let last_row = self.active_grid().dimensions().0.saturating_sub(1);
-        self.active_scroll_region().unwrap_or((0, last_row))
+        self.scroll_region().unwrap_or((0, last_row))
     }
 
     /// Delete `n` lines starting at `first` (scrolling the band `first..=bottom`
@@ -115,14 +107,12 @@ impl TerminalState {
     /// SCOSC) into the active screen's cursor, so the primary and alternate
     /// screens snapshot separately.
     pub(super) fn save_cursor(&mut self) {
-        let row = self.active_cursor().row;
-        let col = self.active_cursor().col;
-        let pending_wrap = self.active_cursor().pending_wrap;
+        let cursor = *self.active_cursor();
         let render = *self.active_render();
         self.active_cursor_mut().saved = Some(SavedCursor {
-            row,
-            col,
-            pending_wrap,
+            row: cursor.row,
+            col: cursor.col,
+            pending_wrap: cursor.pending_wrap,
             render,
         });
     }
@@ -151,10 +141,8 @@ impl TerminalState {
     }
 
     /// Move the cursor to an absolute (`row`, `col`), clamped into the active
-    /// grid, and clear the deferred-wrap latch. This is the single chokepoint
-    /// every absolute cursor placement — CUP/HVP, CHA/HPA, VPA, CNL, CPL —
-    /// routes through, so origin mode (DECOM) and left/right margins (DECSLRM)
-    /// are a one-place change when they land.
+    /// grid, and clear the deferred-wrap latch. Every absolute cursor
+    /// placement — CUP/HVP, CHA/HPA, VPA, CNL, CPL — routes through here.
     pub(super) fn goto(&mut self, row: u16, col: u16) {
         let (rows, cols) = self.active_grid().dimensions();
         let cursor = self.active_cursor_mut();

@@ -236,3 +236,73 @@ fn the_deepest_stack_holding_a_pane_is_found_for_activation() {
     assert_eq!(change.newly_active, c);
     assert!(tree.stack_containing_mut(a).is_none());
 }
+
+/// A three-member stack whose middle member is an empty split — a member
+/// that holds no pane at all — with `active` naming the expanded one.
+fn stack_with_an_empty_middle_member(first: PaneId, last: PaneId, active: usize) -> SplitNode {
+    use crate::size::SizeWeight;
+    use crate::tree::{LayoutChild, LayoutNode};
+
+    let empty = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        Vec::new(),
+    ));
+    SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutChild {
+                node: LayoutNode::Pane(first),
+                collapsed: active != 0,
+            },
+            LayoutChild {
+                node: empty,
+                collapsed: active != 1,
+            },
+            LayoutChild {
+                node: LayoutNode::Pane(last),
+                collapsed: active != 2,
+            },
+        ],
+        weights: vec![SizeWeight::default(); 3],
+        active,
+    }
+}
+
+#[test]
+fn cycling_forward_skips_a_member_that_holds_no_pane() {
+    let (a, c) = (PaneId::new(), PaneId::new());
+    let mut stack = stack_with_an_empty_middle_member(a, c, 0);
+
+    // One step forward lands on the empty middle member, which cannot be
+    // focused, so the walk continues to c.
+    let change = stack_focus_next(&mut stack).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, Some(a));
+    assert_eq!(stack.active, 2);
+    assert_eq!(collapsed_flags(&stack), [true, true, false]);
+}
+
+#[test]
+fn cycling_away_from_a_member_with_no_pane_deactivates_nothing() {
+    let (a, c) = (PaneId::new(), PaneId::new());
+    let mut stack = stack_with_an_empty_middle_member(a, c, 1);
+
+    let change = stack_focus_next(&mut stack).unwrap();
+    assert_eq!(change.newly_active, c);
+    assert_eq!(change.deactivated, None);
+    assert_eq!(stack.active, 2);
+}
+
+#[test]
+fn an_odd_width_pane_keeps_its_half_cell_center_when_ranking_neighbors() {
+    let (odd, even) = (PaneId::new(), PaneId::new());
+    // The removed pane's center is column 10.0. `odd` spans columns 11..14,
+    // center 12.5, distance 2.5; `even` spans 7..9, center 8.0, distance
+    // 2.0, so `even` is nearer. Rounding both centers down to whole cells
+    // would tie the two at distance 2 and hand the tie to `odd`.
+    let removed = rect(0, 0, 20, 2);
+    let survivors = [(odd, rect(11, 0, 3, 2)), (even, rect(7, 0, 2, 2))];
+
+    let candidates = focus_candidates(removed, &survivors, &[]);
+    assert_eq!(candidates.spatial_neighbor, Some(even));
+}

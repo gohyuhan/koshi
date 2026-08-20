@@ -4973,3 +4973,19 @@ fn cursor_moves_on_a_single_row_grid_stay_on_row_zero() {
     advance(&mut state, b"\x1b[9A"); // CUU 9 -> still row 0
     assert_eq!(state.active_cursor_position(), (0, 2));
 }
+
+#[test]
+fn a_resize_breaks_a_cluster_run() {
+    // A resize moves surviving cells to new rows and columns, so the recorded
+    // base of an in-progress cluster no longer names that cell. The run ends: a
+    // combining mark printed after the resize has no base and is dropped.
+    let mut state = state(5, 2);
+    print_str(&mut state, "e");
+    state.resize(PtySize { cols: 5, rows: 2 });
+    state.print('\u{301}');
+
+    let cell = state.active_grid().cell(0, 0).expect("in bounds");
+    assert_eq!(cell.ch(), 'e');
+    assert_eq!(cell.combining(), [] as [char; 0]);
+    assert_eq!(state.active_cursor_position(), (0, 1));
+}

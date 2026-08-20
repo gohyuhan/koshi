@@ -311,13 +311,14 @@ pub trait Deadlined: Send {
 }
 
 impl Deadlined for socket::RecvHalf {
-    /// Ignored: the peer is a process on this machine, admitted by position,
-    /// and it is not held to a clock.
+    /// Does nothing: a local socket read blocks for as long as it takes,
+    /// whatever `at` says.
     fn set_deadline(&mut self, _at: Option<Instant>) {}
 }
 
 impl Deadlined for socket::SendHalf {
-    /// Ignored, for the same reason [`socket::RecvHalf`]'s is.
+    /// Does nothing: a local socket write blocks for as long as it takes,
+    /// whatever `at` says.
     fn set_deadline(&mut self, _at: Option<Instant>) {}
 }
 

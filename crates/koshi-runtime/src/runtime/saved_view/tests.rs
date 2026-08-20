@@ -149,6 +149,23 @@ fn a_second_save_for_one_client_files_nothing() {
 }
 
 #[test]
+fn minting_again_for_one_client_leaves_the_earlier_token_taking_back_nothing() {
+    let tab = TabId::new();
+    let client = client(ClientId::new(), tab);
+    let mut store = SavedViewStore::default();
+    let earlier = store.mint(client.id());
+    let latest = store.mint(client.id());
+    store.save(&client, moment(100));
+
+    assert_eq!(store.records.len(), 1, "one save files one record");
+    assert_eq!(store.take(&earlier, moment(101)), None);
+    assert_eq!(
+        store.take(&latest, moment(101)).map(|view| view.active_tab),
+        Some(tab)
+    );
+}
+
+#[test]
 fn forgetting_a_client_leaves_its_minted_token_taking_back_nothing() {
     let client = client(ClientId::new(), TabId::new());
     let mut store = SavedViewStore::default();

@@ -3,8 +3,7 @@
 //!
 //! Both types are plain config values with no behavior of their own:
 //! `koshi-config` parses them out of `koshi.kdl`, and `koshi-observability`
-//! feeds them to the tracing subscriber. They live here so neither of those
-//! crates has to depend on the other.
+//! feeds them to the tracing subscriber.
 
 /// The lowest severity a log line must carry to be written. A line below the
 /// configured level is dropped.

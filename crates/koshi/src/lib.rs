@@ -26,6 +26,9 @@ pub mod config_command;
 /// directories, and what its sessions are reachable through.
 pub mod doctor;
 
+/// Reading a yes-or-no answer from the terminal koshi was typed in.
+mod prompt;
+
 /// The offline keymap view served by the `koshi keys` queries: the user's
 /// keybinding file folded onto the built-in defaults, conflict-checked and
 /// merged.

@@ -103,8 +103,8 @@ impl ActionName {
                 return Err(ActionNameError::InvalidChar { ch });
             }
         }
-        // Checked after the charset scan so an over-long name still reports the
-        // more specific bad character first when both are wrong.
+        // The length check runs after the charset scan: a name that is both
+        // over-long and holds a bad character reports the bad character.
         let len = name.chars().count();
         if len > MAX_ACTION_NAME_LEN {
             return Err(ActionNameError::TooLong { len });
@@ -343,8 +343,8 @@ pub enum ActionStatus {
     ComingSoon,
 }
 
-/// Typed schema for an action's arguments. Carries no fields; it is named now
-/// so [`ActionMetadata`] has a stable shape and seed entries can carry `None`.
+/// Typed schema for an action's arguments. Carries no fields. Every entry in
+/// [`core_action_seeds`] leaves [`ActionMetadata::args_schema`] `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionArgsSchema {}
 
@@ -362,9 +362,10 @@ pub enum ActionHandlerRef {
 /// Everything the registry knows about one action: how to show it, what it can
 /// target, and how to dispatch it.
 ///
-/// `namespace` is redundant with the owning [`ActionRef`]'s namespace and is
-/// kept here so metadata is self-describing when handed out on its own (e.g. to
-/// a plugin querying the registry).
+/// `namespace` repeats the owning [`ActionRef`]'s namespace, so metadata handed
+/// out on its own still names its owner.
+/// [`ActionRegistry::register`](crate::registry::ActionRegistry::register)
+/// refuses an entry whose two namespaces disagree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionMetadata {
     /// The namespace the action belongs to.
@@ -391,9 +392,12 @@ pub struct ActionMetadata {
     pub continuous: bool,
 }
 
-/// Build one `core:` seed entry. Panics if `name` violates the action-name
-/// grammar. `status` is per entry, so one member of a command family can be
-/// `Available` while its siblings are `ComingSoon`.
+/// Build one `core:` seed entry, with `namespace` set to
+/// [`ActionNamespace::Core`], `args_schema` `None`, and `continuous` `false`.
+/// Each entry carries the `status` it is given, whatever its siblings carry.
+///
+/// # Panics
+/// Panics if `name` violates the action-name grammar.
 fn core_seed(
     name: &'static str,
     display_name: &str,

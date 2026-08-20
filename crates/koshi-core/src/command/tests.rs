@@ -246,8 +246,18 @@ fn command_variant_names_are_canonical() {
             "MoveTab",
         ),
         (Command::Quit, "Quit"),
+        (Command::ToggleMouseSelect, "ToggleMouseSelect"),
+        (Command::Detach(DetachArgs::default()), "Detach"),
+        (Command::DetachAll, "DetachAll"),
+        (
+            Command::SwitchSession(SwitchSessionArgs {
+                client: None,
+                session: SessionId::new(),
+            }),
+            "SwitchSession",
+        ),
     ];
-    assert_eq!(cases.len(), 16);
+    assert_eq!(cases.len(), 20);
     for (value, name) in &cases {
         assert_eq!(&variant_name(value), name);
     }
@@ -293,7 +303,7 @@ fn visual_variant_names_are_canonical() {
 
 /// `Command::kind` must report the matching discriminant for every variant.
 /// Reusing the canonical command instances keeps `CommandKind` pinned to the
-/// same 22-variant set as `Command`; a new command variant added without a
+/// same 20-variant set as `Command`; a new command variant added without a
 /// `kind` arm fails to compile, and a mismatched arm fails this assert.
 #[test]
 fn command_kind_mirrors_command() {

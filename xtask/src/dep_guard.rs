@@ -1,29 +1,18 @@
 //! Dependency-direction guard.
 //!
-//! Loads the workspace dependency graph via `cargo metadata` and enforces the
-//! architecture's load-bearing invariants. These four hold regardless of how
-//! the crates evolve, so the guard needs no per-crate allow-list to maintain:
+//! [`run`] reads the workspace dependency graph with `cargo metadata` and
+//! reports every edge these four rules forbid:
 //!
-//! - `koshi-core` has zero internal `koshi-*` dependencies (it is the foundation).
-//! - `koshi-plugin-manager` does not depend on `koshi-runtime`, `koshi-ipc`, or
-//!   `koshi-plugin-host` (one-way arrow: runtime/cli depend on the manager).
-//! - `wasmtime` is a direct dependency of `koshi-plugin-host` only.
-//! - `portable-pty` is a direct dependency of `koshi-pty` only.
+//! - `koshi-core` depends on no crate whose name starts with `koshi-`.
+//! - `koshi-plugin-manager` depends on none of `koshi-runtime`, `koshi-ipc`,
+//!   `koshi-plugin-host`.
+//! - Only `koshi-plugin-host` depends on `wasmtime`.
+//! - Only `koshi-pty` depends on `portable-pty`.
 //!
-//! Containment is checked on *direct* dependencies, not transitively: crates
-//! legitimately reach the heavy dependency through its rightful owner (e.g.
-//! `koshi-runtime` -> `koshi-plugin-host` -> `wasmtime`), and the real failure
-//! mode this guards against is a stray `cargo add` in the wrong crate.
-//!
-//! The architecture's full per-crate dependency matrix is *not* encoded here:
-//! it would mean editing this file on every PR that adds a legitimate internal
-//! dependency, and several of its edges are a judgment call. Cargo already
-//! rejects dependency cycles; this guard covers the two things it does not —
-//! foundation isolation and heavy-dependency containment.
-//!
-//! Both regular and dev-dependencies are checked, so test-only coupling cannot
-//! quietly cross an isolation line either. A dev-dependency on a test-support
-//! crate is fine wherever the direction rules above allow it.
+//! Each rule reads the dependencies a crate declares in its own manifest, of
+//! every kind: normal, dev, and build. A dependency reached through another
+//! crate is not an edge here, so `koshi-runtime` -> `koshi-plugin-host` ->
+//! `wasmtime` passes.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -33,6 +22,13 @@ use cargo_metadata::{Metadata, MetadataCommand};
 /// One workspace crate and the names of its direct dependencies.
 type CrateDeps = (String, Vec<String>);
 
+/// Prints `dep-guard: ok (N crates checked)` on stdout and returns
+/// [`ExitCode::SUCCESS`] when no rule is broken.
+///
+/// Prints one `dep-guard: forbidden edge: ...` line per broken rule on stderr,
+/// then the violation count, and returns [`ExitCode::FAILURE`]. A `cargo
+/// metadata` run that fails prints its error on stderr and returns
+/// [`ExitCode::FAILURE`] with no rule checked.
 pub fn run() -> ExitCode {
     let metadata = match MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -56,7 +52,9 @@ pub fn run() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Direct dependencies declared by each workspace crate, sorted for determinism.
+/// Every workspace crate paired with the dependency names its manifest
+/// declares. Crates are sorted by name; each dependency list is sorted and
+/// deduplicated.
 fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     let mut graph: Vec<CrateDeps> = metadata
         .workspace_packages()
@@ -76,21 +74,20 @@ fn direct_deps(metadata: &Metadata) -> Vec<CrateDeps> {
     graph
 }
 
-/// Returns one message per forbidden edge; empty means the graph is allowed.
+/// Returns one message per forbidden edge, sorted and deduplicated. An empty
+/// vector means every edge in `graph` is allowed.
 pub fn check(graph: &[CrateDeps]) -> Vec<String> {
     let mut violations = BTreeSet::new();
 
     for (krate, deps) in graph {
         for dep in deps {
-            // koshi-core is the foundation: no internal dependencies.
-            if krate == "koshi-core" && is_internal_crate(dep) {
+            if krate == "koshi-core" && dep.starts_with("koshi-") {
                 violations.insert(edge(
                     krate,
                     dep,
                     "koshi-core must not depend on internal crates",
                 ));
             }
-            // Plugin manager arrow is one-way: runtime/cli depend on it, never the reverse.
             if krate == "koshi-plugin-manager"
                 && matches!(
                     dep.as_str(),
@@ -103,7 +100,6 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
                     "koshi-plugin-manager must not depend on runtime/ipc/host",
                 ));
             }
-            // Heavy dependencies are owned by exactly one crate.
             if dep == "wasmtime" && krate != "koshi-plugin-host" {
                 violations.insert(edge(
                     krate,
@@ -120,12 +116,9 @@ pub fn check(graph: &[CrateDeps]) -> Vec<String> {
     violations.into_iter().collect()
 }
 
-fn is_internal_crate(name: &str) -> bool {
-    name.starts_with("koshi-")
-}
-
-fn edge(from: &str, to: &str, why: &str) -> String {
-    format!("forbidden edge: {from} -> {to} ({why})")
+/// Formats `forbidden edge: {from} -> {to} ({rule})`.
+fn edge(from: &str, to: &str, rule: &str) -> String {
+    format!("forbidden edge: {from} -> {to} ({rule})")
 }
 
 #[cfg(test)]

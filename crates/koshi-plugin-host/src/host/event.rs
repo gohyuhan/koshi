@@ -1,1 +1,1 @@
-//! Plugin events. Placeholder per standard source layout.
+//! Plugin events. This module is empty.

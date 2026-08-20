@@ -260,3 +260,70 @@ fn a_press_and_a_release_of_the_same_button_are_distinct_kinds() {
         MouseKind::Scroll(ScrollDirection::Down)
     );
 }
+
+#[test]
+fn every_tracking_level_answers_every_event_kind_exactly() {
+    let press = MouseKind::Press(MouseButton::Left);
+    let release = MouseKind::Release(MouseButton::Left);
+    let drag = MouseKind::Drag(MouseButton::Left);
+    let scroll = MouseKind::Scroll(ScrollDirection::Up);
+    let motion = MouseKind::Motion;
+
+    let table = [
+        (MouseTracking::Off, press, false),
+        (MouseTracking::Off, release, false),
+        (MouseTracking::Off, drag, false),
+        (MouseTracking::Off, scroll, false),
+        (MouseTracking::Off, motion, false),
+        (MouseTracking::X10, press, true),
+        (MouseTracking::X10, release, false),
+        (MouseTracking::X10, drag, false),
+        (MouseTracking::X10, scroll, false),
+        (MouseTracking::X10, motion, false),
+        (MouseTracking::Normal, press, true),
+        (MouseTracking::Normal, release, true),
+        (MouseTracking::Normal, drag, false),
+        (MouseTracking::Normal, scroll, true),
+        (MouseTracking::Normal, motion, false),
+        (MouseTracking::ButtonMotion, press, true),
+        (MouseTracking::ButtonMotion, release, true),
+        (MouseTracking::ButtonMotion, drag, true),
+        (MouseTracking::ButtonMotion, scroll, true),
+        (MouseTracking::ButtonMotion, motion, false),
+        (MouseTracking::AnyMotion, press, true),
+        (MouseTracking::AnyMotion, release, true),
+        (MouseTracking::AnyMotion, drag, true),
+        (MouseTracking::AnyMotion, scroll, true),
+        (MouseTracking::AnyMotion, motion, true),
+    ];
+
+    for (tracking, kind, expected) in table {
+        assert_eq!(
+            reports(tracking, kind),
+            expected,
+            "{tracking:?} + {kind:?} must report {expected}"
+        );
+    }
+}
+
+#[test]
+fn the_answer_is_the_same_for_every_button_and_every_scroll_direction() {
+    for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+        assert!(reports(MouseTracking::X10, MouseKind::Press(button)));
+        assert!(!reports(MouseTracking::X10, MouseKind::Release(button)));
+        assert!(reports(
+            MouseTracking::ButtonMotion,
+            MouseKind::Drag(button)
+        ));
+        assert!(!reports(MouseTracking::Normal, MouseKind::Drag(button)));
+    }
+    for direction in [
+        ScrollDirection::Up,
+        ScrollDirection::Down,
+        ScrollDirection::Left,
+        ScrollDirection::Right,
+    ] {
+        assert!(!reports(MouseTracking::X10, MouseKind::Scroll(direction)));
+        assert!(reports(MouseTracking::Normal, MouseKind::Scroll(direction)));
+    }
+}

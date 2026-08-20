@@ -4,8 +4,8 @@
 use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
-/// A failure loading or running a plugin. Recoverable: the plugin is isolated
-/// and disabled, and the session keeps running.
+/// A failure loading or running a plugin. Every variant reports
+/// [`Severity::Recoverable`].
 #[derive(Debug, Error)]
 pub enum PluginError {
     /// The plugin module could not be loaded or instantiated.
@@ -22,7 +22,7 @@ impl DomainError for PluginError {
         DomainCategory::Plugin
     }
 
-    /// Always [`Severity::Recoverable`]; the session continues.
+    /// Always [`Severity::Recoverable`].
     fn severity(&self) -> Severity {
         Severity::Recoverable
     }

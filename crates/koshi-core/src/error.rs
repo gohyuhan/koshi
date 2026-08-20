@@ -1,6 +1,6 @@
 //! Error categories and severity. Every crate's domain error classifies into a
-//! shared [`DomainCategory`] and [`Severity`], so observability and diagnostics
-//! can handle a failure without knowing its concrete type.
+//! shared [`DomainCategory`] and [`Severity`] through the [`DomainError`]
+//! trait.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,9 +70,8 @@ impl std::fmt::Display for Severity {
     }
 }
 
-/// Implemented by every crate's domain error so a failure can be classified
-/// without knowing its concrete type. The aggregate `KoshiError` (in
-/// `koshi-error`) delegates through this trait.
+/// Classifies one failure. Implemented by every crate's domain error; the
+/// aggregate `KoshiError` (in `koshi-error`) delegates through this trait.
 pub trait DomainError {
     /// Which domain the failure belongs to.
     fn category(&self) -> DomainCategory;

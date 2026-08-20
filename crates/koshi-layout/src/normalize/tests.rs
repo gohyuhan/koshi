@@ -342,3 +342,20 @@ fn an_already_canonical_tree_is_returned_unchanged() {
     let normalized = normalize(&tree, &live(&[a, b, c])).unwrap();
     assert_eq!(normalized, tree);
 }
+
+#[test]
+fn a_dead_last_active_stack_member_hands_off_to_the_new_last_member() {
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let tree = LayoutNode::Split(SplitNode::stack(vec![a, b, c], 2));
+
+    // The expanded member was the last one and it died. No member sits at
+    // or after its index any more, so the new last member expands.
+    let normalized = normalize(&tree, &live(&[a, b])).unwrap();
+    let LayoutNode::Split(stack) = &normalized else {
+        panic!("stack must survive");
+    };
+    assert_eq!(stack.active, 1);
+    let collapsed: Vec<bool> = stack.children.iter().map(|child| child.collapsed).collect();
+    assert_eq!(collapsed, [true, false]);
+    assert_eq!(normalized.leaf_panes(), [a, b]);
+}

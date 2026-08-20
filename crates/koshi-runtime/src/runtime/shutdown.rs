@@ -20,10 +20,11 @@ impl Server {
     /// Tear the process down in a fixed staged order:
     /// 1. set the draining flag,
     /// 2. stop the control socket and withdraw its endpoint file,
-    /// 3. notify plugins of imminent shutdown *(seam — no host yet)*,
+    /// 3. plugin notification — a no-op, no plugin host is wired,
     /// 4. group-kill immediately for a quit with no issuing client, otherwise
     ///    graceful kill,
-    /// 5. persist the session snapshot *(seam — no storage yet)*.
+    /// 5. session-snapshot persistence — a no-op, the storage service is
+    ///    [`NullStorage`](crate::placeholder::NullStorage).
     ///
     /// Stages 6–7 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
@@ -38,9 +39,7 @@ impl Server {
             ipc_server.shutdown();
         }
 
-        // Stage 3 — notify plugins of imminent shutdown.
-        // SEAM: no plugin host exists yet. When it lands, broadcast the
-        // shutdown notice here, ahead of the kill, so plugins can flush.
+        // Stage 3 — plugin notification: a no-op, no plugin host is wired.
 
         // Stage 4 — a quit with no issuing client is immediate; every other
         // ending keeps the graceful process-group window. Both paths reap
@@ -51,11 +50,9 @@ impl Server {
             self.graceful_kill_all_panes();
         }
 
-        // Stage 5 — persist the session snapshot.
-        // SEAM: storage is a no-op placeholder. When a real storage layer
-        // lands, serialize each session here and write it under the data dir,
-        // skipping gracefully when persistence is unavailable. Ordered after the
-        // kill so it records the final session state.
+        // Stage 5 — session-snapshot persistence: a no-op, the storage service
+        // is the NullStorage stand-in. Ordered after the kill, where the final
+        // session state exists to record.
 
         // Stages 6 (restore terminal) and 7 (flush logs) run after this returns,
         // as the caller's cleanup guard and tracing guard drop in that order.

@@ -877,3 +877,101 @@ fn a_listed_grant_stands_exactly_when_the_record_it_came_from_does() {
         }
     }
 }
+
+/// A file written by hand can hold two records on one hash. The walk runs to
+/// the end of the list rather than stopping at the first record it matches,
+/// so the last live record is the one that answers and the one that is
+/// stamped.
+#[test]
+fn the_last_live_record_holding_a_secret_is_the_one_that_answers() {
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+    let token = ConnectionToken::generate();
+    let mut store = TokenStore::new();
+    for (scope, issued) in [
+        (TokenScope::Session(session), 100),
+        (TokenScope::HostWide, 200),
+    ] {
+        store.records.push(TokenRecord {
+            identity: "ada".to_string(),
+            hash: hash_token(&token),
+            scope,
+            issued_at: moment(issued),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: None,
+        });
+    }
+
+    assert_eq!(store.admit(&token, moment(300)), Some(TokenScope::HostWide));
+    assert_eq!(store.records[0].last_used_at, None);
+    assert_eq!(store.records[1].last_used_at, Some(moment(300)));
+}
+
+/// The walk keeps only the records that still stand and reach the session
+/// asked for, so a later record that is revoked or scoped elsewhere leaves an
+/// earlier one answering instead of hiding it.
+#[test]
+fn a_later_record_that_is_revoked_or_scoped_elsewhere_leaves_an_earlier_one_answering() {
+    let wanted = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+    let other = SessionId::from_uuid(uuid::Uuid::from_u128(2));
+    let token = ConnectionToken::generate();
+    let mut store = TokenStore::new();
+    for (scope, revoked_at) in [
+        (TokenScope::Session(wanted), None),
+        (TokenScope::Session(other), None),
+        (TokenScope::HostWide, Some(moment(250))),
+    ] {
+        store.records.push(TokenRecord {
+            identity: "ada".to_string(),
+            hash: hash_token(&token),
+            scope,
+            issued_at: moment(100),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at,
+        });
+    }
+
+    assert_eq!(
+        store.resolve(&token, wanted, moment(300)),
+        Resolution::Admitted
+    );
+    assert_eq!(store.records[0].last_used_at, Some(moment(300)));
+    assert_eq!(store.records[1].last_used_at, None);
+    assert_eq!(store.records[2].last_used_at, None);
+}
+
+#[test]
+fn one_identity_holding_several_scopes_lists_host_wide_first_then_sessions_by_id() {
+    let first = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+    let second = SessionId::from_uuid(uuid::Uuid::from_u128(2));
+    let mut store = TokenStore::new();
+    store.grant(
+        "ada".to_string(),
+        TokenScope::Session(second),
+        moment(100),
+        None,
+    );
+    store.grant(
+        "ada".to_string(),
+        TokenScope::Session(first),
+        moment(200),
+        None,
+    );
+    store.grant("ada".to_string(), TokenScope::HostWide, moment(300), None);
+
+    let listed: Vec<TokenScope> = store
+        .entries(None)
+        .into_iter()
+        .map(|entry| entry.scope)
+        .collect();
+
+    assert_eq!(
+        listed,
+        vec![
+            TokenScope::HostWide,
+            TokenScope::Session(first),
+            TokenScope::Session(second),
+        ]
+    );
+}

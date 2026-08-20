@@ -45,7 +45,7 @@ pub struct SolveResult {
     /// rectangle. A collapsed stack member's rect is its one-row header
     /// strip; a zero-area rect means the pane is not visible at all.
     pub panes: Vec<(PaneId, Rect)>,
-    /// Panes clipped to zero area because the layout no longer fits. A pane
+    /// Panes clipped to zero area when the layout no longer fits. A pane
     /// that is zero-area for another reason is not listed here: one hidden
     /// behind a fullscreen pane, or a collapsed stack member's non-header
     /// leaves. Trailing order is stable: the same panes suppress and restore
@@ -259,10 +259,12 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
 /// The smallest rectangle a stack can be solved into: its widest member by
 /// one header row per collapsed member plus the active member's rows.
 fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
-    let mut cols: u16 = 0;
-    for child in &split.children {
-        cols = cols.max(min_size(&child.node, default_min).cols);
-    }
+    let cols = split
+        .children
+        .iter()
+        .map(|child| min_size(&child.node, default_min).cols)
+        .max()
+        .unwrap_or(0);
     let header_rows = split.children.len().saturating_sub(1) as u16;
     let active_rows = split
         .children
@@ -284,6 +286,11 @@ pub(crate) fn slot_floor(split: &SplitNode, index: usize, horizontal: bool, min:
             min_size(&child.node, min)
         });
     child_floor(split, index, axis_and_cross(child_min, horizontal).0)
+}
+
+/// The cell count of `rect`: columns × rows. A 40 by 24 rect gives 960.
+pub(crate) fn cell_area(rect: Rect) -> u64 {
+    u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
 /// The `size` measures along the split axis and across it: columns then rows

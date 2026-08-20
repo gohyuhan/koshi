@@ -217,10 +217,7 @@ impl Server {
         // Displaced viewers landed on the nearest surviving tab (the
         // cascade's `TabFocused`); its viewport now counts them, so it
         // reflows. A destination with no viewport keeps its sizes.
-        let destination = events.iter().find_map(|event| match event {
-            Event::TabFocused(focused) => Some(focused.tab_id),
-            _ => None,
-        });
+        let destination = tab_focused_in(&events);
         if let Some(destination) = destination {
             self.reflow_tab_if_viewed(backend.as_ref(), session_id, destination, &mut events);
         }

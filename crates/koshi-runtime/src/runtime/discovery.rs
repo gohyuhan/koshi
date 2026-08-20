@@ -13,6 +13,7 @@ use koshi_core::discovery::{
     ClientInfo, PaneInfo, PaneState, SessionInfo, SessionOverview, TabInfo,
 };
 use koshi_core::ids::PaneId;
+use koshi_core::process::SpawnSpec;
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_session::session::state::{Session, Tab};
 
@@ -123,7 +124,7 @@ fn pane_infos(
 
 /// A spawn spec as the argv discovery reports: the program first, then its
 /// arguments.
-fn spawn_argv(spec: &koshi_core::process::SpawnSpec) -> Vec<String> {
+fn spawn_argv(spec: &SpawnSpec) -> Vec<String> {
     let mut argv = Vec::with_capacity(spec.args.len() + 1);
     argv.push(spec.program.to_string_lossy().into_owned());
     argv.extend(spec.args.iter().cloned());

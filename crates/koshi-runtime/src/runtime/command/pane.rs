@@ -367,10 +367,7 @@ impl Server {
         let reflow_tab = if tab_survives {
             Some(tab_id)
         } else {
-            events.iter().find_map(|event| match event {
-                Event::TabFocused(focused) => Some(focused.tab_id),
-                _ => None,
-            })
+            tab_focused_in(events)
         };
         if let Some(reflow_tab) = reflow_tab {
             self.reflow_tab_if_viewed(backend, session_id, reflow_tab, events);
@@ -921,9 +918,18 @@ impl Server {
         target_client: Option<ClientId>,
         min: Size,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
-        let fits_viewport =
-            |viewport: Size| fits(candidate, Rect::new(Point { x: 0, y: 0 }, viewport), min);
-        let wont_fit = || Rejection::new(RejectReason::MinSize, "not enough space for a new pane");
+        // The chosen viewport, paired with the client designated for it, unless
+        // `candidate` does not fit that viewport.
+        let admit = |viewport: Size, designated: Option<ClientId>| {
+            if fits(candidate, Rect::new(Point { x: 0, y: 0 }, viewport), min) {
+                Ok((viewport, designated))
+            } else {
+                Err(Rejection::new(
+                    RejectReason::MinSize,
+                    "not enough space for a new pane",
+                ))
+            }
+        };
         let existing = session.tab_viewport(tab_id);
 
         // An explicit `--client` target wins over the issuing client — a caller
@@ -942,38 +948,22 @@ impl Server {
             // every client that will view the tab.
             let designated = pane_viewport(client.viewport());
             let viewport = match existing {
-                Some(existing) => Size {
-                    cols: existing.cols.min(designated.cols),
-                    rows: existing.rows.min(designated.rows),
-                },
+                Some(existing) => min_size(existing, designated),
                 None => designated,
             };
-            return if fits_viewport(viewport) {
-                Ok((viewport, Some(client_id)))
-            } else {
-                Err(wont_fit())
-            };
+            return admit(viewport, Some(client_id));
         }
 
         // No designated client: an already-viewed tab needs no adoption.
         if let Some(viewport) = existing {
-            return if fits_viewport(viewport) {
-                Ok((viewport, None))
-            } else {
-                Err(wont_fit())
-            };
+            return admit(viewport, None);
         }
 
         // Unviewed and no designated client: default to the session's sole
         // client; reject when there are several (name one) or none.
         let only =
             Self::sole_attached_client(session, "to view the new pane's tab", "the new pane")?;
-        let viewport = pane_viewport(only.viewport());
-        if fits_viewport(viewport) {
-            Ok((viewport, Some(only.id())))
-        } else {
-            Err(wont_fit())
-        }
+        admit(pane_viewport(only.viewport()), Some(only.id()))
     }
 
     /// The viewport `tab_id` is solved against when a pane closes: the tab's
@@ -997,10 +987,7 @@ impl Server {
                     .clients
                     .list_attached()
                     .map(|client| pane_viewport(client.viewport()))
-                    .reduce(|a, b| Size {
-                        cols: a.cols.min(b.cols),
-                        rows: a.rows.min(b.rows),
-                    })
+                    .reduce(min_size)
             })
             .unwrap_or(Size { cols: 80, rows: 24 })
     }

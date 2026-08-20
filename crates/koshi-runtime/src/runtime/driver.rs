@@ -36,8 +36,7 @@ impl Server {
             // A raw chord is the viewer's to read: it holds the keymap, the
             // input mode and any open sequence, and hands the session either a
             // resolved action or a press to write. One arriving here belongs to
-            // no attached viewer, and the session has no keymap to judge it
-            // with, so it is dropped rather than guessed at.
+            // no attached viewer, and is dropped.
             RuntimeEvent::KeyInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a key no attached viewer resolved");
             }
@@ -59,7 +58,8 @@ impl Server {
             }
             // A mouse event is the viewer's for the same reason: only the frame
             // it painted says which pane the pointer is over and which gesture
-            // is under way. One arriving here belongs to no attached viewer.
+            // is under way. One arriving here belongs to no attached viewer, and
+            // is dropped.
             RuntimeEvent::MouseInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
@@ -104,9 +104,8 @@ impl Server {
                 let events = self.handle_client_resize(client_id, size);
                 self.publish_events(&events);
             }
-            // The only deadline the session ever woke for was a key sequence's,
-            // and that sequence now lives on the viewer, which expires it
-            // itself. The variant stays as the loop's generic wake-up.
+            // The loop's generic wake-up. The session holds no deadline of its
+            // own: a key sequence expires on the viewer that opened it.
             RuntimeEvent::Timer => {}
             RuntimeEvent::Ipc { envelope, reply } => {
                 let result = self.submit_command(envelope);

@@ -159,8 +159,7 @@ impl Scrollback {
     /// A hard-ended row is stored without the trailing default blanks that pad
     /// it out to the screen width, so a 200-column row reading `README.md`
     /// keeps 9 cells. A soft-wrapped row keeps every cell. Taking the row
-    /// borrowed makes one allocation at the stored size; a 1000-column screen
-    /// scrolling 20 000 lines runs about 18% faster for it.
+    /// borrowed makes one allocation, at the stored size.
     pub fn push_row(&mut self, row: &[Cell], end: RowEnd) {
         let line = kept(row, end).to_vec();
         let new_bytes = self.line_bytes(&line);

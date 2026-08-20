@@ -3,9 +3,11 @@
 //! its limit is logged once rather than once per attempt, that a window ends
 //! on its own, and that the table cannot grow past the count it is bounded at.
 //!
-//! Also [`Occasional`], which writes a repeated warning once per window, and
-//! [`EndReport`], which reports a bridged connection ended once.
+//! Also [`Occasional`], which writes a repeated warning once per window,
+//! [`EndReport`], which reports a bridged connection ended once, and the two
+//! functions that read and write one frame.
 
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr};
 
 use super::*;
@@ -249,6 +251,158 @@ fn a_place_in_the_admission_window_is_given_back_however_the_caller_left() {
         counted.load(Ordering::Acquire),
         0,
         "an empty window counts nothing"
+    );
+}
+
+#[test]
+fn an_address_whose_window_is_exactly_over_starts_a_fresh_one() {
+    // The window ends at RATE_WINDOW, not one moment after it: an attempt
+    // arriving at exactly that reading opens a new window and is served.
+    let mut table = RateTable::new();
+    let opened = Instant::now();
+    for _ in 1..=MAX_ATTEMPTS {
+        assert!(matches!(table.allow(caller(1), opened), Attempt::Serve));
+    }
+    assert!(matches!(
+        table.allow(caller(1), opened),
+        Attempt::DropAndSay
+    ));
+
+    assert!(
+        matches!(
+            table.allow(caller(1), opened + RATE_WINDOW - Duration::from_millis(1)),
+            Attempt::DropInSilence
+        ),
+        "one millisecond before the window ends the address is still shut out"
+    );
+    assert!(
+        matches!(table.allow(caller(1), opened + RATE_WINDOW), Attempt::Serve),
+        "at exactly {RATE_WINDOW:?} the window is over"
+    );
+}
+
+#[test]
+fn a_warning_written_exactly_one_window_ago_is_written_again() {
+    // The quiet spell ends at LOG_WINDOW, not one moment after it.
+    let opened = Instant::now();
+
+    let mut inside = Occasional::new();
+    assert!(inside.due(opened));
+    assert!(
+        !inside.due(opened + LOG_WINDOW - Duration::from_millis(1)),
+        "one millisecond before the window ends the warning is still silent"
+    );
+
+    let mut over = Occasional::new();
+    assert!(over.due(opened));
+    assert!(
+        over.due(opened + LOG_WINDOW),
+        "at exactly {LOG_WINDOW:?} the warning is written again"
+    );
+}
+
+/// One frame's bytes as a caller sends them: a 4-byte big-endian length, then
+/// the JSON.
+fn framed(frame: &RemoteClientFrame) -> Vec<u8> {
+    let payload = serde_json::to_vec(frame).expect("the frame encodes");
+    let length = u32::try_from(payload.len()).expect("a test frame fits in a length prefix");
+    let mut bytes = length.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&payload);
+    bytes
+}
+
+#[test]
+fn a_frame_the_length_of_the_cap_is_read_and_one_byte_over_it_is_not() {
+    // The cap is what keeps a caller from naming a payload larger than this
+    // machine will hold. A frame exactly at it is a caller inside the rule.
+    let sent = RemoteClientFrame::Attach {
+        session: SessionSelector::Name("S-quiet-lake".to_string()),
+    };
+    let bytes = framed(&sent);
+    let payload_len = u32::try_from(bytes.len() - 4).expect("the payload fits");
+
+    let mut exact = Cursor::new(bytes.clone());
+    let Opening::Frame(read) = read_client_frame(&mut exact, payload_len) else {
+        panic!("a frame the length of the cap is read");
+    };
+    assert_eq!(read, sent);
+    assert_eq!(
+        exact.position(),
+        u64::try_from(bytes.len()).expect("the frame fits"),
+        "and the whole frame was taken off the stream"
+    );
+
+    let mut over = Cursor::new(bytes);
+    assert!(
+        matches!(
+            read_client_frame(&mut over, payload_len - 1),
+            Opening::Closed
+        ),
+        "a length one byte over the cap closes the connection"
+    );
+    assert_eq!(over.position(), 4, "and its payload is never read");
+}
+
+#[test]
+fn json_this_build_cannot_read_is_refused_and_a_stream_that_ends_early_is_not() {
+    // The two answers are not the same: unreadable bytes get a refusal written
+    // back, and a stream that ended has nobody left to write to.
+    let junk = br#"{"Nonsense":1}"#.to_vec();
+    let mut readable_frame = u32::try_from(junk.len())
+        .expect("the junk fits")
+        .to_be_bytes()
+        .to_vec();
+    readable_frame.extend_from_slice(&junk);
+    assert!(
+        matches!(
+            read_client_frame(&mut Cursor::new(readable_frame), REMOTE_HELLO_MAX_LEN),
+            Opening::Unreadable
+        ),
+        "a whole frame carrying JSON this build has no frame for is refused"
+    );
+
+    // The length says ten bytes and three follow.
+    let mut cut_payload = 10u32.to_be_bytes().to_vec();
+    cut_payload.extend_from_slice(b"abc");
+    assert!(
+        matches!(
+            read_client_frame(&mut Cursor::new(cut_payload), REMOTE_HELLO_MAX_LEN),
+            Opening::Closed
+        ),
+        "a payload that ends early closes the connection"
+    );
+
+    assert!(
+        matches!(
+            read_client_frame(&mut Cursor::new(vec![0u8, 0, 1]), REMOTE_HELLO_MAX_LEN),
+            Opening::Closed
+        ),
+        "and so does a length prefix that ends early"
+    );
+}
+
+#[test]
+fn one_answer_goes_out_as_a_big_endian_length_and_then_its_json() {
+    // The caller reads the length the same way round. A length written the
+    // other way round names another number, and the caller waits for bytes
+    // that never come.
+    let frame = RemoteServerFrame::Refused {
+        message: REMOTE_REFUSED.to_string(),
+    };
+    let payload = serde_json::to_vec(&frame).expect("the frame encodes");
+    let length = u32::try_from(payload.len()).expect("the answer fits");
+    let mut expected = length.to_be_bytes().to_vec();
+    expected.extend_from_slice(&payload);
+
+    let mut written = Vec::new();
+    send_frame(&mut written, &frame).expect("the answer is written");
+
+    assert_eq!(written, expected);
+    assert_ne!(
+        written[..4],
+        length.to_le_bytes(),
+        "a {} byte payload names different bytes each way round",
+        payload.len()
     );
 }
 

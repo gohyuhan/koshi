@@ -305,20 +305,17 @@ impl Walker<'_> {
             self.error(node.span(), "`bind` takes no children");
             return;
         }
-        let [key_entry, action_entry] = node.entries() else {
-            self.error(
-                node.span(),
-                "`bind` takes exactly two string arguments: a key sequence and an action reference",
-            );
-            return;
+        let (key_entry, action_entry) = match node.entries() {
+            [key, action] if key.name().is_none() && action.name().is_none() => (key, action),
+            _ => {
+                self.error(
+                    node.span(),
+                    "`bind` takes exactly two string arguments: a key sequence and an action \
+                     reference",
+                );
+                return;
+            }
         };
-        if key_entry.name().is_some() || action_entry.name().is_some() {
-            self.error(
-                node.span(),
-                "`bind` takes exactly two string arguments: a key sequence and an action reference",
-            );
-            return;
-        }
         let (Some(key_str), Some(action_str)) = (
             key_entry.value().as_string(),
             action_entry.value().as_string(),
@@ -393,26 +390,19 @@ impl Walker<'_> {
             );
             return None;
         }
-        let [entry] = node.entries() else {
-            self.error(
-                node.span(),
-                format!(
-                    "`{}` takes exactly one integer argument",
-                    node.name().value()
-                ),
-            );
-            return None;
+        let entry = match node.entries() {
+            [entry] if entry.name().is_none() => entry,
+            _ => {
+                self.error(
+                    node.span(),
+                    format!(
+                        "`{}` takes exactly one integer argument",
+                        node.name().value()
+                    ),
+                );
+                return None;
+            }
         };
-        if entry.name().is_some() {
-            self.error(
-                node.span(),
-                format!(
-                    "`{}` takes exactly one integer argument",
-                    node.name().value()
-                ),
-            );
-            return None;
-        }
         let value = entry
             .value()
             .as_integer()
@@ -436,26 +426,19 @@ impl Walker<'_> {
     /// and returns `None` on any other shape. Children are left to the
     /// caller — `mode` carries a block, the scalar settings must not.
     fn string_arg<'n>(&mut self, node: &'n KdlNode) -> Option<(&'n str, SourceSpan)> {
-        let [entry] = node.entries() else {
-            self.error(
-                node.span(),
-                format!(
-                    "`{}` takes exactly one string argument",
-                    node.name().value()
-                ),
-            );
-            return None;
+        let entry = match node.entries() {
+            [entry] if entry.name().is_none() => entry,
+            _ => {
+                self.error(
+                    node.span(),
+                    format!(
+                        "`{}` takes exactly one string argument",
+                        node.name().value()
+                    ),
+                );
+                return None;
+            }
         };
-        if entry.name().is_some() {
-            self.error(
-                node.span(),
-                format!(
-                    "`{}` takes exactly one string argument",
-                    node.name().value()
-                ),
-            );
-            return None;
-        }
         match entry.value().as_string() {
             Some(value) => Some((value, entry.span())),
             None => {

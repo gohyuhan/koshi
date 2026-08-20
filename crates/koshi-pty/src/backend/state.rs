@@ -102,13 +102,12 @@ impl PtyHandle {
     pub fn new(pane_id: PaneId) -> (Self, Sender<Vec<u8>>, Sender<ExitStatus>) {
         let (output_sender, output_receiver) = channel();
         let (exit_sender, exit_receiver) = channel();
-        let new_pty_handle = PtyHandle {
+        let handle = PtyHandle {
             pane_id,
             output: Some(output_receiver),
             exit: Some(exit_receiver),
         };
-
-        (new_pty_handle, output_sender, exit_sender)
+        (handle, output_sender, exit_sender)
     }
 
     /// Build a handle for `pane_id` that carries no channels, for a backend

@@ -45,14 +45,14 @@ use kdl::KdlNode;
 use koshi_core::geometry::Direction;
 use koshi_core::log::{LogFormat, LogLevel};
 
-use crate::error::{check_version, ConfigError};
+use crate::error::{check_version, validation, ConfigError};
 use crate::layer::{
     PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
     PartialMouseConfig, PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig,
     PartialUpdateConfig,
 };
 use crate::parser::{
-    parse_kdl, unknown_key, value_bool, value_integer, value_nonempty_string, value_string,
+    parse_kdl, set, unknown_key, value_bool, value_integer, value_nonempty_string, value_string,
     value_u16, value_u32,
 };
 use crate::types::WheelScroll;
@@ -490,21 +490,6 @@ fn parse_logging(node: &KdlNode, warnings: &mut Vec<String>) -> PartialLoggingCo
     cfg
 }
 
-/// Stores a parsed field-partial value, or records a warning naming the field
-/// and the reason it was skipped.
-fn set<T>(
-    slot: &mut Option<T>,
-    parsed: Result<T, String>,
-    section: &str,
-    key: &str,
-    warnings: &mut Vec<String>,
-) {
-    match parsed {
-        Ok(value) => *slot = Some(value),
-        Err(detail) => warnings.push(format!("ignored `{section}.{key}`: {detail}")),
-    }
-}
-
 /// Reads a scrollback cap. A negative value is clamped to `0` — "no
 /// scrollback": the buffer keeps nothing and lines drop as they scroll off,
 /// rather than being rejected as a bad field.
@@ -561,14 +546,6 @@ fn read_bool(node: &KdlNode, key: &str) -> Result<bool, ConfigError> {
 /// Reads the node's single value as a `u32` for the strict `update` section.
 fn read_u32(node: &KdlNode, key: &str) -> Result<u32, ConfigError> {
     value_u32(node).map_err(|detail| validation(key, &detail))
-}
-
-/// Builds a [`ConfigError::Validation`] for a bad strict-section field value.
-fn validation(key: &str, detail: &str) -> ConfigError {
-    ConfigError::Validation {
-        key: key.to_string(),
-        detail: detail.to_string(),
-    }
 }
 
 #[cfg(test)]

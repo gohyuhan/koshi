@@ -20,20 +20,16 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
-    // Universal terminal identity. `TERM` tells the child program which
-    // terminal's feature set to assume; `xterm-256color` is a *compatibility
-    // bootstrap* naming a widely-supported terminal type, safe today because no
-    // terminfo entry (a per-terminal-type capability database the OS consults)
-    // for `koshi` is shipped yet. Only revisit once a terminfo is published.
+    // Universal terminal identity, set for every shell. `TERM` names the
+    // terminal type whose feature set the child assumes, and `COLORTERM` names
+    // the color depth it may use.
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
 
-    // Shell-specific bootstrap, applied per shell so a hack never leaks to a
-    // shell that does not need it. Only zsh needs one today: an empty
-    // `PROMPT_EOL_MARK` suppresses the inverse `%` zsh prints — via the
-    // on-by-default `PROMPT_CR`/`PROMPT_SP` options — for output that lacks a
-    // trailing newline. The match is exhaustive: adding a `ShellKind` requires
-    // an explicit bootstrap decision.
+    // Shell-specific bootstrap. zsh alone gets one: an empty `PROMPT_EOL_MARK`
+    // stops the inverse `%` that zsh's on-by-default `PROMPT_CR`/`PROMPT_SP`
+    // options print after output with no trailing newline. Every other shell
+    // gets no bootstrap key. The match lists every `ShellKind`.
     match specs.shell_kind {
         ShellKind::Zsh => {
             env.insert("PROMPT_EOL_MARK".to_string(), String::new());
@@ -45,9 +41,8 @@ pub fn build_env(specs: &SpawnSpec) -> BTreeMap<String, String> {
         | ShellKind::Other(_) => {}
     }
 
-    // Explicit `spec.env` overrides win over koshi's own defaults above, so they
-    // are applied last. They also win over the inherited parent env because the
-    // caller layers this whole overlay on top of it at spawn time.
+    // `spec.env` is applied last, so each of its keys overwrites the koshi
+    // default of the same name above.
     for (key, value) in &specs.env {
         env.insert(key.to_string(), value.to_string());
     }

@@ -406,3 +406,69 @@ fn a_profile_records_focus_for_every_tab() {
         );
     }
 }
+
+#[test]
+fn a_profile_opens_on_the_tab_it_marks_focused() {
+    let (mut rt, _fake) = runtime();
+    let tmpl = template("version 1\ntab {\n    pane\n}\ntab {\n    focus\n    pane\n}");
+    assert_eq!(tmpl.focused_tab, 1, "the second tab carries `focus`");
+    let client = ClientId::new();
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(client),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let second = session
+        .tabs
+        .values()
+        .find(|tab| tab.index() == 1)
+        .expect("a tab at bar position 1")
+        .id();
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client attached")
+            .active_tab(),
+        second,
+    );
+}
+
+#[test]
+fn a_profile_focusing_a_tab_it_does_not_have_opens_on_its_last_tab() {
+    let (mut rt, _fake) = runtime();
+    let mut tmpl = template("version 1\ntab {\n    pane\n}\ntab {\n    pane\n}");
+    tmpl.focused_tab = 5;
+    let client = ClientId::new();
+    let () = rt
+        .bootstrap_profile(
+            SessionId::new(),
+            tmpl,
+            viewport(),
+            SystemTime::UNIX_EPOCH,
+            Some(client),
+        )
+        .expect("profile launches");
+
+    let session = rt.sessions.values().next().expect("one session");
+    let last = session
+        .tabs
+        .values()
+        .find(|tab| tab.index() == 1)
+        .expect("a tab at bar position 1")
+        .id();
+    assert_eq!(
+        session
+            .clients
+            .get(client)
+            .expect("client attached")
+            .active_tab(),
+        last,
+    );
+}

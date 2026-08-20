@@ -6,9 +6,9 @@
 //! carries the stable ids printed by Koshi, usable directly as explicit
 //! `--session`/`--tab`/`--pane`/`--client` targets.
 //!
-//! [`SessionOverview`] gathers all four into one picture of a session, so a
-//! caller makes one request across the process boundary and filters the answer
-//! for its query.
+//! [`SessionOverview`] gathers all four into one picture of a session. A caller
+//! makes one request across the process boundary and keeps the rows its query
+//! asked for.
 //!
 //! Paths serialize as their lossy UTF-8 string, so a non-UTF-8 working
 //! directory never fails a render.

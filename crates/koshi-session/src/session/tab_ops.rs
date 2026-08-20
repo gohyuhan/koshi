@@ -25,11 +25,9 @@ use koshi_core::event::{
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::tree::LayoutNode;
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
-use koshi_pane::pane::state::PaneRecord;
 
 use crate::session::lifecycle::SessionLifecycleEvent;
-use crate::session::pane_ops::NewPaneSpec;
+use crate::session::pane_ops::{register_running_pane, NewPaneSpec};
 use crate::session::state::{Session, Tab};
 
 /// Which tab a focus request names, resolved against the current display order
@@ -54,10 +52,9 @@ pub enum TabTarget {
 /// state, and a failed spawn never creates a tab. The tab takes the next dense
 /// display index (`len`, i.e. the end). The first tab transitions the session
 /// from `Starting` to `Running`; subsequent tabs leave the lifecycle alone.
-/// `spec` carries the title, cwd, and command recorded on the root pane so a
-/// later restore or respawn can recover the request; `created_at` is supplied
-/// by the caller so the timestamp crosses the IPC boundary intact and tests
-/// stay deterministic.
+/// `spec` carries the cwd and command recorded on the root pane, which a later
+/// restore or respawn reads back; `created_at` is the caller's timestamp,
+/// never read from the clock here.
 ///
 /// `focus_client` — when given and still attached — switches onto the new tab
 /// and focuses its root pane; a stale id focuses nothing, exactly like `None`.
@@ -83,14 +80,8 @@ pub fn commit_new_tab(
 
     let mut events = vec![];
 
-    // Register the root pane. Its process is already live, so it enters
-    // `Running` straight away; the spawn request is recorded so a later
-    // restore or respawn can recover it.
-    let mut record = PaneRecord::new(new_pane_id, created_at);
-    record.cwd = spec.cwd;
-    record.command = spec.command;
-    let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-    let _ = session.panes.insert(record);
+    // Register the root pane as `Running`, carrying its spawn request.
+    register_running_pane(session, new_pane_id, spec, created_at);
 
     let mut new_tab = Tab::new(new_tab_id, name, session.tabs.len(), new_pane_id);
     // The tab's own most-recent focus, recorded whether or not a client is here
@@ -117,9 +108,8 @@ pub fn commit_new_tab(
     let mut previous_tab = None;
 
     if let Some(client_id) = focus {
-        // `focus` was already filtered to attached clients above, so this
-        // lookup should always succeed; the early return is a defensive
-        // fallback rather than an expected path.
+        // A client id absent from the registry returns the events emitted so
+        // far and no previous tab.
         let Some(client) = session.clients.get_mut(client_id) else {
             return (previous_tab, events);
         };
@@ -187,14 +177,9 @@ pub fn commit_profile_tab(
     let focus = focus_client.filter(|client_id| session.clients.get(*client_id).is_some());
     let mut events = Vec::new();
 
-    // Register every pane. Each child is already live, so it enters `Running`
-    // straight away; its spawn request is recorded for a later restore.
+    // Register every pane as `Running`, each carrying its own spawn request.
     for (pane_id, spec) in pane_ids.iter().zip(specs) {
-        let mut record = PaneRecord::new(*pane_id, created_at);
-        record.cwd = spec.cwd;
-        record.command = spec.command;
-        let _ = record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-        let _ = session.panes.insert(record);
+        register_running_pane(session, *pane_id, spec, created_at);
     }
 
     let root_pane = pane_ids[0];
@@ -369,25 +354,20 @@ pub fn move_tab(session: &mut Session, tab_id: TabId, new_index: usize) -> Vec<E
         return Vec::new();
     }
 
-    // 1. Others in display order, excluding the target. (usize, TabId) are Copy,
-    //    so this owns its data — the borrow of session.tabs ends at collect().
-    let mut others: Vec<(usize, TabId)> = session
-        .tabs
-        .values()
-        .filter(|tab| tab.id() != tab_id)
-        .map(|tab| (tab.index(), tab.id()))
-        .collect();
-    others.sort_by_key(|&(index, _)| index);
-
-    // 2. Renumber others densely, leaving the target's slot free: the first
-    //    `new_index` of them keep their position, the rest shift up by one.
-    for (position, &(_, id)) in others.iter().enumerate() {
+    // 1. Renumber the other tabs densely, leaving the target's slot free: the
+    //    first `new_index` of them keep their position, the rest shift up by
+    //    one.
+    for (position, id) in tab_ids_in_display_order(session)
+        .into_iter()
+        .filter(|&id| id != tab_id)
+        .enumerate()
+    {
         if let Some(tab) = session.tabs.get_mut(&id) {
             tab.update_index(position + usize::from(position >= new_index));
         }
     }
 
-    // 3. Drop the target into its new slot.
+    // 2. Drop the target into its new slot.
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.update_index(new_index);
     }
@@ -449,18 +429,19 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
 /// Renumber every tab to a dense `0..len` index in current display order,
 /// closing any gap a removal left. Reordering only — emits no events.
 fn reindex_tab_index(session: &mut Session) {
-    let mut existing_tabs: Vec<(usize, TabId)> = session
-        .tabs
-        .values()
-        .map(|tab| (tab.index(), tab.id()))
-        .collect();
-    existing_tabs.sort_by_key(|&(index, _)| index);
-
-    for (position, &(_, id)) in existing_tabs.iter().enumerate() {
+    for (position, id) in tab_ids_in_display_order(session).into_iter().enumerate() {
         if let Some(tab) = session.tabs.get_mut(&id) {
             tab.update_index(position);
         }
     }
+}
+
+/// Every tab of the session in display order, lowest index first. Tabs sharing
+/// an index keep their id order.
+fn tab_ids_in_display_order(session: &Session) -> Vec<TabId> {
+    let mut tab_ids: Vec<TabId> = session.tabs.keys().copied().collect();
+    tab_ids.sort_by_key(|tab_id| session.tabs[tab_id].index());
+    tab_ids
 }
 
 /// The surviving tab nearest `closed_index` in display order: the previous tab

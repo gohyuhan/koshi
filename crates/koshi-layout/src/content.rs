@@ -7,8 +7,6 @@
 //! into, and the cells the renderer fills) happens in exactly one place: here.
 //! Both PTY sizing and the render snapshot consume this output.
 
-use std::collections::HashSet;
-
 use koshi_core::geometry::Rect;
 use koshi_core::ids::PaneId;
 
@@ -32,24 +30,14 @@ use crate::solver::SolveResult;
 /// PTY layer applies its own minimum-size floor.
 #[must_use]
 pub fn content_rects(solve: &SolveResult) -> Vec<(PaneId, Option<Rect>)> {
-    // Both lists are indexed into sets first; the walk below then tests
-    // membership once per pane.
-    let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
-    let collapsed: HashSet<PaneId> = solve
-        .stack_headers
-        .iter()
-        .map(|header| header.pane)
-        .collect();
-
     solve
         .panes
         .iter()
         .map(|&(pane, outer)| {
-            if suppressed.contains(&pane) || outer.is_empty() || collapsed.contains(&pane) {
-                (pane, None)
-            } else {
-                (pane, Some(outer.inner_with_border()))
-            }
+            let shows_content = !outer.is_empty()
+                && !solve.suppressed.contains(&pane)
+                && !solve.stack_headers.iter().any(|header| header.pane == pane);
+            (pane, shows_content.then(|| outer.inner_with_border()))
         })
         .collect()
 }

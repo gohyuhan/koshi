@@ -77,8 +77,7 @@ impl Server {
         step: i16,
         cells: u16,
     ) -> Result<(), u16> {
-        // Clamping to ±i16::MAX keeps the edge-flip's `saturating_neg`
-        // symmetric.
+        // `step * cells` outside ±`i16::MAX` is clamped to it.
         let size = (i32::from(step) * i32::from(cells))
             .clamp(-i32::from(i16::MAX), i32::from(i16::MAX)) as i16;
         let command = Command::ResizePane(ResizePaneArgs {
@@ -241,8 +240,8 @@ impl Server {
             return false;
         };
         let written = self.pty_backend().write(pane_id, &bytes).is_ok();
-        // A wheel tick is not input the program's child typed, so it leaves
-        // a highlight standing; a click, drag, or release is.
+        // A wheel tick leaves the highlight standing; every other forwarded
+        // report — click, drag, motion, release — drops it.
         if !matches!(mouse.kind, MouseKind::Scroll(_)) {
             self.clear_selection_on_pane_input(client_id, pane_id);
         }

@@ -33,6 +33,7 @@ use koshi_core::ids::SessionId;
 
 use crate::error::IpcError;
 use crate::protocol::ConnectionToken;
+use crate::remote_state::write_owner_only;
 
 /// The format number this build writes into every store, and the only one it
 /// reads back.
@@ -237,31 +238,10 @@ impl TokenStore {
     ///
     /// Any failure along the way is [`IpcError::TokenStoreWrite`].
     pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        let write_failed = |detail: String| IpcError::TokenStoreWrite {
+        write_owner_only(path, self).map_err(|detail| IpcError::TokenStoreWrite {
             path: path.display().to_string(),
             detail,
-        };
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent).map_err(|error| write_failed(error.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| write_failed(error.to_string()))?;
-            }
-        }
-        #[cfg(unix)]
-        if path.exists() {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| write_failed(error.to_string()))?;
-        }
-        let data = serde_json::to_vec(self).map_err(|error| write_failed(error.to_string()))?;
-        koshi_storage::atomic::write_atomic(path, &data)
-            .map_err(|error| write_failed(error.to_string()))
+        })
     }
 
     /// Hand `identity` a fresh secret on `scope` and keep its hash.
@@ -325,6 +305,28 @@ impl TokenStore {
         stopped
     }
 
+    /// Where in `records` the last record sits that holds the hash `presented`,
+    /// still stands at `now`, and whose scope `reaches` accepts. `None` when no
+    /// record does.
+    ///
+    /// Every record is walked, in order, and each hash compared through its
+    /// last byte. The walk runs to the end and reads no record out of a map.
+    fn last_match(
+        &self,
+        presented: &str,
+        now: SystemTime,
+        reaches: impl Fn(&TokenScope) -> bool,
+    ) -> Option<usize> {
+        let mut found = None;
+        for (index, record) in self.records.iter().enumerate() {
+            let same_hash: bool = record.hash.as_bytes().ct_eq(presented.as_bytes()).into();
+            if same_hash && record.is_live(now) && reaches(&record.scope) {
+                found = Some(index);
+            }
+        }
+        found
+    }
+
     /// What `token` reaches on `session` at `now`.
     ///
     /// The presented secret is hashed once, then every record is walked and
@@ -340,14 +342,7 @@ impl TokenStore {
         now: SystemTime,
     ) -> Resolution {
         let presented = hash_token(token);
-        let mut admitted = None;
-        for (index, record) in self.records.iter().enumerate() {
-            let same_hash: bool = record.hash.as_bytes().ct_eq(presented.as_bytes()).into();
-            if same_hash && record.is_live(now) && record.scope.covers(session) {
-                admitted = Some(index);
-            }
-        }
-        match admitted {
+        match self.last_match(&presented, now, |scope| scope.covers(session)) {
             Some(index) => {
                 self.records[index].last_used_at = Some(now);
                 Resolution::Admitted
@@ -359,10 +354,8 @@ impl TokenStore {
     /// What `token` reaches at `now`, without naming a session.
     ///
     /// The presented secret is hashed once, then every record is walked and
-    /// each hash compared through its last byte. The walk is deliberately
-    /// exhaustive: it never stops at the first match and never reads a record
-    /// out of a map, so how long the answer takes does not say which record
-    /// matched, or whether any did. Returns the scope of the last live record
+    /// each hash compared through its last byte. The walk runs to the end and
+    /// reads no record out of a map. Returns the scope of the last live record
     /// holding that hash, and `None` when no record does. Admitting stamps
     /// that record's last-used time with `now`, so the caller writes the
     /// store back.
@@ -371,14 +364,7 @@ impl TokenStore {
     /// [`TokenScope::covers`].
     pub fn admit(&mut self, token: &ConnectionToken, now: SystemTime) -> Option<TokenScope> {
         let presented = hash_token(token);
-        let mut admitted = None;
-        for (index, record) in self.records.iter().enumerate() {
-            let same_hash: bool = record.hash.as_bytes().ct_eq(presented.as_bytes()).into();
-            if same_hash && record.is_live(now) {
-                admitted = Some(index);
-            }
-        }
-        let index = admitted?;
+        let index = self.last_match(&presented, now, |_| true)?;
         self.records[index].last_used_at = Some(now);
         Some(self.records[index].scope.clone())
     }

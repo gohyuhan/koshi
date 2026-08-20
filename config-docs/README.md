@@ -74,7 +74,8 @@ and marks the failed file as possibly changed.
   other valid fields still apply. Koshi logs each skipped field.
 - **Keybindings and profiles are all-or-nothing.** Any error drops the whole
   file.
-- **Unknown keys name the nearest valid key.** `min-col 2` results in
-  ``did you mean `min-cols`?``. `koshi config check` treats that typo as an
-  error even though normal startup can keep the other field-partial settings.
+- **Unknown keys name the nearest valid key.** `min-col 2` inside `pane`
+  results in ``unknown key `pane.min-col`; did you mean `pane.min-cols`?``.
+  `koshi config check` treats that typo as an error even though normal startup
+  can keep the other field-partial settings.
 - **A missing or invalid theme** uses built-in `default` colors and logs why.

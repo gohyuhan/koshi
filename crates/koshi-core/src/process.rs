@@ -1,9 +1,8 @@
 //! Process lifecycle and spawn types.
 //!
-//! These types live in `koshi-core` so the PTY layer, pane layer, and session
-//! close policy all share one definition. They are OS-agnostic: how a
-//! [`KillPolicy`] maps to actual signals or Win32 calls is the PTY layer's
-//! concern.
+//! The PTY layer, the pane layer, and the session close policy all read these
+//! types. They are OS-agnostic: how a [`KillPolicy`] maps to actual signals or
+//! Win32 calls is the PTY layer's concern.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -141,9 +140,6 @@ impl SpawnSpec {
 /// Pick the shell program path from an environment variable's value: the value
 /// when present and non-empty, else `fallback`. A set-but-empty variable
 /// (`SHELL=`) is treated as unset, so the returned path is never empty.
-///
-/// Kept separate from [`SpawnSpec::default_shell`] so the fallback is testable
-/// without mutating the process environment.
 fn shell_program(env_value: Option<std::ffi::OsString>, fallback: &str) -> PathBuf {
     PathBuf::from(
         env_value

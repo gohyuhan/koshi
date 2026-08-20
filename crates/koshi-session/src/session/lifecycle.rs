@@ -2,20 +2,17 @@
 //! a session move through from creation to teardown.
 //!
 //! Each lifecycle is a small enum naming the stages a tab or a session can be
-//! in: a tab is meant to be born `Creating`, become `Active` once its root
-//! pane is live, and wind down through `Closing` to `Closed`; a session
-//! starts `Starting`, reaches `Running` on its first tab, drops to
-//! `Detaching` while no client is attached, and ends `Stopping` then
-//! `Stopped`. Modelling the stages as a type turns an illegal move —
-//! reviving a closed tab, stopping an already-stopped session — into a
-//! transition-time error instead of a silent bug.
+//! in: a tab is `Creating`, `Active` once its root pane is live, then `Closing`
+//! and `Closed`; a session starts `Starting`, reaches `Running` on its first
+//! tab, drops to `Detaching` while no client is attached, and ends `Stopping`
+//! then `Stopped`. An illegal move — reviving a closed tab, stopping an
+//! already-stopped session — is rejected at the transition.
 //!
 //! [`SessionLifecycle::transition`] is the only transition function defined
 //! here, and it polices the session's legal moves — see its rules below. A
-//! [`Tab`](crate::session::state::Tab) currently only ever starts at
-//! `TabLifecycle::Creating`; nothing in this crate yet advances it through
-//! `Active`, `Inactive`, `Closing`, or sets it to `Closed` — a tab is instead
-//! dropped from the session outright once it closes.
+//! [`Tab`](crate::session::state::Tab) starts at `TabLifecycle::Creating` and
+//! nothing in this crate advances it to `Active`, `Inactive`, `Closing`, or
+//! `Closed`: a tab that closes is dropped from the session outright.
 
 use serde::{Deserialize, Serialize};
 

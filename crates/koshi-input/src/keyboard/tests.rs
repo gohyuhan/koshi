@@ -876,3 +876,26 @@ fn hostile_and_edge_characters_round_trip_to_their_own_bytes() {
         );
     }
 }
+
+// ------------------------------------------------------- table boundaries ----
+
+#[test]
+fn function_key_zero_is_not_a_key_the_model_names() {
+    // `F(24)` is the top of the run and `F(25)` is already rejected; `F(0)` is
+    // the bottom of the same bound. The encoder has no sequence for it, so a
+    // chord must never carry it.
+    assert_eq!(decode_key(press(KeyCode::F(0), KeyModifiers::NONE)), None);
+}
+
+#[test]
+fn the_control_fold_covers_its_run_and_stops_at_both_ends() {
+    // Control clears the top bits over `@`..`_`: `@` opens the run at NUL and
+    // `_` closes it at 0x1f. A letter is its capital's version of that fold, so
+    // `z` ends the letter run at 0x1a.
+    assert_eq!(bytes(ModFlags::CTRL, Key::Char('@')), vec![0x00]);
+    assert_eq!(bytes(ModFlags::CTRL, Key::Char('_')), vec![0x1f]);
+    assert_eq!(bytes(ModFlags::CTRL, Key::Char('z')), vec![0x1a]);
+    // The backtick sits between the two runs and belongs to neither: it sends
+    // its own byte, not the NUL that `@` sends.
+    assert_eq!(bytes(ModFlags::CTRL, Key::Char('`')), vec![b'`']);
+}

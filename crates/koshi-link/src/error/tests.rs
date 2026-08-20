@@ -228,6 +228,101 @@ fn unknown_command_and_invalid_args_messages_are_exact() {
 }
 
 #[test]
+fn an_unbound_key_and_a_bad_keymap_file_exit_as_usage_problems() {
+    assert_eq!(
+        CliExitCode::from(&CliError::UnboundKey {
+            sequence: "<C-t> g".into()
+        })
+        .code(),
+        2
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::InvalidKeymapFile {
+            path: "keybinding.kdl".into()
+        })
+        .code(),
+        2
+    );
+    assert_eq!(
+        CliError::UnboundKey {
+            sequence: "<C-t> g".into()
+        }
+        .category(),
+        DomainCategory::Cli
+    );
+    assert_eq!(
+        CliError::InvalidKeymapFile {
+            path: "keybinding.kdl".into()
+        }
+        .category(),
+        DomainCategory::Cli
+    );
+}
+
+#[test]
+fn no_running_session_exits_the_same_as_a_named_session_that_is_gone() {
+    assert_eq!(
+        CliExitCode::from(&CliError::NoSessions),
+        CliExitCode::SessionNotFound
+    );
+    assert_eq!(CliExitCode::from(&CliError::NoSessions).code(), 3);
+    assert_eq!(CliError::NoSessions.category(), DomainCategory::Session);
+}
+
+#[test]
+fn a_failed_update_exits_as_a_runtime_failure() {
+    assert_eq!(
+        CliExitCode::from(&CliError::Update {
+            detail: "the download stopped halfway".into()
+        }),
+        CliExitCode::RuntimeAction
+    );
+    assert_eq!(
+        CliExitCode::from(&CliError::Update {
+            detail: "the download stopped halfway".into()
+        })
+        .code(),
+        1
+    );
+    assert_eq!(
+        CliError::Update {
+            detail: "the download stopped halfway".into()
+        }
+        .category(),
+        DomainCategory::Session
+    );
+}
+
+#[test]
+fn the_key_keymap_no_sessions_and_update_messages_are_exact() {
+    assert_eq!(
+        CliError::UnboundKey {
+            sequence: "<C-t> g".into()
+        }
+        .to_string(),
+        "nothing is bound on `<C-t> g` in any mode"
+    );
+    assert_eq!(
+        CliError::InvalidKeymapFile {
+            path: "/home/u/.config/koshi/keybinding.kdl".into()
+        }
+        .to_string(),
+        "keybinding file /home/u/.config/koshi/keybinding.kdl failed validation"
+    );
+    assert_eq!(
+        CliError::NoSessions.to_string(),
+        "no koshi session is running"
+    );
+    assert_eq!(
+        CliError::Update {
+            detail: "the download stopped halfway".into()
+        }
+        .to_string(),
+        "update failed: the download stopped halfway"
+    );
+}
+
+#[test]
 fn messages_render_an_empty_or_unicode_field_verbatim() {
     // Boundary (empty string) and encoding (multi-byte) cases: the message
     // formats the field exactly as given, with no escaping or substitution.
