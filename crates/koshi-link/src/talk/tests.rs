@@ -162,3 +162,146 @@ fn each_peer_reads_its_range_from_the_versioned_surface_table() {
     assert_eq!(SESSION.surface, koshi_core::compat::SESSION_PROTOCOL);
     assert_eq!(ROUTER.surface, koshi_core::compat::CONTROL_PROTOCOL);
 }
+
+// --- Reading a Hello answer -------------------------------------------------
+
+/// A session's answer carrying `result`, as the wire hands it to a caller.
+fn session_answer(result: IpcResult) -> IncomingResponse {
+    Answer {
+        request_id: Some(1),
+        result: MaybeKnown::Known(result),
+    }
+}
+
+/// The router's answer carrying `result`, as the wire hands it to a caller.
+fn router_answer(result: RouterResult) -> IncomingRouterResponse {
+    Answer {
+        request_id: Some(1),
+        result: MaybeKnown::Known(result),
+    }
+}
+
+#[test]
+fn a_session_hello_hands_back_the_build_the_session_named() {
+    let reply = session_answer(IpcResult::Hello {
+        protocol_version: 2,
+        version: "0.9.9".to_string(),
+    });
+
+    assert_eq!(
+        session_hello_version(reply).expect("2 is inside the 2 to 2 this build speaks"),
+        "0.9.9"
+    );
+}
+
+#[test]
+fn a_session_predating_the_build_field_hands_back_an_empty_string() {
+    let reply = session_answer(IpcResult::Hello {
+        protocol_version: 2,
+        version: String::new(),
+    });
+
+    assert_eq!(
+        session_hello_version(reply).expect("a build with no version field still opens"),
+        ""
+    );
+}
+
+#[test]
+fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
+    let reply = session_answer(IpcResult::Hello {
+        protocol_version: 3,
+        version: "0.9.9".to_string(),
+    });
+
+    let refusal = session_hello_version(reply).expect_err("3 is outside the 2 to 2");
+
+    assert_eq!(
+        detail(refusal),
+        "the session settled on protocol version 3, which is outside the 2 to 2 this koshi \
+         asked for"
+    );
+}
+
+#[test]
+fn a_session_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
+    let reply = session_answer(IpcResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::BadToken,
+        message: "the token presented does not match this Koshi's".to_string(),
+    }));
+
+    let refusal = session_hello_version(reply).expect_err("a refused Hello opens nothing");
+
+    assert_eq!(
+        detail(refusal),
+        "the token presented does not match this Koshi's"
+    );
+}
+
+#[test]
+fn a_session_answering_no_hello_at_all_names_the_reply_that_arrived() {
+    let reply = session_answer(IpcResult::Restarting);
+
+    let refusal = session_hello_version(reply).expect_err("a Restarting is not a Hello");
+
+    assert_eq!(
+        detail(refusal),
+        "the session answered with an unexpected Restarting reply"
+    );
+}
+
+#[test]
+fn a_router_hello_hands_back_the_build_the_router_named() {
+    let reply = router_answer(RouterResult::Hello {
+        protocol_version: 2,
+        version: "0.9.9".to_string(),
+    });
+
+    assert_eq!(
+        router_hello_version(reply).expect("2 is inside the 1 to 2 this build speaks"),
+        "0.9.9"
+    );
+}
+
+#[test]
+fn a_router_hello_naming_a_version_outside_the_range_stops_the_exchange() {
+    let reply = router_answer(RouterResult::Hello {
+        protocol_version: 3,
+        version: "0.9.9".to_string(),
+    });
+
+    let refusal = router_hello_version(reply).expect_err("3 is outside the 1 to 2");
+
+    assert_eq!(
+        detail(refusal),
+        "the router settled on control-plane protocol version 3, which is outside the 1 to 2 \
+         this koshi asked for"
+    );
+}
+
+#[test]
+fn a_router_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
+    let reply = router_answer(RouterResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::BadToken,
+        message: "the token presented does not match the router's".to_string(),
+    }));
+
+    let refusal = router_hello_version(reply).expect_err("a refused Hello opens nothing");
+
+    assert_eq!(
+        detail(refusal),
+        "the token presented does not match the router's"
+    );
+}
+
+#[test]
+fn a_router_answering_no_hello_at_all_names_the_reply_that_arrived() {
+    let reply = router_answer(RouterResult::Restarting);
+
+    let refusal = router_hello_version(reply).expect_err("a Restarting is not a Hello");
+
+    assert_eq!(
+        detail(refusal),
+        "the router answered with an unexpected Restarting reply"
+    );
+}

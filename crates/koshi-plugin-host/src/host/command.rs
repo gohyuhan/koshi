@@ -1,1 +1,1 @@
-//! Command dispatch. Placeholder per standard source layout.
+//! Command dispatch. This module is empty.

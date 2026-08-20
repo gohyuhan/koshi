@@ -27,9 +27,9 @@ use std::path::Path;
 
 use kdl::KdlNode;
 
-use crate::error::{check_version, ConfigError};
+use crate::error::{check_version, validation, ConfigError};
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
-use crate::parser::{parse_kdl, unknown_key, value_string, value_u32};
+use crate::parser::{parse_kdl, set, unknown_key, value_string, value_u32};
 use crate::types::RgbColor;
 
 /// Parses a theme file's `source` into a [`PartialThemeConfig`] override layer
@@ -134,37 +134,14 @@ fn parse_colors(node: &KdlNode, warnings: &mut Vec<String>) -> PartialColorPalet
                 continue;
             }
         };
-        let field = format!("colors.{key}");
-        set(slot, value_color(child), &field, warnings);
+        set(slot, value_color(child), "colors", key, warnings);
     }
     palette
-}
-
-/// Stores a parsed field-partial value, or records a warning naming the field
-/// and the reason it was skipped.
-fn set<T>(
-    slot: &mut Option<T>,
-    parsed: Result<T, String>,
-    field: &str,
-    warnings: &mut Vec<String>,
-) {
-    match parsed {
-        Ok(value) => *slot = Some(value),
-        Err(detail) => warnings.push(format!("ignored `{field}`: {detail}")),
-    }
 }
 
 /// Reads the node's single value as a `#RRGGBB` color.
 fn value_color(node: &KdlNode) -> Result<RgbColor, String> {
     RgbColor::from_hex(value_string(node)?).map_err(|err| err.to_string())
-}
-
-/// Builds a [`ConfigError::Validation`] for a bad top-level field.
-fn validation(key: &str, detail: &str) -> ConfigError {
-    ConfigError::Validation {
-        key: key.to_string(),
-        detail: detail.to_string(),
-    }
 }
 
 #[cfg(test)]

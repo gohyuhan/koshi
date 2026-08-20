@@ -1,5 +1,10 @@
-//! KDL parsing entry point. Wraps the `kdl` crate's document parser and attaches
-//! the config file path to any syntax error as a [`ConfigParseDiagnostic`].
+//! KDL parsing entry point, and the field readers the file parsers share.
+//!
+//! [`parse_kdl`] wraps the `kdl` crate's document parser and attaches the
+//! config file path to any syntax error as a [`ConfigParseDiagnostic`]. The
+//! `value_*` readers turn one field node into a typed value, `set` stores one
+//! such value or records the skip as a warning, and [`unknown_key`] names the
+//! nearest allowed key for an unrecognized one.
 
 use std::path::Path;
 
@@ -24,9 +29,8 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
 }
 
 // Field-value readers shared by the `koshi.kdl` and theme-file parsers. Each
-// takes one field node (`key value`) and returns the value or a plain-words
-// reason it could not be read, so a field-partial parser can turn that reason
-// into a warning and skip the field.
+// takes one field node (`key value`) and returns the value, or a plain-words
+// reason it could not be read.
 
 /// The node's single unnamed argument, or a plain-words reason it is missing.
 pub(crate) fn single_value(node: &KdlNode) -> Result<&KdlValue, String> {
@@ -50,17 +54,12 @@ pub(crate) fn value_string(node: &KdlNode) -> Result<&str, String> {
         .ok_or_else(|| "expected a string".to_string())
 }
 
-/// Reads the node's single value as a non-empty string, **trimmed** of
-/// surrounding whitespace, rejecting an empty or whitespace-only value.
+/// Reads the node's single value as a string, **trimmed** of surrounding
+/// whitespace. A value that is empty or whitespace-only is rejected with
+/// `must not be empty`.
 ///
-/// Used for fields that are exported to child programs, spawned as a program
-/// path, or turned into a file name — all places a stray space breaks
-/// something downstream while looking fine in the file. `term " xterm-256color "`
-/// yields `xterm-256color`, so the child gets a `TERM` terminfo can actually
-/// look up; `theme " midnight "` yields `midnight`, so the loader reads
-/// `themes/midnight.kdl` rather than a file named with spaces around it.
-/// A blank value is still rejected outright (an empty `TERM` disables
-/// terminfo, an empty shell path spawns nothing).
+/// `term " xterm-256color "` yields `xterm-256color`; `theme " midnight "`
+/// yields `midnight`; `term "   "` and `term ""` are both errors.
 pub(crate) fn value_nonempty_string(node: &KdlNode) -> Result<String, String> {
     let trimmed = value_string(node)?.trim();
     if trimmed.is_empty() {
@@ -87,6 +86,25 @@ pub(crate) fn value_u32(node: &KdlNode) -> Result<u32, String> {
     u32::try_from(value_integer(node)?).map_err(|_| "must be between 0 and 4294967295".to_string())
 }
 
+/// Stores a parsed field-partial value in `slot`. On `Err`, leaves `slot`
+/// untouched and pushes one warning naming the field and the reason.
+///
+/// `section` is the enclosing block (`pane`), `key` the field node's name
+/// (`min-cols`). A `parsed` of `Err("expected an integer")` pushes
+/// ``ignored `pane.min-cols`: expected an integer``.
+pub(crate) fn set<T>(
+    slot: &mut Option<T>,
+    parsed: Result<T, String>,
+    section: &str,
+    key: &str,
+    warnings: &mut Vec<String>,
+) {
+    match parsed {
+        Ok(value) => *slot = Some(value),
+        Err(detail) => warnings.push(format!("ignored `{section}.{key}`: {detail}")),
+    }
+}
+
 /// Names the nearest allowed key for an unknown config key.
 #[must_use]
 pub fn unknown_key(key: &str, allowed: &[&str]) -> String {
@@ -97,8 +115,11 @@ pub fn unknown_key(key: &str, allowed: &[&str]) -> String {
     format!("unknown key `{key}`; did you mean `{nearest}`?")
 }
 
+/// The Levenshtein edit distance between `left` and `right`, counted in
+/// characters. `"colors.acent"` against `"colors.accent"` is `1`.
 fn edit_distance(left: &str, right: &str) -> usize {
-    let mut previous: Vec<usize> = (0..=right.chars().count()).collect();
+    let right_len = right.chars().count();
+    let mut previous: Vec<usize> = (0..=right_len).collect();
     let mut current = vec![0; previous.len()];
     for (left_index, left_char) in left.chars().enumerate() {
         current[0] = left_index + 1;
@@ -113,5 +134,5 @@ fn edit_distance(left: &str, right: &str) -> usize {
         }
         std::mem::swap(&mut previous, &mut current);
     }
-    previous[right.chars().count()]
+    previous[right_len]
 }

@@ -2,9 +2,9 @@
 //!
 //! The CLI talks to two peers over the same framing: a session server, on that
 //! session's control socket, and the router, on the router's. Both exchanges
-//! settle a version at the Hello, unwrap an answer that may name a result this
-//! build does not have, and turn a transport fault into the one error the CLI
-//! reports. Those four steps are here once.
+//! read a Hello answer and settle a version from it, unwrap an answer that may
+//! name a result this build does not have, and turn a transport fault into the
+//! one error the CLI reports. Those steps are here once.
 //!
 //! What differs between the two peers is only what they are called and which
 //! versions they speak, which is what [`PeerWords`](crate::talk::PeerWords) carries. The session's
@@ -16,7 +16,8 @@
 
 use koshi_core::compat::Surface;
 use koshi_ipc::error::IpcError;
-use koshi_ipc::protocol::IpcErrorPayload;
+use koshi_ipc::protocol::{IncomingResponse, IpcErrorPayload, IpcResult};
+use koshi_ipc::router::{IncomingRouterResponse, RouterResult};
 use koshi_ipc::wire::{Answer, MaybeKnown, WireName};
 
 use crate::error::CliError;
@@ -56,7 +57,7 @@ impl PeerWords {
     /// sent.
     ///
     /// The peer picks from the range the Hello named. A version outside that
-    /// range is not one this koshi offered, so the exchange stops here.
+    /// range stops the exchange.
     ///
     /// Example — this build asks for 2 to 2 and the reply names 3, so the verb
     /// fails with `the session settled on protocol version 3, which is outside
@@ -75,11 +76,8 @@ impl PeerWords {
         })
     }
 
-    /// The answer inside a response, or an error when the peer named a result
-    /// this build does not have.
-    ///
-    /// A result kind this build has no name for is a protocol violation, so
-    /// the verb fails.
+    /// The answer inside a response. A result kind this build has no name for
+    /// fails the verb with [`CliError::IpcUnavailable`].
     pub fn take_result<R>(&self, response: Answer<MaybeKnown<R>>) -> Result<R, CliError> {
         match response.result {
             MaybeKnown::Known(result) => Ok(result),
@@ -87,8 +85,7 @@ impl PeerWords {
         }
     }
 
-    /// The peer answered with a result kind the request cannot produce — a
-    /// protocol violation, not an outcome.
+    /// The peer answered with a result kind the request cannot produce.
     pub fn unexpected_reply<R: WireName>(&self, result: &R) -> CliError {
         self.unexpected_name(result.wire_name())
     }
@@ -105,8 +102,8 @@ impl PeerWords {
 /// A transport failure mid-exchange: the peer was reachable but the
 /// conversation could not finish.
 ///
-/// The same sentence for either peer, since it names the fault and not who was
-/// on the other end.
+/// The same sentence for either peer: it names the fault, not who was on the
+/// other end.
 pub fn talk_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
         detail: error.to_string(),
@@ -118,6 +115,48 @@ pub fn talk_failed(error: IpcError) -> CliError {
 pub fn refused(refusal: &IpcErrorPayload) -> CliError {
     CliError::IpcUnavailable {
         detail: refusal.message.clone(),
+    }
+}
+
+/// The build a session named in its Hello answer, once the version it settled
+/// on is checked. An empty string is a session that predates the version field.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the session settled on a version outside
+/// the range this build asked for, refused the Hello, or answered anything
+/// other than a Hello.
+pub(crate) fn session_hello_version(reply: IncomingResponse) -> Result<String, CliError> {
+    match SESSION.take_result(reply)? {
+        IpcResult::Hello {
+            protocol_version,
+            version,
+        } => {
+            SESSION.settled_version(protocol_version)?;
+            Ok(version)
+        }
+        IpcResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(SESSION.unexpected_reply(&other)),
+    }
+}
+
+/// The build the router named in its Hello answer, once the version it settled
+/// on is checked. An empty string is a router that predates the version field.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the router settled on a version outside
+/// the range this build asked for, refused the Hello, or answered anything
+/// other than a Hello.
+pub(crate) fn router_hello_version(reply: IncomingRouterResponse) -> Result<String, CliError> {
+    match ROUTER.take_result(reply)? {
+        RouterResult::Hello {
+            protocol_version,
+            version,
+        } => {
+            ROUTER.settled_version(protocol_version)?;
+            Ok(version)
+        }
+        RouterResult::Error(refusal) => Err(refused(&refusal)),
+        other => Err(ROUTER.unexpected_reply(&other)),
     }
 }
 

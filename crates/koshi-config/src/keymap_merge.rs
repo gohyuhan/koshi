@@ -114,9 +114,7 @@ pub fn merge_keymaps(
             }
             let merged = modes.entry(mode.clone()).or_default();
 
-            for key in &bindings.removed {
-                merged.removed_keys.insert(key.clone());
-            }
+            merged.removed_keys.extend(bindings.removed.iter().cloned());
 
             for (key, bound) in &bindings.keys {
                 if !is_firing(

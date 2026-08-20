@@ -234,6 +234,60 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
 }
 
 #[test]
+fn arrow_keys_sort_left_down_up_right_ahead_of_other_keys() {
+    let arrow = |named| {
+        binding(
+            seq(&[KeyChord::new(ModFlags::CTRL, Key::Named(named))]),
+            "Focus Pane",
+            false,
+            false,
+        )
+    };
+    let keymap = hints(
+        vec![
+            arrow(NamedKey::Right),
+            binding(seq(&[ctrl('z')]), "Focus Pane", false, false),
+            arrow(NamedKey::Up),
+            arrow(NamedKey::Left),
+            arrow(NamedKey::Down),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    // One action, so all five keys fold into one ribbon: the four arrows read
+    // in screen order, then every other key.
+    assert_eq!(row_text(&draw(&keymap, 80)), " Ctrl +  ←↓↑→z  Focus Pane");
+}
+
+#[test]
+fn named_keys_read_as_their_own_names() {
+    let named = |key, label: &str| {
+        binding(
+            seq(&[KeyChord::new(ModFlags::NONE, Key::Named(key))]),
+            label,
+            false,
+            false,
+        )
+    };
+    let keymap = hints(
+        vec![
+            named(NamedKey::Enter, "Accept"),
+            named(NamedKey::Esc, "Cancel"),
+            named(NamedKey::Space, "Pick"),
+            named(NamedKey::Backspace, "Undo"),
+        ],
+        &[],
+        Vec::new(),
+        false,
+    );
+    assert_eq!(
+        row_text(&draw(&keymap, 80)),
+        " BACKSPACE  Undo  ENTER  Accept  ESC  Cancel  SPACE  Pick"
+    );
+}
+
+#[test]
 fn user_entry_under_prefix_swaps_label_for_count() {
     let bar = pane_fixture(true);
     assert_eq!(row_text(&draw(&bar, 80)), " Ctrl +  l  Lock  p  +2");
@@ -391,6 +445,15 @@ fn truncation_drops_whole_trailing_hints() {
     // ribbon needs 9 more, so below 26 it is dropped whole behind a `…`.
     assert_eq!(row_text(&draw(&bar, 25)), " Ctrl +  l  Lock …");
     assert_eq!(row_text(&draw(&bar, 26)), " Ctrl +  l  Lock  p  PANE");
+}
+
+#[test]
+fn an_overflow_marker_with_no_cell_left_takes_the_last_one() {
+    let bar = pane_fixture(false);
+    // The `Ctrl +` header plus the first ribbon fill all 17 cells exactly, so
+    // the `…` standing for the dropped second ribbon has no cell of its own and
+    // overwrites the last cell of the ribbon before it.
+    assert_eq!(row_text(&draw(&bar, 17)), " Ctrl +  l  Lock…");
 }
 
 #[test]

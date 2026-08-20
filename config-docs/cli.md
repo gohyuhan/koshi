@@ -179,7 +179,7 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
-| `koshi keys list [--mode <MODE>] [--scope default\|user]` | List effective shortcuts |
+| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout]` | List effective shortcuts |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
@@ -188,7 +188,7 @@ Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 
 | Command | Result |
 |---|---|
-| `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>\|never]` | Grant an identity a remote access token |
+| `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
@@ -284,12 +284,12 @@ other answer leaves it shut and still prints the token. With no address in
 `koshi.kdl` there is nothing to offer, and the grant says the token cannot be
 used to connect yet.
 
-`koshi share revoke alice` ends the connections alice's tokens opened, at once.
-Her connection stops and no further frame reaches her; her next command is not
-merely refused. Granting alice again on the same scope replaces her token and
-ends the connections the replaced token opened, the same way. A token that
-runs out on its own is different: it stops a new connection from opening and
-never interrupts one already attached.
+`koshi share revoke alice` ends the connections alice's tokens opened, at once,
+attached to a session or not. Her connection stops and no further frame reaches
+her; her next command is not merely refused. Granting alice again on the same
+scope replaces her token and ends the connections the replaced token opened,
+the same way. A token that runs out on its own is different: it stops a new
+connection from opening and never interrupts one already attached.
 
 The `koshi share list` columns read:
 
@@ -351,14 +351,9 @@ one session. Typing into a shell of one of those sessions acts as the user who
 runs the session — the same as sitting at that machine and typing there. Hand a
 token to somebody only when you would hand them that account.
 
-`koshi share revoke alice` takes effect at once. It ends every live connection a
-token of alice's admitted, whether that connection attached to a session or not,
-and every connection presenting one of those tokens afterwards is refused.
-
 The token store on the serving machine holds the sha256 of each token it
-granted, never the token itself. A token is printed once, by the grant that made
-it. A token nobody kept is replaced by a fresh `koshi share grant`, and is never
-read back out of the store.
+granted, never the token itself. A token nobody kept is replaced by a fresh
+`koshi share grant`, and is never read back out of the store.
 
 Bare `koshi attach` lists the sessions on every reachable saved server beside
 this machine's own, each row naming the server it belongs to. The remote check
@@ -513,11 +508,12 @@ The checks run in this order:
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
 | `remote connections` | How many open connections the running router holds from another machine |
 
-The last three rows report facts and rate nothing. The `plugins directory` row
-reads the directory and opens no plugin. `koshi doctor` starts no koshi and
-creates no directory. The `log directory` row writes one empty file in the log
-directory and removes it again, which is how it reports whether that directory
-can be written.
+The `session directory` and `remote connections` rows report facts and rate
+nothing. The `remote access` row rates one thing: it reads `warn` when the
+grants could not be read. The `plugins directory` row reads the directory and
+opens no plugin. `koshi doctor` starts no koshi and creates no directory. The
+`log directory` row writes one empty file in the log directory and removes it
+again, which is how it reports whether that directory can be written.
 
 The `router` row is the only row that rates the running router. A router whose
 build has no such question is `warn`; a router that is listening and does not

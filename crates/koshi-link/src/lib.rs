@@ -20,9 +20,10 @@
 //!   socket, [`router_client`] talks to the router on the router's, and
 //!   [`talk`] holds the parts of an exchange that are the same for either
 //!   peer. [`remote_client`] talks to another machine over TLS, on the
-//!   address that machine listens on. [`in_session`] answers whether this
-//!   program is running inside a pane, from the `KOSHI_*` variables the
-//!   pane's shell was given.
+//!   address that machine listens on. [`discovery`] asks every session this
+//!   machine advertises to describe itself and turns the answers into listing
+//!   rows. [`in_session`] answers whether this program is running inside a
+//!   pane, from the `KOSHI_*` variables the pane's shell was given.
 //!
 //! [`error`] is the failure both halves report, and the one a koshi program
 //! turns into an exit code.

@@ -61,7 +61,7 @@ use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_state::{
     remote_enabled, CertFile, EnabledFile, CERT_FILE_FORMAT, ENABLED_FILE_FORMAT,
 };
-use koshi_ipc::remote_tokens::{hash_token, store_path, TokenRecord, TokenScope, TokenStore};
+use koshi_ipc::remote_tokens::{hash_token, store_path, TokenScope, TokenStore};
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
     router_endpoint_path, router_lock_path, router_socket_addr, ControlPlane, RouterHandshake,
@@ -74,6 +74,7 @@ use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
 use koshi_link::ipc_client;
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIR_FLAG};
+use koshi_runtime::server::binary_is_runnable;
 
 use crate::remote_listener::{self, AdmissionAsk, Admitted, Occasional};
 
@@ -1001,12 +1002,6 @@ fn open_store(token_store: Option<&Path>) -> Result<(&Path, TokenStore), RouterR
     }
 }
 
-/// Whether `record` still works at `now`: nobody revoked it, and it either
-/// never expires or expires after `now`.
-fn still_stands(record: &TokenRecord, now: SystemTime) -> bool {
-    record.revoked_at.is_none() && record.expires_at.is_none_or(|expiry| expiry > now)
-}
-
 /// Hand `identity` a fresh secret on `scope` and write the store back.
 ///
 /// The clock is read once, and both the issue time and the expiry are stamped
@@ -1046,7 +1041,10 @@ fn grant_token(
         .records
         .iter()
         .filter(|record| {
-            record.identity == identity && record.scope == scope && still_stands(record, issued_at)
+            record.identity == identity
+                && record.scope == scope
+                && record.revoked_at.is_none()
+                && record.expires_at.is_none_or(|expiry| expiry > issued_at)
         })
         .map(|record| record.hash.clone())
         .collect();
@@ -1109,22 +1107,9 @@ fn list_tokens(token_store: Option<&Path>, scope: Option<&TokenScope>) -> Router
 /// cannot be read is refused; on Unix, one with no execute permission is
 /// refused too. Nothing is torn down either way.
 fn restart_check(exe: &Path) -> RouterResult {
-    match std::fs::metadata(exe) {
-        Err(error) => refused(format!(
-            "the binary at {} could not be read: {error}",
-            exe.display()
-        )),
-        #[cfg(unix)]
-        Ok(metadata) => {
-            use std::os::unix::fs::PermissionsExt as _;
-            if metadata.permissions().mode() & 0o111 == 0 {
-                refused(format!("the binary at {} is not executable", exe.display()))
-            } else {
-                RouterResult::Restarting
-            }
-        }
-        #[cfg(not(unix))]
-        Ok(_) => RouterResult::Restarting,
+    match binary_is_runnable(exe) {
+        Ok(()) => RouterResult::Restarting,
+        Err(message) => refused(message),
     }
 }
 
@@ -1153,11 +1138,12 @@ fn create_session(
         name_is_taken(registry, candidate)
     });
 
-    let mut child =
-        match spawn_session_server(runtime_dir, id, &name, profile, cwd, allow_other_users) {
-            Ok(child) => child,
-            Err(error) => return refused(format!("the session could not be started: {error}")),
-        };
+    let started = session_server_command(runtime_dir, id, &name, profile, cwd, allow_other_users)
+        .and_then(|mut command| command.spawn());
+    let mut child = match started {
+        Ok(child) => child,
+        Err(error) => return refused(format!("the session could not be started: {error}")),
+    };
     let pid = child.id();
 
     let Some(stdout) = child.stdout.take() else {
@@ -1431,18 +1417,6 @@ fn session_server_command(
     Ok(command)
 }
 
-/// Start one session server as a child of this router.
-fn spawn_session_server(
-    runtime_dir: &Path,
-    id: SessionId,
-    name: &str,
-    profile: Option<&str>,
-    cwd: Option<&Path>,
-    allow_other_users: Option<bool>,
-) -> std::io::Result<Child> {
-    session_server_command(runtime_dir, id, name, profile, cwd, allow_other_users)?.spawn()
-}
-
 /// The line a freshly spawned session server printed, or the refusal to answer
 /// with.
 ///
@@ -1528,17 +1502,16 @@ fn refused(message: String) -> RouterResult {
 
 /// A refusal for a selector naming a session the router does not have, under
 /// [`IpcErrorCode::NotFound`].
+///
+/// The message names the selector. A [`SessionSelector::Id`] gives
+/// `no session session-<uuid> is running`, and a [`SessionSelector::Name`] of
+/// `quiet-lake` gives ``no session named `quiet-lake` is running``.
 fn not_found(selector: &SessionSelector) -> RouterResult {
     RouterResult::Error(IpcErrorPayload {
         code: IpcErrorCode::NotFound,
-        message: no_such_session(selector),
+        message: match selector {
+            SessionSelector::Id(id) => format!("no session {id} is running"),
+            SessionSelector::Name(name) => format!("no session named `{name}` is running"),
+        },
     })
-}
-
-/// The message for a selector naming a session the router does not have.
-fn no_such_session(selector: &SessionSelector) -> String {
-    match selector {
-        SessionSelector::Id(id) => format!("no session {id} is running"),
-        SessionSelector::Name(name) => format!("no session named `{name}` is running"),
-    }
 }

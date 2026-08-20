@@ -1008,3 +1008,25 @@ fn a_revoke_naming_no_session_stops_everything_without_asking() {
         "one request, naming no scope, which stops every grant the identity holds"
     );
 }
+
+#[test]
+fn a_router_refusal_is_reported_with_the_routers_own_message() {
+    let failure = refusal(&RouterResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::NotFound,
+        message: "this caller may not grant tokens".to_string(),
+    }));
+
+    assert_eq!(failure.to_string(), "this caller may not grant tokens");
+}
+
+/// A reply of a kind the request cannot produce is not a refusal, so it is
+/// reported as the control plane answering something else, naming the kind.
+#[test]
+fn a_reply_the_request_cannot_produce_is_reported_by_its_wire_name() {
+    let failure = refusal(&RouterResult::Restarting);
+
+    assert_eq!(
+        failure.to_string(),
+        "IPC unavailable: the router answered with an unexpected Restarting reply"
+    );
+}

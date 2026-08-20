@@ -28,7 +28,7 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_core::key::{KeyChord, ModFlags};
+use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
@@ -2427,6 +2427,129 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
 }
 
 #[test]
+fn a_key_the_keymap_does_not_bind_goes_up_the_connection_as_that_chord() {
+    let mut client = viewer();
+    let client_id = client.id();
+    let mut wire = wire();
+
+    handle_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
+        },
+    );
+
+    // The sentinel goes out behind the key, so a key that was never sent reads
+    // back as the sentinel instead of leaving this test waiting.
+    wire.uplink.send(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the key");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_LOOP_REQUEST_ID,
+            kind: IpcRequestKind::KeyPress {
+                chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
+    // The key is the program's, so the highlight gesture over it is over. The
+    // highlight it already made stands; only the drag ends.
+    let pane = PaneId::new();
+    let frame = mouse_frame(&[plain_pane(pane)]);
+    let mut client = viewer();
+    let client_id = client.id();
+    let mut wire = wire();
+    let mut pending = Vec::new();
+
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        press(content_cell(&frame, 0)),
+        &mut pending,
+    );
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        drag(Point { x: 9, y: 8 }),
+        &mut pending,
+    );
+    assert_eq!(
+        pending.last().expect("the drag decided something"),
+        &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+            SetSelectionArgs {
+                pane,
+                selection: Selection {
+                    kind: SelectionKind::Character,
+                    anchor: GridPos { row: 1, col: 1 },
+                    cursor: GridPos { row: 6, col: 8 },
+                },
+            }
+        )))
+    );
+
+    handle_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            chord: KeyChord::new(ModFlags::NONE, Key::Char('a')),
+        },
+    );
+
+    // The same move again, with no gesture left to extend.
+    pending.clear();
+    handle_mouse_event(
+        &mut client,
+        &frame,
+        drag(Point { x: 20, y: 12 }),
+        &mut pending,
+    );
+    assert_eq!(pending, Vec::new());
+}
+
+#[test]
+fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
+    // The viewer hit-tests its own frames against this size, and the session
+    // reconciles the tab size from every viewer's report, so both copies move.
+    let mut client = viewer();
+    let client_id = client.id();
+    let mut wire = wire();
+    let bigger = Size {
+        cols: 132,
+        rows: 43,
+    };
+    assert_eq!(client.viewport(), MOUSE_VIEWPORT);
+
+    handle_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::Resize {
+            client_id,
+            size: bigger,
+        },
+    );
+
+    assert_eq!(client.viewport(), bigger, "the viewer's own copy moved");
+    // The sentinel goes out behind the report, so a report that was never sent
+    // reads back as the sentinel instead of leaving this test waiting.
+    wire.uplink.send(IpcRequestKind::Discovery);
+    let request: IpcRequest = wire.session.recv().expect("read the resize");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_LOOP_REQUEST_ID,
+            kind: IpcRequestKind::Resize { viewport: bigger },
+        }
+    );
+}
+
+#[test]
 fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
     let mut client = viewer();
     let client_id = client.id();
@@ -2991,5 +3114,70 @@ fn the_wait_reads_past_an_endpoint_file_that_is_not_a_file_this_build_reads() {
     assert!(
         Instant::now() >= deadline,
         "the wait sat out its whole window rather than giving up on the first read"
+    );
+}
+
+/// How long a test waits for the reader thread to forward a frame before it
+/// fails instead of hanging the suite.
+const FRAME_WAIT: Duration = Duration::from_secs(10);
+
+/// A live event stream: the session end that writes frames, and both halves of
+/// the client end. The reading half is what the frame-reader thread owns; the
+/// writing half is held so the connection stands exactly as it does in the
+/// running loop.
+///
+/// The accept runs on its own thread, since the connect and the accept must
+/// both be live for the connection to open.
+fn event_stream() -> (Connection, FrameReader, FrameWriter) {
+    // The address is a socket-file path on Unix and a bare pipe name on
+    // Windows, so the directory goes unused there. `/tmp` keeps the path short
+    // enough for the platform's socket-path limit; the session id makes it
+    // unique, so tests running side by side never share one.
+    #[cfg(unix)]
+    let base = std::path::PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
+    let addr = socket_addr(&base, SessionId::new());
+    let listener = Listener::bind(&addr).expect("bind the event stream");
+    let accepting = thread::spawn(move || listener.accept().expect("accept the connection"));
+    let connection = Connection::connect(&addr).expect("connect to the event stream");
+    let session = accepting.join().expect("the accepting thread finished");
+    let (reader, writer) = connection.split();
+    (session, reader, writer)
+}
+
+#[test]
+fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives() {
+    // A newer session writes frames this build was compiled without. Ending the
+    // read at the first one would drop the connection and report the session
+    // dead, so the reader steps over it and forwards the frame after it.
+    let (mut session, reader, _uplink) = event_stream();
+    let (incoming_tx, incoming_rx) = mpsc::channel();
+    spawn_frame_reader(reader, 4, incoming_tx);
+
+    let closed = SessionEvent::TabClosed {
+        tab_id: TabId::new(),
+    };
+    session
+        .send(&serde_json::json!({ "Floating": { "pane_id": 1 } }))
+        .expect("write a frame this build has no name for");
+    session
+        .send(&closed)
+        .expect("write the frame after it, which this build has");
+
+    let Incoming::Frame { connection, frame } = incoming_rx
+        .recv_timeout(FRAME_WAIT)
+        .expect("the reader forwarded a frame")
+    else {
+        panic!("the reader forwards frames, never terminal input");
+    };
+    assert_eq!(
+        connection, 4,
+        "the frame names the connection it was read on"
+    );
+    assert_eq!(
+        frame.expect("the frame after the unknown one decoded"),
+        closed,
+        "the frame after the one this build cannot name is the first the loop is handed",
     );
 }

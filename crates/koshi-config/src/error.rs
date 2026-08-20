@@ -45,6 +45,15 @@ impl DomainError for ConfigError {
     }
 }
 
+/// Builds a [`ConfigError::Validation`] naming the config `key` that failed
+/// and the plain-words `detail`.
+pub(crate) fn validation(key: &str, detail: &str) -> ConfigError {
+    ConfigError::Validation {
+        key: key.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
 /// A KDL syntax error with the config file path attached. Wraps the underlying
 /// [`kdl::KdlError`] — which already carries the source text and error spans —
 /// and adds `path` for the diagnostic header. The [`Diagnostic`] impl forwards
@@ -71,19 +80,17 @@ impl ConfigParseDiagnostic {
 }
 
 impl Diagnostic for ConfigParseDiagnostic {
-    // Every instance of this type is a KDL syntax error, so the code is fixed.
+    // Always `koshi::config::parse`.
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new("koshi::config::parse"))
     }
 
-    // Delegates to the inner `kdl` error, which holds the original source text
-    // that a pretty-printed report highlights.
+    // The inner `kdl` error's source text, which a rendered report highlights.
     fn source_code(&self) -> Option<&dyn SourceCode> {
         self.err.source_code()
     }
 
-    // Delegates to the inner `kdl` error's own sub-diagnostics, so each one
-    // still renders at its own span.
+    // The inner `kdl` error's own sub-diagnostics, each keeping its own span.
     fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
         self.err.related()
     }
@@ -91,9 +98,8 @@ impl Diagnostic for ConfigParseDiagnostic {
 
 impl From<ConfigParseDiagnostic> for ConfigError {
     fn from(diag: ConfigParseDiagnostic) -> Self {
-        // The first sub-diagnostic carries the specific message (kdl's own
-        // top-level Display is the generic "Failed to parse KDL document");
-        // fall back to that generic form only when kdl reported none.
+        // `detail` is the first sub-diagnostic's message, or the kdl error's
+        // own Display ("Failed to parse KDL document") when it reported none.
         let detail = match diag.err.diagnostics.first() {
             Some(d) => d.to_string(),
             None => diag.err.to_string(),

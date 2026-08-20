@@ -31,6 +31,9 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `vertical { … }` | Split its children top to bottom. | ≥ 0.1.0 |
 | `stack { … }` | Its children share one rectangle; one is expanded. | ≥ 0.1.0 |
 
+A `plugin "<name>"` node parses and validates, and no koshi build launches it:
+a profile holding one starts one shell instead.
+
 ## Inside a `pane`
 
 | Key | Value / type | Since |
@@ -47,14 +50,14 @@ launch from `/home/me/proj` + `pane` results in that pane starting in
 ## Sizing (only inside `horizontal` / `vertical`)
 
 Each child of a split may carry sizing. Without any, children share the space
-equally.
+equally. `size` and `weight` are the same slot: give one of the two, once.
 
 | Key | Value / type | Since |
 |---|---|---|
-| `size 40` / `size "60%"` | A fixed size, in cells or a percent of the split. | ≥ 0.1.0 |
-| `weight 2` | A relative share of the leftover space. | ≥ 0.1.0 |
-| `min 10` | Never shrink below this many cells. | ≥ 0.1.0 |
-| `preferred 30` | The size to aim for when there is room. | ≥ 0.1.0 |
+| `size 40` / `size "60%"` | A fixed size: 1–65535 cells, or 1–100 percent of the split. | ≥ 0.1.0 |
+| `weight 2` | A relative share of the leftover space, 1–4294967295. | ≥ 0.1.0 |
+| `min 10` | Never shrink below this many cells, 1–65535. | ≥ 0.1.0 |
+| `preferred 30` | The size to aim for when there is room, 1–65535 cells. | ≥ 0.1.0 |
 
 ## Stacks
 
@@ -69,10 +72,11 @@ profile). Without either, the first pane and the first tab start focused.
 
 ## Full example
 
-This uses every available layout form, pane setting, and sizing key.
+This uses every layout form that launches, every pane setting, and every
+sizing key.
 
 ```kdl
-// profile/dev.kdl — a complete profile using every feature.
+// profile/dev.kdl — every layout form, pane setting, and sizing key.
 version 1
 
 tab {

@@ -45,6 +45,15 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("", "", "koshi")
 }
 
+/// This process's effective user id. It names [`runtime_dir`] and this user's
+/// directory under [`shared_sessions_dir`].
+#[cfg(unix)]
+fn euid() -> u32 {
+    // SAFETY: `geteuid` reads this process's own identity, takes no argument,
+    // and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// The directory user configuration lives in: `koshi.kdl` and
 /// `keybinding.kdl` at the top, color themes under `themes/`, session layouts
 /// under `profile/`. On Linux this is `~/.config/koshi`; see the
@@ -113,9 +122,8 @@ pub fn runtime_dir_with_rule() -> Option<(PathBuf, RuntimeDirRule)> {
     }
     #[cfg(unix)]
     {
-        let euid = unsafe { libc::geteuid() };
         Some((
-            PathBuf::from(format!("/tmp/koshi-{euid}")),
+            PathBuf::from(format!("/tmp/koshi-{}", euid())),
             RuntimeDirRule::UserId,
         ))
     }
@@ -180,12 +188,12 @@ fn dir_refused(path: &Path, reason: &str) -> io::Error {
 fn verify_owner_is_this_user(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let euid = unsafe { libc::geteuid() };
+    let expected = euid();
     let owner = std::fs::symlink_metadata(path)?.uid();
-    if owner != euid {
+    if owner != expected {
         return Err(dir_refused(
             path,
-            &format!("is owned by uid {owner}, expected {euid}"),
+            &format!("is owned by uid {owner}, expected {expected}"),
         ));
     }
     Ok(())
@@ -260,8 +268,7 @@ pub fn ensure_shared_base(base: &Path) -> io::Result<()> {
 pub fn ensure_shared_user_dir(base: &Path) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        let euid = unsafe { libc::geteuid() };
-        let dir = base.join(euid.to_string());
+        let dir = base.join(euid().to_string());
         create_dir_if_absent(&dir)?;
         verify_owner_is_this_user(&dir)?;
         verify_dir_mode(&dir, 0o755)?;

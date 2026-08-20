@@ -230,10 +230,9 @@ fn resolve_at_depth(
             action: action.clone(),
             args: args.clone(),
         }),
-        // A sequence names its steps and nothing else, so there is no argument
-        // for the macro itself to carry and each step resolves with none. The
-        // budget is spent here, where the nesting happens, so a leaf action at
-        // the deepest level still resolves.
+        // Every step resolves with `ActionArgs::None`. `depth` counts the
+        // sequences entered, not the actions reached, so a leaf action below
+        // the deepest allowed sequence still resolves.
         ActionHandlerRef::Sequence(steps) => {
             if depth >= MAX_SEQUENCE_DEPTH {
                 return Err(ResolveError::SequenceTooDeep {
@@ -268,10 +267,9 @@ fn resolve_at_depth(
 /// resolve against the command's source. `new_pane_direction` fills the split
 /// direction of every pane-opening action that does not state one itself.
 ///
-/// The action's [`CommandKind`](crate::command::CommandKind) is not consulted:
-/// three actions share `FocusTab` and two share `SetLockMode`, so the
-/// discriminant cannot say which command to build. It stays on the metadata as
-/// the introspection surface.
+/// The action's [`CommandKind`](crate::command::CommandKind) is not read here:
+/// three actions carry `FocusTab` and two carry `SetLockMode`, so it cannot
+/// name one command. It stays on the metadata as the introspection surface.
 fn resolve_core(
     action: &ActionRef,
     args: &ActionArgs,
@@ -341,9 +339,8 @@ fn resolve_core(
         ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
 
         // --- Run ---
-        // The spawn spec is built here rather than accepted from the caller: a
-        // pane's `cwd` and `env` belong to the boundary that issues the command,
-        // and a spec supplied whole would carry both.
+        // The spawn spec is built here with no `cwd` and an empty `env`; the
+        // boundary that issues the command fills both in.
         (
             "run",
             ActionArgs::Run {

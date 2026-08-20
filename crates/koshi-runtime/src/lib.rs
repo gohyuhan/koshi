@@ -7,6 +7,11 @@
 //! talk only through the server's doors: [`server::Server::submit_command`]
 //! carries a command in, [`server::Server::subscribe`] carries the emitted
 //! events out.
+//!
+//! [`ipc_server::IpcServer`] serves that session's control socket: it carries
+//! every other process's request to the same dispatcher, and an attached
+//! client's event stream back out. [`resume`] writes and reads the file a
+//! session server hands to the process image that replaces it.
 
 pub mod error;
 pub mod ipc_server;

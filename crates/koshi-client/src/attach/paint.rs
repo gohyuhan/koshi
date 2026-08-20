@@ -126,9 +126,8 @@ fn to_pane(pane: &FramePane) -> PaneSnapshot {
 /// back.
 fn to_grid_view(window: &FrameWindow) -> GridView {
     let rows: Vec<Vec<Cell>> = window.rows.iter().map(to_row).collect();
-    // `from_rows` starts every row `Hard`, so each soft-wrapped row is set
-    // back afterwards: a viewer that cannot tell a wrapped line from an ended
-    // one breaks the line when its text is copied out.
+    // `from_rows` starts every row `Hard`; each row the wire ends another way
+    // is set back afterwards.
     let mut grid = Grid::from_rows(rows, window.cols, Style::default());
     for (index, row) in window.rows.iter().enumerate() {
         let end = to_row_end(row.end);
@@ -151,9 +150,18 @@ fn to_row_end(end: FrameRowEnd) -> RowEnd {
     }
 }
 
-/// One row's runs, expanded back into cells.
+/// One row's runs, expanded back into cells: each run's cell is built once and
+/// repeated `count` times. A run with `count: 80` yields 80 equal cells.
 fn to_row(row: &FrameRow) -> Vec<Cell> {
-    row.cells().iter().map(to_cell).collect()
+    let width = row.runs.iter().map(|run| usize::from(run.count)).sum();
+    let mut cells = Vec::with_capacity(width);
+    for run in &row.runs {
+        cells.extend(std::iter::repeat_n(
+            to_cell(&run.cell),
+            usize::from(run.count),
+        ));
+    }
+    cells
 }
 
 /// One cell: its character, the rest of its grapheme cluster layered back on in

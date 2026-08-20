@@ -18,7 +18,7 @@
 //! running router, to restart into the binary just installed.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,13 +43,12 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The GitHub `owner/repo` the release archives live under.
 const REPO: &str = "gohyuhan/koshi";
 
-/// How long the GitHub API check may run before it is abandoned, so a slow or
-/// hung endpoint never stalls a launch. Bounds a small JSON reply, so it is
-/// short.
+/// How long the GitHub API check may run before it is abandoned. Bounds the
+/// whole call, connection through JSON body.
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long a binary download may run before it is abandoned. Covers streaming
-/// a multi-megabyte binary over a slow link, and bounds a stuck transfer.
+/// How long a binary download may run before it is abandoned. Bounds the whole
+/// call, connection through the streamed archive body.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Seconds in a day, for turning the check interval into a duration.
@@ -84,9 +83,8 @@ pub fn run_update_command() -> Result<(), CliError> {
 
 /// On an interactive launch, when auto-check is enabled and a check is due,
 /// look for a newer release and offer to install it. Every failure is
-/// swallowed: a startup update check must never block or crash a normal
-/// launch. Runs before the terminal enters raw mode, so the prompt is a plain
-/// stdin read.
+/// swallowed and the launch continues. Runs before the terminal enters raw
+/// mode, and reads the answer from plain standard input.
 pub fn maybe_prompt_startup_update() {
     remove_stale_backup();
     let config = load_update_config();
@@ -97,9 +95,9 @@ pub fn maybe_prompt_startup_update() {
     if !is_due(&state, config.check_interval_days) {
         return;
     }
-    // Record this attempt before the network call, for every outcome, so a
-    // failing or slow check waits a full interval instead of repeating — and
-    // stalling on the timeout — on every launch while offline or firewalled.
+    // The attempt is recorded before the network call, whatever that call
+    // answers, so a failing or slow check waits a full interval before the
+    // next launch tries again.
     state.last_check = Some(now_secs());
     let _ = save_state(&state);
     let tag = match check_for_update(config.allow_prerelease) {
@@ -111,7 +109,7 @@ pub fn maybe_prompt_startup_update() {
         "koshi {} is available (you have {APP_VERSION}). Update now? [y/N] ",
         strip_v(&tag)
     );
-    if !prompt_yes(&prompt) {
+    if !crate::prompt::yes(&prompt) {
         return;
     }
     match install_release(&tag) {
@@ -126,15 +124,14 @@ pub fn maybe_prompt_startup_update() {
 }
 
 /// How long a restarted router or session has to come back answering Hello
-/// with the installed version, matching the lock-handover wait on Windows.
+/// with the installed version.
 const RESTART_CONFIRM_WAIT: Duration = Duration::from_secs(10);
 
 /// The pause between two Hello probes while waiting for the confirmation.
 const RESTART_CONFIRM_POLL: Duration = Duration::from_millis(200);
 
-/// The hard time bound on one Hello probe. A named pipe on Windows does not
-/// promise a read error when its peer goes away, so a probe that hits a
-/// half-closed pipe would otherwise never return.
+/// The hard time bound on one Hello probe. A probe that reaches a half-closed
+/// named pipe on Windows reads as no answer once the bound runs out.
 const RESTART_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ask the running router to restart into the binary just installed, confirm
@@ -345,9 +342,8 @@ fn check_for_update(allow_prerelease: bool) -> Result<Option<String>, String> {
 
 /// Fetches the newest eligible release tag. With pre-releases allowed it reads
 /// the release list (pre-releases included) and picks the highest version by
-/// semver — not the newest by date, which a backport to an older line could
-/// otherwise win. Otherwise it reads the `latest` endpoint, which GitHub limits
-/// to stable releases.
+/// semver, not the newest by date. Otherwise it reads the `latest` endpoint,
+/// which GitHub limits to stable releases.
 fn latest_release(allow_prerelease: bool) -> Result<String, String> {
     if allow_prerelease {
         let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=25");
@@ -370,8 +366,7 @@ fn latest_release(allow_prerelease: bool) -> Result<String, String> {
 }
 
 /// True when `tag` names a version strictly newer than this build. A tag or
-/// build version that does not parse as semver is treated as not-newer, so a
-/// malformed tag never triggers a download.
+/// build version that does not parse as semver reads as not newer.
 fn is_newer(tag: &str) -> bool {
     match (
         Version::parse(strip_v(tag)),
@@ -426,9 +421,9 @@ fn binary_url(tag: &str) -> Option<String> {
     ))
 }
 
-/// Downloads `url` into a securely-created temp file and returns its path. The
-/// file has a random name and is created exclusively, so it never follows or
-/// truncates a pre-existing file or symlink of a guessable name.
+/// Downloads `url` into a temp file and returns its path. The file is created
+/// exclusively under a random name: it follows and truncates no existing file
+/// or symbolic link.
 fn download(url: &str) -> Result<TempPath, String> {
     let mut response = agent(DOWNLOAD_TIMEOUT)
         .get(url)
@@ -494,9 +489,9 @@ fn extract_zip(archive: &Path) -> Result<TempPath, String> {
     Err("binary not found in archive".to_string())
 }
 
-/// Copies an extracted binary stream to a securely-created temp file, made
-/// executable on Unix. The random-named, exclusively-created temp file never
-/// follows or truncates an existing file or symlink of a guessable name.
+/// Copies an extracted binary stream to a temp file, made executable on Unix.
+/// The file is created exclusively under a random name: it follows and
+/// truncates no existing file or symbolic link.
 fn save_binary(source: &mut impl Read) -> Result<TempPath, String> {
     let mut file = Builder::new()
         .prefix("koshi-update-")
@@ -580,8 +575,8 @@ fn swap_exe(new_binary: &Path, exe: &Path) -> Result<(), String> {
 /// staged one into place, and restore the old one if that final move fails.
 #[cfg(windows)]
 fn swap_exe(new_binary: &Path, exe: &Path) -> Result<(), String> {
-    // Stage on the exe's own volume so the final rename can't fail cross-drive
-    // (the download temp dir may be on a different drive than a portable exe).
+    // The staging name sits beside the exe, on the exe's own volume, so both
+    // renames below stay within one volume.
     let staged = exe.with_file_name(format!("koshi-update-{}.exe", std::process::id()));
     fs::copy(new_binary, &staged).map_err(|err| err.to_string())?;
     let backup = exe.with_extension("old");
@@ -695,8 +690,8 @@ fn is_due(state: &UpdateState, interval_days: u32) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Reads the `update` section of `koshi.kdl`. A missing or unreadable file
-/// falls back to defaults (auto-check on), since no opt-out was expressed. A
-/// file that is present but fails to parse fails **closed** — auto-check off.
+/// gives the defaults, auto-check on. A file that is present and does not
+/// parse gives auto-check off.
 fn load_update_config() -> UpdateConfig {
     let Some(path) = koshi_paths::config_dir().map(|dir| dir.join("koshi.kdl")) else {
         return UpdateConfig::default();
@@ -723,9 +718,8 @@ fn load_update_config() -> UpdateConfig {
 // ---------------------------------------------------------------------------
 
 /// A configured HTTP agent whose whole call — connection through body — is
-/// bounded by `timeout`. The API check uses a short bound; the binary download
-/// uses a long one, since the timeout also covers streaming the body and a
-/// multi-megabyte binary over a slow link needs far longer than a JSON reply.
+/// bounded by `timeout`. The API check passes [`API_TIMEOUT`]; the binary
+/// download passes [`DOWNLOAD_TIMEOUT`].
 fn agent(timeout: Duration) -> Agent {
     Agent::new_with_config(
         Agent::config_builder()
@@ -760,17 +754,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
-}
-
-/// Prints `prompt`, reads a line from stdin, and returns whether it is a yes.
-fn prompt_yes(prompt: &str) -> bool {
-    print!("{prompt}");
-    let _ = io::stdout().flush();
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
 /// Builds a [`CliError::Update`] from a failure detail.

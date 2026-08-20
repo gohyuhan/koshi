@@ -14,7 +14,7 @@
 use koshi_core::geometry::{Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 
-use crate::solver::StackHeader;
+use crate::solver::{cell_area, StackHeader};
 use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
@@ -81,8 +81,8 @@ pub fn focus_candidates(
     }
 }
 
-/// Squared distance between two rect centers, on doubled coordinates so
-/// half-cell centers stay exact integers.
+/// Squared distance between two rect centers, in the doubled coordinates
+/// [`doubled_center`] returns.
 fn center_distance(a: Rect, b: Rect) -> u64 {
     let (ax, ay) = doubled_center(a);
     let (bx, by) = doubled_center(b);
@@ -91,18 +91,14 @@ fn center_distance(a: Rect, b: Rect) -> u64 {
     (dx * dx + dy * dy) as u64
 }
 
-/// Returns the center of `rect` in doubled coordinates (each component ×2).
-/// Doubling avoids fractional coordinates when the rect has odd dimensions.
+/// The center of `rect` with both components doubled: `2·origin + size` on
+/// each axis. A rect at x 0 spanning 5 columns yields x 5, an odd half-cell
+/// center held as an exact integer.
 fn doubled_center(rect: Rect) -> (u32, u32) {
     (
         2 * u32::from(rect.origin.x) + u32::from(rect.size.cols),
         2 * u32::from(rect.origin.y) + u32::from(rect.size.rows),
     )
-}
-
-/// Total cell count in the rect (cols × rows).
-fn cell_area(rect: Rect) -> u64 {
-    u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
 /// A completed stack-local focus move: which member expanded and which

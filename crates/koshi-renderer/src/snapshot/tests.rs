@@ -184,6 +184,38 @@ fn builds_from_fixture_with_exact_values() {
 }
 
 #[test]
+fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
+    let mut snap = fixture(fixture_grid());
+    // Each field takes a value of its own, so a copy that reads the wrong
+    // source field lands on the wrong value here.
+    snap.panes[0].view_top_row = 42;
+    snap.panes[0].mouse_tracking = MouseTracking::ButtonMotion;
+    snap.panes[0].alt_scroll = true;
+    snap.panes[0].on_alt_screen = false;
+    snap.panes[0].has_selection = true;
+    let pane_id = snap.panes[0].id;
+    let client_id = snap.client.id;
+    let tab_id = snap.session.active_tab.id;
+
+    let frame = MouseFrame::from(snap);
+
+    assert_eq!(
+        frame.panes,
+        vec![MousePane {
+            id: pane_id,
+            view_top_row: 42,
+            mouse_tracking: MouseTracking::ButtonMotion,
+            alt_scroll: true,
+            on_alt_screen: false,
+            has_selection: true,
+        }]
+    );
+    // The session and client parts move across whole.
+    assert_eq!(frame.client.id, client_id);
+    assert_eq!(frame.session.active_tab.id, tab_id);
+}
+
+#[test]
 fn snapshot_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<RenderSnapshot>();

@@ -224,3 +224,47 @@ fn suppressed_panes_are_exempt() {
     assert_no_outside(&panes, tab()).unwrap();
     assert_min_size_respected(&panes, Size { cols: 2, rows: 1 }).unwrap();
 }
+
+#[test]
+fn a_pane_past_any_of_the_four_tab_edges_fails_no_outside() {
+    // A tab that does not start at (0, 0), so a pane can sit left of or above
+    // it. Its cells are x 10..30 and y 5..15.
+    let tab = rect(10, 5, 20, 10);
+    let cases = [
+        // One column left of the tab's left edge.
+        ("left", rect(9, 5, 20, 10)),
+        // One row above the tab's top edge.
+        ("top", rect(10, 4, 20, 10)),
+        // One column past the tab's right edge.
+        ("right", rect(11, 5, 20, 10)),
+        // One row past the tab's bottom edge.
+        ("bottom", rect(10, 6, 20, 10)),
+    ];
+    for (edge, spill) in cases {
+        let pane = PaneId::new();
+        let err = assert_no_outside(&[(pane, spill)], tab).unwrap_err();
+        assert_eq!(
+            err,
+            LayoutAssertionError::OutsideTab {
+                pane,
+                rect: spill,
+                tab,
+            },
+            "{edge} edge"
+        );
+    }
+}
+
+#[test]
+fn a_pane_filling_a_tab_that_does_not_start_at_the_origin_stays_inside() {
+    let tab = rect(10, 5, 20, 10);
+    assert_no_outside(&[(PaneId::new(), tab)], tab).unwrap();
+}
+
+#[test]
+fn a_suppressed_pane_placed_outside_the_tab_is_still_exempt() {
+    // The solver clips a pane it cannot fit to zero area. Such a pane covers no
+    // cell, so it never spills, wherever its origin lands.
+    let far_away = Rect::new(Point { x: 500, y: 500 }, Size { cols: 0, rows: 0 });
+    assert_no_outside(&[(PaneId::new(), far_away)], tab()).unwrap();
+}

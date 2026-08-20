@@ -56,17 +56,12 @@ impl Server {
 
     /// One [`Event::ConfigReloaded`] per live session, in session-id order.
     fn config_reloaded_events(&self) -> Vec<Event> {
-        self.session_ids_sorted()
+        let mut session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        session_ids.sort_unstable();
+        session_ids
             .into_iter()
             .map(|session_id| Event::ConfigReloaded(ConfigReloaded { session_id }))
             .collect()
-    }
-
-    /// Every live session's id, sorted so event order is deterministic.
-    fn session_ids_sorted(&self) -> Vec<SessionId> {
-        let mut ids: Vec<SessionId> = self.sessions.keys().copied().collect();
-        ids.sort_unstable();
-        ids
     }
 }
 

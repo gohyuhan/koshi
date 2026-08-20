@@ -6,11 +6,10 @@
 //! back into the bytes a program running inside a pane expects, for the keys no
 //! keybinding consumed.
 //!
-//! Encoding depends on the chord *and* the receiving pane's mode, so it happens
-//! where the bytes are written. A bare Up arrow is `ESC [ A` to a shell but
-//! `ESC O A` to vim, which turned on application-cursor-keys mode (DECCKM,
-//! `ESC [ ? 1 h`). The chord `<Up>` is the same press in both cases; only the
-//! bytes differ.
+//! Encoding reads the chord *and* the receiving pane's mode. A bare Up arrow is
+//! `ESC [ A` to a shell but `ESC O A` to vim, which turned on
+//! application-cursor-keys mode (DECCKM, `ESC [ ? 1 h`). The chord `<Up>` is the
+//! same press in both cases; only the bytes differ.
 //!
 //! # Byte forms
 //!
@@ -33,9 +32,10 @@ const ESC: u8 = 0x1b;
 /// a bitmap of the held modifiers offset by one.
 const UNMODIFIED: u8 = 1;
 
-/// Decode one press or repeat into its canonical chord. Releases yield `None`,
-/// so one physical press is delivered once, as do keys this model has no name
-/// for: media keys, `CapsLock`, `Menu`.
+/// Decode one press or repeat into its canonical chord.
+///
+/// Returns `None` for a release, and for a key this model has no name for:
+/// media keys, `CapsLock`, `Menu`, `F(25)` and above.
 #[must_use]
 pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
     if matches!(event.kind, KeyEventKind::Release) {
@@ -44,12 +44,12 @@ pub fn decode_key(event: KeyEvent) -> Option<KeyChord> {
 
     let key = decode_code(event.code)?;
     let mut mods = decode_mods(event.modifiers);
-    // BackTab IS Shift+Tab: some hosts report the key without also setting the
-    // Shift modifier, so the chord carries it unconditionally.
+    // `BackTab` takes Shift whether or not the host set the Shift modifier.
     if matches!(event.code, KeyCode::BackTab) {
         mods = mods.union(ModFlags::SHIFT);
     }
-    Some(normalize(key, mods, event.modifiers))
+    let shift_held = event.modifiers.contains(KeyModifiers::SHIFT);
+    Some(normalize(key, mods, shift_held))
 }
 
 /// Encode a chord as the bytes the focused pane's program expects.
@@ -76,7 +76,8 @@ pub fn encode(chord: KeyChord, app_cursor_keys: bool) -> Vec<u8> {
 }
 
 /// The chord's key, with its modifiers still to be applied. `BackTab` is the
-/// Tab key — [`decode_key`] adds the Shift that tells the two apart.
+/// Tab key — [`decode_key`] adds the Shift that tells the two apart. Returns
+/// `None` for a code with no [`Key`] form.
 fn decode_code(code: KeyCode) -> Option<Key> {
     let key = match code {
         KeyCode::Char(c) => Key::Char(c),
@@ -100,9 +101,9 @@ fn decode_code(code: KeyCode) -> Option<Key> {
     Some(key)
 }
 
-/// The host's modifier set, minus Shift: whether Shift belongs in the chord
-/// depends on the key it is held with, which [`normalize`] decides. The mouse
-/// decoder builds on this, adding Shift back ([`crate::mouse`]).
+/// The host's Control, Alt and Super, as [`ModFlags`]. Meta counts as Super.
+/// Shift is left out: [`normalize`] adds it back for a key press, and
+/// [`crate::mouse`] adds it for a mouse event.
 pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     let mut mods = ModFlags::NONE;
     if modifiers.contains(KeyModifiers::CONTROL) {
@@ -117,13 +118,12 @@ pub(crate) fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     mods
 }
 
-/// Put the press in the one canonical form the config parser also produces, so
-/// a pressed key and a written binding compare equal.
-fn normalize(key: Key, mods: ModFlags, modifiers: KeyModifiers) -> KeyChord {
-    let shift_held = modifiers.contains(KeyModifiers::SHIFT);
-
-    // The spacebar arrives as the character `' '`; bindings spell it
-    // `<Space>`, so the chord carries the named key.
+/// The canonical chord for one press, the same form the config parser produces.
+/// `shift_held` is the host's Shift state. `' '` becomes [`NamedKey::Space`]. A
+/// named key takes `shift_held` as a modifier. A capital letter folds to
+/// lowercase plus Shift.
+fn normalize(key: Key, mods: ModFlags, shift_held: bool) -> KeyChord {
+    // The spacebar arrives as the character `' '` and becomes `<Space>`.
     let key = match key {
         Key::Char(' ') => Key::Named(NamedKey::Space),
         other => other,
@@ -193,8 +193,7 @@ fn encode_named(key: NamedKey, mods: ModFlags, app_cursor_keys: bool) -> Vec<u8>
     match key {
         NamedKey::Enter => c0(b'\r', mods),
         NamedKey::Esc => c0(ESC, mods),
-        // Backspace sends DEL; Control makes it the ASCII BS byte, which is
-        // how a shell tells "erase a character" from "erase a word".
+        // Backspace sends DEL (`0x7f`), or BS (`0x08`) with Control held.
         NamedKey::Backspace => c0(if ctrl { 0x08 } else { 0x7f }, mods),
         NamedKey::Space => c0(if ctrl { 0x00 } else { b' ' }, mods),
         // Shift+Tab is the one Tab form with a sequence of its own.
@@ -229,8 +228,7 @@ fn c0(byte: u8, mods: ModFlags) -> Vec<u8> {
 
 /// A cursor or Home/End key. Unmodified, its introducer follows the pane's
 /// DECCKM state — `ESC O A` in application mode, `ESC [ A` outside it. Any
-/// modifier forces the CSI form, the only one with room for the parameter that
-/// carries it.
+/// modifier sends the CSI form in either mode.
 ///
 /// `<Up>` → `ESC [ A`; `<Up>` into an application-mode pane → `ESC O A`;
 /// `<C-Up>` → `ESC [ 1 ; 5 A` into either.
@@ -242,8 +240,8 @@ fn cursor_key(final_byte: u8, param: u8, app_cursor_keys: bool) -> Vec<u8> {
 }
 
 /// A key of the SS3 family — the `ESC O` introducer. Unmodified, the key is
-/// `ESC O <final>`. A held modifier takes the CSI form `ESC [ 1 ; <param>
-/// <final>`, which has room for the parameter that carries it.
+/// `ESC O <final>`. A held modifier takes the CSI form
+/// `ESC [ 1 ; <param> <final>`.
 ///
 /// `<F1>` → `ESC O P`; `<C-F1>` → `ESC [ 1 ; 5 P`.
 fn ss3_key(final_byte: u8, param: u8) -> Vec<u8> {
@@ -293,9 +291,12 @@ fn push_decimal(bytes: &mut Vec<u8>, value: u8) {
 /// and `ESC [ 1 ; <param> P` … once modified); F5–F12 join the `~` family
 /// under the codes terminfo lists, whose run skips 16 and 22.
 ///
-/// F13–F24 have no sequence of their own: terminfo spends those slots on Shift
-/// plus F1–F12, so `kf13` IS `ESC [ 1 ; 2 P`, Shift+F1. `<F13>` encodes as
-/// Shift+F1.
+/// F13–F24 encode as Shift plus F1–F12: `<F13>` sends `ESC [ 1 ; 2 P`, which is
+/// terminfo's `kf13`.
+///
+/// # Panics
+///
+/// Panics when `n` is `0`, or above `24`.
 fn function_key(n: u8, mods: ModFlags) -> Vec<u8> {
     let (n, mods) = if n > 12 {
         (n - 12, mods.union(ModFlags::SHIFT))
@@ -319,7 +320,7 @@ fn function_key(n: u8, mods: ModFlags) -> Vec<u8> {
 /// The CSI parameter that carries a chord's modifiers: one plus a bitmap of
 /// Shift (1), Alt (2), Control (4), and Super (8).
 ///
-/// `<C-Right>` → `5` (1 + 4), which is why that sequence reads `ESC [ 1 ; 5 C`.
+/// `<C-Right>` → `5` (1 + 4); that sequence reads `ESC [ 1 ; 5 C`.
 fn modifier_param(mods: ModFlags) -> u8 {
     let mut param = UNMODIFIED;
     if mods.contains(ModFlags::SHIFT) {
@@ -341,8 +342,7 @@ fn modifier_param(mods: ModFlags) -> u8 {
 /// [`Key::Char`] is stored under.
 ///
 /// `'a'` → `'A'`. A character whose uppercase mapping runs to more than one
-/// character (`'ß'` → `"SS"`) stands as it is: one key press sends one
-/// character.
+/// character (`'ß'` → `"SS"`) stands as it is.
 fn unfold_shift(c: char) -> char {
     let mut upper = c.to_uppercase();
     match (upper.next(), upper.next()) {
@@ -360,10 +360,10 @@ fn unfold_shift(c: char) -> char {
 /// covers `@` through `_` — 32 characters for the 32 C0 codes — and a letter is
 /// just its capital's version of that.
 ///
-/// The digit row carries the leftovers, the control codes whose punctuation is
-/// hard to reach: `2` sends NUL, `3` sends ESC, `4`–`7` send `0x1c`–`0x1f`, and
-/// `8` sends DEL. The same byte therefore has two spellings — `<C-4>` and
-/// `<C-\>` both send `0x1c` — and which one arrives depends on the host:
+/// The digit row carries the leftover control codes: `2` sends NUL, `3` sends
+/// ESC, `4`–`7` send `0x1c`–`0x1f`, and `8` sends DEL. The same byte therefore
+/// has two spellings — `<C-4>` and `<C-\>` both send `0x1c` — and which one
+/// arrives depends on the host:
 ///
 /// - On unix the terminal sends the byte, and crossterm decodes `0x1c`–`0x1f`
 ///   back to `Char('4')`–`Char('7')` — so `Ctrl+\` reaches koshi as `<C-4>`.

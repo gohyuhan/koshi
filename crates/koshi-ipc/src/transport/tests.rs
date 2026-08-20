@@ -560,3 +560,30 @@ fn dropping_the_listener_unlinks_the_socket_file() {
     drop(listener);
     assert!(!std::path::Path::new(&addr).exists());
 }
+
+/// The raw halves carry somebody else's frames through, so nothing of koshi's
+/// own frame shape may be written around the bytes: five bytes handed in
+/// arrive as those same five bytes, not as a length prefix and a payload.
+#[test]
+fn raw_halves_carry_the_bytes_as_given_with_no_frame_around_them() {
+    let addr = test_addr("rawsplit");
+    let listener = Listener::bind(&addr).expect("bind");
+
+    let server = thread::spawn(move || {
+        let (mut reader, mut writer) = listener.accept().expect("accept").split_raw();
+        let mut received = [0u8; 5];
+        reader.read_exact(&mut received).expect("server read");
+        writer.write_all(b"pong").expect("server write");
+        writer.flush().expect("server flush");
+        received
+    });
+
+    let (mut reader, mut writer) = Connection::connect(&addr).expect("connect").split_raw();
+    writer.write_all(b"hello").expect("client write");
+    writer.flush().expect("client flush");
+    let mut answered = [0u8; 4];
+    reader.read_exact(&mut answered).expect("client read");
+
+    assert_eq!(&answered, b"pong");
+    assert_eq!(&server.join().expect("server thread"), b"hello");
+}

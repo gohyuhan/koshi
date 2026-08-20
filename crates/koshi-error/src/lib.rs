@@ -44,33 +44,31 @@ pub enum KoshiError {
     Storage(#[from] StorageError),
 }
 
+impl KoshiError {
+    /// The wrapped error, as the trait every variant's payload implements.
+    fn inner(&self) -> &dyn DomainError {
+        match self {
+            KoshiError::Config(e) => e,
+            KoshiError::Cli(e) => e,
+            KoshiError::Ipc(e) => e,
+            KoshiError::Pty(e) => e,
+            KoshiError::Terminal(e) => e,
+            KoshiError::Layout(e) => e,
+            KoshiError::Plugin(e) => e,
+            KoshiError::Storage(e) => e,
+        }
+    }
+}
+
 impl DomainError for KoshiError {
     /// The wrapped error's category.
     fn category(&self) -> DomainCategory {
-        match self {
-            KoshiError::Config(e) => e.category(),
-            KoshiError::Cli(e) => e.category(),
-            KoshiError::Ipc(e) => e.category(),
-            KoshiError::Pty(e) => e.category(),
-            KoshiError::Terminal(e) => e.category(),
-            KoshiError::Layout(e) => e.category(),
-            KoshiError::Plugin(e) => e.category(),
-            KoshiError::Storage(e) => e.category(),
-        }
+        self.inner().category()
     }
 
     /// The wrapped error's severity.
     fn severity(&self) -> Severity {
-        match self {
-            KoshiError::Config(e) => e.severity(),
-            KoshiError::Cli(e) => e.severity(),
-            KoshiError::Ipc(e) => e.severity(),
-            KoshiError::Pty(e) => e.severity(),
-            KoshiError::Terminal(e) => e.severity(),
-            KoshiError::Layout(e) => e.severity(),
-            KoshiError::Plugin(e) => e.severity(),
-            KoshiError::Storage(e) => e.severity(),
-        }
+        self.inner().severity()
     }
 }
 

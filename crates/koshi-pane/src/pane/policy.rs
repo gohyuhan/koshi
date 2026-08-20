@@ -11,6 +11,7 @@ use std::time::Duration;
 use koshi_core::{constant::GRACEFUL_TIMEOUT_DURATION, process::KillPolicy};
 use serde::{Deserialize, Serialize};
 
+/// How a pane carries out a requested close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneClosePolicy {
     /// Close gracefully. `timeout` is how long the process has to clean up.
@@ -48,6 +49,7 @@ impl PaneClosePolicy {
     }
 }
 
+/// What happens to a pane when its child process ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PaneExitPolicy {
     /// Close the pane when its child process ends.

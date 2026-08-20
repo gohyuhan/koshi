@@ -19,9 +19,7 @@
 //! one change that did qualify.
 //!
 //! [`Surface::version_problem`] checks that rule, and a test walks the whole
-//! table through it. Before that check existed the rule lived only in prose,
-//! and two surfaces carried a wrong number until somebody re-read the
-//! paragraph.
+//! table through it.
 //!
 //! # What is here and what is not
 //!

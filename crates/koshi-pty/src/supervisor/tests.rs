@@ -848,3 +848,177 @@ fn a_shutdown_the_supervisor_refuses_is_the_outcome_asked_for() {
     assert_eq!(backend.shut_down(), Ok(()));
     assert_eq!(peer.asked().last(), Some(&SupervisorRequestKind::Shutdown));
 }
+
+#[test]
+fn asking_a_pane_for_its_directory_answers_what_the_supervisor_said() {
+    // The supervisor is the child's parent, so it is the only side that can
+    // ask the operating system. Every answer other than a directory leaves the
+    // pane without one.
+    let pane = PaneId::new();
+    let mut answers = opening_answers(Vec::new());
+    answers.push(SupervisorResult::Spawned { pid: 4242 });
+    answers.push(SupervisorResult::Cwd(Some(PathBuf::from("/tmp/work"))));
+    answers.push(SupervisorResult::Cwd(None));
+    answers.push(SupervisorResult::Done);
+    let peer = FakeSupervisor::start(answers, Vec::new());
+    let sink = RecordingSink::new();
+    let backend = connect_to(&peer, Arc::clone(&sink));
+    backend
+        .spawn(pane, shell_spec("sleep 30"), PANE_SIZE)
+        .expect("the supervisor opens the pane");
+
+    assert_eq!(
+        backend.live_cwd(pane),
+        Some(PathBuf::from("/tmp/work")),
+        "the directory the supervisor named must reach the caller unchanged"
+    );
+    assert_eq!(
+        peer.asked().last(),
+        Some(&SupervisorRequestKind::LiveCwd { pane_id: pane }),
+        "the pane asked about must be the pane named"
+    );
+    assert_eq!(
+        backend.live_cwd(pane),
+        None,
+        "an operating system that cannot answer leaves the pane without a directory"
+    );
+    assert_eq!(
+        backend.live_cwd(pane),
+        None,
+        "an answer that is not a directory is not a directory"
+    );
+}
+
+#[test]
+fn a_kill_the_supervisor_refuses_still_drops_the_pane() {
+    // The caller is closing the pane and has nothing left to do with it. A
+    // pane kept here because the supervisor refused would stay in this map for
+    // the life of the process, and every later call on it would cross the link
+    // for nothing.
+    let pane = PaneId::new();
+    let mut answers = opening_answers(Vec::new());
+    answers.push(SupervisorResult::Spawned { pid: 4242 });
+    answers.push(SupervisorResult::Error(
+        koshi_ipc::protocol::IpcErrorPayload {
+            code: koshi_ipc::protocol::IpcErrorCode::Unknown,
+            message: "the pane could not be closed".to_string(),
+        },
+    ));
+    let peer = FakeSupervisor::start(answers, Vec::new());
+    let sink = RecordingSink::new();
+    let backend = connect_to(&peer, Arc::clone(&sink));
+    backend
+        .spawn(pane, shell_spec("sleep 30"), PANE_SIZE)
+        .expect("the supervisor opens the pane");
+
+    assert_eq!(
+        backend.kill(pane, KillPolicy::Tree),
+        Err(PtyError::Io {
+            detail: "the supervisor refused Kill: the pane could not be closed".to_string(),
+        }),
+        "a refusal must reach the caller"
+    );
+    assert_eq!(
+        backend.carried_panes(),
+        Vec::new(),
+        "and the pane must be gone from this backend all the same"
+    );
+    assert_eq!(
+        backend.kill(pane, KillPolicy::Tree),
+        Err(PtyError::UnknownPane { pane }),
+        "so closing it again is refused without a round trip"
+    );
+}
+
+#[test]
+fn a_resize_the_supervisor_refuses_leaves_the_pane_at_its_old_size() {
+    // The size a pane reports is the size its child was really told. Recording
+    // one the supervisor refused would hand the next process image a window
+    // the child never had.
+    let pane = PaneId::new();
+    let mut answers = opening_answers(Vec::new());
+    answers.push(SupervisorResult::Spawned { pid: 4242 });
+    answers.push(SupervisorResult::Error(
+        koshi_ipc::protocol::IpcErrorPayload {
+            code: koshi_ipc::protocol::IpcErrorCode::Unknown,
+            message: "the terminal could not be retuned".to_string(),
+        },
+    ));
+    let peer = FakeSupervisor::start(answers, Vec::new());
+    let sink = RecordingSink::new();
+    let backend = connect_to(&peer, Arc::clone(&sink));
+    backend
+        .spawn(pane, shell_spec("sleep 30"), PANE_SIZE)
+        .expect("the supervisor opens the pane");
+
+    let wider = PtySize {
+        cols: 120,
+        rows: 40,
+    };
+    assert_eq!(
+        backend.resize(pane, wider),
+        Err(PtyError::Io {
+            detail: "the supervisor refused Resize: the terminal could not be retuned".to_string(),
+        }),
+        "a refusal must reach the caller"
+    );
+    assert_eq!(
+        backend.carried_panes(),
+        vec![CarriedPtyPane {
+            pane_id: pane,
+            #[cfg(unix)]
+            terminal_fd: None,
+            pid: 4242,
+            size: PANE_SIZE,
+            exit: None,
+        }],
+        "a pane whose child was never told the new size must still report the old one"
+    );
+}
+
+#[test]
+fn a_kill_that_asks_the_child_to_stop_waits_out_its_grace_window_as_well() {
+    // The supervisor spends the grace window before it answers, so the wait on
+    // this side has to cover that window on top of its own. A wait that did
+    // not would report a kill as unanswered while the child is still being
+    // given its chance to exit.
+    let pane = PaneId::new();
+    let grace = Duration::from_secs(4);
+
+    assert_eq!(
+        answer_wait(&SupervisorRequestKind::Kill {
+            pane_id: pane,
+            kill_policy: KillPolicy::Graceful { timeout: grace },
+        }),
+        ANSWER_WAIT + grace
+    );
+    assert_eq!(
+        answer_wait(&SupervisorRequestKind::Kill {
+            pane_id: pane,
+            kill_policy: KillPolicy::GracefulTree { timeout: grace },
+        }),
+        ANSWER_WAIT + grace
+    );
+    assert_eq!(
+        answer_wait(&SupervisorRequestKind::Kill {
+            pane_id: pane,
+            kill_policy: KillPolicy::Force,
+        }),
+        ANSWER_WAIT,
+        "a kill that spends no grace window waits no longer than any other request"
+    );
+    assert_eq!(
+        answer_wait(&SupervisorRequestKind::Kill {
+            pane_id: pane,
+            kill_policy: KillPolicy::Tree,
+        }),
+        ANSWER_WAIT
+    );
+    assert_eq!(
+        answer_wait(&SupervisorRequestKind::Write {
+            pane_id: pane,
+            bytes: b"hi".to_vec(),
+        }),
+        ANSWER_WAIT
+    );
+}

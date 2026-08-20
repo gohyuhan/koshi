@@ -115,16 +115,16 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
         })
         .collect();
 
-    let empty = |first_visible| TablineLayout {
+    let no_tabs = || TablineLayout {
         session_width,
         right_x,
-        first_visible,
+        first_visible: 0,
         tabs: Vec::new(),
         left_arrow: None,
         right_arrow: None,
     };
     if count == 0 || strip_start >= right_x {
-        return empty(0);
+        return no_tabs();
     }
 
     // Everything fits from the first tab: show them all, no scrolling.
@@ -145,7 +145,7 @@ pub(crate) fn tabline_layout(frame: FrameLayout<'_>, area: RatatuiRect) -> Tabli
     let lo = strip_start.saturating_add(TABLINE_ARROW_WIDTH);
     let hi = right_x.saturating_sub(TABLINE_ARROW_WIDTH);
     if lo >= hi {
-        return empty(0);
+        return no_tabs();
     }
 
     let active = frame

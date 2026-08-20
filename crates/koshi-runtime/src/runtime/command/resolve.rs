@@ -363,28 +363,6 @@ impl Server {
         session: Option<&Session>,
     ) -> Result<NewPaneTarget, Rejection> {
         match (args.source, args.tab) {
-            // A source pane wins outright: its own tab is the receiving tab.
-            (Some(source_pane), _) => {
-                let owner = self
-                    .session_for_pane(source_pane)
-                    .ok_or_else(|| Rejection::bare(RejectReason::TargetNotFound))?;
-                if Self::is_winding_down(owner) {
-                    return Err(Rejection::new(
-                        RejectReason::InvalidState,
-                        "session is stopping",
-                    ));
-                }
-                let tab_id = Self::tab_of_pane(owner, source_pane)?;
-                let focus_client = source
-                    .client_id()
-                    .filter(|client_id| owner.clients.get(*client_id).is_some());
-                Ok(NewPaneTarget {
-                    session_id: owner.id,
-                    source_pane,
-                    tab_id,
-                    focus_client,
-                })
-            }
             // An explicit tab picks where the pane lands; the split anchors on
             // that tab's most recently focused pane. The issuer becomes the
             // focus client only while still attached to the acting session.
@@ -401,14 +379,16 @@ impl Server {
                     focus_client,
                 })
             }
-            // With no explicit source the default-pane resolution is exactly
-            // [`Self::resolve_pane_target`]'s: the in-session CLI's captured
-            // pane, else the acting client's focused pane. The issuer becomes
-            // the focus client only while still attached to the owning session
-            // — an in-session CLI whose client is gone still splits its pane,
-            // it just focuses the new pane for nobody.
-            (None, None) => {
-                let target = self.resolve_pane_target(None, source, session)?;
+            // An explicit source pane wins outright, and with none the default
+            // pane stands in — the in-session CLI's captured pane, else the
+            // acting client's focused pane. Both resolve through
+            // [`Self::resolve_pane_target`], so the pane's own tab is the
+            // receiving tab. The issuer becomes the focus client only while
+            // still attached to the owning session — an in-session CLI whose
+            // client is gone still splits its pane, it just focuses the new pane
+            // for nobody.
+            (source_pane, _) => {
+                let target = self.resolve_pane_target(source_pane, source, session)?;
                 let focus_client = source.client_id().filter(|client_id| {
                     self.sessions
                         .get(&target.session_id)
@@ -642,7 +622,6 @@ impl Server {
         // solved in this client's own mode: a zoomed client draws one pane and
         // has no neighbour to move to.
         let solve = solve_tab(tab, client.layout_mode(tab_id), viewport, min);
-        let suppressed: HashSet<PaneId> = solve.suppressed.iter().copied().collect();
         let from_rect = solve
             .panes
             .iter()
@@ -652,7 +631,7 @@ impl Server {
 
         let mut best: Option<(PaneId, u16, u16)> = None;
         for &(pane_id, rect) in &solve.panes {
-            if pane_id == from || suppressed.contains(&pane_id) || rect.is_empty() {
+            if pane_id == from || solve.suppressed.contains(&pane_id) || rect.is_empty() {
                 continue;
             }
             // Distance between the facing edges; `None` when the candidate is
@@ -764,17 +743,12 @@ impl Server {
         pane: PaneId,
     ) -> Result<TabId, Rejection> {
         Self::resolve_pane_in_session(session, pane)?;
-        session
-            .tabs
-            .values()
-            .find(|tab| tab.layout().contains_pane(pane))
-            .map(|tab| tab.id())
-            .ok_or_else(|| {
-                Rejection::new(
-                    RejectReason::TargetNotFound,
-                    "source pane not found in any tab",
-                )
-            })
+        Self::tab_of_pane(session, pane).map_err(|_| {
+            Rejection::new(
+                RejectReason::TargetNotFound,
+                "source pane not found in any tab",
+            )
+        })
     }
 
     /// Resolve the client a tab-view command acts for: the explicit `client`

@@ -78,6 +78,33 @@ fn inserting_a_duplicate_id_is_rejected_and_keeps_the_original() {
 }
 
 #[test]
+fn a_duplicate_insert_reports_the_kind_of_the_record_it_turned_away() {
+    let mut registry = PaneRegistry::new();
+    let id = PaneId::new();
+    let plugin_id = PluginId::new();
+    registry.insert(terminal_record(id)).expect("first insert");
+
+    let rejected = registry.insert(PaneRecord::new_with_kind(
+        id,
+        PaneKind::Plugin { plugin_id },
+        SystemTime::UNIX_EPOCH,
+    ));
+
+    // The error names the rejected record's kind, so the failure is reported
+    // against the plugin that tried to take the id, not the terminal pane that
+    // already holds it.
+    assert_eq!(
+        rejected,
+        Err(PaneRegistryError::DuplicateId {
+            id,
+            kind: PaneKind::Plugin { plugin_id }
+        })
+    );
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.get(id), Some(&terminal_record(id)));
+}
+
+#[test]
 fn a_duplicate_id_error_is_recoverable_and_classified_by_pane_kind() {
     // The error's domain follows the clashing pane's kind, so a plugin pane is
     // never mislabelled as a terminal-emulator failure.

@@ -151,6 +151,54 @@ fn drop_with_no_registered_hooks_is_a_noop() {
     drop(guard); // must not panic on an empty registry
 }
 
+// A thread that dies while it holds the registry poisons that lock. The
+// terminal must still be restored: registering and draining both recover the
+// poisoned lock instead of panicking.
+#[test]
+fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
+    let _serial = panic_hook_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = Arc::new(AtomicUsize::new(0));
+    let after = Arc::new(AtomicUsize::new(0));
+
+    let guard = TerminalCleanupGuard::new();
+    let before_counter = Arc::clone(&before);
+    guard.register_cleanup(Box::new(move || {
+        before_counter.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Silence the default hook so the deliberate panic below stays quiet.
+    let saved = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let hooks = Arc::clone(&guard.hooks);
+    let died = std::thread::spawn(move || {
+        let _held = hooks.lock().expect("the registry is not poisoned yet");
+        panic!("the thread holding the registry died");
+    });
+    assert!(died.join().is_err(), "the spawned thread must have died");
+    panic::set_hook(saved);
+
+    // Registering into the poisoned registry still works.
+    let after_counter = Arc::clone(&after);
+    guard.register_cleanup(Box::new(move || {
+        after_counter.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    drop(guard);
+
+    assert_eq!(
+        before.load(Ordering::SeqCst),
+        1,
+        "a hook registered before the poisoning must still run"
+    );
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        1,
+        "a hook registered after the poisoning must still run"
+    );
+}
+
 // A hook registered after a panic already drained the registry must still run
 // on the guard's later normal drop: the registry is reusable, not left
 // permanently drained by the earlier panic.

@@ -1415,6 +1415,83 @@ fn a_pane_event_waits_until_a_hello_opens_the_link() {
     );
 }
 
+/// One connected pair on the supervisor's link address: the accepted end's
+/// writing half, and the peer's own connection.
+fn linked_pair(addr: &str, listener: &Listener) -> (FrameWriter, Connection) {
+    let dialling = {
+        let addr = addr.to_string();
+        thread::spawn(move || Connection::connect(&addr).expect("the peer connects"))
+    };
+    let accepted = listener.accept().expect("the peer is accepted");
+    let peer = dialling.join().expect("the connecting thread ended");
+    let (_reader, writer) = accepted.split();
+    (writer, peer)
+}
+
+#[test]
+fn a_second_link_carries_no_pane_output_until_its_own_hello_opens_it() {
+    // Being open belongs to the link that was opened. A session server that
+    // replaced its own image takes the link, and the peer that arrives next
+    // has presented no token yet: it must be handed nothing until it does, the
+    // same as the first one.
+    let runtime_dir = tempfile::tempdir().expect("a temporary directory is created");
+    let addr = link_addr(runtime_dir.path());
+    let listener = Listener::bind(&addr).expect("the link binds");
+    let sink = LinkSink::new();
+    let pane = PaneId::new();
+
+    let (first_writer, mut first_peer) = linked_pair(&addr, &listener);
+    sink.link_up(first_writer);
+    sink.open();
+    assert!(
+        sink.output(pane, b"before the swap".to_vec()),
+        "the opened link takes the chunk"
+    );
+    assert_eq!(
+        first_peer
+            .recv::<SupervisorMessage>()
+            .expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Output {
+            pane_id: pane,
+            bytes: b"before the swap".to_vec(),
+        })
+    );
+
+    // The session server's process image goes, and the next peer takes the
+    // link without presenting the token.
+    sink.link_down();
+    drop(first_peer);
+    let (second_writer, mut second_peer) = linked_pair(&addr, &listener);
+    sink.link_up(second_writer);
+
+    let forwarding = {
+        let sink = Arc::clone(&sink);
+        thread::spawn(move || sink.output(pane, b"after the swap".to_vec()))
+    };
+    thread::sleep(TEST_IDLE_EXIT);
+    assert!(
+        !forwarding.is_finished(),
+        "a link that has presented no token must be handed nothing, however the link before it ended"
+    );
+
+    sink.open();
+    wait_until("the held chunk went out", || forwarding.is_finished());
+    assert!(
+        forwarding.join().expect("the forwarding thread ended"),
+        "the chunk goes out once this link's own Hello opened it"
+    );
+    assert_eq!(
+        second_peer
+            .recv::<SupervisorMessage>()
+            .expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Output {
+            pane_id: pane,
+            bytes: b"after the swap".to_vec(),
+        }),
+        "and it is the chunk this link was handed, not the one the link before it took"
+    );
+}
+
 #[test]
 fn a_send_parked_for_a_pane_being_closed_gives_up_and_leaves_the_others_parked() {
     // Closing a pane's terminal waits for that pane's reader to carry the

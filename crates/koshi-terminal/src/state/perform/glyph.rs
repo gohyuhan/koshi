@@ -6,7 +6,7 @@
 //! glyphs, and keeps wide-glyph pairs intact across edits.
 
 use crate::grid::state::{Cell, RowEnd};
-use crate::state::TerminalState;
+use crate::state::{rebuilt_with_width, TerminalState};
 use unicode_segmentation::GraphemeCursor;
 use unicode_width::UnicodeWidthStr;
 
@@ -305,16 +305,4 @@ impl TerminalState {
             }
         }
     }
-}
-
-/// Rebuild `cell` with a new display `width`, preserving its character,
-/// combining marks, and style — used to re-width a cluster's base when a
-/// continuation promotes it to a two-column emoji glyph or demotes it back to a
-/// one-column text glyph.
-fn rebuilt_with_width(cell: &Cell, width: u8) -> Cell {
-    let mut out = Cell::new(cell.ch(), width, cell.style());
-    for mark in cell.combining() {
-        out.push_combining(*mark);
-    }
-    out
 }

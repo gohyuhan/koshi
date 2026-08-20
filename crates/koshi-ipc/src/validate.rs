@@ -41,27 +41,26 @@ use crate::transport::Connection;
 ///
 /// Callers resolve `runtime_dir` through `koshi_paths::runtime_dir()`.
 pub fn validate_socket_addr(addr: &str, runtime_dir: &Path) -> Result<(), IpcError> {
+    let untrusted = |reason: String| IpcError::UntrustedSocket {
+        addr: addr.to_string(),
+        reason,
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         if Path::new(addr).parent() != Some(runtime_dir) {
-            return Err(IpcError::UntrustedSocket {
-                addr: addr.to_string(),
-                reason: "not directly inside the koshi runtime directory".to_string(),
-            });
+            return Err(untrusted(
+                "not directly inside the koshi runtime directory".to_string(),
+            ));
         }
-        let metadata =
-            std::fs::metadata(runtime_dir).map_err(|error| IpcError::UntrustedSocket {
-                addr: addr.to_string(),
-                reason: format!("runtime directory is unreadable: {error}"),
-            })?;
+        let metadata = std::fs::metadata(runtime_dir)
+            .map_err(|error| untrusted(format!("runtime directory is unreadable: {error}")))?;
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o700 {
-            return Err(IpcError::UntrustedSocket {
-                addr: addr.to_string(),
-                reason: format!("runtime directory mode is {mode:03o}, expected 700"),
-            });
+            return Err(untrusted(format!(
+                "runtime directory mode is {mode:03o}, expected 700"
+            )));
         }
         Ok(())
     }
@@ -69,10 +68,9 @@ pub fn validate_socket_addr(addr: &str, runtime_dir: &Path) -> Result<(), IpcErr
     {
         let _ = runtime_dir;
         if !addr.starts_with("koshi-") {
-            return Err(IpcError::UntrustedSocket {
-                addr: addr.to_string(),
-                reason: "pipe name is outside the koshi- namespace".to_string(),
-            });
+            return Err(untrusted(
+                "pipe name is outside the koshi- namespace".to_string(),
+            ));
         }
         Ok(())
     }

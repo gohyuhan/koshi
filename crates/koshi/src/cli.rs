@@ -75,8 +75,8 @@ impl Cli {
     }
 }
 
-/// A split or resize direction as typed on the command line. A separate type
-/// from the core [`Direction`] so `koshi-core` stays free of clap derives.
+/// A split or resize direction as typed on the command line. Converts to the
+/// core [`Direction`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DirectionArg {
     /// Rightward.
@@ -121,7 +121,7 @@ pub enum TabRef {
 }
 
 /// Parse a session argument: an id when the value reads as one, else a
-/// display name.
+/// display name. An empty value is `Err("expected a session id or name")`.
 pub fn parse_session_ref(value: &str) -> Result<SessionRef, String> {
     if value.is_empty() {
         return Err("expected a session id or name".to_string());
@@ -144,8 +144,7 @@ pub enum Expiry {
 /// Parse an expiry argument: the word `never`, or a decimal count followed by
 /// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
 ///
-/// The count times its unit is a checked multiply, so a span too large for
-/// `u64` seconds is a bad value.
+/// A count times its unit that overflows `u64` seconds is an error.
 pub fn parse_expiry(value: &str) -> Result<Expiry, String> {
     const EXPECTED: &str = "expected a length such as 30s, 15m, 24h or 7d, or the word never";
 
@@ -167,7 +166,7 @@ pub fn parse_expiry(value: &str) -> Result<Expiry, String> {
 }
 
 /// Parse a `--tab` flag value: an id when the value reads as one, else a
-/// display name.
+/// display name. An empty value is `Err("expected a tab id or name")`.
 fn parse_tab_ref(value: &str) -> Result<TabRef, String> {
     if value.is_empty() {
         return Err("expected a tab id or name".to_string());
@@ -204,20 +203,18 @@ pub enum FormatArg {
 /// Lifecycle commands (`list-sessions`, `kill-session`, `attach`, `detach`,
 /// `doctor`) run outside any session, except a bare `detach`, which names this
 /// pane's own client. Action subcommands carry their typed arguments and map
-/// to core commands via [`CliCommand::to_action`];
-/// execution arrives with the IPC client. The discovery queries (`inspect`,
-/// the `list-*` verbs) carry typed target and `--format` arguments; their
-/// answers are rendered by [`crate::output`]. `actions` introspects the action
-/// registry through its `list`/`explain` subcommands, and `keys` introspects
-/// the keymap through its own subcommand tree. `config` validates and migrates
-/// files locally. `share` reaches the router over the control plane; the
-/// router is the only writer of the remote access token store. `remote`
-/// reads and writes the servers this machine has saved, and reaches no
-/// network. `version`
-/// prints this program's own build, and
-/// `server-version` asks each running koshi server for the build it runs;
-/// both carry `--format` and render through [`crate::output`]. `plugin`
-/// remains bare until its argument surface is built.
+/// to core commands via [`CliCommand::to_action`]. The discovery queries
+/// (`inspect`, the `list-*` verbs) carry typed target and `--format`
+/// arguments; their answers are rendered by [`crate::output`]. `actions`
+/// introspects the action registry through its `list`/`explain` subcommands,
+/// and `keys` introspects the keymap through its own subcommand tree.
+/// `config` validates and migrates files locally. `share` reaches the router
+/// over the control plane; the router is the only writer of the remote access
+/// token store. `remote` reads and writes the servers this machine has saved,
+/// and reaches no network. `version` prints this program's own build, and
+/// `server-version` asks each running koshi server for the build it runs; both
+/// carry `--format` and render through [`crate::output`]. `plugin` takes no
+/// arguments.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// List running sessions.
@@ -711,9 +708,7 @@ pub enum DebugCommand {
     },
 }
 
-/// Which keymap layer authored a binding, as typed on the command line. A
-/// separate type from the config crate's `LayerOrigin` so `koshi-config`
-/// stays free of clap derives.
+/// Which keymap layer authored a binding, as typed on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ScopeArg {
     /// The built-in default binding table.
@@ -727,9 +722,7 @@ pub enum ScopeArg {
 }
 
 /// The `koshi keys` subcommands: read-only keymap introspection. Every verb
-/// renders locally from the built-in defaults plus the user's keybinding
-/// file; the file is the single mutation surface — koshi has no runtime
-/// keybinding edits.
+/// renders locally from the built-in defaults plus the user's keybinding file.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum KeysCommand {
     /// List effective keybindings per mode.
@@ -848,21 +841,20 @@ impl CliCommand {
     /// resolved to ids (a name looked up against the running sessions); the
     /// routing layer builds it, and a verb without those flags passes
     /// `ResolvedTargets::default()`. A resolved target wins; without one, a
-    /// flag given directly as an id is used as-is, so only a flag given as a
-    /// NAME needs the routing layer's lookup.
+    /// flag given directly as an id is used as-is.
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
     /// [`config::new_pane_direction`](koshi_link::config::new_pane_direction). A
-    /// pane-opening verb given no `--direction` splits toward it, so the
-    /// command that reaches the session already names a side.
+    /// pane-opening verb given no `--direction` splits toward it.
     ///
     /// `None` for the verbs that are not actions — the lifecycle commands
     /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
     /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
-    /// `actions`, `keys`, `config`, and the `debug` dumps), `update`, the
-    /// hidden `serve-router` and `serve-session`, plus `plugin`, whose
-    /// arguments are not built.
+    /// `actions`, `keys`, `config`, and the `debug` dumps), `update`,
+    /// `version`, `server-version`, `share`, `remote`, `plugin`, and the
+    /// hidden `serve-router`, `serve-session`, `serve-pty-supervisor` and
+    /// `resume-support`.
     #[must_use]
     pub fn to_action(
         &self,
@@ -917,9 +909,8 @@ impl CliCommand {
                 pane,
                 no_enter,
             } => {
-                // A shell runs a line when it reads a carriage return — the
-                // byte the Enter key sends — so the text alone sits at the
-                // prompt and the text plus `\r` runs.
+                // The text alone sits at the shell prompt; the text plus `\r`,
+                // the byte the Enter key sends, runs as a line.
                 let mut data = text.clone().into_bytes();
                 if !no_enter {
                     data.push(b'\r');
@@ -1134,6 +1125,8 @@ fn tab_ref_id(tab: &Option<TabRef>) -> Option<TabId> {
 /// token is the program, the rest its arguments. The working directory and
 /// environment stay empty — they are filled from the issuing terminal when
 /// the command is sent.
+///
+/// Panics when `argv` is empty.
 fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
     let program = PathBuf::from(&argv[0]);
     let shell_kind = ShellKind::from_program(&program);
@@ -1147,8 +1140,8 @@ fn spawn_spec_from_argv(argv: &[String]) -> SpawnSpec {
 }
 
 // Each id parser takes the id exactly as koshi prints it (`<prefix>-<uuid>`)
-// or as a bare UUID. A mismatched prefix does not strip, so an id of the wrong
-// kind is rejected rather than silently accepted.
+// or as a bare UUID. A value carrying another kind's prefix is rejected:
+// `parse_pane_id("tab-<uuid>")` is an error, not a pane id.
 
 /// Parse a session id argument into a [`SessionId`].
 fn parse_session_id(value: &str) -> Result<SessionId, String> {

@@ -112,21 +112,7 @@ impl Server {
         // about to create, then commit the tab + root pane and focus the client
         // on it.
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
-        if let Some(client_id) = client_id {
-            // This is the session's first client, so no existing label can collide.
-            let client_label = generate_name(NameKind::Client, |_| false);
-            let client = Client::new(
-                client_id,
-                session_id,
-                now,
-                viewport,
-                tab_id,
-                ClientOrigin::Local,
-                client_label,
-                0,
-            );
-            session.attach_client(client);
-        }
+        attach_first_client(&mut session, client_id, viewport, tab_id, now);
 
         let tab_name = generate_name(NameKind::Tab, |candidate| {
             session.tabs.values().any(|tab| tab.name() == candidate)
@@ -270,21 +256,7 @@ impl Server {
         let focused_tab = template.focused_tab.min(plans.len().saturating_sub(1));
         let focused_tab_id = plans[focused_tab].tab_id;
         let mut session = Session::new(session_id, session_name, now, ClientRegistry::new());
-        if let Some(client_id) = client_id {
-            // This is the session's first client, so no existing label can collide.
-            let client_label = generate_name(NameKind::Client, |_| false);
-            let client = Client::new(
-                client_id,
-                session_id,
-                now,
-                viewport,
-                focused_tab_id,
-                ClientOrigin::Local,
-                client_label,
-                0,
-            );
-            session.attach_client(client);
-        }
+        attach_first_client(&mut session, client_id, viewport, focused_tab_id, now);
 
         // Commit each tab; only the focused one moves the client onto it.
         for (index, plan) in plans.into_iter().enumerate() {
@@ -321,6 +293,34 @@ impl Server {
 
         Ok(())
     }
+}
+
+/// Attach `client_id` to a freshly seeded `session` as its only client,
+/// viewing `tab_id`, sized to `viewport`, stamped `now`, with a generated
+/// client label and origin [`ClientOrigin::Local`]. A `None` `client_id`
+/// attaches nobody and leaves `session` untouched.
+fn attach_first_client(
+    session: &mut Session,
+    client_id: Option<ClientId>,
+    viewport: Size,
+    tab_id: TabId,
+    now: SystemTime,
+) {
+    let Some(client_id) = client_id else {
+        return;
+    };
+    // The session holds no other client, so no existing label can collide.
+    let client_label = generate_name(NameKind::Client, |_| false);
+    session.attach_client(Client::new(
+        client_id,
+        session.id,
+        now,
+        viewport,
+        tab_id,
+        ClientOrigin::Local,
+        client_label,
+        0,
+    ));
 }
 
 /// One tab's fully-planned genesis: the ids, tree, and specs its panes need.
@@ -377,8 +377,8 @@ impl Server {
 pub enum ProfileLaunchError {
     /// The profile asks for a plugin pane, which has no host to fill it yet.
     PluginPane,
-    /// A tab's tree could not be built from its pane ids — an internal count
-    /// mismatch that should not happen once the profile parsed.
+    /// A tab's tree could not be built from its pane ids: the tree's leaf count
+    /// and the pane-id count disagree.
     Template(TemplateError),
     /// A pane's child process failed to spawn.
     Spawn(PtyError),

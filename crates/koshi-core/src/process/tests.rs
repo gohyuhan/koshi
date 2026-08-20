@@ -185,3 +185,26 @@ fn tree_scoped_widens_each_policy_to_its_group_flavor() {
         assert_eq!(policy.tree_scoped(), widened, "{policy:?}");
     }
 }
+
+#[test]
+fn the_default_shell_spec_passes_the_callers_cwd_and_env_through_and_takes_no_arguments() {
+    let cwd = PathBuf::from("/tmp/koshi-default-shell");
+    let mut env = BTreeMap::new();
+    env.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
+
+    let spec = SpawnSpec::default_shell(Some(cwd.clone()), env.clone());
+
+    assert_eq!(spec.cwd, Some(cwd));
+    assert_eq!(spec.env, env);
+    assert_eq!(spec.args, Vec::<String>::new());
+}
+
+#[test]
+fn the_default_shell_program_is_never_empty_and_its_kind_matches_that_program() {
+    let spec = SpawnSpec::default_shell(None, BTreeMap::new());
+
+    assert_ne!(spec.program, PathBuf::new());
+    assert_eq!(spec.shell_kind, ShellKind::from_program(&spec.program));
+    assert_eq!(spec.cwd, None);
+    assert_eq!(spec.env, BTreeMap::new());
+}

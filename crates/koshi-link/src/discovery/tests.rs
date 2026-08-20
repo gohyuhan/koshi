@@ -312,6 +312,43 @@ fn inspecting_with_a_session_unasked_reports_the_gap_not_a_miss() {
 }
 
 #[test]
+fn a_session_no_answering_session_matched_is_reported_as_not_running() {
+    let found = census(vec![overview("quiet-lake", &[("editor", 1)])]);
+
+    match found.no_such_session("amber-fox") {
+        CliError::SessionNotFound { session } => assert_eq!(session, "amber-fox"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn a_session_missed_while_one_went_unasked_reports_the_gap_not_a_miss() {
+    // The name may well belong to the session that stayed silent, so "not
+    // running" would be a guess.
+    let found = partial(vec![overview("quiet-lake", &[("editor", 1)])], 1);
+
+    match found.no_such_session("amber-fox") {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            "`amber-fox` is not among the sessions that answered \
+             (1 running session did not answer)"
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn one_session_asked_directly_is_a_complete_census_of_itself() {
+    let only = overview("quiet-lake", &[("editor", 1)]);
+
+    let found = Discovered::of(only.clone());
+
+    assert_eq!(found.unasked, 0);
+    assert!(found.is_complete());
+    assert_eq!(found.sessions, vec![only]);
+}
+
+#[test]
 fn a_complete_listing_reports_no_gap() {
     assert!(census(vec![overview("quiet-lake", &[("editor", 1)])])
         .incomplete_listing()

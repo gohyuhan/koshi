@@ -10,13 +10,18 @@ use super::*;
 use koshi_core::command::CopyTarget;
 use koshi_core::event::{
     CommandRejected, ConfigReloaded, Copied, EventClass, InputMode, InputModeChanged,
-    KeybindingMatched, MouseScrolled, MouseSelectChanged, PaneClosing, PaneCreated,
-    PaneOutputUpdated, PaneProcessExited, PaneRemoved, PaneTyped, PluginInstalled,
-    PluginLoadFailed, PtyResized, RejectReason, SubscriberLagged, TypedPayload,
+    KeybindingMatched, LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled,
+    MouseSelectChanged, PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated,
+    PaneEnterPressed, PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited,
+    PaneRemoved, PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginBroken,
+    PluginDisabled, PluginDoctorCompleted, PluginEnabled, PluginInstalled, PluginLoadFailed,
+    PluginMouseInput, PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated, PtyResized,
+    RejectReason, SelectionChanged, SubmittedLinePayload, SubscriberLagged, TabClosed, TabCreated,
+    TabFocused, TabMoved, TerminalTooSmallEntered, TerminalTooSmallExited, TypedPayload,
 };
-use koshi_core::geometry::Point;
+use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
-use koshi_core::mouse::ScrollDirection;
+use koshi_core::mouse::{MouseButton, ScrollDirection};
 use koshi_core::process::PtySize;
 
 use crate::logging::with_test_writer;
@@ -304,4 +309,312 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         "{signalled}"
     );
     assert!(!signalled.contains("exit_code"), "{signalled}");
+}
+
+// Focus and tab lifecycle: each fact a person can point at gets its own message
+// and carries the ids that tie it back to where it happened. The "what it was
+// before" fields exist on the events but are not written — a line records the
+// state that now holds, not the one it replaced.
+#[test]
+fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let prior_pane = PaneId::new();
+    let prior_tab = TabId::new();
+
+    let focused_pane = captured(&[Event::PaneFocused(PaneFocused {
+        client_id,
+        tab_id,
+        pane_id,
+        prior_pane: Some(prior_pane),
+    })]);
+    assert!(focused_pane.contains(r#""level":"INFO""#), "{focused_pane}");
+    assert!(
+        focused_pane.contains(r#""message":"pane focused""#),
+        "{focused_pane}"
+    );
+    assert!(
+        focused_pane.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{focused_pane}"
+    );
+    assert!(
+        focused_pane.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{focused_pane}"
+    );
+    assert!(
+        focused_pane.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{focused_pane}"
+    );
+    assert!(
+        !focused_pane.contains(&prior_pane.to_string()),
+        "the pane focus left behind is not written: {focused_pane}"
+    );
+
+    let created_tab = captured(&[Event::TabCreated(TabCreated { tab_id })]);
+    assert!(created_tab.contains(r#""level":"INFO""#), "{created_tab}");
+    assert!(
+        created_tab.contains(r#""message":"tab created""#),
+        "{created_tab}"
+    );
+    assert!(
+        created_tab.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{created_tab}"
+    );
+
+    let closed_tab = captured(&[Event::TabClosed(TabClosed { tab_id })]);
+    assert!(closed_tab.contains(r#""level":"INFO""#), "{closed_tab}");
+    assert!(
+        closed_tab.contains(r#""message":"tab closed""#),
+        "{closed_tab}"
+    );
+    assert!(
+        closed_tab.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{closed_tab}"
+    );
+
+    let focused_tab = captured(&[Event::TabFocused(TabFocused {
+        client_id,
+        tab_id,
+        prior_tab,
+    })]);
+    assert!(focused_tab.contains(r#""level":"INFO""#), "{focused_tab}");
+    assert!(
+        focused_tab.contains(r#""message":"tab focused""#),
+        "{focused_tab}"
+    );
+    assert!(
+        focused_tab.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{focused_tab}"
+    );
+    assert!(
+        focused_tab.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{focused_tab}"
+    );
+    assert!(
+        !focused_tab.contains(&prior_tab.to_string()),
+        "the tab focus left behind is not written: {focused_tab}"
+    );
+}
+
+// A move is only readable with both ends of it, and the two must not be
+// swapped: a tab dragged from slot 0 to slot 3 reads `old_index` 0, not 3.
+#[test]
+fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
+    let tab_id = TabId::new();
+
+    let out = captured(&[Event::TabMoved(TabMoved {
+        tab_id,
+        old_index: 0,
+        new_index: 3,
+    })]);
+
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(out.contains(r#""message":"tab moved""#), "{out}");
+    assert!(out.contains(r#""old_index":0"#), "{out}");
+    assert!(out.contains(r#""new_index":3"#), "{out}");
+    assert!(out.contains(&format!(r#""tab_id":"{tab_id}""#)), "{out}");
+}
+
+// The two edges of "the window got too small to show anything" must not read
+// the same: each says which way it went, and the size it happened at.
+#[test]
+fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
+    let client_id = ClientId::new();
+
+    let entered = captured(&[Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+        client_id,
+        size: Size { cols: 10, rows: 3 },
+    })]);
+    assert!(entered.contains(r#""level":"INFO""#), "{entered}");
+    assert!(
+        entered.contains(r#""message":"terminal too small; panes hidden""#),
+        "{entered}"
+    );
+    assert!(entered.contains(r#""cols":10"#), "{entered}");
+    assert!(entered.contains(r#""rows":3"#), "{entered}");
+    assert!(
+        entered.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{entered}"
+    );
+
+    let exited = captured(&[Event::TerminalTooSmallExited(TerminalTooSmallExited {
+        client_id,
+        size: Size { cols: 80, rows: 24 },
+    })]);
+    assert!(exited.contains(r#""level":"INFO""#), "{exited}");
+    assert!(
+        exited.contains(r#""message":"terminal big enough again; panes shown""#),
+        "{exited}"
+    );
+    assert!(exited.contains(r#""cols":80"#), "{exited}");
+    assert!(exited.contains(r#""rows":24"#), "{exited}");
+}
+
+// The end of a session is the line that explains why the file stops.
+#[test]
+fn quitting_writes_one_info_line_saying_the_session_is_ending() {
+    let out = captured(&[Event::Quit]);
+
+    assert_eq!(out.lines().count(), 1, "expected exactly one line: {out}");
+    assert!(out.contains(r#""level":"INFO""#), "{out}");
+    assert!(out.contains(r#""message":"session quitting""#), "{out}");
+}
+
+// Every plugin lifecycle fact is a deliberate act, so each gets its own line,
+// and no two of them read the same. The two that report a plugin koshi could
+// not run are warnings; the rest are info.
+#[test]
+fn each_plugin_lifecycle_fact_writes_its_own_message_at_its_own_level() {
+    let plugin_id = PluginId::new();
+    let cases = [
+        (
+            Event::Plugin(PluginEvent::Uninstalled(PluginUninstalled { plugin_id })),
+            "INFO",
+            "plugin uninstalled",
+        ),
+        (
+            Event::Plugin(PluginEvent::Enabled(PluginEnabled { plugin_id })),
+            "INFO",
+            "plugin enabled",
+        ),
+        (
+            Event::Plugin(PluginEvent::Disabled(PluginDisabled { plugin_id })),
+            "INFO",
+            "plugin disabled",
+        ),
+        (
+            Event::Plugin(PluginEvent::Updated(PluginUpdated { plugin_id })),
+            "INFO",
+            "plugin updated",
+        ),
+        (
+            Event::Plugin(PluginEvent::Reloaded(PluginReloaded { plugin_id })),
+            "INFO",
+            "plugin reloaded",
+        ),
+        (
+            Event::Plugin(PluginEvent::Unloaded(PluginUnloaded { plugin_id })),
+            "INFO",
+            "plugin unloaded",
+        ),
+        (
+            Event::Plugin(PluginEvent::DoctorCompleted(PluginDoctorCompleted {
+                plugin_id,
+            })),
+            "INFO",
+            "plugin diagnostic completed",
+        ),
+        (
+            Event::Plugin(PluginEvent::Broken(PluginBroken {
+                plugin_id,
+                reason: "manifest names no entry point".to_string(),
+            })),
+            "WARN",
+            "plugin marked broken and disabled",
+        ),
+    ];
+
+    for (event, level, message) in cases {
+        let out = captured(std::slice::from_ref(&event));
+        assert_eq!(out.lines().count(), 1, "{message}: {out}");
+        assert!(
+            out.contains(&format!(r#""level":"{level}""#)),
+            "{message}: {out}"
+        );
+        assert!(
+            out.contains(&format!(r#""message":"{message}""#)),
+            "{message}: {out}"
+        );
+        assert!(
+            out.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
+            "{message}: {out}"
+        );
+    }
+
+    // The one that names why it failed writes that reason on the line.
+    let broken = captured(&[Event::Plugin(PluginEvent::Broken(PluginBroken {
+        plugin_id,
+        reason: "manifest names no entry point".to_string(),
+    }))]);
+    assert!(broken.contains("manifest names no entry point"), "{broken}");
+}
+
+// The rest of the events kept out of the file, one per reason. Together with
+// `events_that_fire_faster_than_a_person_acts_write_nothing` this covers every
+// silent variant, so a session of dragging, clicking, scrolling and printing
+// must not put a single line in the log.
+#[test]
+fn the_remaining_silent_events_write_nothing() {
+    let out = captured(&[
+        // One per pane per frame while a window edge is dragged; the splits and
+        // closes behind the change already have their own lines.
+        Event::LayoutChanged(LayoutChanged {
+            tab_id: TabId::new(),
+        }),
+        Event::PaneSuppressed(PaneSuppressed {
+            pane_id: PaneId::new(),
+            tab_id: TabId::new(),
+        }),
+        Event::PaneResumed(PaneResumed {
+            pane_id: PaneId::new(),
+            tab_id: TabId::new(),
+        }),
+        // Carries the command line the user typed.
+        Event::PaneEnterPressed(PaneEnterPressed {
+            pane_id: PaneId::new(),
+            tab_id: TabId::new(),
+            session_id: SessionId::new(),
+            client_id: ClientId::new(),
+            line: SubmittedLinePayload::SafePublic("ls -la".to_string()),
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
+        }),
+        // One per click and per step of a drag.
+        Event::MousePressed(MousePressed {
+            client_id: ClientId::new(),
+            pane: Some(PaneId::new()),
+            position: Point { x: 1, y: 2 },
+            button: MouseButton::Left,
+        }),
+        Event::MouseReleased(MouseReleased {
+            client_id: ClientId::new(),
+            pane: Some(PaneId::new()),
+            position: Point { x: 1, y: 2 },
+            button: MouseButton::Left,
+        }),
+        Event::MouseDragged(MouseDragged {
+            client_id: ClientId::new(),
+            pane: None,
+            position: Point { x: 3, y: 4 },
+            button: MouseButton::Left,
+        }),
+        Event::PaneMouseForwarded(PaneMouseForwarded {
+            pane_id: PaneId::new(),
+        }),
+        Event::PluginMouseInput(PluginMouseInput {
+            plugin_id: PluginId::new(),
+        }),
+        // What the shell inside a pane is doing, not koshi's own state.
+        Event::PaneCommandStarted(PaneCommandStarted {
+            pane_id: PaneId::new(),
+        }),
+        Event::PaneCommandFinished(PaneCommandFinished {
+            pane_id: PaneId::new(),
+            exit_code: Some(1),
+        }),
+        // Fires while a pane prints past the end of its buffer.
+        Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
+            pane_id: PaneId::new(),
+            dropped_lines: 500,
+            dropped_bytes: 40_000,
+        }),
+        // One per step of a mouse drag across the screen.
+        Event::SelectionChanged(SelectionChanged {
+            client_id: ClientId::new(),
+            pane_id: PaneId::new(),
+            selection: None,
+        }),
+    ]);
+
+    assert_eq!(out, "", "an event kept out of the file reached it: {out}");
 }

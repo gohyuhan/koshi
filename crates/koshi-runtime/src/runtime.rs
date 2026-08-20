@@ -1,11 +1,13 @@
 //! The server's internal machinery: local-session bootstrap (genesis), the
-//! loop-facing driver surface, command dispatch, the event inbox, the event
-//! fan-out bus, outer-input routing, PTY (pseudo-terminal, a child process's
-//! terminal connection) forwarding and output handling, config reload
-//! transactions, render scheduling, the saved views a detached client can take
-//! back, per-client scrollback scrolling, staged
-//! shutdown, the render-snapshot builder, the wire-frame builder, the
-//! attach-structure builder, the layout-dump builder, and event transactions.
+//! `KOSHI_*` environment a spawned pane's child gets, the loop-facing driver
+//! surface, command dispatch, the event inbox, the event fan-out bus,
+//! outer-input routing, mouse handling, highlight upkeep, clipboard writes,
+//! PTY (pseudo-terminal, a child process's terminal connection) forwarding and
+//! output handling, config reload transactions, render scheduling, the saved
+//! views a detached client can take back, per-client scrollback scrolling,
+//! staged shutdown, the render-snapshot builder, the wire-frame builder, the
+//! attach-structure builder, the discovery-overview builder, the layout-dump
+//! builder, and event transactions.
 //! The [`Server`](crate::server::Server) type these modules extend lives in
 //! [`crate::server`].
 

@@ -176,6 +176,70 @@ fn a_dial_failure_hands_back_the_error_it_carries_unchanged() {
 }
 
 #[test]
+fn a_welcome_naming_a_doorway_this_build_speaks_opens_the_connection() {
+    for version in [MIN_REMOTE_PROTOCOL_VERSION, REMOTE_PROTOCOL_VERSION] {
+        let answer = RemoteServerFrame::Welcome {
+            remote_version: version,
+        };
+        check_answer("desk.local:7654", &answer)
+            .unwrap_or_else(|_| panic!("doorway {version} is inside the range this build speaks"));
+    }
+}
+
+#[test]
+fn a_welcome_naming_a_doorway_this_build_does_not_speak_is_refused() {
+    let answer = RemoteServerFrame::Welcome {
+        remote_version: REMOTE_PROTOCOL_VERSION + 1,
+    };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("the doorway is too new");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "server desk.local:7654 settled on remote doorway {}, which this koshi does not \
+             speak: it speaks {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}",
+            REMOTE_PROTOCOL_VERSION + 1
+        )
+    );
+}
+
+#[test]
+fn a_session_listing_where_a_welcome_belongs_is_refused() {
+    let answer = RemoteServerFrame::Sessions { rows: Vec::new() };
+
+    let refusal = check_answer("desk.local:7654", &answer).expect_err("a listing is not a welcome");
+
+    let DialError::Refused(CliError::IpcUnavailable { detail }) = refusal else {
+        panic!("a frame this dial cannot use is a transport failure, not a runtime one");
+    };
+    assert_eq!(
+        detail,
+        "desk.local:7654 answered with a frame this request cannot produce"
+    );
+}
+
+#[test]
+fn a_saved_server_is_named_by_its_name_and_a_new_one_by_its_address() {
+    assert_eq!(ServerArg::Saved(a_saved_server()).label(), "work");
+
+    let mut nameless = a_saved_server();
+    nameless.name = None;
+    assert_eq!(ServerArg::Saved(nameless).label(), "desk.local:7654");
+
+    assert_eq!(
+        ServerArg::New {
+            address: "laptop.local:7654".to_string()
+        }
+        .label(),
+        "laptop.local:7654"
+    );
+}
+
+#[test]
 fn the_refusal_every_rejected_token_carries_names_both_ways_to_replace_it() {
     let answer = RemoteServerFrame::Refused {
         message: remote_wire::REMOTE_REFUSED.to_string(),

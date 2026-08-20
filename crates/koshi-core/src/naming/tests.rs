@@ -135,3 +135,28 @@ fn random_start_generates_a_well_formed_free_name() {
         .expect("adjective from a known language");
     assert!(LANGUAGES[language].1.contains(&noun.as_str()));
 }
+
+#[test]
+fn the_one_free_name_next_to_the_start_is_found_in_the_same_round() {
+    // Combination 1 sits one place after the start, which the stride reaches
+    // only because it is coprime with the combination count. A stride that
+    // walks a smaller orbit skips it and wraps to a `-2` name instead.
+    let only_free = generate_name_from(NameKind::Tab, |_| false, 1);
+    let found = generate_name_from(NameKind::Tab, |name| name != only_free, 0);
+    assert_eq!(found, only_free);
+}
+
+#[test]
+fn the_one_free_name_on_the_last_step_of_a_round_is_found_before_the_wrap() {
+    // The walk from 0 reaches this combination on its final step. A round that
+    // stops any earlier returns a wrapped `-2` name while a plain name is free.
+    let last_step = (COMBOS - 1) * STRIDE % COMBOS;
+    let only_free = generate_name_from(NameKind::Tab, |_| false, last_step);
+    let found = generate_name_from(NameKind::Tab, |name| name != only_free, 0);
+    assert_eq!(found, only_free);
+    assert_eq!(
+        found.matches('-').count(),
+        2,
+        "{found} carries no wrap number"
+    );
+}

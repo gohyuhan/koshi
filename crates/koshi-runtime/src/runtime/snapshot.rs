@@ -372,9 +372,9 @@ pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size, min: Size) 
 /// `total_pushed - view_offset`, so a line `a` draws at row `a - (total_pushed -
 /// view_offset)`, and a row outside `0..rows` is not on screen.
 ///
-/// A highlight only partly on screen keeps the part that is: its first visible
-/// row starts at column 0 rather than at the selection's own start column,
-/// because the real start is somewhere above the window.
+/// A highlight only partly on screen keeps the part that is: when its first
+/// visible row is not the selection's own first row, that row starts at column
+/// 0.
 ///
 /// Example — a 5-row, 20-column pane at the live bottom (`view_offset = 0`) with
 /// `total_pushed = 100`, and a character selection from line 101 column 12 to

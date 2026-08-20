@@ -341,6 +341,20 @@ fn an_invalid_transition_is_recoverable_and_classified_by_pane_kind() {
 }
 
 #[test]
+fn a_signal_killed_pane_exits_with_no_code() {
+    let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7);
+
+    let next = PaneLifecycle::Running.transition(
+        PaneLifecycleEvent::ProcessExited { code: None, at },
+        PaneKind::Terminal,
+    );
+
+    // A signal leaves no exit code behind. The missing code stays missing: the
+    // state never stands in a `0` that would read as a clean exit.
+    assert_eq!(next, Ok(PaneLifecycle::Exited { code: None, at }));
+}
+
+#[test]
 fn lifecycle_events_survive_a_serde_round_trip() {
     for event in all_events() {
         let json = serde_json::to_string(&event).expect("serialize");

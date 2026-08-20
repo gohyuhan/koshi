@@ -1,4 +1,3 @@
-//! Test fixtures — placeholder module.
+//! Test fixtures shared across the suite.
 //!
-//! The module is empty. It is reserved for test fixtures shared across the
-//! suite, such as pre-built terminal states and known pane configurations.
+//! The module is empty. It exports nothing.

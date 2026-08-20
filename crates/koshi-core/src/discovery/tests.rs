@@ -131,6 +131,43 @@ fn pane_state_serializes_with_snake_case_names() {
     );
 }
 
+/// A client row whose origin is `origin`, with fixed everything else.
+fn client_info(origin: Option<ClientOrigin>) -> ClientInfo {
+    ClientInfo {
+        id: ClientId::from_uuid(fixed_uuid()),
+        session_id: SessionId::from_uuid(fixed_uuid()),
+        attached_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        viewport_size: Size { cols: 80, rows: 24 },
+        active_tab: TabId::from_uuid(fixed_uuid()),
+        focused_pane: None,
+        lock_state: LockMode::Normal,
+        origin,
+    }
+}
+
+#[test]
+fn a_client_row_carrying_no_origin_field_reads_as_unanswered_never_as_local() {
+    let mut wire = serde_json::to_value(client_info(Some(ClientOrigin::Local))).expect("serialize");
+    wire.as_object_mut()
+        .expect("a client row is a JSON object")
+        .remove("origin")
+        .expect("the row carries an `origin` field to remove");
+
+    let decoded: ClientInfo = serde_json::from_value(wire).expect("deserialize");
+
+    assert_eq!(decoded.origin, None);
+    assert_eq!(decoded, client_info(None));
+}
+
+#[test]
+fn a_client_row_stating_its_origin_keeps_that_answer() {
+    for origin in [ClientOrigin::Local, ClientOrigin::Remote] {
+        let wire = serde_json::to_value(client_info(Some(origin))).expect("serialize");
+        let decoded: ClientInfo = serde_json::from_value(wire).expect("deserialize");
+        assert_eq!(decoded.origin, Some(origin), "{origin:?}");
+    }
+}
+
 #[test]
 fn pane_state_round_trips_through_json_for_every_variant() {
     for state in [

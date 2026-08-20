@@ -262,9 +262,15 @@ impl EventBus {
 
     /// Whether `id` is still registered.
     pub(crate) fn contains(&self, id: SubscriberId) -> bool {
+        self.index_of(id).is_some()
+    }
+
+    /// Where `id` sits in the subscription-ordered list, or `None` when `id` is
+    /// not registered.
+    fn index_of(&self, id: SubscriberId) -> Option<usize> {
         self.subscribers
             .iter()
-            .any(|subscriber| subscriber.id == id)
+            .position(|subscriber| subscriber.id == id)
     }
 
     /// Drop `id`'s subscription. Does nothing when `id` is not registered.
@@ -280,11 +286,7 @@ impl EventBus {
     /// caller retries a full queue on a later pass. A subscriber whose receiver
     /// is gone is removed.
     pub(crate) fn try_resync(&mut self, id: SubscriberId, snapshot: Box<RenderSnapshot>) -> bool {
-        let Some(index) = self
-            .subscribers
-            .iter()
-            .position(|subscriber| subscriber.id == id)
-        else {
+        let Some(index) = self.index_of(id) else {
             return false;
         };
         let subscriber = &mut self.subscribers[index];
@@ -329,11 +331,7 @@ impl EventBus {
         id: SubscriberId,
         snapshot: Box<RenderSnapshot>,
     ) -> bool {
-        let Some(index) = self
-            .subscribers
-            .iter()
-            .position(|subscriber| subscriber.id == id)
-        else {
+        let Some(index) = self.index_of(id) else {
             return false;
         };
         let subscriber = &mut self.subscribers[index];
@@ -357,11 +355,7 @@ impl EventBus {
     /// unknown or already paused takes nothing, and one whose receiver is gone
     /// is removed.
     fn try_send_direct(&mut self, id: SubscriberId, delivery: Delivery) -> Queued {
-        let Some(index) = self
-            .subscribers
-            .iter()
-            .position(|subscriber| subscriber.id == id)
-        else {
+        let Some(index) = self.index_of(id) else {
             return Queued::Skipped;
         };
         let subscriber = &mut self.subscribers[index];

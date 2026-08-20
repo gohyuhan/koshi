@@ -1176,6 +1176,109 @@ fn a_gesture_is_dropped_when_its_pane_leaves_the_frame() {
 }
 
 #[test]
+fn a_pane_swapping_to_the_alternate_screen_ends_the_selection_drag() {
+    // The anchor names a line of the primary screen's text. The alternate
+    // screen's rows are different text, so extending onto them would highlight
+    // whatever `vim` just drew there.
+    let pane = PaneId::new();
+    let primary = one_pane_frame(plain_pane(pane));
+    let at = content_cell(&primary, 0);
+    let to = Point { x: at.x + 4, ..at };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &primary, now);
+    assert!(
+        set_selection(&viewer.handle_mouse(drag(to), &primary, later(now, 1))).is_some(),
+        "the drag extends while the pane stays on the screen the press landed on"
+    );
+
+    // The program in the pane entered the alternate screen.
+    let mut alt_pane = plain_pane(pane);
+    alt_pane.on_alt_screen = true;
+    let alt = one_pane_frame(alt_pane);
+
+    assert_eq!(
+        viewer.handle_mouse(drag(to), &alt, later(now, 2)),
+        Vec::new(),
+        "the drag ended with the screen it was made on"
+    );
+    assert_eq!(viewer.selection_drag, None);
+}
+
+#[test]
+fn a_drag_held_past_the_top_edge_scrolls_the_view_back_into_history() {
+    let pane = PaneId::new();
+    let mut content = plain_pane(pane);
+    content.view_top_row = 100;
+    let frame = one_pane_frame(content);
+    let at = content_cell(&frame, 0);
+    let inner = frame.session.active_tab.layout_solved[0]
+        .inner_rect
+        .expect("a visible pane");
+    // Above the pane's first content row, where the earlier lines are.
+    let above = Point { x: at.x, y: 0 };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(at), &frame, now);
+    viewer.handle_mouse(drag(above), &frame, later(now, 1));
+    let due = later(now, 1) + Duration::from_millis(15);
+
+    assert_eq!(
+        viewer.expire_mouse_scroll(due, &frame),
+        vec![MouseAction::Scroll {
+            pane,
+            up: true,
+            lines: 1,
+        }],
+        "past the top edge the view moves up, not down"
+    );
+
+    // The session says the view moved back one line; the highlight follows it
+    // to the pane's first row.
+    let actions = viewer.note_scroll_applied(pane, Some(99), &frame);
+    let args = set_selection(&actions).expect("the scroll re-extends the highlight");
+    assert_eq!(
+        args.selection.cursor,
+        GridPos {
+            row: 99,
+            col: at.x - inner.origin.x,
+        },
+        "the moving end sits on the first row of the view the scroll revealed"
+    );
+}
+
+#[test]
+fn dragging_the_bare_tab_strip_peeks_one_tab_every_six_cells() {
+    let frame = one_pane_frame(plain_pane(PaneId::new()));
+    let tab = frame.client.active_tab;
+    // The bare tab strip, past the one tab's ribbon.
+    let strip = Point { x: 40, y: 0 };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(strip), &frame, now);
+
+    // Five cells left of the anchor is short of one whole step.
+    viewer.handle_mouse(drag(Point { x: 35, y: 0 }), &frame, later(now, 1));
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(0));
+
+    // Twelve cells left of the anchor is two steps toward the last tab.
+    viewer.handle_mouse(drag(Point { x: 28, y: 0 }), &frame, later(now, 2));
+    assert_eq!(viewer.chrome(tab).tabline_offset, Some(2));
+
+    // The whole distance is measured from the anchor, so dragging back past it
+    // steps the other way and stops at the first tab.
+    viewer.handle_mouse(drag(Point { x: 52, y: 0 }), &frame, later(now, 3));
+    assert_eq!(
+        viewer.chrome(tab).tabline_offset,
+        Some(0),
+        "the first visible index saturates at zero"
+    );
+}
+
+#[test]
 fn a_border_press_starts_no_resize_when_the_viewer_turned_it_off() {
     let left = PaneId::new();
     let right = PaneId::new();
@@ -1257,6 +1360,69 @@ fn grabbing_a_border_with_no_pane_beside_it_starts_no_resize() {
         ),
         Vec::new(),
         "the tab's outer frame has no neighbour to resize against"
+    );
+}
+
+#[test]
+fn the_drag_anchor_only_walks_over_the_cells_the_session_accepted() {
+    // The pointer travelled three cells, the session took two — the pane it
+    // would have shrunk hit its minimum size on the third. The anchor advances
+    // by those two, so the very next move asks for the one cell still owed.
+    let left = PaneId::new();
+    let right = PaneId::new();
+    let frame = frame(
+        &[plain_pane(left), plain_pane(right)],
+        Some(left),
+        PaneKind::Terminal,
+    );
+    let divider = Point {
+        x: 10,
+        y: frame.session.active_tab.layout_solved[1].rect.origin.y,
+    };
+    let three_down = Point {
+        y: divider.y + 3,
+        ..divider
+    };
+    let mut viewer = viewer();
+    let now = Instant::now();
+
+    viewer.handle_mouse(press(divider), &frame, now);
+    assert_eq!(
+        viewer.handle_mouse(drag(three_down), &frame, later(now, 1)),
+        vec![MouseAction::Resize {
+            pane: right,
+            side: Direction::Up,
+            step: -1,
+            count: 3,
+        }]
+    );
+
+    // An answer for another pane's border leaves this drag where it is.
+    viewer.note_resize_applied(PaneId::new(), Direction::Up, -1, 1);
+    // So does an answer for another side of the very border being dragged.
+    viewer.note_resize_applied(right, Direction::Down, -1, 1);
+    assert_eq!(
+        viewer.handle_mouse(drag(three_down), &frame, later(now, 2)),
+        vec![MouseAction::Resize {
+            pane: right,
+            side: Direction::Up,
+            step: -1,
+            count: 3,
+        }],
+        "neither answer named this border, so the whole distance stands"
+    );
+
+    viewer.note_resize_applied(right, Direction::Up, -1, 2);
+
+    assert_eq!(
+        viewer.handle_mouse(drag(three_down), &frame, later(now, 3)),
+        vec![MouseAction::Resize {
+            pane: right,
+            side: Direction::Up,
+            step: -1,
+            count: 1,
+        }],
+        "two cells were taken, so one is still owed"
     );
 }
 

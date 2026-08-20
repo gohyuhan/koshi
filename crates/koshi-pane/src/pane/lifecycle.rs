@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::InvalidTransition, pane::state::PaneKind};
 
+/// Where a pane sits between spawn and removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycle {
     /// The pane exists. The child process has not started.

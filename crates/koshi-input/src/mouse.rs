@@ -1,13 +1,13 @@
 //! Crossterm mouse boundary: one host mouse event becomes one canonical
 //! [`MouseInput`].
 //!
-//! This is the mouse peer of [`decode_key`](crate::keyboard::decode_key). It is
-//! a pure mapping: every host event turns into exactly one koshi event, so
-//! there is no `None` case. A mouse release and a bare motion are both kept.
+//! This is the mouse peer of [`decode_key`](crate::keyboard::decode_key). Every
+//! host event turns into exactly one koshi event: a mouse release and a bare
+//! motion are both kept.
 //!
-//! The coordinate that comes out is a raw client cell. Which pane, border, or
-//! bar it lands on is decided later by a hit-test against the client's render
-//! layout, not here.
+//! The coordinate that comes out is a raw client cell. A hit-test against the
+//! client's render layout, elsewhere, decides which pane, border, or bar it
+//! lands on.
 
 use crossterm::event::{KeyModifiers, MouseButton as HostButton, MouseEvent, MouseEventKind};
 use koshi_core::geometry::Point;
@@ -56,9 +56,8 @@ fn button(b: HostButton) -> MouseButton {
     }
 }
 
-/// The modifiers held during the event. Unlike a key press, a mouse event folds
-/// nothing into Shift, so all four modifiers pass straight through: the
-/// keyboard decoder supplies Ctrl/Alt/Super and Shift is added here.
+/// The modifiers held during the event. All four pass straight through: the
+/// keyboard decoder supplies Control, Alt and Super, and Shift is added here.
 fn decode_mods(modifiers: KeyModifiers) -> ModFlags {
     let mods = crate::keyboard::decode_mods(modifiers);
     if modifiers.contains(KeyModifiers::SHIFT) {

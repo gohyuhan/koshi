@@ -1,1 +1,1 @@
-//! Diagnostic state. Placeholder per standard source layout.
+//! Diagnostics for application state. The module is empty. It exports nothing.

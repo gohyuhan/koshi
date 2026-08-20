@@ -1667,6 +1667,70 @@ fn two_carried_panes_naming_one_descriptor_are_refused_rather_than_owned_twice()
     );
 }
 
+/// One carried record for `pane_id`, naming no terminal descriptor. Enough for
+/// the checks that read the header alone.
+fn carried_record(pane_id: PaneId) -> koshi_runtime::resume::CarriedPane {
+    koshi_runtime::resume::CarriedPane {
+        pane_id,
+        pid: 0,
+        rows: 24,
+        cols: 80,
+        terminal_fd: None,
+        terminal_name: None,
+        exit: None,
+    }
+}
+
+/// A header naming `panes`, in that order.
+fn header_naming(panes: Vec<koshi_runtime::resume::CarriedPane>) -> ResumeHeader {
+    ResumeHeader {
+        format: RESUME_FORMAT,
+        session_id: SessionId::new(),
+        session_name: "S-quiet-lake".to_string(),
+        panes,
+    }
+}
+
+#[test]
+fn a_header_naming_one_pane_twice_is_refused_before_any_pane_is_touched() {
+    // Every platform runs this check as the first step of taking the panes
+    // back, and each platform takes them back its own way, so the check itself
+    // is pinned here rather than through either of them.
+    let first = PaneId::new();
+    let repeated = PaneId::new();
+    let last = PaneId::new();
+
+    header_names_each_pane_once(&header_naming(vec![
+        carried_record(first),
+        carried_record(repeated),
+        carried_record(last),
+    ]))
+    .expect("three panes named once each are taken back");
+
+    let refused = header_names_each_pane_once(&header_naming(vec![
+        carried_record(first),
+        carried_record(repeated),
+        carried_record(repeated),
+        carried_record(first),
+    ]))
+    .expect_err("a header naming a pane twice is refused");
+
+    assert_eq!(
+        refused.to_string(),
+        format!("pane {repeated} is named twice by the carried state, so it cannot be taken back"),
+        "the refusal names the first pane that repeats, not the last"
+    );
+}
+
+#[test]
+fn a_header_naming_no_pane_at_all_names_each_of_them_once() {
+    // A session whose last pane closed as the swap was written carries no pane,
+    // and the check must let that header through rather than read as empty
+    // meaning wrong.
+    header_names_each_pane_once(&header_naming(Vec::new()))
+        .expect("a header naming no pane is taken back");
+}
+
 #[cfg(unix)]
 #[test]
 fn two_carried_records_naming_one_pane_are_refused_rather_than_taken_back_over_each_other() {

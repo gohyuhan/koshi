@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
+use crate::remote_state::write_owner_only;
 
 /// The format number this build writes into every saved-server file, and the
 /// only one it reads back.
@@ -125,32 +126,11 @@ impl ServerStore {
     ///
     /// Any failure along the way is [`IpcError::RemoteFileWrite`].
     pub fn write(&self, path: &Path) -> Result<(), IpcError> {
-        let write_failed = |detail: String| IpcError::RemoteFileWrite {
+        write_owner_only(path, self).map_err(|detail| IpcError::RemoteFileWrite {
             file: RemoteFile::SavedServers,
             path: path.display().to_string(),
             detail,
-        };
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent).map_err(|error| write_failed(error.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| write_failed(error.to_string()))?;
-            }
-        }
-        #[cfg(unix)]
-        if path.exists() {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| write_failed(error.to_string()))?;
-        }
-        let data = serde_json::to_vec(self).map_err(|error| write_failed(error.to_string()))?;
-        koshi_storage::atomic::write_atomic(path, &data)
-            .map_err(|error| write_failed(error.to_string()))
+        })
     }
 
     /// The server `arg` names.
@@ -188,29 +168,18 @@ impl ServerStore {
     /// [`NameTaken`] carrying the word and the address of the record that
     /// already answers to it.
     pub fn save(&mut self, server: SavedServer) -> Result<(), NameTaken> {
+        // Rules 2 and 3: another record answering to this record's name.
         if let Some(name) = server.name.as_deref() {
-            // Rules 2 and 3: another record answering to this word by its own
-            // name or its own address.
-            if let Some(holder) = self
-                .records
-                .iter()
-                .filter(|record| record.address != server.address)
-                .find(|record| record.name.as_deref() == Some(name) || record.address == name)
-            {
+            if let Some(holder) = self.name_holder(name, &server.address) {
                 return Err(NameTaken {
                     name: name.to_string(),
                     address: holder.address.clone(),
                 });
             }
         }
-        // Rule 3, the other direction: this record's address against every
-        // other record's name.
-        if let Some(holder) = self
-            .records
-            .iter()
-            .filter(|record| record.address != server.address)
-            .find(|record| record.name.as_deref() == Some(server.address.as_str()))
-        {
+        // Rule 3, the other direction: another record answering to this
+        // record's address.
+        if let Some(holder) = self.name_holder(&server.address, &server.address) {
             return Err(NameTaken {
                 name: server.address.clone(),
                 address: holder.address.clone(),
@@ -229,11 +198,17 @@ impl ServerStore {
     /// a name it already holds.
     #[must_use]
     pub fn name_free_for(&self, name: &str, address: &str) -> bool {
-        !self
-            .records
+        self.name_holder(name, address).is_none()
+    }
+
+    /// The record other than the one at `address` that answers to `name`, by
+    /// its own name or by its own address. `None` when no record does, and the
+    /// first of them when several do.
+    fn name_holder(&self, name: &str, address: &str) -> Option<&SavedServer> {
+        self.records
             .iter()
             .filter(|record| record.address != address)
-            .any(|record| record.name.as_deref() == Some(name) || record.address == name)
+            .find(|record| record.name.as_deref() == Some(name) || record.address == name)
     }
 
     /// Drop the server `arg` names, returning its address.

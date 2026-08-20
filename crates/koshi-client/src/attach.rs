@@ -670,13 +670,7 @@ fn choose_remote(server: &str, rows: &[RemoteSessionRow]) -> Result<SessionSelec
             name: row.name.clone(),
         })
         .collect();
-    // Only a list longer than one row has anything to pick, so only that asks.
-    let line = if listed.len() > 1 {
-        ask(&listed)?
-    } else {
-        String::new()
-    };
-    let at = pick(&listed, &line)?;
+    let at = settle_on(&listed)?;
     Ok(SessionSelector::Id(listed[at].id))
 }
 
@@ -1497,13 +1491,7 @@ fn choose(runtime_dir: &Path, remote: Vec<SessionRow>) -> Result<Picked, CliErro
     }
     let local = rows.len();
     rows.extend(remote);
-    // Only a list longer than one row has anything to pick, so only that asks.
-    let line = if rows.len() > 1 {
-        ask(&rows)?
-    } else {
-        String::new()
-    };
-    let at = pick(&rows, &line)?;
+    let at = settle_on(&rows)?;
     Ok(match at.checked_sub(local) {
         Some(remote_at) => Picked::Remote(remote_at),
         None => Picked::Local(rows[at].id.to_string()),
@@ -1517,6 +1505,22 @@ enum Picked {
     Local(String),
     /// A session on a saved server: where in the listing's `remote` rows it sat.
     Remote(usize),
+}
+
+/// Where in `rows` a listing settles. A list of one row settles on it without
+/// printing anything; a longer list is printed by [`ask`] and the number typed
+/// on stdin names the row.
+///
+/// # Errors
+/// [`CliError::NoSessions`] for an empty `rows`. [`CliError::InvalidArgs`] when
+/// stdin cannot be read, and when the line is not one of the listed numbers.
+fn settle_on(rows: &[SessionRow]) -> Result<usize, CliError> {
+    let line = if rows.len() > 1 {
+        ask(rows)?
+    } else {
+        String::new()
+    };
+    pick(rows, &line)
 }
 
 /// Print one numbered line per session — number, name, id — and read back the
@@ -1939,9 +1943,9 @@ fn fire_expired_key_sequence(client: &mut Client, uplink: &mut Uplink, now: Inst
 ///
 /// Viewer state moves at once — the hovered pane, the gesture under way, the
 /// capture a press takes — so a drag keeps tracking the pointer while earlier
-/// rounds are still unanswered. The capture is recorded here, on
-/// the viewer's own decision to forward the press, rather than on the session's
-/// report that the pane took it.
+/// rounds are still unanswered. Every [`MouseAction::Forward`] carrying a press
+/// records the capture here, through [`Client::note_press_forwarded`], before
+/// the round is written.
 fn handle_mouse_event(
     client: &mut Client,
     frame: &MouseFrame,
@@ -2286,10 +2290,7 @@ fn fold(tail: &mut MouseAction, next: MouseAction) -> Option<MouseAction> {
 }
 
 /// The sooner of two deadlines, or `None` when neither is set.
-fn earliest(
-    left: Option<std::time::Duration>,
-    right: Option<std::time::Duration>,
-) -> Option<std::time::Duration> {
+fn earliest(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
     [left, right].into_iter().flatten().min()
 }
 

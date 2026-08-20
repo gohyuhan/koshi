@@ -2382,3 +2382,22 @@ fn neither_version_verb_is_an_action_the_socket_serves() {
         None
     );
 }
+
+/// `koshi --remote work` names another machine, so it is not the bare
+/// invocation that paints a terminal here.
+#[test]
+fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
+    let cli = parse(&["koshi", "--remote", "work"]);
+
+    assert_eq!(
+        cli,
+        Cli {
+            headless: false,
+            allow_other_users: false,
+            profile: None,
+            remote: Some("work".to_string()),
+            command: None,
+        }
+    );
+    assert!(!cli.is_interactive_launch());
+}

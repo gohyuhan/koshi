@@ -806,6 +806,44 @@ impl Delivery {
     }
 }
 
+/// Build one pane's caller handle and its reader's delivery, plus the watcher's
+/// own reference to the sink.
+///
+/// With a `sink` the handle carries no channels, the reader hands each chunk to
+/// that consumer, and the delivery holds the receiving end the reader takes the
+/// watcher's status from. Without one the handle keeps the receiving ends of
+/// both channels and the reader pushes each chunk onto the output sender.
+///
+/// The returned sender is the watcher's in both cases. The fourth value is
+/// `Some(sink)` only in the first case, and it is what the watcher publishes the
+/// exit through on the paths where the reader cannot.
+fn open_delivery(
+    sink: Option<Arc<dyn PtySink>>,
+    pane_id: PaneId,
+    handover: &Arc<Mutex<Handover>>,
+) -> (
+    PtyHandle,
+    Delivery,
+    Sender<ExitStatus>,
+    Option<Arc<dyn PtySink>>,
+) {
+    let Some(sink) = sink else {
+        let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
+        return (handle, Delivery::Channel(output_sender), exit_sender, None);
+    };
+    let (exit_sender, exit_receiver) = channel::<ExitStatus>();
+    (
+        PtyHandle::detached(pane_id),
+        Delivery::Sink {
+            sink: Arc::clone(&sink),
+            exit_receiver,
+            handover: Arc::clone(handover),
+        },
+        exit_sender,
+        Some(sink),
+    )
+}
+
 /// Hand every chunk of `pane`'s output to `delivery`, blocking in `read` until
 /// the terminal reports an end or the consumer lets the pane go.
 ///
@@ -1116,8 +1154,6 @@ fn should_publish_exit(
     deadline: Instant,
     grace: Duration,
 ) -> bool {
-    use std::sync::mpsc::RecvTimeoutError;
-
     loop {
         match cancel.recv_timeout(grace) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return false,
@@ -1521,16 +1557,18 @@ pub struct PaneEntry {
     /// `kill` joins the watcher, so by the time it returns the writer has been
     /// released either way.
     ///
-    /// A writer already blocked *inside*
-    /// `write_all` — child stopped reading while a `setsid` descendant still holds
-    /// the slave open (Linux; macOS `revoke`s it) — cannot be interrupted; like the
-    /// reader it detaches and exits only once that fd finally closes. `kill` never
-    /// joins it, so this can leak a thread + fd in that case but never blocks the
-    /// dispatcher.
+    /// A writer already blocked inside its write — the child stopped reading
+    /// while a `setsid` descendant still holds the slave open (Linux; macOS
+    /// `revoke`s it) — cannot be interrupted; like the reader it exits only once
+    /// that descriptor finally closes. `kill` never joins it, so its thread and
+    /// that descriptor stay until then, and the dispatcher is never blocked.
     /// [`flush_writers`](PortablePtyBackend::flush_writers) sends its barrier on
     /// this same channel, and names the pane whose writer is in that state.
     writer: Sender<WriterMsg>,
-    /// Kill handle for the child process; `kill()` sends the terminating signal.
+    /// Kill handle for the child process:
+    /// [`force`](PtyChildKillControl::force) signals the child alone,
+    /// [`tree`](PtyChildKillControl::tree) the whole group, and the two stop
+    /// requests ask them to exit on their own.
     killer: PtyChildKillControl,
     /// Flipped to `true` by the watcher thread the moment the child exits; read
     /// by [`kill`](PortablePtyBackend::kill) to avoid signalling a dead process.
@@ -1855,24 +1893,8 @@ impl PortablePtyBackend {
         // The terminal exposes a descriptor, so the reader reaches the end of
         // the output itself and no watcher stands by to be cancelled.
         drop(exit_grace_rx);
-        let (handle, delivery, exit_sender) = match self.sink.clone() {
-            Some(sink) => {
-                let (exit_sender, exit_receiver) = channel::<ExitStatus>();
-                (
-                    PtyHandle::detached(pane_id),
-                    Delivery::Sink {
-                        sink,
-                        exit_receiver,
-                        handover: Arc::clone(&handover),
-                    },
-                    exit_sender,
-                )
-            }
-            None => {
-                let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
-                (handle, Delivery::Channel(output_sender), exit_sender)
-            }
-        };
+        let (handle, delivery, exit_sender, _) =
+            open_delivery(self.sink.clone(), pane_id, &handover);
 
         let wake = Arc::new(Waker::new().ok_or(PtyError::Io {
             detail: "this platform offers no one-descriptor wake for a pane reader".to_string(),
@@ -1973,14 +1995,8 @@ impl PtyBackend for PortablePtyBackend {
         size: PtySize,
     ) -> Result<PtyHandle, PtyError> {
         // 1. Decide where this pane's output goes, and build the caller's handle
-        //    to match. With a sink the reader hands each chunk straight to the
-        //    consumer and the handle carries no channels, so the caller starts
-        //    no relay thread for the pane; without one the handle keeps the
-        //    consuming ends and the threads below feed the producing ends.
-        //
-        //    `exit_sender` is the watcher's in both cases. Under a sink its
-        //    receiver is private to the reader, which publishes the status once
-        //    the child's output has run out — that is what keeps a consumer
+        //    to match, in `open_delivery`. Under a sink the reader publishes the
+        //    status once the child's output has run out, which keeps a consumer
         //    from seeing the child end while output is still coming.
         //
         //    The watcher takes a second reference to the sink for the one path
@@ -1993,25 +2009,8 @@ impl PtyBackend for PortablePtyBackend {
         // descriptor stands by on it, and a Windows pane waits on it for its
         // reader before closing the terminal. `kill` sends on it.
         let (exit_grace_cancel, exit_grace_rx) = channel::<()>();
-        let (handle, delivery, exit_sender, watcher_sink) = match self.sink.clone() {
-            Some(sink) => {
-                let (exit_sender, exit_receiver) = channel::<ExitStatus>();
-                (
-                    PtyHandle::detached(pane_id),
-                    Delivery::Sink {
-                        sink: Arc::clone(&sink),
-                        exit_receiver,
-                        handover: Arc::clone(&handover),
-                    },
-                    exit_sender,
-                    Some(sink),
-                )
-            }
-            None => {
-                let (handle, output_sender, exit_sender) = PtyHandle::new(pane_id);
-                (handle, Delivery::Channel(output_sender), exit_sender, None)
-            }
-        };
+        let (handle, delivery, exit_sender, watcher_sink) =
+            open_delivery(self.sink.clone(), pane_id, &handover);
         // 2. Open the PTY pair sized to the pane. The pair is two linked ends:
         //    `master` stays with us, `slave` becomes the child's terminal.
         let pty = native_pty_system();
@@ -2035,17 +2034,16 @@ impl PtyBackend for PortablePtyBackend {
             }
         }
 
-        //    ...including the environment. `CommandBuilder` is deliberately NOT
-        //    cleared, so the child inherits the full parent env — kept as
-        //    `OsString`, so non-UTF-8 vars survive intact. `build_env` returns
-        //    only koshi's overlay (terminal identity + shell bootstrap +
-        //    `spec.env`); applying each key with `cmd.env` overwrites the
-        //    inherited value. On Windows `portable-pty` folds env names
-        //    case-insensitively, so an override (e.g. `PATH`) replaces a
-        //    differently-cased inherited key (`Path`) rather than duplicating it.
-        let pty_env = build_env(&spec);
-        for (k, v) in pty_env {
-            cmd.env(k.as_str(), v.as_str());
+        //    ...including the environment. `CommandBuilder` is never cleared, so
+        //    the child inherits the full parent env, kept as `OsString`, and
+        //    non-UTF-8 vars survive intact. `build_env` returns only koshi's
+        //    overlay (terminal identity + shell bootstrap + `spec.env`), and
+        //    applying each key with `cmd.env` overwrites the inherited value. On
+        //    Windows `portable-pty` folds env names case-insensitively, so an
+        //    override such as `PATH` replaces a differently-cased inherited key
+        //    (`Path`) rather than duplicating it.
+        for (key, value) in build_env(&spec) {
+            cmd.env(key, value);
         }
 
         //    ...and launch it on the slave end. The child now owns the slave as
@@ -2065,12 +2063,9 @@ impl PtyBackend for PortablePtyBackend {
         // 4. Build the kill control right away. On Windows this assigns the child
         //    to its Job Object, so do it as early as possible after spawn.
         //
-        //    NOTE: we do not reinvent portable-pty's spawn (no CREATE_SUSPENDED or
-        //    job-at-creation), so the child is already running here. A program
-        //    that forks a grandchild in the instant before this assignment can
-        //    leave that grandchild outside the Job Object, where `KillPolicy::Tree`
-        //    cannot reach it. Closing that window entirely needs control over
-        //    `CreateProcess` that portable-pty does not expose.
+        //    The child is already running when the assignment happens. A
+        //    grandchild it forks before that assignment lands stays outside the
+        //    Job Object, where `KillPolicy::Tree` does not reach it.
         #[cfg(unix)]
         let killer = PtyChildKillControl::new(pid);
         #[cfg(windows)]

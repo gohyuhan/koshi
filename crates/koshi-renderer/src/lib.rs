@@ -1,6 +1,7 @@
 //! `koshi-renderer` — ratatui drawing: pane borders, the tabline (tab bar plus
-//! the top-right status section), the keybinding hint bar, visible cell
-//! rendering, cursor placement, and render snapshots.
+//! the right-aligned mode tag), the keybinding hint bar, visible cell
+//! rendering, cursor placement, the chrome theme, render snapshots, and
+//! mapping a mouse cell to the region drawn under it.
 
 pub mod error;
 pub mod types;

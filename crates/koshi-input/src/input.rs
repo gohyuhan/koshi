@@ -1,4 +1,4 @@
-//! Input processing core: keyboard/mouse event handling, keybinding resolution, mode state.
+//! Input processing core. Placeholder per standard source layout.
 
 pub mod event;
 pub mod state;

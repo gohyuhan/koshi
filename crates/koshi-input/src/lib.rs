@@ -1,9 +1,10 @@
-//! `koshi-input` — outer terminal input: keyboard/mouse decoding, keybinding
-//! resolution, input modes, lock/unlock, mouse drag state, and the
-//! privacy-aware input event classifier for typing/Enter events.
+//! `koshi-input` — the outer terminal's input boundary.
 //!
-//! A keybinding is a key the user writes in the config, paired with the action
-//! koshi runs when that key arrives.
+//! [`keyboard::decode_key`] turns one host key event into a canonical
+//! [`koshi_core::key::KeyChord`], and [`keyboard::encode`] turns a chord back
+//! into the bytes a program running inside a pane expects.
+//! [`mouse::decode_mouse`] turns one host mouse event into a canonical
+//! [`koshi_core::mouse::MouseInput`].
 
 pub mod error;
 pub mod keyboard;

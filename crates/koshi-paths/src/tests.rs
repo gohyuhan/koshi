@@ -289,6 +289,37 @@ fn ensure_private_dir_creates_owner_only() {
     }
 }
 
+#[test]
+fn ensure_private_dir_creates_every_missing_parent() {
+    // On Windows the runtime directory is `run/` under the data directory, and
+    // neither one need exist yet, so the whole chain is created in one call.
+    let root = tempfile::tempdir().expect("tempdir");
+    let private = root.path().join("data").join("koshi").join("run");
+
+    ensure_private_dir(&private).expect("create the whole chain");
+
+    assert!(private.is_dir());
+    #[cfg(unix)]
+    assert_eq!(mode_of(&private), 0o700);
+}
+
+#[test]
+fn ensure_private_dir_refuses_a_regular_file_planted_in_its_place() {
+    // A file where the runtime directory must go is refused, and its bytes are
+    // left alone: nothing truncates it and nothing uses it as a directory.
+    let root = tempfile::tempdir().expect("tempdir");
+    let private = root.path().join("run");
+    std::fs::write(&private, b"not a directory").expect("plant the file");
+
+    let error = ensure_private_dir(&private).expect_err("a file is not a directory");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&private).expect("read the planted file"),
+        b"not a directory"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn ensure_private_dir_repairs_a_pre_existing_wide_open_directory() {
@@ -515,6 +546,22 @@ fn ensure_shared_user_dir_hands_back_this_users_own_directory() {
     // split and the base itself is the directory.
     #[cfg(windows)]
     assert_eq!(dir, base);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_shared_user_dir_refuses_a_missing_base_instead_of_creating_it() {
+    // Only `ensure_shared_base` may create the machine-wide directory, because
+    // only it gives that directory mode 1777. A base created here as a parent
+    // would carry the process umask instead, and one local user could then
+    // delete another user's socket.
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path().join("koshi");
+
+    let error = ensure_shared_user_dir(&base).expect_err("a missing base is not created here");
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(!base.exists(), "the base must be left uncreated");
 }
 
 #[cfg(unix)]

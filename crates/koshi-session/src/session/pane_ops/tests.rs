@@ -431,3 +431,75 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
         "the other client's zoom is not disturbed by someone else's split"
     );
 }
+
+/// Committing under a pane id the registry already holds keeps the existing
+/// record: its cwd and command stay as they were, and no second record appears.
+/// The live pane's spawn request is what a later restore or respawn reads back,
+/// so overwriting it would relaunch that pane in the wrong place.
+#[test]
+fn committing_a_pane_id_already_registered_keeps_the_original_record() {
+    let (mut session, tab, source, client) = session_one_pane();
+    session.panes.get_mut(source).expect("record").cwd = Some(PathBuf::from("/original"));
+    // The tree is committed unchanged; only the registry path is under test.
+    let candidate = session.tabs.get(&tab).expect("tab").layout().clone();
+
+    let (_previous, _events) = commit_new_pane(
+        &mut session,
+        source,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec {
+            cwd: Some(PathBuf::from("/replacement")),
+            command: None,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(session.panes.len(), 1);
+    assert_eq!(
+        session.panes.get(source).expect("record").cwd,
+        Some(PathBuf::from("/original"))
+    );
+}
+
+/// A split in the tab the client is already viewing switches no view, so the
+/// caller is handed no previous tab to reflow and no [`Event::TabFocused`] is
+/// emitted. Only a client pulled across from another tab reports one.
+#[test]
+fn commit_reports_no_previous_tab_when_the_client_already_views_the_tab() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (previous, events) = commit_new_pane(
+        &mut session,
+        new_id,
+        tab,
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(previous, None);
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneCreated(PaneCreated {
+                pane_id: new_id,
+                tab_id: tab,
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id: tab }),
+            Event::PaneFocused(PaneFocused {
+                client_id: client,
+                tab_id: tab,
+                pane_id: new_id,
+                prior_pane: Some(source),
+            }),
+        ]
+    );
+    assert_eq!(
+        session.clients.get(client).expect("client").active_tab(),
+        tab
+    );
+}

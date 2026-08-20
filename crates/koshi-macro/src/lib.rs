@@ -81,7 +81,7 @@ pub fn beta_feature(args: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote!(return #otherwise;)
     };
-    // The original statements go in one by one, so the last one stays the
+    // The original statements go back in one by one. The last one stays the
     // function's tail expression.
     *function.block = syn::parse_quote!({
         if !::koshi_beta::allowed() {

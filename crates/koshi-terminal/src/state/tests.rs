@@ -494,3 +494,59 @@ fn scrolled_view_keeps_a_history_rows_own_background() {
         assert_eq!(grid.cell(0, col).unwrap().style().bg(), Color::Indexed(1));
     }
 }
+
+#[test]
+fn text_view_on_the_alternate_screen_reads_its_grid_alone() {
+    // The scrollback belongs to the primary and is still retained while the
+    // alternate screen is up, so the alternate's view must hold its own grid
+    // alone: its top row is the first readable row, and the primary's history
+    // rows read as gone.
+    let mut state = state_with_history();
+    state.active = Screen::Alternate;
+
+    // Three rows were pushed into history, so the live top row is absolute
+    // row 3 and the screen's two rows are 3 and 4.
+    let view = state.text_view();
+    assert_eq!(view.first_row(), 3);
+    assert_eq!(view.last_row(), 4);
+    assert_eq!(view.row(2).map(|(cells, _)| cells.len()), None);
+
+    // The primary's own view still reaches back over the same history.
+    state.active = Screen::Primary;
+    assert_eq!(state.text_view().first_row(), 0);
+}
+
+#[test]
+fn resize_blanks_a_wide_glyph_the_alternate_screen_cuts_in_half() {
+    // The alternate screen crops instead of reflowing. 世 occupies cols 2-3;
+    // cropping to 3 columns drops its right half, so the base left in the last
+    // column is blanked rather than drawn as a half glyph.
+    let mut state = TerminalState::new(PtySize { cols: 4, rows: 1 });
+    state.active = Screen::Alternate;
+    put(&mut state, 0, 0, 'a', 1);
+    put(&mut state, 0, 2, '世', 2);
+    put(&mut state, 0, 3, ' ', 0);
+
+    state.resize(PtySize { cols: 3, rows: 1 });
+    assert_eq!(state.alternate.cell(0, 0).unwrap().ch(), 'a');
+    assert_eq!(state.alternate.cell(0, 2), Some(&Cell::blank()));
+}
+
+#[test]
+fn resize_moves_the_alternate_cursor_up_by_the_rows_cropped_off_the_top() {
+    // Alternate height 4 -> 2 crops the two top rows away. The cursor sat on
+    // row 2 holding `c`, so it lands on row 0 with `c` still under it — not on
+    // the last row, which is where a bare clamp would leave it.
+    let mut state = TerminalState::new(PtySize { cols: 2, rows: 4 });
+    state.active = Screen::Alternate;
+    for (row, ch) in "abcd".chars().enumerate() {
+        put(&mut state, row as u16, 0, ch, 1);
+    }
+    state.alternate_cursor.row = 2;
+    state.alternate_cursor.col = 1;
+
+    state.resize(PtySize { cols: 2, rows: 2 });
+    assert_eq!(state.alternate.cell(0, 0).unwrap().ch(), 'c');
+    assert_eq!(state.alternate_cursor.row, 0);
+    assert_eq!(state.alternate_cursor.col, 1);
+}

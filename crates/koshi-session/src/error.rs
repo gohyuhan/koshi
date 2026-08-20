@@ -29,10 +29,8 @@ impl DomainError for InvalidTransition {
 
 /// A way a session's layout, pane registry, client focus, and pane lifecycles
 /// can disagree with one another. [`Session::validate`](crate::session::state::Session::validate)
-/// returns every violation it finds in one pass, so a single check surfaces the
-/// whole picture rather than only the first fault. Each variant names the
-/// offending pane, tab, or client, so a caught state points straight at what to
-/// fix before a snapshot or render is built from it.
+/// returns every violation it finds in one pass. Each variant names the
+/// offending pane, tab, or client.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionConsistencyError {
     /// A layout leaf references a pane with no record in the registry.
@@ -77,8 +75,7 @@ pub enum SessionConsistencyError {
 
     /// A client is zoomed on a pane that is not a live leaf of the tab it is
     /// zoomed in — the pane has no registry record, the tab is gone, or the pane
-    /// is not in that tab's layout. A zoom on a pane that is not there has
-    /// nothing to draw, so it must have been dropped when the pane went.
+    /// is not in that tab's layout. Removing a pane drops every zoom on it.
     #[error("client {client:?} is zoomed on pane {pane:?}, not a live leaf of tab {tab:?}")]
     ZoomTargetMissing {
         client: ClientId,

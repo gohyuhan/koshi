@@ -4,6 +4,7 @@
 
 use super::*;
 
+use std::io::Write;
 use std::thread::JoinHandle;
 
 use koshi_ipc::endpoint::{socket_addr, EndpointFile};
@@ -561,4 +562,108 @@ fn extracting_a_zip_without_the_binary_is_an_error() {
         extract(archive.as_ref(), "koshi.zip").expect_err("no binary present"),
         "binary not found in archive"
     );
+}
+
+/// Writes a gzip-compressed tar to a temp file, one entry per
+/// `(name, entry type, bytes)`.
+fn write_tar_gz_of_kinds(entries: &[(&str, tar::EntryType, &[u8])]) -> TempPath {
+    let file = Builder::new()
+        .prefix("koshi-test-")
+        .suffix(".tar.gz")
+        .tempfile()
+        .expect("temp file");
+    {
+        let encoder = flate2::write::GzEncoder::new(file.as_file(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for (name, entry_type, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).expect("path");
+            header.set_entry_type(*entry_type);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append(&header, *data).expect("append entry");
+        }
+        tar.into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+    }
+    file.into_temp_path()
+}
+
+#[test]
+fn a_directory_carrying_the_binary_name_is_passed_over_for_the_real_file() {
+    let archive = write_tar_gz_of_kinds(&[
+        (binary_name(), tar::EntryType::Directory, b""),
+        (binary_name(), tar::EntryType::Regular, b"binary-bytes"),
+    ]);
+
+    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+
+    assert_eq!(
+        fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
+        b"binary-bytes"
+    );
+}
+
+#[test]
+fn a_symbolic_link_carrying_the_binary_name_is_passed_over_for_the_real_file() {
+    let archive = write_tar_gz_of_kinds(&[
+        (binary_name(), tar::EntryType::Symlink, b""),
+        (binary_name(), tar::EntryType::Regular, b"binary-bytes"),
+    ]);
+
+    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+
+    assert_eq!(
+        fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
+        b"binary-bytes"
+    );
+}
+
+#[test]
+fn a_tar_gz_binary_under_a_top_level_directory_is_found_by_its_file_name() {
+    let nested = format!("koshi-v9.9.9-linux-amd64/{}", binary_name());
+    let archive = write_tar_gz(&[(nested.as_str(), b"nested-bytes")]);
+
+    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+
+    assert_eq!(
+        fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
+        b"nested-bytes"
+    );
+}
+
+#[test]
+fn a_zip_binary_under_a_top_level_directory_is_found_by_its_file_name() {
+    let nested = format!("koshi-v9.9.9-windows-amd64/{}", binary_name());
+    let archive = write_zip(&[(nested.as_str(), b"nested-bytes")]);
+
+    let extracted = extract(archive.as_ref(), "koshi.zip").expect("extract the binary");
+
+    assert_eq!(
+        fs::read(AsRef::<Path>::as_ref(&extracted)).expect("read extracted binary"),
+        b"nested-bytes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_extracted_binary_is_left_runnable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let archive = write_tar_gz_of_kinds(&[(
+        binary_name(),
+        tar::EntryType::Regular,
+        b"binary-bytes" as &[u8],
+    )]);
+
+    let extracted = extract(archive.as_ref(), "koshi.tar.gz").expect("extract the binary");
+
+    let mode = fs::metadata(AsRef::<Path>::as_ref(&extracted))
+        .expect("read the extracted binary's metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
 }

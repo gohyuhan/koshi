@@ -255,3 +255,65 @@ fn concurrent_writers_never_leave_partial_content() {
     );
     assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
 }
+
+#[test]
+fn write_atomic_stages_the_temp_in_the_targets_own_directory() {
+    let dir = TempDir::new().unwrap();
+    // The target's directory does not exist, so staging the temp is what fails,
+    // and the error names that directory. A temp staged in the system temp
+    // directory instead would be created without error, and the failure would
+    // move to the rename. Same-directory staging keeps the rename on one
+    // filesystem, which is what makes it atomic.
+    let missing = dir.path().join("missing");
+    let dst = missing.join("cfg.kdl");
+
+    let err = write_atomic(&dst, b"x").unwrap_err();
+
+    let StorageError::Io { detail } = err else {
+        panic!("expected an Io error, got {err:?}");
+    };
+    assert!(
+        detail.starts_with(&format!("create temp in {}: ", missing.display())),
+        "unexpected error detail: {detail}"
+    );
+}
+
+#[test]
+fn write_atomic_names_the_target_when_the_rename_is_blocked() {
+    let dir = TempDir::new().unwrap();
+    // A directory at `dst` blocks the rename permanently, so the failure comes
+    // from the replace step rather than from staging or from the fsync.
+    let dst = dir.path().join("target");
+    std::fs::create_dir(&dst).unwrap();
+
+    let err = write_atomic(&dst, b"x").unwrap_err();
+
+    let StorageError::Io { detail } = err else {
+        panic!("expected an Io error, got {err:?}");
+    };
+    assert!(
+        detail.starts_with(&format!("replace {}: ", dst.display())),
+        "unexpected error detail: {detail}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_replaces_a_read_only_file_and_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let dst = dir.path().join("cfg.kdl");
+    std::fs::write(&dst, b"old").unwrap();
+    // Mode 0400: the owner may not write the file itself. The directory stays
+    // writable, and on Unix the directory decides whether the rename lands, so
+    // the replace succeeds and the mode carries over onto the new bytes.
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    write_atomic(&dst, b"new").unwrap();
+
+    let meta = std::fs::symlink_metadata(&dst).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o400);
+    assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+    assert_eq!(dir_entries(dir.path()), vec!["cfg.kdl".to_string()]);
+}

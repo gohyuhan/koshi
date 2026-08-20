@@ -5,8 +5,7 @@
 //! the real clipboard, so it works over SSH and needs no OS clipboard
 //! dependency. The payload is base64 so any bytes survive the trip.
 //!
-//! `ClipboardWriter` is the seam an operating-system clipboard backend plugs
-//! into. `Osc52Clipboard` is the only writer koshi builds, so a copy naming
+//! `Osc52Clipboard` is the only `ClipboardWriter` koshi builds. A copy naming
 //! `CopyTarget::Native` writes nothing.
 //!
 //! The copy command carries which clipboard it means: the viewer that decided
@@ -56,9 +55,8 @@ impl Server {
     /// Write `text` to the clipboard the copy command named.
     ///
     /// `target` comes from the command, which the viewer filled in from its own
-    /// `copy.clipboard` setting: two viewers of one session can send their
-    /// copies to different clipboards, so the session takes the destination from
-    /// the command rather than from its own config.
+    /// `copy.clipboard` setting: two viewers of one session send their copies to
+    /// the clipboards their own settings name.
     ///
     /// [`CopyTarget::Osc52`] queues the escape for `client_id`'s outer terminal.
     /// [`CopyTarget::Native`] writes nothing: koshi builds no native
@@ -87,9 +85,8 @@ impl Server {
 /// (`ESC [ 200 ~` … `ESC [ 201 ~`) when the pane turned that mode on, so the
 /// program can tell a paste from typing.
 ///
-/// Every line-break spelling becomes ONE return: Windows clipboard text
-/// carries `\r\n`, and converting its `\n` alone would send two Enters per
-/// break.
+/// Every line-break spelling becomes ONE return: `\r\n`, `\n` and `\r` each
+/// leave a single `\r`, so `"a\r\nb"` pastes as `a\rb`.
 #[must_use]
 pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let payload = text.replace("\r\n", "\r").replace('\n', "\r");

@@ -2,8 +2,7 @@
 //!
 //! koshi runs more than one request protocol over the same framing: a session
 //! server answers its session's control socket, and the router answers the
-//! control socket. Four decisions are the same on both, and were written out
-//! once per server before this module existed:
+//! control socket. Four decisions are the same on both:
 //!
 //! 1. A frame that arrives whole but cannot be read is answered with
 //!    [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest), and the connection
@@ -128,31 +127,27 @@ pub fn next_request<P: Plane>(
     let request: Envelope<MaybeKnown<P::Kind>> = match connection.recv() {
         Ok(request) => request,
         Err(IpcError::MalformedFrame { .. }) => {
-            // The frame was read whole, so the stream is still aligned; only
-            // its bytes were unreadable. `request_id: None` tells the caller
-            // the answer belongs to no request of its own.
+            // The frame arrived whole and its bytes did not decode. The answer
+            // carries `request_id: None`, and the connection keeps serving.
             let refusal = P::refusal(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,
                 message: "the bytes received are not a request this build can read".to_string(),
             });
             return answer::<P>(connection, None, refusal);
         }
-        // An oversize frame's payload was never read, so the stream's framing
-        // is lost; disconnects and transport faults have no stream left. All
-        // close this one connection.
+        // An oversize frame leaves its payload unread and the stream off its
+        // frame boundaries; a disconnect and a transport fault leave no stream
+        // at all. All three close this one connection.
         Err(_) => return Next::Stop,
     };
 
-    // Asked once a request has arrived and before any answer is written, so a
-    // peer whose admission was withdrawn while its connection sat open is not
-    // served the request it just sent. A malformed frame is answered above
-    // without asking, since that answer names no session state.
+    // Asked once the request has arrived and before any answer is written. The
+    // malformed-frame answer above is written without asking.
     if !admitted() {
         return Next::Stop;
     }
 
     let request_id = request.request_id;
-    // A kind this build does not have comes from a newer koshi.
     let kind = match request.kind {
         MaybeKnown::Known(kind) => kind,
         MaybeKnown::Unknown { name } => {
@@ -185,8 +180,8 @@ pub fn always_admitted() -> bool {
     true
 }
 
-/// Send one answer this module built itself. A write that fails means the peer
-/// is gone, which ends the connection.
+/// Send one answer this module built itself: [`Next::Answered`] once the bytes
+/// are written, and [`Next::Stop`] when the write fails.
 fn answer<P: Plane>(
     connection: &mut Connection,
     request_id: Option<u64>,

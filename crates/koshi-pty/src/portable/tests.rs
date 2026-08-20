@@ -2562,3 +2562,207 @@ fn a_half_question_the_terminal_never_finishes_is_delivered_as_output() {
     // the terminal ends.
     assert_eq!(through_the_stripping_reader(&[b"\x1b["]), b"\x1b[");
 }
+
+// --- what a pane records, and what it answers about its child ---
+
+#[test]
+fn a_channel_consumer_that_dropped_its_handle_stops_its_readers_pump() {
+    // The one thing a channel delivery reports: whether anybody is still
+    // listening. A reader told `true` here for a handle nobody holds carries on
+    // reading a terminal whose output has nowhere to go, for as long as the
+    // child runs.
+    let pane = PaneId::new();
+    let (handle, output, _exit) = PtyHandle::new(pane);
+    let delivery = Delivery::Channel(output);
+
+    assert!(
+        delivery.output(pane, b"printed"),
+        "a handle the caller still holds must keep the pump running"
+    );
+    assert_eq!(
+        handle.try_read_output(),
+        Some(b"printed".to_vec()),
+        "the chunk must reach the handle unchanged"
+    );
+
+    drop(handle);
+    assert!(
+        !delivery.output(pane, b"more"),
+        "a handle the caller has let go must stop the pump"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resize_the_kernel_refuses_leaves_the_pane_at_its_old_size() {
+    // The size a pane reports is the size its child was really told. Recording
+    // one the kernel refused would hand the next process image a window the
+    // child never had, and that image would redraw the pane at it.
+    let bigger = PtySize {
+        cols: 132,
+        rows: 43,
+    };
+    let (_far, socket) = fake_terminal();
+    let terminal = Arc::new(socket);
+    let backend = PortablePtyBackend::new();
+    let pane = PaneId::new();
+    let (writer, writer_rx) = channel::<WriterMsg>();
+    drop(writer_rx);
+    backend.panes.lock().expect("panes").insert(
+        pane,
+        pane_entry(Terminal::Owned(Arc::clone(&terminal)), writer),
+    );
+
+    // The kernel's own refusal, taken here rather than written down, so the
+    // check holds on every system this runs on.
+    let refused = resize_terminal(&terminal, bigger)
+        .expect_err("a socket is not a terminal and takes no window size");
+
+    assert_eq!(
+        backend.resize(pane, bigger),
+        Err(PtyError::Io {
+            detail: refused.to_string(),
+        }),
+        "the kernel's refusal must reach the caller as it stands"
+    );
+    assert_eq!(
+        backend.carried_panes().first().map(|carried| carried.size),
+        Some(PANE_SIZE),
+        "a pane whose child was never told the new size must still report the old one"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pane_whose_writer_has_already_ended_does_not_hold_up_the_flush() {
+    // A pane's writer thread ends when its child does. The flush is about
+    // bytes still queued for a live child, so a pane with no writer left has
+    // nothing to answer and must not fail the call for the panes that do.
+    let backend = PortablePtyBackend::new();
+
+    // One pane whose writer channel is closed, so the barrier cannot even be
+    // queued for it.
+    let closed = PaneId::new();
+    let (closed_writer, closed_rx) = channel::<WriterMsg>();
+    drop(closed_rx);
+
+    // One pane whose writer takes the barrier and then ends without answering
+    // it, which is what a writer thread stopping between the two steps does.
+    let ending = PaneId::new();
+    let (ending_writer, ending_rx) = channel::<WriterMsg>();
+    let ended = spawn_pty_thread("koshi-pty-write", move || {
+        let _ = ending_rx.recv();
+    });
+
+    {
+        let mut panes = backend.panes.lock().expect("panes");
+        panes.insert(
+            closed,
+            pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), closed_writer),
+        );
+        panes.insert(
+            ending,
+            pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), ending_writer),
+        );
+    }
+
+    assert_eq!(
+        backend.flush_writers(),
+        Ok(()),
+        "a writer that has already ended must not refuse the flush"
+    );
+    ended.join().expect("the writer thread ends");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn only_a_pane_with_a_live_child_answers_a_directory() {
+    // The directory comes from the child's process id, and a reaped process id
+    // can already name a stranger. The answer has to be nothing rather than
+    // that stranger's directory.
+    let backend = PortablePtyBackend::new();
+    let pane = PaneId::new();
+    let (writer, writer_rx) = channel::<WriterMsg>();
+    drop(writer_rx);
+    // The entry names this test process, whose directory is known here.
+    backend.panes.lock().expect("panes").insert(
+        pane,
+        pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), writer),
+    );
+
+    assert_eq!(
+        backend.live_cwd(PaneId::new()),
+        None,
+        "a pane this backend does not drive has no directory"
+    );
+    assert_eq!(
+        backend.live_cwd(pane),
+        None,
+        "a pane whose child was reaped must answer nothing"
+    );
+
+    backend
+        .panes
+        .lock()
+        .expect("panes")
+        .get(&pane)
+        .expect("the pane just inserted")
+        .exited
+        .store(false, Ordering::SeqCst);
+
+    let here =
+        std::fs::canonicalize(std::env::current_dir().expect("this process has a directory"))
+            .expect("this process's directory is real");
+    assert_eq!(
+        backend
+            .live_cwd(pane)
+            .map(|dir| std::fs::canonicalize(dir).expect("the answer names a real directory")),
+        Some(here),
+        "a pane with a live child must answer the directory that child is in"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pane_taken_back_after_its_child_was_signalled_reports_the_signal() {
+    // The taken-back pane reaps the process id itself, so it is the one place
+    // a child killed by a signal is turned into an exit. Reporting a code
+    // there would tell the consumer the child chose to end.
+    let (terminal, pid) = {
+        let _gate = PTY_GATE.lock().expect("pty gate");
+        let pair = native_pty_system()
+            .openpty(to_pp_size(PANE_SIZE))
+            .expect("openpty");
+        let terminal = own_terminal_fd(&*pair.master).expect("terminal descriptor");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("kill -9 $$");
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        drop(pair.slave);
+        let pid = child.process_id().expect("pid");
+        // Left unreaped, exactly as an image swap leaves it.
+        drop(child);
+        (terminal, pid)
+    };
+
+    let sink = CountingSink::new();
+    let backend = PortablePtyBackend::with_sink(sink.clone());
+    let pane = PaneId::new();
+    backend
+        .adopt(pane, terminal, pid, PANE_SIZE, None)
+        .expect("take the pane back");
+
+    let deadline = Instant::now() + HANG_GUARD;
+    while sink.exit_taken().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "a taken-back pane never published its child's exit"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        sink.exit_taken(),
+        Some(ExitStatus::Signaled(9)),
+        "a child killed by SIGKILL must be reported as signalled, with that signal's number"
+    );
+}

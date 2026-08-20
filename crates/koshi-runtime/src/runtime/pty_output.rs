@@ -29,8 +29,8 @@ impl Server {
     /// whose view of this pane is held is then re-anchored by that many lines so
     /// it keeps showing the same text while live output accumulates below. A
     /// highlight whose every line this chunk erased (`CSI 3 J`) or evicted past
-    /// the scrollback cap is dropped first — it could never draw again, yet it
-    /// would keep holding its client's view.
+    /// the scrollback cap is dropped before that re-anchor, so it holds no
+    /// client's view.
     ///
     /// A chunk that switches the pane between its primary and alternate screens
     /// drops every client's highlight in it: a highlight names a line by how many
@@ -54,8 +54,7 @@ impl Server {
         let screen_after = engine.state().active_screen();
 
         if !replies.is_empty() {
-            // A device query holds its asker until the answer lands, so a write
-            // that fails here wedges the pane rather than losing a byte.
+            // A failed write leaves the child waiting for its answer.
             if let Err(error) = self.pty_backend().write(pane_id, &replies) {
                 tracing::error!(
                     %pane_id,
@@ -68,11 +67,10 @@ impl Server {
         if screen_before != screen_after {
             self.clear_pane_selections(pane_id);
         }
-        // Held views need adjusting only when history gained lines (offsets rise)
-        // or shrank under an erase (offsets reclamp); the common chunk that
-        // touches no history skips the client walk entirely. A highlight whose
-        // every line the chunk erased or evicted is dropped first, so it stops
-        // holding a view over text that no longer exists.
+        // Held views move only when history gained lines (offsets rise) or shrank
+        // under an erase (offsets reclamp); a chunk that touches no history skips
+        // the client walk. A highlight whose every line the chunk erased or
+        // evicted is dropped before the walk.
         if pushed > 0 || len_after < len_before {
             self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed, len_after);

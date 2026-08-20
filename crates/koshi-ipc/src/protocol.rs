@@ -35,23 +35,14 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::SESSION_PROTOCOL`].
-///
-/// Versions 3 and 4 were bumped for pure additions, under an older reading
-/// that bumped on every change. Folding those non-qualifying bumps back to the
-/// last released value — v0.1.0 is the only released build and speaks 1 —
-/// leaves 0.2.0 speaking 2.
 pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.max;
 
 /// The lowest protocol version this build speaks. A peer whose highest is
 /// below this one is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// The floor is 2, the version 0.2.0 speaks. Version 1 is v0.1.0, which has
-/// no attach and puts nothing user-visible on the socket, so no version-1
-/// peer has anything to ask a session server for.
-///
-/// Raising this floor drops support for every build below it, so it moves
-/// only on a stated decision to end that support.
+/// The floor is 2, the version 0.2.0 speaks. Raising it drops support for
+/// every build below it.
 pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.min;
 
 /// The version two peers use, given the range each speaks: the highest both
@@ -118,14 +109,13 @@ impl ConnectionToken {
 }
 
 impl PartialEq for ConnectionToken {
-    /// Two secrets of the same length are compared byte by byte to the end,
-    /// never stopping at the first mismatch, so how long the answer takes does
-    /// not reveal how many leading bytes a caller guessed right. `subtle`
-    /// holds that property through optimization by reading each byte's verdict
-    /// back through a volatile load, which the compiler may not fold away.
+    /// Compares two secrets of the same length byte by byte through the last
+    /// byte, never stopping at the first mismatch. `subtle` reads each byte's
+    /// verdict back through a volatile load, which the compiler may not fold
+    /// away.
     ///
-    /// Secrets of different lengths are refused at once: Koshi generates every
-    /// token at one length, so a token's length is not a secret.
+    /// Two secrets of different lengths are unequal at once, with no byte
+    /// compared. Every generated token has one length, 64 hex characters.
     fn eq(&self, other: &Self) -> bool {
         self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
     }
@@ -279,10 +269,8 @@ pub enum IpcRequestKind {
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
-    /// lowest first, and the `token` the caller presents.
-    ///
-    /// Every caller builds its Hello here, so the two version fields are
-    /// filled in one place.
+    /// [`MIN_PROTOCOL_VERSION`] then [`PROTOCOL_VERSION`], the `token` the
+    /// caller presents, and `remote` set to `false`.
     #[must_use]
     pub fn hello(token: ConnectionToken) -> IpcRequestKind {
         IpcRequestKind::Hello {

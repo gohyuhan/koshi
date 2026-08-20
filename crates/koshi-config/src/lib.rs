@@ -8,8 +8,9 @@
 //! per-mode lookup tables ([`keymap_merge`]), profile files parsed into
 //! templates ([`profile`]), and the config error types ([`error`]).
 //!
-//! The other modules serve those. [`parser`] holds the KDL entry point and
-//! the field readers the file parsers share. [`app_config`] parses
+//! The other modules serve those. [`parser`] holds the KDL entry point, the
+//! field readers, and the warning writer the file parsers share.
+//! [`app_config`] parses
 //! `koshi.kdl`. [`theme`] parses one `themes/<name>.kdl`. [`migration`]
 //! validates a versioned file and moves it forward to the current schema.
 //! [`hints`] resolves the merged keymap into the table the hint bar reads.

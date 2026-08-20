@@ -589,10 +589,9 @@ pub struct ReloadPluginArgs {
 //
 // Every command that crosses a boundary (keybinding dispatch, IPC socket,
 // plugin host call, internal lifecycle) travels inside one [`CommandEnvelope`].
-// The envelope carries the identity, origin, and timestamp the runtime needs
-// for permissions, focus context, and diagnostics; the [`Command`] itself stays
-// a pure "what" with no provenance baked in. `issued_at` is `SystemTime` (never
-// `Instant`) because the envelope is serialized across processes.
+// The envelope carries the identity, origin, and timestamp; the [`Command`]
+// itself carries no provenance. `issued_at` is a `SystemTime`, never an
+// `Instant`.
 
 /// Where a command came from. The runtime uses this to resolve focus context,
 /// enforce permissions, and attribute diagnostics.
@@ -706,9 +705,7 @@ impl CommandSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandEnvelopeError {
     /// `client_id` does not match the client named by `source`, or names a
-    /// client for a source that has none. The check stops a malformed or hostile
-    /// peer from misattributing a command to another client by forging
-    /// `client_id`.
+    /// client for a source that has none.
     ClientIdMismatch,
 }
 
@@ -815,9 +812,9 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
 //
 // A command never silently no-ops: dispatching one always yields a
 // [`CommandResult`], either applied (with the events it emitted) or rejected
-// with an observable [`RejectReason`]. [`CliExitCode`] is the placeholder
-// core-side mapping the external CLI turns a result into a process exit status
-// with (full wiring lives in the CLI layer).
+// with an observable [`RejectReason`]. [`CliExitCode`] names the process exit
+// statuses the external CLI reports; the CLI layer picks which one a result
+// maps to.
 
 /// The outcome of dispatching one command, keyed back to its originating
 /// [`CommandEnvelope`] by `command_id`.

@@ -2593,3 +2593,128 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
     dispatcher.join().expect("dispatcher exits");
     cleanup(&runtime_dir);
 }
+
+/// A stand-in dispatcher that reports the `remote` flag of every attach it is
+/// asked for and accepts each one as `client_id`. Holds the queues it hands out
+/// open so the writing threads stay blocked. Exits when every inbox sender is
+/// gone.
+fn spawn_origin_reporting_dispatcher(
+    inbox_rx: Receiver<RuntimeEvent>,
+    client_id: ClientId,
+    session_id: SessionId,
+) -> (JoinHandle<()>, Receiver<bool>) {
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut queues = Vec::new();
+        let ending_notice = Arc::new(EndingNotice::default());
+        while let Ok(event) = inbox_rx.recv() {
+            match event {
+                RuntimeEvent::IpcAttach { remote, reply, .. } => {
+                    let (events_tx, events_rx) = mpsc::channel();
+                    queues.push(events_tx);
+                    if seen_tx.send(remote).is_err() {
+                        break;
+                    }
+                    let _ = reply.send(Some(AttachAccepted {
+                        client_id,
+                        session_id,
+                        structure: attached_structure(session_id),
+                        events: events_rx,
+                        ending_notice: Arc::clone(&ending_notice),
+                        resume_token: ConnectionToken::new(MINTED_TOKEN),
+                    }));
+                }
+                RuntimeEvent::ClientDetached { .. } => queues.clear(),
+                _ => {}
+            }
+        }
+    });
+    (handle, seen_rx)
+}
+
+/// Open a connection, say hello naming whether the caller reached this session
+/// from another machine, attach on it, and read both replies back. The
+/// connection comes back carrying `client_id`'s stream.
+fn attach_saying_remote(
+    runtime_dir: &Path,
+    session: SessionId,
+    client_id: ClientId,
+    remote: bool,
+) -> Connection {
+    let endpoint = EndpointFile::read(&EndpointFile::path(runtime_dir, session))
+        .expect("endpoint file readable");
+    let mut connection = connect_to(runtime_dir, session);
+    connection
+        .send(&IpcRequest {
+            request_id: 1,
+            kind: IpcRequestKind::Hello {
+                min_protocol_version: MIN_PROTOCOL_VERSION,
+                max_protocol_version: PROTOCOL_VERSION,
+                token: endpoint.token,
+                remote,
+            },
+        })
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.result, hello_accepted());
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            kind: IpcRequestKind::Attach {
+                viewport: VIEWPORT,
+                filter: EventFilterSpec::All,
+                resume: None,
+                resume_token: None,
+            },
+        })
+        .expect("send attach");
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(
+        attach_reply.result,
+        IpcResult::Attached {
+            client_id,
+            session_id: session,
+            structure: attached_structure(session),
+            resume_token: Some(ConnectionToken::new(MINTED_TOKEN)),
+        },
+    );
+    connection
+}
+
+/// The attach the dispatcher is asked for is marked remote exactly when the
+/// Hello that opened the connection said so.
+#[test]
+fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
+    // The router sets `remote` on the Hello it sends for a caller its remote
+    // listener admitted, and the dispatcher mints that caller's client with the
+    // flag the attach carries as its origin. A connection that drops the flag on
+    // the way makes a viewer on another machine read as a local one, and
+    // `koshi share` prints a secret into a pane that viewer sees.
+    let client = ClientId::new();
+    let session = SessionId::new();
+    let runtime_dir = test_runtime_dir("attach-origin");
+    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (dispatcher, seen) = spawn_origin_reporting_dispatcher(inbox_rx, client, session);
+    let server = IpcServer::start(&runtime_dir, session, inbox_tx, None).expect("start serving");
+
+    let local = attach_saying_remote(&runtime_dir, session, client, false);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(5)),
+        Ok(false),
+        "a hello naming no other machine leaves the attach it carries local",
+    );
+
+    let remote = attach_saying_remote(&runtime_dir, session, client, true);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(5)),
+        Ok(true),
+        "a hello naming another machine marks the attach it carries remote",
+    );
+
+    drop(local);
+    drop(remote);
+    server.shutdown();
+    dispatcher.join().expect("dispatcher exits");
+    cleanup(&runtime_dir);
+}

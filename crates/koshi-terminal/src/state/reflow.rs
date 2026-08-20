@@ -18,7 +18,7 @@ use koshi_core::process::PtySize;
 use crate::grid::state::{content_len, Cell, Grid, RowEnd};
 use crate::style::Style;
 
-use super::TerminalState;
+use super::{rebuilt_with_width, TerminalState};
 
 impl TerminalState {
     /// Rebuild the primary screen and its scrollback for `size` by re-wrapping
@@ -163,7 +163,7 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowE
             if cols == 1 {
                 // A wide pair can never fit one column; keep the base narrow
                 // (the same rule as place_glyph) and skip its continuation.
-                row.push(narrowed(cell));
+                row.push(rebuilt_with_width(cell, 1));
                 index += 1;
                 if content.get(index).is_some_and(|next| next.width() == 0) {
                     index += 1;
@@ -183,16 +183,6 @@ fn rewrap_line(content: &[Cell], cols: u16, fill: Style) -> Vec<(Vec<Cell>, RowE
     }
     rows.push((row, RowEnd::Hard));
     rows
-}
-
-/// `cell` rebuilt one column wide, keeping its character, combining marks,
-/// and style — for a wide base re-wrapped into a one-column screen.
-fn narrowed(cell: &Cell) -> Cell {
-    let mut out = Cell::new(cell.ch(), 1, cell.style());
-    for mark in cell.combining() {
-        out.push_combining(*mark);
-    }
-    out
 }
 
 /// The (row-within-line, column) where content offset `offset` lands among a

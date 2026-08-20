@@ -1,5 +1,5 @@
-//! Tests for [`parse_kdl`], its [`ConfigParseDiagnostic`] error, and the shared
-//! field-value readers.
+//! Tests for [`parse_kdl`], its [`ConfigParseDiagnostic`] error, the shared
+//! field-value readers, and the unknown-key suggestion.
 
 use std::path::Path;
 
@@ -7,8 +7,8 @@ use kdl::{KdlDocument, KdlNode};
 use miette::Diagnostic;
 
 use super::{
-    parse_kdl, single_value, value_bool, value_integer, value_nonempty_string, value_string,
-    value_u16, value_u32,
+    parse_kdl, single_value, unknown_key, value_bool, value_integer, value_nonempty_string,
+    value_string, value_u16, value_u32,
 };
 use crate::error::ConfigError;
 
@@ -203,5 +203,59 @@ fn value_u32_rejects_an_out_of_range_value() {
     assert_eq!(
         value_u32(&node("x 5000000000")).unwrap_err(),
         "must be between 0 and 4294967295"
+    );
+}
+
+#[test]
+fn unknown_key_names_the_nearest_allowed_key() {
+    assert_eq!(
+        unknown_key("pane.min-col", &["pane.min-cols", "pane.min-rows"]),
+        "unknown key `pane.min-col`; did you mean `pane.min-cols`?"
+    );
+}
+
+#[test]
+fn unknown_key_picks_by_edit_distance_not_by_length() {
+    // `xyz1` is one insertion away; `abc` is the same length but shares no
+    // character. A length-based guess would answer `abc`.
+    assert_eq!(
+        unknown_key("xyz", &["abc", "xyz1"]),
+        "unknown key `xyz`; did you mean `xyz1`?"
+    );
+}
+
+#[test]
+fn unknown_key_counts_distance_in_characters_not_bytes() {
+    // `é` is one character but two bytes. Counted in characters it is one
+    // substitution from `e` and two edits from `ab`, so `e` wins. Counted in
+    // bytes both are two edits, and the earlier `ab` would win the tie.
+    assert_eq!(
+        unknown_key("é", &["ab", "e"]),
+        "unknown key `é`; did you mean `e`?"
+    );
+}
+
+#[test]
+fn unknown_key_breaks_a_tie_on_the_first_allowed_key() {
+    // `ab` and `ay` are both two edits from `x`.
+    assert_eq!(
+        unknown_key("x", &["ab", "ay"]),
+        "unknown key `x`; did you mean `ab`?"
+    );
+}
+
+#[test]
+fn unknown_key_with_one_allowed_key_names_that_key() {
+    assert_eq!(
+        unknown_key("completely-different", &["version"]),
+        "unknown key `completely-different`; did you mean `version`?"
+    );
+}
+
+#[test]
+fn unknown_key_handles_an_empty_key() {
+    assert_eq!(
+        unknown_key("", &["colors", "version"]),
+        "unknown key ``; did you mean `colors`?"
     );
 }

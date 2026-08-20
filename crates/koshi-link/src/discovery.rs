@@ -80,12 +80,10 @@ pub struct ClientRow {
 /// What one sweep found: every session that answered, plus how many running
 /// sessions could not be asked.
 ///
-/// The unasked count is what keeps an answer honest. "No running session has
-/// pane X" and "there is exactly one session, so it is the default" are both
-/// claims about *every* running session — with one of them unasked, neither
-/// can be made, so the paths that would make them report the unasked session
-/// instead. A session that is gone is not unasked: it answered by not being
-/// there.
+/// With one running session unasked, the paths that would answer "no running
+/// session has pane X" or "there is exactly one session, so it is the default"
+/// report the unasked session instead. A session that is gone is not unasked:
+/// it answered by not being there.
 #[derive(Debug, Default)]
 pub struct Discovered {
     /// The sessions that answered, sorted by name and then id so two runs of
@@ -106,8 +104,7 @@ impl Discovered {
         }
     }
 
-    /// Whether every running session answered, so a negative answer is the
-    /// truth rather than a gap.
+    /// Whether every running session answered.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.unasked == 0
@@ -147,10 +144,8 @@ impl Discovered {
     /// The failure a listing ends with when it could not see everything, or
     /// `None` when it could.
     ///
-    /// A listing prints the rows it has either way — partial output beats no
-    /// output — but a caller reading only stdout and the exit code would
-    /// take those rows for the whole picture, so the exit code carries the
-    /// gap: `koshi list-panes` with one session unable to answer prints the
+    /// A listing prints the rows it has either way, and the exit code carries
+    /// the gap: `koshi list-panes` with one session unable to answer prints the
     /// other sessions' panes and still exits 4.
     #[must_use]
     pub fn incomplete_listing(&self) -> Option<CliError> {
@@ -161,8 +156,8 @@ impl Discovered {
         }
     }
 
-    /// A failure that names how many sessions went unasked, so an incomplete
-    /// answer never reads as a definite one.
+    /// A failure that names `detail` and how many running sessions went
+    /// unasked.
     pub fn unanswered(&self, detail: &str) -> CliError {
         let sessions = if self.unasked == 1 {
             "1 running session did not answer".to_string()
@@ -182,36 +177,24 @@ impl Discovered {
 /// A session that is gone contributes no rows and is not counted as unasked
 /// — [`fetch_one`] has already swept what it left behind. A session that is
 /// listening but cannot finish the exchange contributes no rows either, says
-/// so on stderr, and is counted, so a caller can tell a real "not there"
-/// from "could not check".
+/// so on stderr, and is counted.
 #[must_use]
 pub fn fetch_all(runtime_dir: &Path) -> Discovered {
     let mut found = Discovered::default();
     for session_id in ipc_client::advertised_sessions(runtime_dir) {
-        match fetch_one(runtime_dir, session_id) {
-            Ok(overview) => found.sessions.push(overview),
-            // Gone: swept by `fetch_one`, and it simply has no rows.
-            Err(CliError::SessionNotFound { .. }) => {}
-            Err(error) => {
-                eprintln!("koshi: session {session_id} did not answer: {error}");
-                found.unasked += 1;
-            }
-        }
+        add_answer(&mut found, session_id, fetch_one(runtime_dir, session_id));
     }
+    // A session of another user's is never swept: what it left behind belongs
+    // to that user.
     for (session_id, socket) in ipc_client::shared_base()
         .into_iter()
         .flat_map(|base| ipc_client::foreign_sessions(&base, runtime_dir))
     {
-        match ipc_client::fetch_foreign_overview(session_id, &socket) {
-            Ok(overview) => found.sessions.push(overview),
-            // Nothing listens: the session is gone. What it left behind
-            // belongs to another user, so it is left where it is.
-            Err(CliError::SessionNotFound { .. }) => {}
-            Err(error) => {
-                eprintln!("koshi: session {session_id} did not answer: {error}");
-                found.unasked += 1;
-            }
-        }
+        add_answer(
+            &mut found,
+            session_id,
+            ipc_client::fetch_foreign_overview(session_id, &socket),
+        );
     }
     found.sessions.sort_by(|a, b| {
         a.session
@@ -222,13 +205,30 @@ pub fn fetch_all(runtime_dir: &Path) -> Discovered {
     found
 }
 
+/// Fold what the session `session_id` answered into `found`: an overview
+/// becomes a row, a session that is gone adds nothing, and every other failure
+/// prints on stderr and counts as unasked.
+fn add_answer(
+    found: &mut Discovered,
+    session_id: SessionId,
+    answered: Result<SessionOverview, CliError>,
+) {
+    match answered {
+        Ok(overview) => found.sessions.push(overview),
+        Err(CliError::SessionNotFound { .. }) => {}
+        Err(error) => {
+            eprintln!("koshi: session {session_id} did not answer: {error}");
+            found.unasked += 1;
+        }
+    }
+}
+
 /// Ask the one session `session_id` to describe itself, sweeping what it
 /// left behind if it is gone.
 ///
-/// The failure keeps its kind, so a caller can tell the two apart: nothing
-/// listens ([`CliError::SessionNotFound`]) versus something listens but the
-/// exchange failed, such as a token that no longer matches
-/// ([`CliError::IpcUnavailable`]).
+/// Nothing listening is [`CliError::SessionNotFound`]. Something listening
+/// whose exchange failed — a token that no longer matches, say — is
+/// [`CliError::IpcUnavailable`].
 pub fn fetch_one(runtime_dir: &Path, session_id: SessionId) -> Result<SessionOverview, CliError> {
     ipc_client::fetch_overview(runtime_dir, session_id).inspect_err(|error| {
         if matches!(error, CliError::SessionNotFound { .. }) {
@@ -280,9 +280,8 @@ pub fn tab_rows(overviews: &[SessionOverview]) -> Vec<TabRow> {
 /// The `list-panes` answer: every pane of every listed session, in the
 /// overview's own order — tab-bar order, then layout order within a tab.
 ///
-/// A pane whose tab has left the tab list has no tab name to print and is
-/// left out; the overview builds both lists from the same state in one pass,
-/// so this cannot happen to a live pane.
+/// A pane whose tab is not in the overview's tab list has no tab name to print
+/// and is left out.
 #[must_use]
 pub fn pane_rows(overviews: &[SessionOverview]) -> Vec<PaneRow> {
     overviews

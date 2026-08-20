@@ -76,9 +76,9 @@ use koshi_renderer::snapshot::Delivery;
 use crate::runtime::bus::wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 
-/// How long the accept loop pauses after a failed accept before trying
-/// again, so a persistent accept error (say, the process is out of file
-/// descriptors) cannot spin a core.
+/// How long the accept loop sleeps after a failed accept before it accepts
+/// again. A persistent accept error — say, the process is out of file
+/// descriptors — retries at this interval rather than spinning.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// The version of the binary this session server is, reported in its Hello

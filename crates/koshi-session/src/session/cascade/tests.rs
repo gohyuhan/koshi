@@ -798,3 +798,102 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
         "focus repair moves to the survivor"
     );
 }
+
+/// A pane with a registry record but no leaf in the tab's tree: the record is
+/// dropped and the cascade stops there. Nothing else in the tab may move — the
+/// tab's own pane, its tree, its client's focus and the tab itself all stand,
+/// and the empty-tab policy never fires.
+#[test]
+fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab() {
+    let tab_id = TabId::new();
+    let (kept, ghost) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, kept)],
+        vec![
+            record(kept, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(ghost, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let client = focused_client(session.id, tab_id, kept);
+    let client_id = client.id();
+    session.attach_client(client);
+
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        ghost,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
+
+    // Exactly the two removal facts: no `LayoutChanged`, no `TabClosed`, no
+    // `Quit`.
+    assert_eq!(
+        events,
+        vec![
+            Event::PaneClosing(PaneClosing { pane_id: ghost }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: ghost,
+                tab_id,
+            }),
+        ]
+    );
+    assert_eq!(session.panes.get(ghost).map(PaneRecord::id), None);
+    assert_eq!(session.panes.get(kept).map(PaneRecord::id), Some(kept));
+    assert_eq!(session.tabs[&tab_id].layout(), &LayoutNode::Pane(kept));
+    assert_eq!(session.tabs.len(), 1);
+    assert_eq!(
+        session
+            .clients
+            .get(client_id)
+            .expect("client")
+            .focused_pane(tab_id),
+        Some(kept)
+    );
+}
+
+/// A second exit report for the same child. `ProcessExited` is illegal from
+/// `Exited` and is dropped, but `Respawn` still applies, so a `RespawnShell`
+/// pane lands in `Spawning` and the runtime starts its replacement. Were the
+/// pane left `Exited`, no replacement shell would ever be spawned.
+#[test]
+fn a_repeated_exit_still_returns_a_respawn_pane_to_spawning() {
+    let tab_id = TabId::new();
+    let pane = PaneId::new();
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, pane)],
+        vec![record(
+            pane,
+            PaneLifecycle::Exited {
+                code: Some(1),
+                at: SystemTime::UNIX_EPOCH,
+            },
+            PaneExitPolicy::RespawnShell,
+        )],
+    );
+
+    let events = on_child_exit(
+        &mut session,
+        tab_id,
+        pane,
+        Some(2),
+        SystemTime::UNIX_EPOCH,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
+
+    assert_eq!(
+        events,
+        vec![Event::PaneProcessExited(PaneProcessExited {
+            pane_id: pane,
+            exit_code: Some(2),
+        })]
+    );
+    assert_eq!(
+        *session.panes.get(pane).expect("record").lifecycle(),
+        PaneLifecycle::Spawning
+    );
+    assert_eq!(session.tabs[&tab_id].layout(), &LayoutNode::Pane(pane));
+}

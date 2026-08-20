@@ -6,13 +6,11 @@
 //! against its own terminal size, and the attach handler decides whether a
 //! session is fit to attach to before it calls this.
 //!
-//! Both lists are sorted here. Tabs come out in display order (`Tab::index`),
-//! so a client draws its tab bar straight from the list; panes come out by
-//! [`PaneId`](koshi_core::ids::PaneId). Sorting is what makes the payload
-//! deterministic —
-//! [`PaneRegistry`](koshi_pane::registry::PaneRegistry) stores records in a
+//! Both lists are sorted here: tabs in display order (`Tab::index`), panes by
+//! [`PaneId`](koshi_core::ids::PaneId).
+//! [`PaneRegistry`](koshi_pane::registry::PaneRegistry) holds its records in a
 //! [`HashMap`](std::collections::HashMap), whose iteration order varies between
-//! processes.
+//! processes; the sort gives the payload one fixed order.
 
 use koshi_ipc::attach::{AttachedSessionStructureSnapshot, PaneStructure, TabStructure};
 use koshi_session::session::state::Session;

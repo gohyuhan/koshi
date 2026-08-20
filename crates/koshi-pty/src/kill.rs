@@ -42,8 +42,8 @@ use crate::error::PtyError;
 
 /// What became of a request asking a child to exit on its own.
 ///
-/// The caller spends a grace window only when something can act on the request,
-/// so `Unknown` is grouped with `Delivered` rather than with `NotDelivered`.
+/// Callers spend the grace window on `Delivered` and on `Unknown`, and spend
+/// none on `NotDelivered`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopRequest {
     /// The target received the request.
@@ -127,10 +127,9 @@ impl PtyChildKillControl {
 /// Owns a Windows Job Object handle and closes it on drop.
 ///
 /// One of these is created per child, grouping that child and its descendants
-/// so [`tree`] can terminate them together. That per-child job is created
-/// without `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the handle does not
-/// kill members; this keeps [`force`] (child only) and [`tree`] (whole group)
-/// distinct — matching the Unix `kill`/`killpg` split.
+/// so [`tree`] can terminate them together. That per-child job carries no
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing its handle terminates no
+/// member: [`force`] ends the child alone, [`tree`] ends the whole group.
 ///
 /// [`panes_die_with_this_process`] holds one more, with that limit set.
 ///
@@ -204,9 +203,9 @@ fn panes_die_with_this_process() -> Option<HANDLE> {
 
 /// Owns a duplicated handle to the child process and closes it on drop.
 ///
-/// `force` terminates through this handle instead of reopening the PID, so once
-/// the child has exited a recycled PID can never be killed by mistake — the
-/// handle refers to the exact process object, dead or alive.
+/// `force` terminates through this handle rather than reopening the PID. The
+/// handle names the exact process object, dead or alive, so a PID another
+/// process took over after the child exited is never terminated.
 #[cfg(windows)]
 struct OwnedHandle(HANDLE);
 
@@ -269,7 +268,7 @@ impl PtyChildKillControl {
                     detail: "CreateJobObjectW failed".to_string(),
                 });
             }
-            // Own it now so an early return below still closes the handle.
+            // Owned from here on: every return below closes the handle.
             let job = OwnedJob(job);
 
             if AssignProcessToJobObject(job.0, child_handle as HANDLE) == 0 {
@@ -327,21 +326,16 @@ impl PtyChildKillControl {
         Ok(())
     }
 
-    /// Reports that the child cannot be asked to exit on its own; callers go
-    /// straight to [`force`](Self::force).
-    ///
-    /// A console control signal reaches only a process group created by the
-    /// `CREATE_NEW_PROCESS_GROUP` flag, which portable-pty's ConPTY spawn does
-    /// not set, and only processes sharing this process's console, which a
-    /// pseudoconsole child does not.
+    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: the child
+    /// cannot be asked to exit on its own, so callers go straight to
+    /// [`force`](Self::force).
     pub fn request_stop(&self) -> StopRequest {
         StopRequest::NotDelivered
     }
 
-    /// Reports that the child's process group cannot be asked to exit on its
-    /// own; callers go straight to [`tree`](Self::tree).
-    ///
-    /// Shares [`request_stop`](Self::request_stop)'s reason.
+    /// Sends nothing and always answers [`StopRequest::NotDelivered`]: the
+    /// child's process group cannot be asked to exit on its own, so callers go
+    /// straight to [`tree`](Self::tree).
     pub fn request_stop_tree(&self) -> StopRequest {
         StopRequest::NotDelivered
     }

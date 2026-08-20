@@ -2,10 +2,10 @@
 //!
 //! Every pane's child process receives a set of `KOSHI_*` variables naming
 //! the session, client, and pane it lives in, plus the control-socket
-//! address of its session — so a `koshi` CLI run inside the pane can tell it
-//! is in a koshi session and reach the right socket. [`koshi_env`] builds
-//! that set; the spawn paths merge it into the spec's environment overlay
-//! right before launch.
+//! address of its session. A `koshi` CLI run inside the pane reads them to
+//! tell it is in a koshi session and to reach that session's socket.
+//! [`koshi_env`] builds that set; the spawn paths merge it into the spec's
+//! environment overlay right before launch.
 
 use std::collections::BTreeMap;
 use std::path::Path;

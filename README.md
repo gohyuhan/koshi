@@ -25,12 +25,6 @@ process, terminal screen, and scrollback.
 - A terminal with true color and 256-color support
 - Rust 1.96 to build from source
 
-## Description
-
-Koshi is a terminal multiplexer for running several shells and programs inside
-one terminal window. It handles pane layouts, tabs, terminal emulation,
-scrollback, keyboard shortcuts, mouse input, and process cleanup.
-
 ## Why Koshi?
 
 Koshi keeps the core focused on terminal work. Panes, tabs, layouts,
@@ -138,7 +132,7 @@ Remove a script-installed binary:
 sudo rm -f /usr/local/bin/koshi
 ```
 
-Remove all Koshi config, logs, update state, cached data, and runtime files:
+Remove all Koshi config, logs, update state, cache, and runtime files:
 
 ```bash
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/koshi"
@@ -252,7 +246,7 @@ Koshi uses four optional KDL file types. Each present file must declare
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, and session-closing settings |
+| `koshi.kdl` | Theme, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, and environment values |
@@ -321,7 +315,7 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 | `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--client <CLIENT_ID>]` | Open a shell pane |
 | `koshi run [new-pane options] -- <COMMAND>...` | Open a pane running one command |
 | `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
-| `koshi resize-pane --direction <DIRECTION> [--size <CELLS>] [--pane <PANE_ID>]` | Move one pane border |
+| `koshi resize-pane --direction <DIRECTION> [--size <SIZE>] [--pane <PANE_ID>]` | Move one pane border |
 | `koshi focus-pane --pane <PANE_ID> [--client <CLIENT_ID>]` | Focus a pane |
 | `koshi toggle-pane-fullscreen` | Toggle the focused pane's fullscreen view |
 | `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Send text to a pane |
@@ -355,7 +349,7 @@ session id.
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported bindable actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action and its targets |
-| `koshi keys list [--mode <MODE>] [--scope default\|user]` | List active shortcuts |
+| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout]` | List active shortcuts |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source |
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a keybinding file without applying it |

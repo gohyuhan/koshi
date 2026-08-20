@@ -11,8 +11,8 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::solve_with_min;
-use crate::tree::{LayoutChild, LayoutNode, SplitNode};
+use crate::solver::{cell_area, solve_with_min};
+use crate::tree::{split_axis, LayoutChild, LayoutNode, SplitNode};
 
 /// A rejected split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -70,17 +70,16 @@ pub fn split_leaf(
     let slot = result.node_at_mut(&path[..operand_depth]);
     let operand = std::mem::replace(slot, LayoutNode::Pane(new_pane));
 
-    let split_direction = match direction {
-        Direction::Left | Direction::Right => SplitDirection::Horizontal,
-        Direction::Up | Direction::Down => SplitDirection::Vertical,
-    };
     let old = LayoutChild::new(operand);
     let new = LayoutChild::new(LayoutNode::Pane(new_pane));
     let children = match direction {
         Direction::Right | Direction::Down => vec![old, new],
         Direction::Left | Direction::Up => vec![new, old],
     };
-    *slot = LayoutNode::Split(SplitNode::with_equal_weights(split_direction, children));
+    *slot = LayoutNode::Split(SplitNode::with_equal_weights(
+        split_axis(direction),
+        children,
+    ));
     Ok(result)
 }
 
@@ -232,8 +231,8 @@ pub fn remove_pane(
             (overlap > 0 || resized).then_some((id, overlap))
         })
         .collect();
-    // Largest absorbed area first; ties (including zero-overlap resizes)
-    // keep layout order because the sort is stable.
+    // Largest absorbed area first. The sort is stable, so ties (including
+    // zero-overlap resizes) keep layout order.
     absorbers.sort_by_key(|&(_, area)| std::cmp::Reverse(area));
 
     Ok((
@@ -243,12 +242,6 @@ pub fn remove_pane(
             absorbed_by: absorbers.into_iter().map(|(id, _)| id).collect(),
         },
     ))
-}
-
-/// Cell count of `rect` (columns × rows), used to measure how much of the
-/// freed space each surviving pane absorbed.
-fn cell_area(rect: Rect) -> u64 {
-    u64::from(rect.size.cols) * u64::from(rect.size.rows)
 }
 
 /// What happened below while looking for the leaf to remove.

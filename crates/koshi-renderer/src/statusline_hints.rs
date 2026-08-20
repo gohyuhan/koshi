@@ -194,8 +194,7 @@ fn hint_items(hints: &KeymapHints, pending: &[KeyChord]) -> Vec<HintItem> {
             }
         })
         .collect();
-    // Cached: the sort key builds a string, so it is computed once per item
-    // rather than once per comparison.
+    // Pinned hints first, then by modifier group, then by key.
     items.sort_by_cached_key(|item| {
         (
             !item.pinned,
@@ -269,11 +268,12 @@ fn prefix_label(
     count: usize,
     any_user: bool,
 ) -> String {
-    let untouched = !any_user && !removed_under(hints, pending, chord);
-    untouched
-        .then(|| hints.prefix_labels.get(&chord).cloned())
-        .flatten()
-        .unwrap_or_else(|| format!("+{count}"))
+    if !any_user && !removed_under(hints, pending, chord) {
+        if let Some(label) = hints.prefix_labels.get(&chord) {
+            return label.clone();
+        }
+    }
+    format!("+{count}")
 }
 
 fn removed_under(hints: &KeymapHints, pending: &[KeyChord], chord: KeyChord) -> bool {
@@ -308,12 +308,7 @@ fn chord_ribbon(theme: &Theme, chord: KeyChord, label: Option<&str>) -> Line<'st
 }
 
 fn entry_ribbon(entry: &DisplayEntry, key_style: Style, label_style: Style) -> Line<'static> {
-    let keys = entry
-        .keys
-        .iter()
-        .map(|key| human_key(*key))
-        .collect::<Vec<_>>()
-        .join("");
+    let keys: String = entry.keys.iter().map(|key| human_key(*key)).collect();
     Line::from(vec![
         Span::styled(format!(" {keys} "), key_style),
         Span::styled(format!(" {} ", entry.text), label_style),

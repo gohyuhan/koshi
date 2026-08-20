@@ -1,22 +1,20 @@
-//! Forward-declared stand-ins the runtime holds before their real subsystems
-//! exist. Each is replaced in place once its owning crate ships the concrete
-//! type; the runtime field and these names change together at that point.
+//! Stand-ins the runtime holds where a subsystem has no concrete type wired
+//! yet. Each trait here carries no methods, so nothing calls through them.
 
-/// Source of render snapshots for attach. Stand-in until the snapshot type is
-/// built.
+/// Source of render snapshots for attach.
 pub trait SnapshotProvider {}
 
-/// Session persistence backend. Stand-in until the storage layer is built.
+/// Session persistence backend.
 pub trait Storage {}
 
-/// A [`SnapshotProvider`] that holds nothing — the stock service until a real
-/// snapshot source exists, and the one tests use when they build a runtime
-/// without exercising snapshots.
+/// A [`SnapshotProvider`] that holds nothing.
+/// [`Server::resume`](crate::server::Server::resume) builds on it, and tests
+/// use it when they build a runtime without exercising snapshots.
 pub struct NullSnapshotProvider;
 impl SnapshotProvider for NullSnapshotProvider {}
 
-/// A [`Storage`] that persists nothing — the stock service until a real storage
-/// layer exists, and the one tests use when they build a runtime without
-/// exercising persistence.
+/// A [`Storage`] that persists nothing.
+/// [`Server::resume`](crate::server::Server::resume) builds on it, and tests
+/// use it when they build a runtime without exercising persistence.
 pub struct NullStorage;
 impl Storage for NullStorage {}

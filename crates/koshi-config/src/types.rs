@@ -337,10 +337,10 @@ pub struct ModeBindings {
 /// The built-in default binding table: the `normal`-mode set plus the
 /// reserved unlock, quit, and mouse-select in `locked` mode.
 ///
-/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held) — with
-/// ONE owner-chosen exception, the bare `Tab`/`Shift+Tab` tab-switching pair
-/// (2026-07-12): outside locked mode the keymap owns Tab, and a shell sees a
-/// literal Tab only while the client is locked. A later chord in a sequence
+/// Every sequence OPENS with a non-typeable chord (Ctrl or Alt held), with one
+/// exception: the bare `Tab`/`Shift+Tab` tab-switching pair. Outside locked
+/// mode the keymap owns Tab, and a shell sees a literal Tab only while the
+/// client is locked. A later chord in a sequence
 /// may be a plain key, since it is only read while the pending sequence is
 /// live. No opening chord uses `<C-i>`, `<C-m>`, `<C-[>`, or `<C-h>`, which
 /// unix terminals without the kitty keyboard protocol cannot tell apart from
@@ -368,13 +368,12 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
     };
 
     let normal: BTreeMap<KeySequence, BoundAction> = [
-        // Lock — the reserved chord, explicit. It locks here and unlocks in
-        // locked mode, one key both ways, and never moves with the leader so
-        // the escape stays where a locked pane expects it.
+        // Lock — the reserved chord, written literally: it does not move with
+        // the leader. The same chord unlocks in locked mode.
         (reserved(), bound("lock")),
-        // Quit and mouse-select — leader-relative. Mouse-select grabs the
-        // mouse so a drag highlights in koshi even over a program that asked
-        // for it; it is bound in locked mode too.
+        // Quit and mouse-select — leader-relative, and bound in locked mode
+        // too. Mouse-select grabs the mouse: a drag highlights in koshi even
+        // over a program that asked for the mouse itself.
         (seq("<leader>q"), bound("quit")),
         (seq("<leader>g"), bound("mouse-select")),
         // Pane lifecycle, under the leader then `p`. `n` splits in the
@@ -401,10 +400,9 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
         (seq("<leader>s <Right>"), bound("resize-pane-right")),
         // Copy and paste have NO bindings — they follow the OS.
         // Tab lifecycle, under the leader then `t`: `n` opens, `x` closes.
-        // Switching is the bare Tab / Shift+Tab pair — an OWNER-CHOSEN
-        // exception, never leader-relative: outside locked mode the keymap
-        // owns Tab, so a shell sees a literal Tab only while the client is
-        // locked.
+        // Switching is the bare Tab / Shift+Tab pair, written literally and
+        // never leader-relative: outside locked mode the keymap owns Tab, and
+        // a shell sees a literal Tab only while the client is locked.
         (seq("<leader>t n"), bound("new-tab")),
         (seq("<leader>t x"), bound("close-tab")),
         (seq("<Tab>"), bound("next-tab")),
@@ -415,8 +413,7 @@ pub fn default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings>
 
     // Locked mode intercepts exactly its bound chords and passes every other
     // key to the pane: the reserved unlock (the same chord that locks in
-    // normal mode) as the guaranteed escape, plus the quit chord so quitting
-    // works from either side of the lock.
+    // normal mode), the quit chord, and the mouse-select chord.
     let locked: BTreeMap<KeySequence, BoundAction> = [
         (reserved(), bound("unlock")),
         (seq("<leader>q"), bound("quit")),

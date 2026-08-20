@@ -1,5 +1,7 @@
-//! `koshi-pty` — process/PTY backend: `portable-pty` wrapper, shell bootstrap,
-//! PTY read/write/resize, and child process exit detection.
+//! `koshi-pty` — runs a program in a pseudo-terminal and drives it: the
+//! `portable-pty` wrapper, the environment overlay a shell starts with, PTY
+//! read/write/resize, child termination, and exit detection. Panes held by
+//! another process are driven the same way over the supervisor link.
 //!
 //! A PTY (pseudo-terminal) is an OS-level pair of linked file handles that
 //! makes a spawned program (a shell, for example) behave as if it were

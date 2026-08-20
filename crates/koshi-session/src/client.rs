@@ -401,8 +401,7 @@ impl ClientRegistry {
     }
 
     /// Detach the client under `client_id` on disconnect, returning the removed
-    /// [`Client`] so the caller can run teardown and re-reconcile tab sizes.
-    /// `None` if it was not attached.
+    /// [`Client`]. `None` if it was not attached.
     pub fn detach(&mut self, client_id: ClientId) -> Option<Client> {
         self.records.remove(&client_id)
     }
@@ -413,14 +412,12 @@ impl ClientRegistry {
         self.records.insert(client.id, client)
     }
 
-    /// Every attached client. Used to reconcile a tab's effective size across
-    /// all clients viewing it and to fan out per-client work.
+    /// Every attached client, in id order.
     pub fn list_attached(&self) -> impl Iterator<Item = &Client> {
         self.records.values()
     }
 
-    /// Mutable access to every attached client, to fan out per-client view-state
-    /// updates — e.g. re-anchoring pinned views as new output arrives.
+    /// Mutable access to every attached client, in id order.
     pub fn list_attached_mut(&mut self) -> impl Iterator<Item = &mut Client> {
         self.records.values_mut()
     }

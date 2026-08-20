@@ -29,6 +29,40 @@ fn chord(mods: ModFlags, key: char) -> KeyChord {
     KeyChord::new(mods, Key::Char(key))
 }
 
+/// A resolved keymap holding exactly `bindings` in `normal` mode, each sequence
+/// paired with the core action of that name. Nothing else is bound, so a case
+/// the shipped table does not hold can be set up.
+fn keymap_of(bindings: &[(KeySequence, &str)]) -> KeymapHintCatalog {
+    let keys = bindings
+        .iter()
+        .map(|(sequence, action)| {
+            (
+                sequence.clone(),
+                BoundAction {
+                    action: ActionRef::core(action).expect("valid core action name"),
+                    args: ActionArgs::None,
+                },
+            )
+        })
+        .collect();
+    let mut modes = BTreeMap::new();
+    modes.insert(
+        ModeName::new("normal"),
+        ModeBindings {
+            keys,
+            removed: BTreeSet::new(),
+        },
+    );
+    KeymapHintCatalog::from_parts(
+        &[KeyMapLayer {
+            origin: LayerOrigin::Defaults,
+            modes,
+        }],
+        &KeybindingsConfig::default(),
+        &ActionRegistry::new(),
+    )
+}
+
 #[test]
 fn an_unbound_key_passes_through_in_normal_mode() {
     let mut client = client();
@@ -197,6 +231,107 @@ fn a_prefix_only_sequence_never_wakes_the_loop() {
 fn expiring_without_a_deadline_fires_nothing() {
     let mut client = client();
     assert_eq!(client.expire_key_sequence(Instant::now()), None);
+}
+
+#[test]
+fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
+    // `<C-p> <Left>` fires `core:focus-pane-left`, which the action table marks
+    // continuous: the prefix `<C-p>` comes straight back so a second `<Left>`
+    // alone focuses left again, with no second `<C-p>`.
+    let mut client = client();
+    let now = Instant::now();
+    let left = KeyChord::new(ModFlags::NONE, Key::Named(NamedKey::Left));
+    let focus_left = ActionRef::core("focus-pane-left").expect("valid name");
+
+    assert_eq!(
+        client.resolve_key(chord(ModFlags::CTRL, 'p'), now),
+        KeyOutcome::Pending
+    );
+
+    let outcome = client.resolve_key(left, now);
+    let KeyOutcome::Fire(bound) = outcome else {
+        panic!("`<C-p> <Left>` fires focus-pane-left, got {outcome:?}");
+    };
+    assert_eq!(bound.action, focus_left);
+    assert_eq!(
+        client.pending_sequence().map(|s| s.chords().to_vec()),
+        Some(vec![chord(ModFlags::CTRL, 'p')]),
+        "the prefix alone is held again, not the whole sequence"
+    );
+    assert_eq!(
+        client.next_key_wakeup(now),
+        None,
+        "the re-opened prefix waits for its next chord with no deadline"
+    );
+
+    let outcome = client.resolve_key(left, now);
+    let KeyOutcome::Fire(bound) = outcome else {
+        panic!("the bare `<Left>` fires focus-pane-left again, got {outcome:?}");
+    };
+    assert_eq!(bound.action, focus_left);
+}
+
+#[test]
+fn a_one_chord_binding_of_a_continuous_action_opens_no_prefix() {
+    // Only a multi-chord sequence has a prefix to re-open. `<C-y>` on its own
+    // fires `core:focus-pane-left` and leaves the keyboard to the user.
+    let mut client = client();
+    let ctrl_y = chord(ModFlags::CTRL, 'y');
+    client.keymap = keymap_of(&[(KeySequence::from(ctrl_y), "focus-pane-left")]);
+
+    let outcome = client.resolve_key(ctrl_y, Instant::now());
+
+    let KeyOutcome::Fire(bound) = outcome else {
+        panic!("`<C-y>` fires focus-pane-left, got {outcome:?}");
+    };
+    assert_eq!(
+        bound.action,
+        ActionRef::core("focus-pane-left").expect("valid name")
+    );
+    assert_eq!(client.pending_sequence(), None);
+}
+
+#[test]
+fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
+    // `<C-y>` binds `core:quit` and also opens `<C-y> a`. The viewer cannot
+    // know which the user meant until the deadline passes, and then the
+    // complete binding is the answer.
+    let mut client = client();
+    let ctrl_y = chord(ModFlags::CTRL, 'y');
+    client.keymap = keymap_of(&[
+        (KeySequence::from(ctrl_y), "quit"),
+        (
+            KeySequence::new(ctrl_y, vec![chord(ModFlags::NONE, 'a')]),
+            "new-tab",
+        ),
+    ]);
+    let timeout = client.keymap.chord_timeout();
+    let now = Instant::now();
+
+    assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
+    assert_eq!(
+        client.next_key_wakeup(now),
+        Some(timeout),
+        "the ambiguity arms a deadline one chord timeout out"
+    );
+    assert_eq!(
+        client.expire_key_sequence(now),
+        None,
+        "nothing fires before the deadline"
+    );
+
+    let due = now + timeout;
+    let bound = client
+        .expire_key_sequence(due)
+        .expect("the deadline fires the complete binding");
+
+    assert_eq!(bound.action, ActionRef::core("quit").expect("valid name"));
+    assert_eq!(client.pending_sequence(), None, "the sequence is spent");
+    assert_eq!(
+        client.next_key_wakeup(due),
+        None,
+        "and it wakes the loop no more"
+    );
 }
 
 #[test]
