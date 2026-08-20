@@ -895,6 +895,71 @@ fn a_shared_directory_that_cannot_be_read_holds_no_session() {
 
 #[cfg(unix)]
 #[test]
+fn an_absent_runtime_dir_skips_no_shared_subdirectory() {
+    // A user with no runtime directory holds no session, so every
+    // subdirectory of the shared directory — this user's uid included —
+    // yields its rows.
+    use std::os::unix::fs::MetadataExt;
+
+    let shared = test_runtime_dir("shared-absent-runtime-base");
+    let own = std::fs::metadata(&shared)
+        .expect("read the shared directory")
+        .uid();
+    let theirs = SessionId::new();
+    let user_dir = shared.join(own.to_string());
+    std::fs::create_dir_all(&user_dir).expect("create a user's directory");
+    std::fs::write(user_dir.join(format!("{theirs}.sock")), b"").expect("plant a socket");
+
+    assert_eq!(
+        foreign_sessions(&shared, &shared.join("no-runtime-dir-here")),
+        vec![(
+            theirs,
+            koshi_ipc::endpoint::shared_socket_addr(&user_dir, theirs)
+        )],
+    );
+
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runtime_dir_with_an_unreadable_owner_yields_no_foreign_session() {
+    // The owner of a runtime directory that cannot be read leaves this
+    // user's subdirectory unknown, so the walk yields nothing.
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let shared = test_runtime_dir("shared-owner-unreadable-base");
+    let own = std::fs::metadata(&shared)
+        .expect("read the shared directory")
+        .uid();
+    if own == 0 {
+        eprintln!(
+            "skipped `a_runtime_dir_with_an_unreadable_owner_yields_no_foreign_session`: \
+             root reads through a mode-000 directory"
+        );
+        let _ = std::fs::remove_dir_all(&shared);
+        return;
+    }
+    let theirs = SessionId::new();
+    let user_dir = shared.join((own + 1).to_string());
+    std::fs::create_dir_all(&user_dir).expect("create the other user's directory");
+    std::fs::write(user_dir.join(format!("{theirs}.sock")), b"").expect("plant their socket");
+
+    let parent = test_runtime_dir("shared-owner-unreadable-parent");
+    let runtime_dir = parent.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("create the runtime directory");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
+        .expect("make the parent unsearchable");
+
+    assert_eq!(foreign_sessions(&shared, &runtime_dir), Vec::new());
+
+    let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_dir_all(&parent);
+    let _ = std::fs::remove_dir_all(&shared);
+}
+
+#[cfg(unix)]
+#[test]
 fn entries_another_user_planted_that_name_no_session_are_passed_over() {
     // Every local user may create an entry in the shared directory, so the
     // walk meets whatever any of them names. Only a `session-<uuid>.sock`

@@ -15,9 +15,6 @@ use thiserror::Error;
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Direction;
 
-/// Diagnostics for application state. The module is empty.
-pub mod state;
-
 /// A configuration value the user must correct, naming the file and key.
 #[derive(Debug, Error, Diagnostic)]
 #[error("invalid config at {path}: key `{key}` {reason}")]

@@ -23,6 +23,7 @@
 //! operating system's own and carries no timeout, so it sits outside the
 //! deadline.
 
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,7 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use sha2::{Digest, Sha256};
 
 use crate::error::IpcError;
+use crate::transport::waited_out;
 
 /// How large a helping of raw bytes [`TlsReader`] takes off the socket at a
 /// time.
@@ -91,6 +93,7 @@ pub fn split_tls(conn: rustls::Connection, sock: TcpStream) -> io::Result<(TlsRe
             conn: Arc::clone(&shared),
             sock: read_sock,
             deadline: None,
+            raw: Box::new([0u8; RAW_CHUNK]),
         },
         TlsWriter {
             conn: shared,
@@ -100,9 +103,18 @@ pub fn split_tls(conn: rustls::Connection, sock: TcpStream) -> io::Result<(TlsRe
     ))
 }
 
+/// Store `deadline` on the half and, when it is `None`, clear both socket
+/// timeouts so every later socket call blocks for as long as it takes.
+fn store_deadline(sock: &TcpStream, slot: &mut Option<Instant>, deadline: Option<Instant>) {
+    *slot = deadline;
+    if deadline.is_none() {
+        let _ = sock.set_read_timeout(None);
+        let _ = sock.set_write_timeout(None);
+    }
+}
+
 /// The reading half of a TLS stream: plaintext out of the encrypted bytes the
 /// peer sends.
-#[derive(Debug)]
 pub struct TlsReader {
     /// The encryption state, shared with the writing half.
     conn: Arc<Mutex<rustls::Connection>>,
@@ -111,6 +123,19 @@ pub struct TlsReader {
     /// When every read this half has left must be finished by, or `None` to
     /// block for as long as it takes.
     deadline: Option<Instant>,
+    /// The buffer each socket read lands in before decryption, allocated once
+    /// for the half's lifetime.
+    raw: Box<[u8; RAW_CHUNK]>,
+}
+
+impl fmt::Debug for TlsReader {
+    /// Writes the half without its read buffer's bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsReader")
+            .field("sock", &self.sock)
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TlsReader {
@@ -121,11 +146,7 @@ impl TlsReader {
     /// away clears the timeouts already on the socket, so every read after it
     /// blocks for as long as it takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        self.deadline = deadline;
-        if deadline.is_none() {
-            let _ = self.sock.set_read_timeout(None);
-            let _ = self.sock.set_write_timeout(None);
-        }
+        store_deadline(&self.sock, &mut self.deadline, deadline);
     }
 }
 
@@ -142,7 +163,6 @@ impl Read for TlsReader {
     /// until that deadline, and [`io::ErrorKind::TimedOut`] ends the read once
     /// no time is left.
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut raw = [0u8; RAW_CHUNK];
         loop {
             {
                 let mut conn = self.conn.lock().expect("tls connection");
@@ -155,9 +175,9 @@ impl Read for TlsReader {
             set_timeouts_until(&self.sock, self.deadline)?;
             // The socket read blocks with no lock held, so the writing half
             // keeps working while this half waits.
-            let filled = self.sock.read(&mut raw)?;
+            let filled = self.sock.read(&mut self.raw[..])?;
             let mut conn = self.conn.lock().expect("tls connection");
-            conn.read_tls(&mut &raw[..filled])?;
+            conn.read_tls(&mut &self.raw[..filled])?;
             conn.process_new_packets()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             while conn.wants_write() {
@@ -189,11 +209,7 @@ impl TlsWriter {
     /// the deadline away clears the timeouts already on the socket, so every
     /// write after it blocks for as long as it takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        self.deadline = deadline;
-        if deadline.is_none() {
-            let _ = self.sock.set_read_timeout(None);
-            let _ = self.sock.set_write_timeout(None);
-        }
+        store_deadline(&self.sock, &mut self.deadline, deadline);
     }
 }
 
@@ -294,16 +310,6 @@ pub fn handshake(
         }
     }
     Ok(())
-}
-
-/// Whether `error` is a socket read or write timeout. Unix reports one as
-/// [`WouldBlock`](io::ErrorKind::WouldBlock), Windows as
-/// [`TimedOut`](io::ErrorKind::TimedOut).
-fn waited_out(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
 }
 
 /// The sha256 of one certificate's DER bytes, as 64 lowercase hex characters.

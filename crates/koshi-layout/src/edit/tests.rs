@@ -127,7 +127,7 @@ fn split_result_still_tiles_the_tab() {
     let tree = pair(SplitDirection::Horizontal, a, b);
     let split = split_leaf(&tree, a, new, Direction::Down).unwrap();
 
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 });
+    let tab = Rect::at_origin(Size { cols: 80, rows: 24 });
     let result = solve(&split, tab);
     assert_all_space_occupied(&result.panes, tab).unwrap();
     assert_no_overlap(&result.panes).unwrap();
@@ -136,7 +136,7 @@ fn split_result_still_tiles_the_tab() {
 
 /// Returns a standard test tab size: 80 columns × 24 rows at origin (0, 0).
 fn tab() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
+    Rect::at_origin(Size { cols: 80, rows: 24 })
 }
 
 /// Verifies that a solved layout completely tiles the tab with no gaps, overlaps, or panes outside bounds.
@@ -278,7 +278,7 @@ fn absorbed_by_keeps_layout_order_on_an_exact_tie() {
         SplitDirection::Horizontal,
         vec![leaf(a), leaf(x), leaf(b)],
     ));
-    let wide = Rect::new(Point { x: 0, y: 0 }, Size { cols: 90, rows: 24 });
+    let wide = Rect::at_origin(Size { cols: 90, rows: 24 });
 
     // Three even 30-column panes; removing the middle one leaves a 50/50
     // split where both survivors absorb exactly 15 of its freed columns —
@@ -292,23 +292,17 @@ fn absorbed_by_keeps_layout_order_on_an_exact_tie() {
 fn remove_pane_measures_the_freed_rect_against_the_given_min() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 12, rows: 24 });
+    let tab = Rect::at_origin(Size { cols: 12, rows: 24 });
 
     // Under the default floor both panes fit, so `a` freed only its half.
     let (_, small) = remove_pane(&tree, tab, a, MIN_PANE_SIZE).unwrap();
-    assert_eq!(
-        small.old_rect,
-        Rect::new(Point { x: 0, y: 0 }, Size { cols: 6, rows: 24 })
-    );
+    assert_eq!(small.old_rect, Rect::at_origin(Size { cols: 6, rows: 24 }));
 
     // An 8-column floor needs ten bordered columns per pane, so `b` is
     // suppressed and `a` owned the whole tab — its freed rect is the full width.
     // Fails if remove_pane ignores `min`.
     let (_, large) = remove_pane(&tree, tab, a, Size { cols: 8, rows: 1 }).unwrap();
-    assert_eq!(
-        large.old_rect,
-        Rect::new(Point { x: 0, y: 0 }, Size { cols: 12, rows: 24 })
-    );
+    assert_eq!(large.old_rect, Rect::at_origin(Size { cols: 12, rows: 24 }));
 }
 
 #[test]
@@ -320,7 +314,7 @@ fn removing_a_suppressed_pane_reports_a_zero_area_old_rect() {
     ));
     // Three bordered panes need twelve columns; nine fits only a and b, so
     // c solves to a zero-area suppressed rect before removal.
-    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 9, rows: 24 });
+    let narrow = Rect::at_origin(Size { cols: 9, rows: 24 });
 
     let (removed, info) = remove_pane(&tree, narrow, c, MIN_PANE_SIZE).unwrap();
     assert_eq!(removed.leaf_panes(), [a, b]);
@@ -465,13 +459,10 @@ fn close_all_but_one_in_order(order: &[usize], keep_index: usize) {
 
     let panes: Vec<PaneId> = (0..51).map(|_| PaneId::new()).collect();
     let mut tree = deep_alternating(&panes);
-    let big = Rect::new(
-        Point { x: 0, y: 0 },
-        Size {
-            cols: 1000,
-            rows: 1000,
-        },
-    );
+    let big = Rect::at_origin(Size {
+        cols: 1000,
+        rows: 1000,
+    });
     let mut live: HashSet<PaneId> = panes.iter().copied().collect();
 
     for &index in order {
@@ -722,13 +713,10 @@ fn a_removal_leaves_every_surviving_child_with_its_own_weight() {
         SizeWeight::new(SizeConstraint::Flex(3)),
     ];
     let tree = LayoutNode::Split(row);
-    let wide = Rect::new(
-        Point { x: 0, y: 0 },
-        Size {
-            cols: 100,
-            rows: 24,
-        },
-    );
+    let wide = Rect::at_origin(Size {
+        cols: 100,
+        rows: 24,
+    });
 
     let (removed, _) = remove_pane(&tree, wide, b, MIN_PANE_SIZE).unwrap();
     let LayoutNode::Split(row) = &removed else {

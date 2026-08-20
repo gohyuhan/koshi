@@ -367,7 +367,9 @@ pub fn shared_base() -> Option<PathBuf> {
 ///
 /// A session is counted by its file name alone; whether anything still
 /// listens behind it is the caller's probe to make. An unreadable directory
-/// reads as no sessions.
+/// reads as no sessions. A `runtime_dir` that does not exist holds no
+/// sessions of this user's, so no subdirectory is skipped; one whose owner
+/// cannot be read reads as no sessions.
 #[must_use]
 pub fn foreign_sessions(shared_base: &Path, runtime_dir: &Path) -> Vec<(SessionId, String)> {
     let Ok(entries) = std::fs::read_dir(shared_base) else {
@@ -378,12 +380,25 @@ pub fn foreign_sessions(shared_base: &Path, runtime_dir: &Path) -> Vec<(SessionI
     {
         use std::os::unix::fs::MetadataExt;
 
-        let own_subdir = std::fs::metadata(runtime_dir)
-            .map(|dir| dir.uid().to_string())
-            .ok();
+        let own_subdir = match std::fs::metadata(runtime_dir) {
+            Ok(dir) => Some(dir.uid().to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the runtime directory's owner could not be read; \
+                     the shared sessions are not listed"
+                );
+                return Vec::new();
+            }
+        };
         entries
             .filter_map(Result::ok)
-            .filter(|entry| Some(entry.file_name().to_string_lossy().into_owned()) != own_subdir)
+            .filter(|entry| {
+                own_subdir
+                    .as_deref()
+                    .is_none_or(|own| entry.file_name().to_string_lossy() != own)
+            })
             .flat_map(|entry| sockets_in(&entry.path()))
             .filter(|(id, _)| !advertised.contains(id))
             .collect()

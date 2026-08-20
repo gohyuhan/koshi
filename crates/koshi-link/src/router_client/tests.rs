@@ -17,18 +17,7 @@ use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{router_socket_addr, RouterHandshake, RouterResponse};
 use koshi_ipc::transport::Listener;
-use tempfile::TempDir;
-
-/// A fresh directory to stand in for the runtime dir, under a short base so
-/// the Unix socket path stays inside the OS path-length cap. Removed when the
-/// test drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// How the stand-in router answers the caller.
 enum Script {

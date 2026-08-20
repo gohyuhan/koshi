@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use koshi_core::command::{Selection, SelectionKind};
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::content_rects;
@@ -132,7 +132,7 @@ impl Server {
                     pane_id,
                     rect,
                     inner_rect,
-                    kind: record.map_or(PaneKind::Terminal, |record| record.kind().clone()),
+                    kind: record.map_or(PaneKind::Terminal, |record| *record.kind()),
                     visible: inner_rect.is_some(),
                     suppressed: suppressed.contains(&pane_id),
                     dead: record.is_some_and(|record| {
@@ -355,12 +355,7 @@ fn shorten_home(path: &std::path::Path, home: Option<&str>) -> String {
 /// and whether a pane is zoomed is a fact about one client's view. Two clients
 /// on this tab can pass different modes for the same tree in the same frame.
 pub(crate) fn solve_tab(tab: &Tab, mode: LayoutMode, viewport: Size, min: Size) -> SolveResult {
-    solve_with_mode_min(
-        tab.layout(),
-        mode,
-        Rect::new(Point { x: 0, y: 0 }, viewport),
-        min,
-    )
+    solve_with_mode_min(tab.layout(), mode, Rect::at_origin(viewport), min)
 }
 
 /// Cut `selection` down to the rows this frame shows, as a column range per

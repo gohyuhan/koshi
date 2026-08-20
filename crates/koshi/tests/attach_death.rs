@@ -44,6 +44,8 @@ use koshi_ipc::protocol::{
 #[cfg(unix)]
 use koshi_ipc::router::router_endpoint_path;
 use koshi_ipc::transport::Connection;
+use koshi_test_support::fixtures::test_runtime_dir;
+#[cfg(unix)]
 use tempfile::TempDir;
 
 mod common;
@@ -61,17 +63,6 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 /// The display name the session server is started under, standing in for the
 /// one the router generates.
 const SESSION_NAME: &str = "workspace";
-
-/// A fresh directory to serve, under a short base so the Unix socket path
-/// stays inside the operating system's path-length cap. Removed when the test
-/// drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
 
 /// A session server the test started. Dropping it ends that server, so a
 /// failed assertion leaves nothing running.

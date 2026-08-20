@@ -59,7 +59,9 @@ use koshi_ipc::remote_wire::{
 };
 use koshi_ipc::router::SessionSelector;
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
-use koshi_ipc::transport::{Connection, RawReader, RawWriter, ReadCloser, MAX_FRAME_LEN};
+use koshi_ipc::transport::{
+    Connection, Deadlined, RawReader, RawWriter, ReadCloser, MAX_FRAME_LEN,
+};
 
 use crate::router::RouterEvent;
 
@@ -553,8 +555,8 @@ fn serve_admitted(
 /// `None` means the connection is finished: it hung up, it sent something this
 /// loop does not serve, or its attach was refused.
 fn admitted_frames(
-    reader: &mut TlsReader,
-    writer: &mut TlsWriter,
+    reader: &mut impl Read,
+    writer: &mut (impl Write + Deadlined),
     admitted: &Admitted,
     admissions: &Sender<RouterEvent>,
 ) -> Option<PathBuf> {
@@ -768,7 +770,7 @@ fn ask<T>(
 /// holds with [`REFUSAL_WINDOW`] counted from now.
 ///
 /// A write that fails is dropped.
-fn refuse(writer: &mut TlsWriter) {
+fn refuse(writer: &mut (impl Write + Deadlined)) {
     writer.set_deadline(Some(Instant::now() + REFUSAL_WINDOW));
     let _ = send_frame(
         writer,

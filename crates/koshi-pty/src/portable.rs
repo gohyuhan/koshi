@@ -1847,6 +1847,14 @@ impl PortablePtyBackend {
             .collect()
     }
 
+    /// The process id of `pane`'s child, or `None` when this backend does not
+    /// hold that pane.
+    #[must_use]
+    pub fn child_pid(&self, pane: PaneId) -> Option<u32> {
+        let panes = self.panes.lock().unwrap();
+        panes.get(&pane).map(|entry| entry.killer.pid())
+    }
+
     /// Take a pane back from a terminal descriptor and a child process id, as
     /// the process image that replaced another one does.
     ///

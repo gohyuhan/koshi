@@ -84,7 +84,7 @@ impl Server {
         let new_pane_id = PaneId::new();
         let new_tab_id = TabId::new();
         let candidate = LayoutNode::Pane(new_pane_id);
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let tab_rect = Rect::at_origin(viewport);
         if !fits(&candidate, tab_rect, pane_min) {
             return Err(Rejection::new(
                 RejectReason::MinSize,

@@ -3,6 +3,3 @@
 
 /// The `PtyBackend` trait and the `PtyHandle` struct.
 pub mod state;
-
-#[cfg(test)]
-mod tests;

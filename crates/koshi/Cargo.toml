@@ -34,8 +34,8 @@ koshi-runtime = { version = "0.2.0", path = "../koshi-runtime" }
 koshi-storage = { version = "0.2.0", path = "../koshi-storage" }
 tracing = "0.1.44"
 clap = { version = "4.6.1", features = ["derive"] }
-uuid = "1.23.4"
-serde_json = "1.0.150"
+uuid.workspace = true
+serde_json.workspace = true
 serde = "1.0.228"
 koshi-terminal = { version = "0.2.0", path = "../koshi-terminal" }
 ureq = "3.3.0"
@@ -47,7 +47,7 @@ tar = "0.4.46"
 # non-permissive transitive licenses. `deflate-flate2` reuses the flate2
 # already pulled for tar.gz.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
-tempfile = "3.27.0"
+tempfile.workspace = true
 fs4 = "1.1.0"
 
 [target."cfg(unix)".dependencies]

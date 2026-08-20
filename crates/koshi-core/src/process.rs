@@ -126,6 +126,18 @@ impl SpawnSpec {
         #[cfg(not(windows))]
         let program = shell_program(std::env::var_os("SHELL"), "/bin/sh");
 
+        SpawnSpec::shell(program, cwd, env)
+    }
+
+    /// Build a spec that launches `program` as an interactive shell with no
+    /// arguments. `shell_kind` is derived from the program's file name, so
+    /// the pair can never disagree.
+    #[must_use]
+    pub fn shell(
+        program: PathBuf,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> SpawnSpec {
         let shell_kind = ShellKind::from_program(&program);
         SpawnSpec {
             program,

@@ -188,12 +188,7 @@ fn remote_census(arg: &ServerArg, rows: Vec<RemoteSessionRow>) -> Discovered {
             }
         }
     }
-    found.sessions.sort_by(|a, b| {
-        a.session
-            .name
-            .cmp(&b.session.name)
-            .then(a.session.id.cmp(&b.session.id))
-    });
+    found.sort_sessions();
     found
 }
 

@@ -47,9 +47,9 @@ use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
     ClientSnapshot, MousePane, PaneKind, PaneSlot, SessionSnapshot, TabMeta, TabSnapshot,
 };
-use tempfile::TempDir;
 
 use super::*;
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
 /// unlocked. [`classify`] reads the frame's variant and nothing inside it.
@@ -156,17 +156,6 @@ fn a_line_that_is_not_a_listed_number_is_refused() {
         );
         assert_eq!(CliExitCode::from(&error), CliExitCode::UsageOrConfig);
     }
-}
-
-/// A fresh directory to stand in for the runtime dir, under a short base so
-/// the Unix socket path stays inside the OS path-length cap. Removed when the
-/// test drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
 }
 
 /// A stand-in router that records the name of every request it is asked. It
@@ -2868,7 +2857,7 @@ fn a_screen_with_no_frame_yet_draws_nothing() {
     screen.refresh(&client, Some(TabId::new()));
 
     assert_eq!(screen.shown, None);
-    assert_eq!(screen.last_painted, None);
+    assert_eq!(screen.last_snapshot, None);
 }
 
 #[test]

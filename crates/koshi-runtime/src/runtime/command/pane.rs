@@ -107,7 +107,7 @@ impl Server {
         // its siblings. Fit passed above, so the new pane has a real content
         // rect; a solve that still gives it no area rejects defensively,
         // before any mutation.
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let tab_rect = Rect::at_origin(viewport);
         let rects = content_rects(&solve_with_mode_min(
             &candidate,
             LayoutMode::Tiled,
@@ -237,10 +237,7 @@ impl Server {
 
         // Solve the tab against a deterministic viewport so focus candidates
         // rank geometrically even when no client currently views the tab.
-        let tab_rect = Rect::new(
-            Point { x: 0, y: 0 },
-            Self::close_viewport(session, target.tab_id),
-        );
+        let tab_rect = Rect::at_origin(Self::close_viewport(session, target.tab_id));
 
         // Closing drops the zoom of the client that closed, and of that client
         // only: the tab it edited is the tiled one it now returns to. A client
@@ -430,7 +427,7 @@ impl Server {
 
         // Solve the tab against a deterministic viewport so focus repair ranks
         // candidates geometrically even when no client currently views the tab.
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, Self::close_viewport(session, tab_id));
+        let tab_rect = Rect::at_origin(Self::close_viewport(session, tab_id));
 
         // Apply the exit policy: `PaneProcessExited`, then either the removal
         // cascade (`CloseOnExit`) or a lifecycle advance to `Spawning`
@@ -504,7 +501,7 @@ impl Server {
 
         let pane_min = self.effective_pane_min();
         let (session, viewport) = self.session_and_viewport(target.session_id, target.tab_id)?;
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let tab_rect = Rect::at_origin(viewport);
         let tab = session
             .tabs
             .get_mut(&target.tab_id)
@@ -633,7 +630,7 @@ impl Server {
 
         // Solve the tab as this client will display it: a pane suppressed for
         // lack of space cannot take focus.
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let tab_rect = Rect::at_origin(viewport);
         let solved = solve_with_mode_min(tab.layout(), effective_mode, tab_rect, pane_min);
         if solved.suppressed.contains(&target.pane_id) {
             return Err(Rejection::new(
@@ -753,7 +750,7 @@ impl Server {
                 let mode = LayoutMode::Fullscreen {
                     focused: target.pane_id,
                 };
-                let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+                let tab_rect = Rect::at_origin(viewport);
                 let solved = solve_with_mode_min(tab.layout(), mode, tab_rect, pane_min);
                 if solved.suppressed.contains(&target.pane_id) {
                     return Err(Rejection::new(
@@ -921,7 +918,7 @@ impl Server {
         // The chosen viewport, paired with the client designated for it, unless
         // `candidate` does not fit that viewport.
         let admit = |viewport: Size, designated: Option<ClientId>| {
-            if fits(candidate, Rect::new(Point { x: 0, y: 0 }, viewport), min) {
+            if fits(candidate, Rect::at_origin(viewport), min) {
                 Ok((viewport, designated))
             } else {
                 Err(Rejection::new(
@@ -948,7 +945,7 @@ impl Server {
             // every client that will view the tab.
             let designated = pane_viewport(client.viewport());
             let viewport = match existing {
-                Some(existing) => min_size(existing, designated),
+                Some(existing) => existing.min_axes(designated),
                 None => designated,
             };
             return admit(viewport, Some(client_id));
@@ -987,7 +984,7 @@ impl Server {
                     .clients
                     .list_attached()
                     .map(|client| pane_viewport(client.viewport()))
-                    .reduce(min_size)
+                    .reduce(Size::min_axes)
             })
             .unwrap_or(Size { cols: 80, rows: 24 })
     }

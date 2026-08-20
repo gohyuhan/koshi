@@ -39,11 +39,11 @@ use koshi_core::{
         Event, InputMode, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PtyResized, RejectReason, SelectionChanged,
     },
-    geometry::{Direction, Point, Rect, Size},
+    geometry::{Direction, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
-    process::{ExitStatus, KillPolicy, PtySize, ShellKind, SpawnSpec},
+    process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
 };
 use koshi_layout::{
     content::content_rects,
@@ -79,7 +79,7 @@ use koshi_session::session::{
 /// rect.
 pub(crate) fn size_root_pane(pane_id: PaneId, viewport: Size, min: Size) -> PtySize {
     let candidate = LayoutNode::Pane(pane_id);
-    let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+    let tab_rect = Rect::at_origin(viewport);
     let rects = content_rects(&solve_with_min(&candidate, tab_rect, min));
     let rect = rects
         .iter()
@@ -100,7 +100,7 @@ pub(crate) fn pane_spawn_sizes(
     viewport: Size,
     min: Size,
 ) -> Vec<(PaneId, PtySize)> {
-    let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+    let tab_rect = Rect::at_origin(viewport);
     content_rects(&solve_with_min(layout, tab_rect, min))
         .into_iter()
         .map(|(pane, content)| (pane, compute_pty_size(content.unwrap_or(tab_rect))))
@@ -115,15 +115,6 @@ fn span_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> u16 {
     let start = a_start.max(b_start);
     let end = (a_start + a_len).min(b_start + b_len);
     end.saturating_sub(start)
-}
-
-/// The per-axis smaller of two sizes: the smaller column count and the smaller
-/// row count, each taken on its own. `80x24` and `100x10` give `80x10`.
-fn min_size(a: Size, b: Size) -> Size {
-    Size {
-        cols: a.cols.min(b.cols),
-        rows: a.rows.min(b.rows),
-    }
 }
 
 /// The tab named by the first [`Event::TabFocused`] in `events`, or `None` when
@@ -440,17 +431,7 @@ impl Server {
     ) -> SpawnSpec {
         let env = self.terminal_identity_env(env);
         match &self.config.terminal.default_shell {
-            Some(program) => {
-                let program = PathBuf::from(program);
-                let shell_kind = ShellKind::from_program(&program);
-                SpawnSpec {
-                    program,
-                    args: Vec::new(),
-                    cwd,
-                    env,
-                    shell_kind,
-                }
-            }
+            Some(program) => SpawnSpec::shell(PathBuf::from(program), cwd, env),
             None => SpawnSpec::default_shell(cwd, env),
         }
     }
@@ -705,7 +686,7 @@ impl Server {
         let Some(tab) = session.tabs.get(&tab_id) else {
             return Vec::new();
         };
-        let tab_rect = Rect::new(Point { x: 0, y: 0 }, viewport);
+        let tab_rect = Rect::at_origin(viewport);
 
         // One solve per viewer, each in that client's own layout mode.
         let per_viewer: Vec<Vec<(PaneId, Option<Rect>)>> = session
@@ -742,7 +723,7 @@ impl Server {
                 };
                 let entry = smallest.entry(pane_id).or_insert(Some(rect));
                 *entry = Some(match *entry {
-                    Some(current) => Rect::new(current.origin, min_size(current.size, rect.size)),
+                    Some(current) => Rect::new(current.origin, current.size.min_axes(rect.size)),
                     None => rect,
                 });
             }

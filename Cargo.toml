@@ -33,3 +33,9 @@ members = [
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
+
+[workspace.dependencies]
+proptest = "1.11.0"
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+tempfile = "3.27.0"
+uuid = { version = "1.24.0", features = ["v7", "serde"] }

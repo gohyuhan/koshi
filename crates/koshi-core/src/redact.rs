@@ -13,12 +13,9 @@ use std::ops::Range;
 pub const REDACTED: &str = "***";
 
 /// Case-insensitive key fragments that mark an environment variable as sensitive.
-/// A key is redacted if it *contains* any of these.
+/// A key is redacted if it *contains* any of these. `KOSHI_CONTEXT_TOKEN`, the
+/// in-session capability token, is covered by the `TOKEN` fragment.
 const SENSITIVE_KEY_FRAGMENTS: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH"];
-
-/// The in-session capability token. Redacted by this exact name, and by the
-/// `TOKEN` fragment in [`SENSITIVE_KEY_FRAGMENTS`].
-const ALWAYS_HIDDEN_KEY: &str = "KOSHI_CONTEXT_TOKEN";
 
 /// An environment value after redaction. A `Hidden` value never reveals its
 /// contents in any format; a `Visible` value carries a non-sensitive value through.
@@ -71,9 +68,6 @@ impl std::fmt::Debug for Marker {
 /// True if `key` names a sensitive environment variable and must be redacted.
 fn is_sensitive_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    if upper == ALWAYS_HIDDEN_KEY {
-        return true;
-    }
     SENSITIVE_KEY_FRAGMENTS
         .iter()
         .any(|fragment| upper.contains(fragment))

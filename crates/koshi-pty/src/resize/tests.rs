@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use koshi_core::geometry::{Point, Size};
+use koshi_core::geometry::Size;
 use koshi_core::process::{KillPolicy, SpawnSpec};
 
 use super::*;
@@ -16,7 +16,7 @@ use crate::error::PtyError;
 
 /// A content rect at the origin — only the size matters to resize.
 fn rect(cols: u16, rows: u16) -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols, rows })
+    Rect::at_origin(Size { cols, rows })
 }
 
 /// A [`PtyBackend`] that records every `resize` and can be told to fail one

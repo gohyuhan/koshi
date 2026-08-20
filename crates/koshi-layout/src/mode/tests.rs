@@ -1,6 +1,6 @@
 //! Tests for layout modes: fullscreen and tiled.
 
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Rect, Size, SplitDirection};
 
 use super::*;
 use crate::solver::{solve, solve_with_mode};
@@ -11,7 +11,7 @@ fn leaf(pane: PaneId) -> LayoutChild {
 }
 
 fn tab() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
+    Rect::at_origin(Size { cols: 80, rows: 24 })
 }
 
 /// Builds a test layout: horizontal split with `a` on the left and two vertically-stacked panes (`b` over `c`) on the right.
@@ -131,7 +131,7 @@ fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
         SplitDirection::Horizontal,
         vec![leaf(a), leaf(b)],
     ));
-    let tiny = Rect::new(Point { x: 0, y: 0 }, Size { cols: 1, rows: 1 });
+    let tiny = Rect::at_origin(Size { cols: 1, rows: 1 });
 
     let result = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, tiny);
     assert_eq!(result.suppressed, [a]);
@@ -150,12 +150,12 @@ fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
         vec![leaf(a), leaf(b)],
     ));
 
-    let cramped = Rect::new(Point { x: 0, y: 0 }, Size { cols: 3, rows: 2 });
+    let cramped = Rect::at_origin(Size { cols: 3, rows: 2 });
     let suppressed = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, cramped);
     assert_eq!(suppressed.suppressed, [a]);
     assert!(suppressed.all_suppressed);
 
-    let snug = Rect::new(Point { x: 0, y: 0 }, Size { cols: 4, rows: 3 });
+    let snug = Rect::at_origin(Size { cols: 4, rows: 3 });
     let shown = solve_with_mode(&tree, LayoutMode::Fullscreen { focused: a }, snug);
     assert!(shown.suppressed.is_empty());
     assert!(!shown.all_suppressed);

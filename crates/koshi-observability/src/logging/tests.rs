@@ -213,6 +213,32 @@ fn session_log_writer_creates_parent_then_appends_each_write() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// A `logs/` directory removed between writes comes back on the next line: the
+// failed open triggers one recreate-and-retry.
+#[test]
+fn session_log_writer_recreates_a_logs_directory_removed_mid_session() {
+    use std::io::Write as _;
+
+    let dir = std::env::temp_dir().join(format!("koshi-writer-regrow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("logs").join("koshi-log-writer.log");
+
+    let mut writer = SessionLogWriter { path: path.clone() };
+    let first = writer
+        .write(b"line one\n")
+        .expect("first write creates the file");
+    std::fs::remove_dir_all(dir.join("logs")).expect("remove the logs directory");
+    let second = writer
+        .write(b"line two\n")
+        .expect("the write after the removal recreates the directory");
+    assert_eq!(first, 9, "write reports the byte count it accepted");
+    assert_eq!(second, 9);
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"line two\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // The capture writer records raw bytes, `contents` returns them verbatim, and
 // `lines` splits on newlines; flush reports success without touching the buffer.
 #[test]

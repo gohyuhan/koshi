@@ -90,7 +90,7 @@ impl Server {
             .session_for_client(client_id)
             .and_then(|session| session.clients.get(client_id))
             .map(koshi_session::client::Client::lock_mode);
-        if !mode.is_some_and(transparent) {
+        if !mode.is_some_and(LockMode::passes_to_pane) {
             return;
         }
         let Some(pane_id) = self.typed_pane(client_id) else {
@@ -217,12 +217,3 @@ impl Server {
 
 #[cfg(test)]
 mod tests;
-
-/// Whether input that binds nothing reaches the pane. Normal and locked mode
-/// pass what they do not bind; the modal layers own the keyboard while they
-/// are held and discard it. A host paste is gated the same way — pasted text is
-/// input for the pane, and a mode that keeps keys from the pane keeps pastes
-/// from it too.
-fn transparent(mode: LockMode) -> bool {
-    matches!(mode, LockMode::Normal | LockMode::Locked)
-}

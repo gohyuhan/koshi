@@ -277,9 +277,11 @@ struct Screen<B: Backend> {
     last_title: String,
     /// The cursor style last written to the outer terminal.
     last_cursor: Option<CursorStyle>,
-    /// The frame last drawn, kept so a viewer-only change can draw it again.
-    /// `None` until the first draw.
-    last_painted: Option<Box<PaintedFrame>>,
+    /// The snapshot last drawn, kept so a viewer-only change can draw it
+    /// again without re-reading the frame. Its grids travel behind `Arc`s, so
+    /// keeping and cloning it moves no cell data. `None` until the first
+    /// draw.
+    last_snapshot: Option<RenderSnapshot>,
     /// What the viewer contributed to the frame on the screen. `None` until the
     /// first draw.
     shown: Option<ViewerPaint>,
@@ -292,7 +294,7 @@ impl<B: Backend> Screen<B> {
             terminal,
             last_title: String::new(),
             last_cursor: None,
-            last_painted: None,
+            last_snapshot: None,
             shown: None,
         }
     }
@@ -312,7 +314,7 @@ impl<B: Backend> Screen<B> {
         adopt_frame(client, &snapshot);
         self.paint(client, &snapshot);
         self.shown = Some(ViewerPaint::read(client, snapshot.client.active_tab));
-        self.last_painted = Some(frame);
+        self.last_snapshot = Some(snapshot.clone());
         MouseFrame::from(snapshot)
     }
 
@@ -331,7 +333,7 @@ impl<B: Backend> Screen<B> {
         if current == self.shown {
             return;
         }
-        let Some(snapshot) = self.last_painted.as_ref().map(|frame| to_snapshot(frame)) else {
+        let Some(snapshot) = self.last_snapshot.clone() else {
             return;
         };
         self.paint(client, &snapshot);

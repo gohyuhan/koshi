@@ -63,8 +63,6 @@ pub mod tls;
 /// Framed messages over a local socket or named pipe, and the same frame shape
 /// on any other pair of byte streams.
 pub mod transport;
-/// Shared types.
-pub mod types;
 /// Socket-address trust checks and stale-socket reclaim.
 pub mod validate;
 /// Reading a message whose variant this build may not have.

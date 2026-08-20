@@ -108,7 +108,7 @@ fn frame(panes: &[MousePane], focused: Option<PaneId>, kind: PaneKind) -> MouseF
                         rows: band - 2,
                     },
                 )),
-                kind: kind.clone(),
+                kind,
                 visible: true,
                 suppressed: false,
                 dead: false,

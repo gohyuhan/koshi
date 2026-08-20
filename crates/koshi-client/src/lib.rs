@@ -201,9 +201,10 @@ impl Client {
     /// are all-or-nothing: conflict detection runs over the candidate against
     /// this viewer's action table, and it commits only on a
     /// [`KeymapVerdict::Apply`] — storing the layer, rebuilding the keymap,
-    /// and dropping any sequence being typed. A collision or a fatal finding
-    /// puts the stored layer and the folded keybinding settings back on the
-    /// built-ins, and the keymap already running keeps running.
+    /// and dropping any sequence being typed. A collision puts the built-in
+    /// defaults in place with the hint bar's revert marker set; a fatal
+    /// finding keeps the running keymap unmarked. Both put the stored layer
+    /// and the folded keybinding settings back on the built-ins.
     ///
     /// Returns the conflict report when `keybindings` is `Some`, and `None`
     /// when it is `None`.
@@ -235,6 +236,13 @@ impl Client {
             &built_in_modes(),
         );
         if report.verdict() != KeymapVerdict::Apply {
+            // A collision reverts to the built-in defaults with the revert
+            // marker in the hint bar; a fatal finding keeps the running
+            // keymap unmarked.
+            if report.verdict() == KeymapVerdict::RevertToDefaults {
+                self.keymap = KeymapHintCatalog::from_registry(&self.registry).with_reverted();
+                self.pending = None;
+            }
             return Some(report);
         }
         self.layers = tentative_layers;

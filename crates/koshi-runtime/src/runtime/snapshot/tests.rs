@@ -115,10 +115,7 @@ fn build_snapshot_maps_session_tab_and_client() {
     assert_eq!(slot.pane_id, pane_id);
     assert!(slot.visible);
     // Full 80×24 client leaves an 80×22 pane region; border insets content.
-    assert_eq!(
-        slot.rect,
-        Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 })
-    );
+    assert_eq!(slot.rect, Rect::at_origin(Size { cols: 80, rows: 22 }));
     assert_eq!(
         slot.inner_rect,
         Some(Rect::new(Point { x: 1, y: 1 }, Size { cols: 78, rows: 20 }))

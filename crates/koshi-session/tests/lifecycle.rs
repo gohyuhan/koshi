@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved,
 };
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_layout::solver::MIN_PANE_SIZE;
@@ -42,13 +42,13 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
 /// A viewport-sized rect for solving a tab's layout.
 fn rect() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, VIEWPORT)
+    Rect::at_origin(VIEWPORT)
 }
 
 /// A viewport too small to fit any pane, so focus recovery finds no focusable
 /// survivor even when one still exists in the layout.
 fn tiny_rect() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols: 1, rows: 1 })
+    Rect::at_origin(Size { cols: 1, rows: 1 })
 }
 
 /// The spawn spec every fake child launches with — the one fact the backend

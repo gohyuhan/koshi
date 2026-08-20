@@ -328,15 +328,12 @@ impl FrameRow {
     /// 80 blank cells give one run with `count == 80`. 70 000 blank cells give
     /// two runs, `65_535` then `4_465`.
     #[must_use]
-    pub fn from_cells(cells: &[FrameCell], end: FrameRowEnd) -> Self {
+    pub fn from_cells(cells: impl IntoIterator<Item = FrameCell>, end: FrameRowEnd) -> Self {
         let mut runs: Vec<FrameRun> = Vec::new();
         for cell in cells {
             match runs.last_mut() {
-                Some(run) if run.cell == *cell && run.count < u16::MAX => run.count += 1,
-                _ => runs.push(FrameRun {
-                    count: 1,
-                    cell: cell.clone(),
-                }),
+                Some(run) if run.cell == cell && run.count < u16::MAX => run.count += 1,
+                _ => runs.push(FrameRun { count: 1, cell }),
             }
         }
         Self { runs, end }

@@ -6,14 +6,12 @@
 //! a connection, so a server that is switched off is still forgotten and still
 //! takes a fresh secret. A listing never prints a secret.
 
-use std::path::PathBuf;
-
-use koshi_ipc::remote_servers::{store_path, Lookup, SavedServer, ServerStore};
+use koshi_ipc::remote_servers::{Lookup, SavedServer, ServerStore};
 
 use crate::cli::RemoteCommand;
 use crate::output;
 use koshi_link::error::CliError;
-use koshi_link::remote_client;
+use koshi_link::remote_client::{self, read_store, store_failed};
 
 #[cfg(test)]
 mod tests;
@@ -68,30 +66,9 @@ fn named<'a>(store: &'a ServerStore, server: &str) -> Result<&'a SavedServer, Cl
     }
 }
 
-/// The saved-server store and the path it came from. A machine with no data
-/// directory, and one whose store has never been written, both read as no
-/// saved servers.
-fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
-    let data_dir = koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
-        detail: "no data directory found".to_string(),
-    })?;
-    let path = store_path(&data_dir);
-    let store = ServerStore::read(&path).map_err(|error| CliError::IpcUnavailable {
-        detail: error.to_string(),
-    })?;
-    Ok((path, store))
-}
-
 /// A `SERVER` argument that matches neither a saved name nor a saved address.
 fn not_saved(server: &str) -> CliError {
     CliError::InvalidArgs {
         detail: format!("no saved server is named {server}; run `koshi remote list`"),
-    }
-}
-
-/// A saved-server store that could not be written.
-fn store_failed(error: koshi_ipc::error::IpcError) -> CliError {
-    CliError::IpcUnavailable {
-        detail: error.to_string(),
     }
 }

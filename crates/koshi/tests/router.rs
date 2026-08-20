@@ -22,11 +22,11 @@ use koshi_ipc::router::{
     SessionAddress, SessionSelector, MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
-use tempfile::TempDir;
 
 mod common;
 
 use common::{copy_of_koshi, end_process, start_koshi};
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
@@ -38,17 +38,6 @@ const EXIT_WAIT: Duration = Duration::from_secs(90);
 
 /// How long a poll pauses between attempts.
 const POLL: Duration = Duration::from_millis(100);
-
-/// A fresh directory to serve, under a short base so the Unix socket path
-/// stays inside the operating system's path-length cap. Removed when the test
-/// drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
 
 /// A router the test started. Dropping it ends that router.
 struct RunningRouter(Child);

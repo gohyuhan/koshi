@@ -27,8 +27,6 @@ fn a_new_record_starts_spawning_with_empty_metadata() {
     assert_eq!(record.exit_policy, PaneExitPolicy::CloseOnExit);
     assert_eq!(record.env, BTreeMap::new());
     assert_eq!(record.created_at, SystemTime::UNIX_EPOCH);
-    assert_eq!(record.exited_at, None);
-    assert_eq!(record.exit_code, None);
 }
 
 #[test]

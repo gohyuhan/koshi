@@ -1254,7 +1254,7 @@ fn tiled_solve() -> SolvedTab {
         panes: vec![
             SolvedPane {
                 id: first_pane(),
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 22 }),
+                rect: Rect::at_origin(Size { cols: 40, rows: 22 }),
             },
             SolvedPane {
                 id: second_pane(),
@@ -1447,7 +1447,7 @@ fn dump_layout_table_lists_the_panes_with_no_room() {
         panes: vec![
             SolvedPane {
                 id: first_pane(),
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 6, rows: 4 }),
+                rect: Rect::at_origin(Size { cols: 6, rows: 4 }),
             },
             SolvedPane {
                 id: second_pane(),
@@ -1522,7 +1522,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
         panes: vec![
             SolvedPane {
                 id: first_pane(),
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 21 }),
+                rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
             },
             SolvedPane {
                 id: second_pane(),
@@ -1691,7 +1691,7 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
         vec![SolvedTab {
             panes: vec![SolvedPane {
                 id: first_pane(),
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 }),
+                rect: Rect::at_origin(Size { cols: 80, rows: 22 }),
             }],
             ..tiled_solve()
         }],

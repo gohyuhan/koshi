@@ -78,7 +78,7 @@ fn wire_slot(slot: &PaneSlot) -> FrameSlot {
         pane_id: slot.pane_id,
         rect: slot.rect,
         inner_rect: slot.inner_rect,
-        kind: slot.kind.clone(),
+        kind: slot.kind,
         visible: slot.visible,
         suppressed: slot.suppressed,
         dead: slot.dead,
@@ -147,10 +147,8 @@ fn wire_row(grid: &Grid, row: u16, cols: u16) -> FrameRow {
         "every grid row is the grid's width"
     );
     let blank = Cell::blank();
-    let cells: Vec<FrameCell> = (0..cols)
-        .map(|col| wire_cell(grid.cell(row, col).unwrap_or(&blank)))
-        .collect();
-    FrameRow::from_cells(&cells, wire_row_end(grid.row_end(row)))
+    let cells = (0..cols).map(|col| wire_cell(grid.cell(row, col).unwrap_or(&blank)));
+    FrameRow::from_cells(cells, wire_row_end(grid.row_end(row)))
 }
 
 /// The wire form of one row's line-continuation state.

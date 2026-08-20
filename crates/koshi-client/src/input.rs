@@ -149,7 +149,7 @@ impl Client {
                     KeyOutcome::Pending
                 }
                 // No sequence is open, so the key is the user's own to type.
-                None if transparent(mode) => KeyOutcome::PassThrough(chord),
+                None if mode.passes_to_pane() => KeyOutcome::PassThrough(chord),
                 None => KeyOutcome::Discard,
             },
         }
@@ -223,11 +223,4 @@ fn unlock() -> BoundAction {
             .expect("the reserved unlock action name satisfies the action-name grammar"),
         args: ActionArgs::None,
     }
-}
-
-/// Whether a key that binds nothing reaches the pane. Normal and locked mode
-/// pass what they do not bind; the modal layers own the keyboard while they
-/// are held and discard it.
-fn transparent(mode: LockMode) -> bool {
-    matches!(mode, LockMode::Normal | LockMode::Locked)
 }

@@ -123,6 +123,14 @@ fn single_value_rejects_a_named_property() {
 }
 
 #[test]
+fn single_value_refuses_a_child_block() {
+    assert_eq!(
+        single_value(&node("x \"midnight\" { foo }")).unwrap_err(),
+        "takes no children"
+    );
+}
+
+#[test]
 fn value_bool_reads_true_and_false() {
     assert!(value_bool(&node("x #true")).unwrap());
     assert!(!value_bool(&node("x #false")).unwrap());

@@ -921,7 +921,7 @@ fn serve_router_takes_the_wait_for_lock_flag() {
 }
 
 #[test]
-fn the_subcommands_koshi_only_runs_itself_are_the_only_ones_kept_out_of_the_help() {
+fn the_help_hides_the_self_run_subcommands_and_the_unwired_plugin_verb() {
     let hidden: Vec<String> = Cli::command()
         .get_subcommands()
         .filter(|command| command.is_hide_set())
@@ -931,6 +931,7 @@ fn the_subcommands_koshi_only_runs_itself_are_the_only_ones_kept_out_of_the_help
     assert_eq!(
         hidden,
         [
+            "plugin",
             "serve-router",
             "serve-session",
             "serve-pty-supervisor",
@@ -2400,4 +2401,90 @@ fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
         }
     );
     assert!(!cli.is_interactive_launch());
+}
+
+/// The discovery split: every `list-*` verb and every `inspect` form is a
+/// discovery query, and an action verb is not.
+#[test]
+fn discovery_queries_are_the_listings_and_inspects() {
+    let command = |argv: &[&str]| parse(argv).command.expect("a subcommand was given");
+
+    assert!(command(&["koshi", "list-sessions"]).is_discovery());
+    assert!(command(&["koshi", "list-tabs"]).is_discovery());
+    assert!(command(&["koshi", "list-panes"]).is_discovery());
+    assert!(command(&["koshi", "list-clients"]).is_discovery());
+    assert!(command(&["koshi", "inspect", "session", "main"]).is_discovery());
+    assert!(!command(&["koshi", "new-tab"]).is_discovery());
+}
+
+/// A discovery query names its one session — a listing's `--session` flag or
+/// the session an `inspect session` targets — and spans all sessions
+/// otherwise.
+#[test]
+fn a_discovery_query_names_its_session_scope() {
+    let command = |argv: &[&str]| parse(argv).command.expect("a subcommand was given");
+
+    assert_eq!(
+        command(&["koshi", "list-tabs", "--session", "main"]).discovery_session(),
+        Some(&SessionRef::Name("main".to_string()))
+    );
+    assert_eq!(
+        command(&["koshi", "inspect", "session", "main"]).discovery_session(),
+        Some(&SessionRef::Name("main".to_string()))
+    );
+    assert_eq!(command(&["koshi", "list-tabs"]).discovery_session(), None);
+    assert_eq!(
+        command(&["koshi", "list-sessions"]).discovery_session(),
+        None
+    );
+}
+
+/// Every action name `to_action` builds is a registered core action: a CLI
+/// verb naming an action the registry does not hold would resolve to nothing
+/// at dispatch, invisibly.
+#[test]
+fn every_to_action_name_is_a_registered_core_action() {
+    use std::collections::BTreeSet;
+
+    use koshi_core::action::core_action_seeds;
+
+    let registered: BTreeSet<String> = core_action_seeds()
+        .iter()
+        .map(|(action, _)| action.to_string())
+        .collect();
+
+    // One argv per CLI verb that maps to an action.
+    let pane = PaneId::new().to_string();
+    let action_verbs: Vec<Vec<&str>> = vec![
+        vec!["koshi", "new-pane"],
+        vec!["koshi", "close-pane"],
+        vec!["koshi", "resize-pane", "--direction", "left"],
+        vec!["koshi", "toggle-pane-fullscreen"],
+        vec!["koshi", "input", "echo hi"],
+        vec!["koshi", "new-tab"],
+        vec!["koshi", "close-tab"],
+        vec!["koshi", "focus-tab", "--index", "1"],
+        vec!["koshi", "move-tab", "--index", "1"],
+        vec!["koshi", "next-tab"],
+        vec!["koshi", "previous-tab"],
+        vec!["koshi", "focus-pane", "--pane", &pane],
+        vec!["koshi", "lock"],
+        vec!["koshi", "unlock"],
+        vec!["koshi", "toggle-lock"],
+        vec!["koshi", "run", "--", "htop"],
+    ];
+
+    let mut named = BTreeSet::new();
+    for argv in &action_verbs {
+        let command = parse(argv).command.expect("an action verb parses");
+        let (action, _) = command
+            .to_action(&ResolvedTargets::default(), Direction::Right)
+            .unwrap_or_else(|| panic!("{argv:?} maps to an action"));
+        assert!(
+            registered.contains(&action.to_string()),
+            "{argv:?} names {action}, which core_action_seeds does not register"
+        );
+        named.insert(action.to_string());
+    }
+    assert_eq!(named.len(), 16, "each verb names its own action");
 }

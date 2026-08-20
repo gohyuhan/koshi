@@ -179,8 +179,9 @@ fn max_level(level: LogLevel) -> Level {
 }
 
 /// A [`MakeWriter`] that appends each formatted event to a per-session log
-/// file, creating the file — and its `logs/` parent — on the first write and
-/// re-creating it if it is removed while koshi runs.
+/// file, creating the file — and, when the open fails, its `logs/` parent —
+/// on each write, so a file or directory removed while koshi runs comes back
+/// on the next line.
 ///
 /// Every line is one open-append-close, which is what lets a log file deleted
 /// mid-session come back on the next line. On a local disk that costs about
@@ -212,20 +213,33 @@ struct SessionLogWriter {
 
 impl io::Write for SessionLogWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if append_to(&self.path, buf).is_err() {
+            // A `logs/` directory removed mid-session makes the open fail;
+            // one recreate-and-retry brings the file back. A failure that a
+            // recreate cannot cure reports from the retry.
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            append_to(&self.path, buf)?;
         }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?
-            .write_all(buf)?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Append `buf` to the file at `path` in create-and-append mode, then close
+/// it, so the line is on disk when this returns.
+fn append_to(path: &std::path::Path, buf: &[u8]) -> io::Result<()> {
+    use io::Write as _;
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(buf)
 }
 
 /// A thread-local capture of log output. Returned by [`with_test_writer`] so a

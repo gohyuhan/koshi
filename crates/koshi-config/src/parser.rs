@@ -33,7 +33,13 @@ pub fn parse_kdl(path: &Path, source: &str) -> Result<KdlDocument, ConfigParseDi
 // reason it could not be read.
 
 /// The node's single unnamed argument, or a plain-words reason it is missing.
+/// A node carrying a `{ … }` child block is refused: every scalar field takes
+/// a value alone, so `theme "midnight" { foo }` is an error, not a silently
+/// dropped block.
 pub(crate) fn single_value(node: &KdlNode) -> Result<&KdlValue, String> {
+    if node.children().is_some() {
+        return Err("takes no children".to_string());
+    }
     match node.entries() {
         [entry] if entry.name().is_none() => Ok(entry.value()),
         _ => Err("expected exactly one value".to_string()),

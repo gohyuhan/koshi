@@ -84,6 +84,27 @@ fn prepared(
 }
 
 #[test]
+fn commit_with_an_unknown_tab_registers_nothing_and_emits_nothing() {
+    let (mut session, tab, source, client) = session_one_pane();
+    let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);
+
+    let (previous, events) = commit_new_pane(
+        &mut session,
+        new_id,
+        TabId::new(),
+        candidate,
+        Some(client),
+        NewPaneSpec::default(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(previous, None);
+    assert_eq!(events, Vec::new());
+    assert!(session.panes.get(new_id).is_none());
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
 fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
     let (mut session, tab, source, client) = session_one_pane();
     let (new_id, candidate) = prepared(&session, tab, source, Direction::Right);

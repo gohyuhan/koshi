@@ -22,7 +22,7 @@ use crate::pane::{
 
 /// What backs a pane: an emulated terminal over a PTY, or a surface that a
 /// plugin renders. The kind tells the runtime which path drives the pane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneKind {
     /// A terminal pane backed by a PTY and emulated terminal.
     Terminal,
@@ -64,10 +64,6 @@ pub struct PaneRecord {
     lifecycle: PaneLifecycle,
     /// The time when the pane was created.
     pub created_at: SystemTime,
-    /// The time when the child process ended, once it has ended.
-    pub exited_at: Option<SystemTime>,
-    /// The exit code of the child process, once it has ended.
-    pub exit_code: Option<i32>,
 }
 
 impl PaneRecord {
@@ -89,8 +85,6 @@ impl PaneRecord {
             env: BTreeMap::new(),
             lifecycle: PaneLifecycle::Spawning,
             created_at,
-            exited_at: None,
-            exit_code: None,
         }
     }
 
@@ -117,7 +111,7 @@ impl PaneRecord {
     /// and leaves the state unchanged. This is the only way to change
     /// `lifecycle`.
     pub fn update_lifecycle(&mut self, event: PaneLifecycleEvent) -> Result<(), InvalidTransition> {
-        self.lifecycle = self.lifecycle.transition(event, self.kind.clone())?;
+        self.lifecycle = self.lifecycle.transition(event, self.kind)?;
         Ok(())
     }
 }

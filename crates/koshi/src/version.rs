@@ -172,6 +172,8 @@ fn server_version_rows_in(
         None,
         router_client::running_router_version(runtime_dir),
     )];
+    // The two sources never overlap: `foreign_sessions` drops every id
+    // `advertised_sessions` reports, so no session earns two rows.
     let mut sessions = ipc_client::advertised_sessions(runtime_dir);
     sessions.extend(
         ipc_client::shared_base()

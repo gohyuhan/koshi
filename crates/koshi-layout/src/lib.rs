@@ -12,8 +12,6 @@ pub mod content;
 pub mod edit;
 pub mod error;
 pub mod focus;
-
-pub mod layout;
 pub mod mode;
 pub mod normalize;
 pub mod resize;

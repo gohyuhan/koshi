@@ -1,6 +1,6 @@
 //! Tests for snapshot capture and restore.
 
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Rect, Size};
 
 use super::*;
 use crate::size::SizeWeight;
@@ -135,7 +135,7 @@ fn a_stack_beside_a_pane_suppresses_as_a_unit_while_the_sibling_survives() {
 
     // Three rows: the stack needs four (one header plus a bordered active),
     // a alone fits.
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 3 });
+    let tab = Rect::at_origin(Size { cols: 80, rows: 3 });
     let result = solve(&tree, tab);
     assert_eq!(result.panes[0], (a, tab));
     assert_eq!(result.suppressed, [b, c]);

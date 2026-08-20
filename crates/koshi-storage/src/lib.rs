@@ -4,6 +4,3 @@
 
 pub mod atomic;
 pub mod error;
-pub mod types;
-
-pub mod store;

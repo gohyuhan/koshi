@@ -169,7 +169,7 @@ pub enum Reach {
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the machine has no data directory, and
 /// when the store could not be read.
-fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
+pub fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
     let data_dir = koshi_paths::data_dir().ok_or_else(|| CliError::IpcUnavailable {
         detail: "no data directory found".to_string(),
     })?;
@@ -179,7 +179,7 @@ fn read_store() -> Result<(PathBuf, ServerStore), CliError> {
 }
 
 /// A saved-server store that could not be read or written.
-fn store_failed(error: IpcError) -> CliError {
+pub fn store_failed(error: IpcError) -> CliError {
     CliError::IpcUnavailable {
         detail: error.to_string(),
     }
@@ -323,23 +323,22 @@ fn read_secret(prompt: &str) -> Result<String, CliError> {
         io::stdin().read_line(&mut line).map_err(prompt_failed)?;
         return Ok(line);
     }
-    let typed = read_hidden_line();
+    let typed = read_hidden_line(&mut io::stdin().lock());
     let _ = crossterm::terminal::disable_raw_mode();
     println!();
     typed.map_err(prompt_failed)
 }
 
-/// Read from stdin until the Enter key, with none of it printed.
+/// Read from `input` until the Enter key, with none of it printed.
 ///
 /// Ends at `\r`, `\n` or `0x04`. Backspace — `0x7f` or `0x08` — removes the
 /// last byte. `0x03` returns an empty string. End of stream ends the entry
 /// where it stands. Invalid UTF-8 is replaced.
-fn read_hidden_line() -> io::Result<String> {
-    let mut stdin = io::stdin().lock();
+fn read_hidden_line(input: &mut impl Read) -> io::Result<String> {
     let mut typed: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        if stdin.read(&mut byte)? == 0 {
+        if input.read(&mut byte)? == 0 {
             break;
         }
         match byte[0] {

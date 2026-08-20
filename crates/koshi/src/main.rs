@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use koshi::cli::{
     parse_session_ref, ActionsCommand, Cli, CliCommand, DebugCommand, FormatArg, InspectTarget,
-    KeysCommand, ResolvedTargets, SessionRef, TabRef,
+    KeysCommand, ResolvedTargets, TabRef,
 };
 use koshi::config_command;
 use koshi::doctor;
@@ -238,7 +238,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         };
     }
 
-    if let Some(command) = cli.command.as_ref().filter(|command| is_discovery(command)) {
+    if let Some(command) = cli
+        .command
+        .as_ref()
+        .filter(|command| command.is_discovery())
+    {
         // The discovery queries read every running session's state and render
         // it here. They dispatch no command and never enter the routing layer
         // the action verbs use.
@@ -372,34 +376,6 @@ fn finish_command(result: CommandResult) -> Result<(), CliError> {
     }
 }
 
-/// Whether `command` is a discovery query: a `list-*` verb or an `inspect`
-/// form.
-fn is_discovery(command: &CliCommand) -> bool {
-    matches!(
-        command,
-        CliCommand::ListSessions { .. }
-            | CliCommand::ListTabs { .. }
-            | CliCommand::ListPanes { .. }
-            | CliCommand::ListClients { .. }
-            | CliCommand::Inspect { .. }
-    )
-}
-
-/// The one session a discovery query is scoped to, by id or name: a
-/// listing's `--session` flag, or the session an `inspect session` names.
-/// Every other query spans all running sessions.
-fn discovery_session(command: &CliCommand) -> Option<&SessionRef> {
-    match command {
-        CliCommand::ListTabs { session, .. }
-        | CliCommand::ListPanes { session, .. }
-        | CliCommand::ListClients { session, .. } => session.as_ref(),
-        CliCommand::Inspect {
-            target: InspectTarget::Session { session, .. },
-        } => Some(session),
-        _ => None,
-    }
-}
-
 /// Serve a discovery query from live state: probe the running sessions the
 /// query is scoped to, keep the rows it asked for, and print them.
 ///
@@ -415,7 +391,7 @@ fn discovery_session(command: &CliCommand) -> Option<&SessionRef> {
 /// have said, so a successful one is a success.
 fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
     let runtime_dir = ipc_client::runtime_dir()?;
-    let found = targeting::scope_sessions(&runtime_dir, discovery_session(command))?;
+    let found = targeting::scope_sessions(&runtime_dir, command.discovery_session())?;
     let sessions = found.sessions.as_slice();
 
     let rendered = match command {
@@ -437,10 +413,7 @@ fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
                 // holds that one session; an empty census reports it as not
                 // found.
                 let overview = sessions.first().ok_or_else(|| CliError::SessionNotFound {
-                    session: match session {
-                        SessionRef::Id(id) => id.to_string(),
-                        SessionRef::Name(name) => name.clone(),
-                    },
+                    session: session.to_string(),
                 })?;
                 output::render_session(&overview.session, *format)
             }

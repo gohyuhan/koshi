@@ -200,14 +200,19 @@ pub fn commit_profile_tab(
         }));
     }
 
+    let focus_pane = pane_ids.get(focus_leaf).copied().unwrap_or(root_pane);
+    // Record this tab's starting pane in the tab's own focus history whether
+    // or not a client is given, so the first client to view the tab — a later
+    // attach to a session started detached included — lands on the profile's
+    // chosen leaf, not on layout order.
+    if let Some(tab) = session.tabs.get_mut(&tab_id) {
+        tab.record_focus_mru(focus_pane);
+    }
+
     if let Some(client_id) = focus {
-        let focus_pane = pane_ids.get(focus_leaf).copied().unwrap_or(root_pane);
-        // Record this tab's starting pane on the client whether or not the tab
-        // starts active, so keyboard input and focused-pane commands resolve the
-        // moment the client later switches to it.
-        if let Some(tab) = session.tabs.get_mut(&tab_id) {
-            tab.record_focus_mru(focus_pane);
-        }
+        // Record the pane on the client whether or not the tab starts active,
+        // so keyboard input and focused-pane commands resolve the moment the
+        // client later switches to it.
         if let Some(client) = session.clients.get_mut(client_id) {
             let prior_pane = client.update_focused_pane(tab_id, focus_pane);
             if active {

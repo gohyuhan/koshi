@@ -11,7 +11,8 @@
 //! 10 milliseconds, so about 400 kilobytes per second, and stops 20 seconds
 //! from now whatever the streams are doing.
 
-use std::io::{self, Read, Write};
+use koshi_ipc::transport::waited_out;
+use std::io::{Read, Write};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -28,8 +29,8 @@ use std::time::{Duration, Instant};
 ///
 /// - `from` reporting end of stream (a read of `Ok(0)`),
 /// - any write error on `to`,
-/// - a read error on `from` other than [`io::ErrorKind::WouldBlock`] or
-///   [`io::ErrorKind::TimedOut`],
+/// - a read error on `from` other than [`std::io::ErrorKind::WouldBlock`] or
+///   [`std::io::ErrorKind::TimedOut`],
 /// - the clock reaching `deadline`, checked at the top of every slice.
 ///
 /// A read that reports `WouldBlock` or `TimedOut` is a pause, not a failure:
@@ -71,16 +72,6 @@ pub fn pump_throttled(
         }
         copied
     })
-}
-
-/// Whether `error` is a socket read or write timeout. Unix reports one as
-/// [`WouldBlock`](io::ErrorKind::WouldBlock), Windows as
-/// [`TimedOut`](io::ErrorKind::TimedOut).
-fn waited_out(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
 }
 
 #[cfg(test)]

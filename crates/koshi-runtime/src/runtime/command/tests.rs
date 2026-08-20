@@ -5232,7 +5232,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         let rects = content_rects(&solve_with_mode_min(
             &candidate,
             LayoutMode::Tiled,
-            Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 8 }),
+            Rect::at_origin(Size { cols: 40, rows: 8 }),
             MIN_PANE_SIZE,
         ));
         let rect = rects

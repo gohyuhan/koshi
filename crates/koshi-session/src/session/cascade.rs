@@ -86,18 +86,24 @@ pub fn remove_pane_cascade(
     // removal edit leaves canonicalization to `normalize`, which collapses the
     // unary split the removed leaf leaves behind; every surviving leaf is
     // live, so the pass canonicalizes shape only and drops nothing.
+    // `Some` carries the rect the pane vacated, which ranks the spatial focus
+    // candidates; `None` means the tab is now empty.
     let removal = match remove_pane(tab.layout(), tab_rect, pane_id, min) {
         Ok((new_tree, info)) => {
             let live: HashSet<PaneId> = new_tree.leaf_panes().into_iter().collect();
             let canonical = normalize(&new_tree, &live).unwrap_or(new_tree);
             tab.update_layout(canonical);
-            Some(info)
+            // The layout collapsed a leaf, so the tab's geometry changed —
+            // announce it before focus moves.
+            events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
+            Some(info.old_rect)
         }
         Err(RemoveError::LastPane { .. }) => None,
         // The pane was in the registry but not the layout: a registry/layout
-        // desync that should not happen in practice. Nothing left to
-        // collapse; the removal events already emitted stand.
-        Err(RemoveError::PaneNotFound { .. }) => return events,
+        // desync. The layout stands unchanged, so no rect was vacated and no
+        // `LayoutChanged` is emitted; zoom and focus still move off the gone
+        // pane below, ranked by focus history and layout order alone.
+        Err(RemoveError::PaneNotFound { .. }) => Some(Rect::zero()),
     };
 
     // A client zoomed on the removed pane has nothing left to show, so it drops
@@ -111,11 +117,7 @@ pub fn remove_pane_cascade(
     match removal {
         // The tab still has panes: repair focus for every client that was
         // looking at the removed pane.
-        Some(info) => {
-            // The layout collapsed a leaf, so the tab's geometry changed —
-            // announce it before focus moves.
-            events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
-
+        Some(old_rect) => {
             let verdicts: Vec<(ClientId, FocusRepairResult)> = {
                 let tab = &session.tabs[&tab_id];
                 // Candidates are ranked in the tiled view. Every client repaired
@@ -123,8 +125,7 @@ pub fn remove_pane_cascade(
                 // so any zoom of theirs was on that pane and has just been
                 // dropped: the layout they are about to see is the tiled one.
                 let solved = solve_with_mode_min(tab.layout(), LayoutMode::Tiled, tab_rect, min);
-                let candidates =
-                    focus_candidates(info.old_rect, &solved.panes, &solved.stack_headers);
+                let candidates = focus_candidates(old_rect, &solved.panes, &solved.stack_headers);
                 // The verdict reads the tab, the registry and the candidates —
                 // nothing client-specific — so every repaired client inherits
                 // the same pane.
@@ -173,8 +174,9 @@ pub fn remove_pane_cascade(
             EmptyTabPolicy::CloseTab => {
                 events.extend(close_and_refocus_tab(session, tab_id));
             }
-            // `RespawnShell` leaves the empty tab in place and emits no events;
-            // spawning the replacement pane is the runtime's job.
+            // `RespawnShell` leaves the empty tab in place and emits no
+            // events. No caller selects it: the runtime passes the `CloseTab`
+            // default on every removal path.
             EmptyTabPolicy::RespawnShell => {}
         },
     }

@@ -14,7 +14,6 @@
 //! `koshi.kdl`. [`theme`] parses one `themes/<name>.kdl`. [`migration`]
 //! validates a versioned file and moves it forward to the current schema.
 //! [`hints`] resolves the merged keymap into the table the hint bar reads.
-//! [`config`] is a placeholder for the standard source layout.
 //!
 //! No module here reads a file. The caller reads the text and passes it in.
 
@@ -32,5 +31,3 @@ pub mod parser;
 pub mod profile;
 pub mod theme;
 pub mod types;
-
-pub mod config;

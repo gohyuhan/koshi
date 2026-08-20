@@ -607,6 +607,40 @@ fn sid_of(buffer: &[u64]) -> PSID {
     unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
 }
 
+/// Accept connections on `listener` until `shutting_down` is set, handing
+/// each accepted connection to `serve`. A failed accept sleeps `retry_delay`
+/// and the loop continues. The flag is read between the accept and the
+/// dispatch, so the wake-up connection a shutdown makes is dropped, not
+/// served.
+pub fn accept_until_shutdown(
+    listener: &Listener,
+    shutting_down: &AtomicBool,
+    retry_delay: std::time::Duration,
+    mut serve: impl FnMut(Connection),
+) {
+    loop {
+        let connection = listener.accept();
+        if shutting_down.load(Ordering::SeqCst) {
+            break;
+        }
+        match connection {
+            Ok(connection) => serve(connection),
+            Err(_) => std::thread::sleep(retry_delay),
+        }
+    }
+}
+
+/// Whether `error` is a socket read or write timeout. Unix reports one as
+/// [`WouldBlock`](io::ErrorKind::WouldBlock), Windows as
+/// [`TimedOut`](io::ErrorKind::TimedOut).
+#[must_use]
+pub fn waited_out(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
 /// True for the connect failures that mean "nothing answers at this
 /// address": the connection was refused (a socket file with no listener
 /// behind it), nothing exists at the address, or (Unix) the file at the

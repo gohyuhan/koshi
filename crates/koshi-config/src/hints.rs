@@ -86,8 +86,8 @@ pub struct KeymapHintCatalog {
     /// Display labels for the default table's prefix chords.
     prefix_labels: Arc<BTreeMap<KeyChord, String>>,
     /// True when the user keymap was reverted to defaults over a key
-    /// collision. Stays `false` until the config loader runs conflict
-    /// detection and reports its verdict.
+    /// collision. [`from_parts`](Self::from_parts) builds it `false`;
+    /// [`with_reverted`](Self::with_reverted) sets it.
     reverted: bool,
 }
 
@@ -152,6 +152,15 @@ impl KeymapHintCatalog {
             prefix_labels: Arc::new(default_prefix_labels(config.leader)),
             reverted: false,
         }
+    }
+
+    /// Mark this catalog as the built-in defaults standing in for a user
+    /// keymap that a key collision reverted. The hint bar draws the revert
+    /// marker for a catalog marked this way.
+    #[must_use]
+    pub fn with_reverted(mut self) -> Self {
+        self.reverted = true;
+        self
     }
 
     /// Resolve one pending sequence in a built-in mode.

@@ -19,12 +19,12 @@ koshi-terminal = { version = "0.2.0", path = "../koshi-terminal" }
 ratatui = { version = "0.30.2", default-features = false, features = [
   "crossterm",
 ] }
-serde_json = { version = "1.0.150", features = ["raw_value"] }
-uuid = "1.23.4"
+serde_json.workspace = true
+uuid.workspace = true
 tracing = "0.1.44"
 
 [dev-dependencies]
 koshi-layout = { path = "../koshi-layout" }
 koshi-pty = { path = "../koshi-pty" }
 koshi-test-support = { path = "../koshi-test-support" }
-tempfile = "3.27.0"
+tempfile.workspace = true
