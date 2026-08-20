@@ -3,9 +3,6 @@
 //! rendering, cursor placement, the chrome theme, render snapshots, and
 //! mapping a mouse cell to the region drawn under it.
 
-pub mod error;
-pub mod types;
-
 pub mod hit_test;
 pub mod render;
 pub mod snapshot;

@@ -114,7 +114,7 @@ fn layout() -> SessionLayout {
                 mode: LayoutMode::Tiled,
                 panes: vec![SolvedPane {
                     id: pane_id,
-                    rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 22 }),
+                    rect: Rect::at_origin(Size { cols: 80, rows: 22 }),
                 }],
                 suppressed: Vec::new(),
                 all_suppressed: false,

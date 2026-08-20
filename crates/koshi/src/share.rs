@@ -390,10 +390,7 @@ fn scope_of(
         .sessions
         .first()
         .ok_or_else(|| CliError::SessionNotFound {
-            session: match session_ref {
-                SessionRef::Id(id) => id.to_string(),
-                SessionRef::Name(name) => name.clone(),
-            },
+            session: session_ref.to_string(),
         })?;
     Ok(Some(TokenScope::Session(overview.session.id)))
 }

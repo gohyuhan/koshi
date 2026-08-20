@@ -40,7 +40,7 @@ pub fn session_structure(session: &Session) -> AttachedSessionStructureSnapshot 
         .list()
         .map(|record| PaneStructure {
             id: record.id(),
-            kind: record.kind().clone(),
+            kind: *record.kind(),
         })
         .collect();
     panes.sort_by_key(|pane| pane.id);

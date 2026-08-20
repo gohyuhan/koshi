@@ -17,6 +17,7 @@
 //! `tab-<uuid>`, or a bare UUID) is that id, anything else is a name.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -108,6 +109,49 @@ pub enum SessionRef {
     Id(SessionId),
     /// A display name; it must match exactly one running session.
     Name(String),
+}
+
+impl CliCommand {
+    /// Whether this is a discovery query: a `list-*` verb or an `inspect`
+    /// form.
+    #[must_use]
+    pub fn is_discovery(&self) -> bool {
+        matches!(
+            self,
+            CliCommand::ListSessions { .. }
+                | CliCommand::ListTabs { .. }
+                | CliCommand::ListPanes { .. }
+                | CliCommand::ListClients { .. }
+                | CliCommand::Inspect { .. }
+        )
+    }
+
+    /// The one session a discovery query is scoped to, by id or name: a
+    /// listing's `--session` flag, or the session an `inspect session` names.
+    /// Every other query spans all running sessions.
+    #[must_use]
+    pub fn discovery_session(&self) -> Option<&SessionRef> {
+        match self {
+            CliCommand::ListTabs { session, .. }
+            | CliCommand::ListPanes { session, .. }
+            | CliCommand::ListClients { session, .. } => session.as_ref(),
+            CliCommand::Inspect {
+                target: InspectTarget::Session { session, .. },
+            } => Some(session),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SessionRef {
+    /// Writes the reference as the user named it: the session id for `Id`,
+    /// the display name for `Name`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionRef::Id(id) => id.fmt(f),
+            SessionRef::Name(name) => f.write_str(name),
+        }
+    }
 }
 
 /// A tab named on the command line: a `tab-<uuid>` id (or bare UUID), or a
@@ -441,7 +485,9 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: DebugCommand,
     },
-    /// Manage plugins.
+    /// Manage plugins. Hidden from help until the plugin host exists;
+    /// invoking it reports the runtime as unavailable.
+    #[command(hide = true)]
     Plugin,
     /// Download and install the latest koshi release.
     Update,

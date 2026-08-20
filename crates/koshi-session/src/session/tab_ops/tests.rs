@@ -898,6 +898,34 @@ fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
 }
 
 #[test]
+fn commit_profile_tab_without_a_client_still_records_the_focus_leaf() {
+    // A profile committed with no client — a session started detached — must
+    // still put its chosen leaf in the tab's focus history, so the first
+    // client to view the tab lands on it, not on layout order.
+    let mut session = session_with(vec![], vec![]);
+    let tab_id = TabId::new();
+    let (p0, p1) = (PaneId::new(), PaneId::new());
+    let profile = ProfileTab {
+        pane_ids: vec![p0, p1],
+        layout: two_leaf_layout(p0, p1),
+        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        focus_leaf: 1,
+    };
+
+    let _ = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile,
+        "dev".to_owned(),
+        None,
+        true,
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(session.tabs[&tab_id].focus_mru(), &[p1]);
+}
+
+#[test]
 fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
     let mut session = session_with(vec![], vec![]);
     let start_tab = TabId::new();

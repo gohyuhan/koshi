@@ -6,4 +6,6 @@ license.workspace = true
 
 [dependencies]
 koshi-core = { version = "0.2.0", path = "../koshi-core" }
+koshi-ipc = { version = "0.2.0", path = "../koshi-ipc" }
 koshi-pty = { version = "0.2.0", path = "../koshi-pty" }
+tempfile.workspace = true

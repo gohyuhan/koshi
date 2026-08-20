@@ -548,10 +548,14 @@ impl Client {
                 Vec::new()
             }
             HitRegion::Tabline => {
-                self.tabline_drag = Some(TablineDrag {
-                    anchor_x: mouse.at.x,
-                    anchor_first_visible: tabline_first_visible(self.frame_layout(frame)),
-                });
+                // `Tabline` is only hit on a frame that draws one, so the
+                // window index is present.
+                if let Some(first_visible) = tabline_first_visible(self.frame_layout(frame)) {
+                    self.tabline_drag = Some(TablineDrag {
+                        anchor_x: mouse.at.x,
+                        anchor_first_visible: first_visible,
+                    });
+                }
                 Vec::new()
             }
             HitRegion::Statusline | HitRegion::None => Vec::new(),
@@ -833,7 +837,7 @@ impl Client {
         ) {
             return None;
         }
-        let first = tabline_first_visible(self.frame_layout(frame));
+        let first = tabline_first_visible(self.frame_layout(frame))?;
         Some(match direction {
             ScrollDirection::Up | ScrollDirection::Left => first.saturating_sub(1),
             ScrollDirection::Down | ScrollDirection::Right => first + 1,

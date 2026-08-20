@@ -21,8 +21,6 @@
 //! margin is filled with a dim letterbox. Nothing here draws
 //! plugin-contributed segments.
 
-pub mod state;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};

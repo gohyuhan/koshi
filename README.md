@@ -283,6 +283,7 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 | `koshi` | Start one session with one tab and shell pane |
 | `koshi --profile <NAME>` | Start with `profile/<NAME>.kdl` |
 | `koshi --headless` | Start a session with nothing attached, print its id, and return to the shell |
+| `koshi --headless --allow-other-users` | The same, and let this machine's other users reach the session |
 
 ### Sessions and discovery
 
@@ -363,6 +364,31 @@ session id.
 One row per check, each with a verdict of `ok`, `warn`, or `fail`, the fact
 behind it, and what to do about it. The whole answer prints either way: a run
 holding a `fail` row exits 1, and a run of only `ok` and `warn` rows exits 0.
+
+### Sharing and remote access
+
+Every subcommand also takes a global `--remote <SERVER>` flag, which runs that
+invocation against the machine `SERVER` names instead of this one.
+
+| Command | Result |
+|---|---|
+| `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
+| `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
+| `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
+| `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi remote list [--format table\|json]` | List the servers this machine has saved |
+| `koshi remote forget <SERVER>` | Drop one saved server |
+| `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
+
+The `share` commands run on the machine holding the sessions; the rest run on
+the machine connecting to it.
+
+### Debugging
+
+| Command | Result |
+|---|---|
+| `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
+| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, and per-client focus |
 
 ### Versions and updating
 

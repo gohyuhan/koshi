@@ -16,7 +16,7 @@ koshi-pty = { version = "0.2.0", path = "../koshi-pty" }
 koshi-runtime = { version = "0.2.0", path = "../koshi-runtime" }
 koshi-storage = { version = "0.2.0", path = "../koshi-storage" }
 serde = "1.0.228"
-serde_json = "1.0.150"
+serde_json.workspace = true
 tracing = "0.1.44"
 
 koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
@@ -31,5 +31,5 @@ clap = { version = "4.6.1", features = ["derive"] }
 koshi = { version = "0.2.0", path = "../koshi" }
 koshi-terminal = { version = "0.2.0", path = "../koshi-terminal" }
 koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
-tempfile = "3.27.0"
-uuid = "1.23.4"
+tempfile.workspace = true
+uuid.workspace = true

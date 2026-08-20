@@ -85,7 +85,7 @@ fn populated_layout() -> SessionLayout {
                 panes: vec![
                     SolvedPane {
                         id: active_pane(),
-                        rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 21 }),
+                        rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
                     },
                     SolvedPane {
                         id: collapsed_pane(),

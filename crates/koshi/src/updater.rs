@@ -347,22 +347,31 @@ fn check_for_update(allow_prerelease: bool) -> Result<Option<String>, String> {
 fn latest_release(allow_prerelease: bool) -> Result<String, String> {
     if allow_prerelease {
         let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=25");
-        let releases: Vec<Release> = get_json(&url)?;
-        releases
-            .into_iter()
-            .filter_map(|release| {
-                Version::parse(strip_v(&release.tag_name))
-                    .ok()
-                    .map(|version| (version, release.tag_name))
-            })
-            .max_by(|left, right| left.0.cmp(&right.0))
-            .map(|(_, tag)| tag)
-            .ok_or_else(|| "no releases found".to_string())
+        highest_version(get_json(&url)?)
     } else {
         let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
         let release: Release = get_json(&url)?;
         Ok(release.tag_name)
     }
+}
+
+/// The tag of the highest version among `releases` by semver order. A tag
+/// that does not parse as a version is skipped; an empty or all-unparsable
+/// list is `no releases found`.
+///
+/// `["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0"]` gives `v0.3.0-rc.10` —
+/// publish dates play no part.
+fn highest_version(releases: Vec<Release>) -> Result<String, String> {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            Version::parse(strip_v(&release.tag_name))
+                .ok()
+                .map(|version| (version, release.tag_name))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, tag)| tag)
+        .ok_or_else(|| "no releases found".to_string())
 }
 
 /// True when `tag` names a version strictly newer than this build. A tag or

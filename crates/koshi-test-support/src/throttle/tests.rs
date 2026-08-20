@@ -1,6 +1,7 @@
 //! Tests for the rate-bounded byte pump.
 
 use super::*;
+use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 

@@ -196,8 +196,16 @@ fn encode_named(key: NamedKey, mods: ModFlags, app_cursor_keys: bool) -> Vec<u8>
         // Backspace sends DEL (`0x7f`), or BS (`0x08`) with Control held.
         NamedKey::Backspace => c0(if ctrl { 0x08 } else { 0x7f }, mods),
         NamedKey::Space => c0(if ctrl { 0x00 } else { b' ' }, mods),
-        // Shift+Tab is the one Tab form with a sequence of its own.
-        NamedKey::Tab if mods.contains(ModFlags::SHIFT) => vec![ESC, b'[', b'Z'],
+        // Shift+Tab is the one Tab form with a sequence of its own. Alt adds
+        // the `ESC` prefix that stands for it, the same as every other
+        // Alt-modified key: `<S-Tab>` → `ESC [ Z`, `<A-S-Tab>` → `ESC ESC [ Z`.
+        NamedKey::Tab if mods.contains(ModFlags::SHIFT) => {
+            if mods.contains(ModFlags::ALT) {
+                vec![ESC, ESC, b'[', b'Z']
+            } else {
+                vec![ESC, b'[', b'Z']
+            }
+        }
         NamedKey::Tab => c0(b'\t', mods),
         NamedKey::Up => cursor_key(b'A', param, app_cursor_keys),
         NamedKey::Down => cursor_key(b'B', param, app_cursor_keys),

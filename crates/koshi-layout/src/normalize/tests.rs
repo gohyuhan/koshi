@@ -1,6 +1,6 @@
 //! Tests for layout normalization: cleanup after edits and snapshot restore.
 
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Rect, Size};
 
 use super::*;
 use crate::solver::solve;
@@ -17,7 +17,7 @@ fn live(panes: &[PaneId]) -> HashSet<PaneId> {
 
 /// Returns a standard 80×24 tab rectangle for test layouts.
 fn tab() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
+    Rect::at_origin(Size { cols: 80, rows: 24 })
 }
 
 #[test]

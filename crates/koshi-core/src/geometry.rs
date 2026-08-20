@@ -29,6 +29,18 @@ pub struct Size {
     pub rows: u16,
 }
 
+impl Size {
+    /// The per-axis minimum of the two sizes: the smaller `cols` paired with
+    /// the smaller `rows`. `40×10 min 20×24` → `20×10`.
+    #[must_use]
+    pub fn min_axes(self, other: Size) -> Size {
+        Size {
+            cols: self.cols.min(other.cols),
+            rows: self.rows.min(other.rows),
+        }
+    }
+}
+
 /// A rectangular region of cells, anchored at `origin` with the given `size`.
 ///
 /// ```text
@@ -106,13 +118,19 @@ impl Rect {
         Self { origin, size }
     }
 
+    /// The rect of the given size anchored at the origin `(0, 0)`.
+    #[must_use]
+    pub fn at_origin(size: Size) -> Self {
+        Self {
+            origin: Point { x: 0, y: 0 },
+            size,
+        }
+    }
+
     /// The empty rect at the origin `(0, 0)` with zero size.
     #[must_use]
     pub fn zero() -> Self {
-        Self {
-            origin: Point { x: 0, y: 0 },
-            size: Size { cols: 0, rows: 0 },
-        }
+        Self::at_origin(Size { cols: 0, rows: 0 })
     }
 
     /// `true` when the rect covers no cells (zero width or zero height).

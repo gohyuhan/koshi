@@ -16,10 +16,11 @@ koshi-paths = { version = "0.2.0", path = "../koshi-paths" }
 koshi-renderer = { version = "0.2.0", path = "../koshi-renderer" }
 koshi-runtime = { version = "0.2.0", path = "../koshi-runtime" }
 serde = "1.0.228"
-serde_json = "1.0.150"
+serde_json.workspace = true
 thiserror = "2.0.18"
 tracing = "0.1.44"
-uuid = "1.23.4"
+uuid.workspace = true
 
 [dev-dependencies]
-tempfile = "3.27.0"
+koshi-test-support = { version = "0.2.0", path = "../koshi-test-support" }
+tempfile.workspace = true

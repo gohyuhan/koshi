@@ -13,4 +13,3 @@ pub mod scrollback;
 pub mod selection;
 pub mod state;
 pub mod style;
-pub mod types;

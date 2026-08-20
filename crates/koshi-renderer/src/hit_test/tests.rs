@@ -502,11 +502,36 @@ fn tabline_first_visible_reports_the_window_the_strip_draws() {
         ..ViewerChrome::default()
     };
 
-    assert_eq!(tabline_first_visible(s.layout(peek(2))), 2);
+    assert_eq!(tabline_first_visible(s.layout(peek(2))), Some(2));
     // An index past the last tab clamps to it.
-    assert_eq!(tabline_first_visible(s.layout(peek(99))), 7);
+    assert_eq!(tabline_first_visible(s.layout(peek(99))), Some(7));
     // Following the active tab, which is the first one, starts at the start.
-    assert_eq!(tabline_first_visible(s.layout(chrome())), 0);
+    assert_eq!(tabline_first_visible(s.layout(chrome())), Some(0));
+}
+
+/// A frame that draws no tabline has no first-visible index: every pane
+/// suppressed for want of room, or a zero-size viewport.
+#[test]
+fn tabline_first_visible_is_none_when_no_tabline_is_drawn() {
+    let tab = TabId::new();
+    let mut suppressed = snap(
+        Size { cols: 80, rows: 24 },
+        Size { cols: 80, rows: 24 },
+        &[],
+        &[],
+        &[(tab, "tab")],
+    );
+    suppressed.session.active_tab.all_suppressed = true;
+    assert_eq!(tabline_first_visible(suppressed.layout(chrome())), None);
+
+    let zero = snap(
+        Size { cols: 0, rows: 0 },
+        Size { cols: 0, rows: 0 },
+        &[],
+        &[],
+        &[(tab, "tab")],
+    );
+    assert_eq!(tabline_first_visible(zero.layout(chrome())), None);
 }
 
 /// Two clients viewing the same layout at different sizes hit-test in their own

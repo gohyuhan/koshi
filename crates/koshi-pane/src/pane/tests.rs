@@ -30,12 +30,6 @@ fn a_pane_walks_from_spawning_to_removed_one_event_at_a_time() {
         &PaneLifecycle::Exited { code: Some(0), at }
     );
 
-    // The lifecycle move records the exit inside its own state variant; the
-    // record's separate `exit_code`/`exited_at` fields are set elsewhere and
-    // stay untouched here.
-    assert_eq!(record.exit_code, None);
-    assert_eq!(record.exited_at, None);
-
     let since = SystemTime::UNIX_EPOCH + Duration::from_secs(9);
     record
         .update_lifecycle(PaneLifecycleEvent::CloseRequested { since })
@@ -95,8 +89,7 @@ fn a_rejected_transition_on_a_plugin_pane_reports_the_plugin_kind() {
     let plugin_kind = PaneKind::Plugin {
         plugin_id: PluginId::new(),
     };
-    let mut record =
-        PaneRecord::new_with_kind(PaneId::new(), plugin_kind.clone(), SystemTime::UNIX_EPOCH);
+    let mut record = PaneRecord::new_with_kind(PaneId::new(), plugin_kind, SystemTime::UNIX_EPOCH);
 
     let rejected = record.update_lifecycle(PaneLifecycleEvent::Cleaned);
 

@@ -59,6 +59,7 @@ use koshi_runtime::placeholder::{NullSnapshotProvider, NullStorage, SnapshotProv
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::test_runtime_dir;
 use tempfile::TempDir;
 
 /// How long a poll waits for something the session server has to do before the
@@ -70,17 +71,6 @@ const POLL: Duration = Duration::from_millis(10);
 
 /// The terminal size the session starts at and the attaching client reports.
 const VIEWPORT: Size = Size { cols: 80, rows: 24 };
-
-/// A fresh directory to serve, under a short base so the Unix socket path
-/// stays inside the operating system's path-length cap. Removed when the test
-/// drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
 
 /// One session server running on its own thread, serving a real control socket
 /// in its own runtime directory over a fake PTY backend. Dropping it stops

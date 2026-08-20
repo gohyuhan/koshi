@@ -376,6 +376,14 @@ fn shift_tab_has_a_sequence_of_its_own() {
 }
 
 #[test]
+fn alt_shift_tab_keeps_the_alt_prefix() {
+    assert_eq!(
+        bytes(ModFlags::ALT | ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+        vec![ESC, ESC, b'[', b'Z']
+    );
+}
+
+#[test]
 fn cursor_keys_follow_the_panes_application_mode() {
     let cases = [
         (NamedKey::Up, b'A'),

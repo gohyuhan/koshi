@@ -1,7 +1,7 @@
 //! Tests for resize transactions: moving pane borders by exact signed cell
 //! counts — outward grows the pane, inward shrinks it toward the neighbor.
 
-use koshi_core::geometry::{Point, Size};
+use koshi_core::geometry::Size;
 use koshi_test_support::layout_assert::{
     assert_all_space_occupied, assert_no_outside, assert_no_overlap,
 };
@@ -11,7 +11,7 @@ use crate::solver::solve;
 use crate::tree::{LayoutChild, SplitNode};
 
 fn tab() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 })
+    Rect::at_origin(Size { cols: 80, rows: 24 })
 }
 
 fn leaf(pane: PaneId) -> LayoutChild {
@@ -115,7 +115,7 @@ fn a_shrink_mirrors_the_neighbors_grow_on_the_same_border() {
 fn shrink_blocked_by_the_panes_own_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);
-    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
+    let narrow = Rect::at_origin(Size { cols: 10, rows: 24 });
 
     // a solves to five columns and must keep its border-inclusive four: one
     // is spare — on a shrink, a itself is the donor.
@@ -207,6 +207,28 @@ fn pane_inside_a_stack_resizes_the_stack_as_a_unit() {
     let resized = resize(&tree, tab(), c, Direction::Left, 5).unwrap();
     assert_eq!(solved_size(&resized, tab(), a).cols, 35);
     assert_eq!(solved_size(&resized, tab(), b).cols, 45);
+}
+
+#[test]
+fn resize_inside_a_suppressed_stack_is_refused() {
+    // Hand-built: a stack whose rect cannot hold its headers plus the active
+    // member, so the solver suppresses the whole stack to zero area. A resize
+    // there has no cells to move: it is refused with zero spare and stores no
+    // delta, matching the geometry the solver draws.
+    let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack = SplitNode::stack(vec![a, c], 0);
+    stack.children[0].node = pair(SplitDirection::Horizontal, a, b);
+    let tree = LayoutNode::Split(stack);
+
+    let too_small = Rect::at_origin(Size { cols: 80, rows: 1 });
+    let err = resize(&tree, too_small, b, Direction::Left, 5).unwrap_err();
+    assert_eq!(
+        err,
+        ResizeError::MinSize {
+            requested: 5,
+            spare: 0,
+        }
+    );
 }
 
 #[test]
@@ -312,7 +334,7 @@ fn missing_weights_are_repaired_before_a_resize() {
 fn resize_blocked_by_the_neighbors_floor() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);
-    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
+    let narrow = Rect::at_origin(Size { cols: 10, rows: 24 });
 
     // b solves to five columns and must keep its border-inclusive four: one
     // is spare.
@@ -455,7 +477,7 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
 fn a_request_exactly_at_the_spare_boundary_succeeds_one_past_it_fails() {
     let (a, b) = (PaneId::new(), PaneId::new());
     let tree = pair(SplitDirection::Horizontal, a, b);
-    let narrow = Rect::new(Point { x: 0, y: 0 }, Size { cols: 10, rows: 24 });
+    let narrow = Rect::at_origin(Size { cols: 10, rows: 24 });
 
     // b solves to five columns with a border-inclusive floor of four: one
     // spare cell exactly. Taking exactly that one cell succeeds; asking

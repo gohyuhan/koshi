@@ -18,7 +18,7 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{directional_child_rects, slot_floor, MIN_PANE_SIZE};
+use crate::solver::{directional_child_rects, slot_floor, stack_min_size, MIN_PANE_SIZE};
 use crate::tree::{split_axis, LayoutNode};
 
 /// A rejected resize. The caller's tree is unchanged in every case.
@@ -228,10 +228,15 @@ fn rect_at(tree: &LayoutNode, tab_rect: Rect, path: &[usize], min: Size) -> Rect
                 directional_child_rects(split, rect, min)[index]
             }
             SplitDirection::Stacked => {
-                // Mirror `solve_stacked`: one header row per other member
-                // carved out of the active rect, headers above the active
-                // member shifting it down.
-                if index == split.active_index() {
+                // Mirror `solve_stacked`: a rect that cannot hold every
+                // header plus the active member at minimum size suppresses
+                // the whole stack to zero area; otherwise one header row per
+                // other member is carved out of the active rect, headers
+                // above the active member shifting it down.
+                let needed = stack_min_size(split, min);
+                if rect.size.rows < needed.rows || rect.size.cols < needed.cols {
+                    Rect::zero()
+                } else if index == split.active_index() {
                     let header_rows = split.children.len().saturating_sub(1) as u16;
                     Rect::new(
                         Point {

@@ -1,8 +1,7 @@
-//! `session` domain — skeleton per standard source layout.
+//! The session domain modules: state, lifecycle, tabs, panes, focus, and the
+//! removal cascade.
 
 pub mod cascade;
-pub mod command;
-pub mod event;
 pub mod focus;
 pub mod lifecycle;
 pub mod pane_ops;

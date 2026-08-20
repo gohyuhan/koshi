@@ -45,7 +45,7 @@ use std::fmt;
 
 use koshi_core::action::ActionRef;
 use koshi_core::geometry::Direction;
-use koshi_core::key::{KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ActionArgs, ResolveError};
@@ -536,6 +536,12 @@ pub fn detect_conflicts(
     }
 
     let removals = removal_index(layers, known_modes);
+    let rules = FiringRules {
+        registry,
+        reserved,
+        locked: &locked,
+        max_chord_depth,
+    };
 
     for (index, layer) in layers
         .iter()
@@ -546,35 +552,15 @@ pub fn detect_conflicts(
             layer,
             index,
             &removals,
-            registry,
             known_modes,
-            reserved,
-            &locked,
-            max_chord_depth,
+            &rules,
             &mut diagnostics,
         );
     }
 
-    scan_collisions(
-        layers,
-        &removals,
-        registry,
-        known_modes,
-        reserved,
-        &locked,
-        max_chord_depth,
-        &mut diagnostics,
-    );
+    scan_collisions(layers, &removals, known_modes, &rules, &mut diagnostics);
 
-    let effective = effective_bindings(
-        layers,
-        &removals,
-        registry,
-        known_modes,
-        reserved,
-        &locked,
-        max_chord_depth,
-    );
+    let effective = effective_bindings(layers, &removals, known_modes, &rules);
     scan_prefixes(&effective, &mut diagnostics);
     check_reserved_unlock(&effective, reserved, &locked, &mut diagnostics);
 
@@ -664,6 +650,20 @@ fn holds_reserved_unlock(
     mode == locked && key.chords().len() > 1 && key.chords().contains(&reserved)
 }
 
+/// The inputs the firing judgment reads: the live action table, the
+/// reserved unlock chord, the locked mode's name, and the chord-depth cap.
+/// One value serves a whole detection or merge run.
+pub(crate) struct FiringRules<'a> {
+    /// The live action table each binding is resolved against.
+    pub(crate) registry: &'a ActionRegistry,
+    /// The reserved unlock chord.
+    pub(crate) reserved: KeyChord,
+    /// The locked mode's name.
+    pub(crate) locked: &'a ModeName,
+    /// The chord-depth cap a firing sequence must fit.
+    pub(crate) max_chord_depth: u8,
+}
+
 /// True when the binding participates in firing: the resolver accepts it as
 /// written, no reserved-chord bypass swallows it, and its sequence fits the
 /// chord-depth cap. Only firing bindings claim keys in the collision scan
@@ -675,14 +675,11 @@ pub(crate) fn is_firing(
     mode: &ModeName,
     key: &KeySequence,
     bound: &BoundAction,
-    registry: &ActionRegistry,
-    reserved: KeyChord,
-    locked: &ModeName,
-    max_chord_depth: u8,
+    rules: &FiringRules<'_>,
 ) -> bool {
-    classify(bound, registry) == BindingState::Live
-        && !holds_reserved_unlock(mode, key, reserved, locked)
-        && !exceeds_chord_depth(key, max_chord_depth)
+    classify(bound, rules.registry) == BindingState::Live
+        && !holds_reserved_unlock(mode, key, rules.reserved, rules.locked)
+        && !exceeds_chord_depth(key, rules.max_chord_depth)
 }
 
 /// True when the sequence is longer than the `max_chord_depth` cap. Dropping
@@ -695,12 +692,11 @@ fn exceeds_chord_depth(key: &KeySequence, max_chord_depth: u8) -> bool {
 }
 
 /// True when the leader is reachable by plain typing: a chord leader that is
-/// itself typeable, or a modifier-run leader holding none of Ctrl, Alt, or
-/// Super (Shift alone merges into keys plain typing produces).
+/// itself typeable, or a modifier-run leader whose modifiers plain typing
+/// produces ([`ModFlags::is_typing`] — Shift alone merges into typed keys).
 fn leader_is_typeable(leader: Leader) -> bool {
-    const NON_TEXT: ModFlags = ModFlags::CTRL.union(ModFlags::ALT).union(ModFlags::SUPER);
     match leader {
-        Leader::Mods(mods) => !mods.intersects(NON_TEXT),
+        Leader::Mods(mods) => mods.is_typing(),
         Leader::Chord(chord) => chord.is_typeable(),
     }
 }
@@ -713,16 +709,12 @@ fn leader_is_typeable(leader: Leader) -> bool {
 /// the resolver's refusal, then the reserved-chord bypass, then the chord-depth
 /// cap. Only a binding that participates in firing is checked for a typeable
 /// opening chord, since a dead binding steals nothing.
-#[expect(clippy::too_many_arguments)]
 fn scan_layer(
     layer: &KeyMapLayer,
     index: usize,
     removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
-    reserved: KeyChord,
-    locked: &ModeName,
-    max_chord_depth: u8,
+    rules: &FiringRules<'_>,
     out: &mut Vec<ConflictDiagnostic>,
 ) {
     for (mode, bindings) in &layer.modes {
@@ -737,7 +729,7 @@ fn scan_layer(
             if removed_above(removals, mode, key, index) {
                 continue;
             }
-            match classify(bound, registry) {
+            match classify(bound, rules.registry) {
                 BindingState::Live => {}
                 BindingState::Orphan => {
                     out.push(ConflictDiagnostic::OrphanAction {
@@ -767,7 +759,7 @@ fn scan_layer(
                     continue;
                 }
             }
-            if holds_reserved_unlock(mode, key, reserved, locked) {
+            if holds_reserved_unlock(mode, key, rules.reserved, rules.locked) {
                 out.push(ConflictDiagnostic::DeadUnderReservedUnlock {
                     origin: layer.origin,
                     key: key.clone(),
@@ -775,13 +767,13 @@ fn scan_layer(
                 });
                 continue;
             }
-            if exceeds_chord_depth(key, max_chord_depth) {
+            if exceeds_chord_depth(key, rules.max_chord_depth) {
                 out.push(ConflictDiagnostic::ExceedsChordDepth {
                     origin: layer.origin,
                     mode: mode.clone(),
                     key: key.clone(),
                     action: bound.action.clone(),
-                    max_chord_depth,
+                    max_chord_depth: rules.max_chord_depth,
                 });
                 continue;
             }
@@ -811,15 +803,11 @@ fn scan_layer(
 /// voided the same way — removing a key and rebinding it above is how a
 /// user-authored layer takes a key another user-authored layer holds
 /// without colliding.
-#[expect(clippy::too_many_arguments)]
 fn scan_collisions(
     layers: &[KeyMapLayer],
     removals: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
-    reserved: KeyChord,
-    locked: &ModeName,
-    max_chord_depth: u8,
+    rules: &FiringRules<'_>,
     out: &mut Vec<ConflictDiagnostic>,
 ) {
     let mut claims: BTreeMap<(&ModeName, &KeySequence), Vec<(LayerOrigin, &BoundAction)>> =
@@ -834,16 +822,7 @@ fn scan_collisions(
                 continue;
             }
             for (key, bound) in &bindings.keys {
-                if removed_above(removals, mode, key, index)
-                    || !is_firing(
-                        mode,
-                        key,
-                        bound,
-                        registry,
-                        reserved,
-                        locked,
-                        max_chord_depth,
-                    )
+                if removed_above(removals, mode, key, index) || !is_firing(mode, key, bound, rules)
                 {
                     continue;
                 }
@@ -884,11 +863,8 @@ fn scan_collisions(
 fn effective_bindings<'a>(
     layers: &'a [KeyMapLayer],
     removals: &BTreeMap<(&'a ModeName, &'a KeySequence), usize>,
-    registry: &ActionRegistry,
     known_modes: &BTreeSet<ModeName>,
-    reserved: KeyChord,
-    locked: &ModeName,
-    max_chord_depth: u8,
+    rules: &FiringRules<'_>,
 ) -> BTreeMap<&'a ModeName, BTreeMap<&'a KeySequence, (LayerOrigin, &'a BoundAction)>> {
     let mut effective: BTreeMap<&ModeName, BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>> =
         BTreeMap::new();
@@ -899,16 +875,7 @@ fn effective_bindings<'a>(
             }
             let mode_map = effective.entry(mode).or_default();
             for (key, bound) in &bindings.keys {
-                if removed_above(removals, mode, key, index)
-                    || !is_firing(
-                        mode,
-                        key,
-                        bound,
-                        registry,
-                        reserved,
-                        locked,
-                        max_chord_depth,
-                    )
+                if removed_above(removals, mode, key, index) || !is_firing(mode, key, bound, rules)
                 {
                     continue;
                 }

@@ -119,7 +119,7 @@ fn random_edit_sequences_uphold_the_layout_invariants() {
 /// that no panes overlap, no panes leave the tab, minimum sizes are met, space is fully occupied
 /// when the tree fits, all referenced panes are still live, and solving is deterministic.
 fn check_sequence(ops: &[Op], cols: u16, rows: u16) {
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols, rows });
+    let tab = Rect::at_origin(Size { cols, rows });
     let first = PaneId::new();
     let mut tree = LayoutNode::Pane(first);
     let mut live: HashSet<PaneId> = HashSet::from([first]);
@@ -220,7 +220,7 @@ fn normalizing_after_any_random_edit_sequence_is_idempotent() {
 
     TestRunner::new(config)
         .run(&strategy, |(ops, cols, rows)| {
-            let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols, rows });
+            let tab = Rect::at_origin(Size { cols, rows });
             let first = PaneId::new();
             let mut tree = LayoutNode::Pane(first);
             let mut live: HashSet<PaneId> = HashSet::from([first]);
@@ -265,7 +265,7 @@ const PINNED_OPS: [Op; 6] = [
 /// every step, and the run ends on one exact tree and one exact placement.
 #[test]
 fn a_fixed_op_sequence_lands_on_its_exact_layout() {
-    let tab = Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 24 });
+    let tab = Rect::at_origin(Size { cols: 80, rows: 24 });
     let first = PaneId::new();
     let mut tree = LayoutNode::Pane(first);
     let mut live: HashSet<PaneId> = HashSet::from([first]);
@@ -298,10 +298,7 @@ fn a_fixed_op_sequence_lands_on_its_exact_layout() {
     assert_eq!(
         result.panes,
         [
-            (
-                leaves[0],
-                Rect::new(Point { x: 0, y: 0 }, Size { cols: 45, rows: 24 })
-            ),
+            (leaves[0], Rect::at_origin(Size { cols: 45, rows: 24 })),
             (
                 leaves[1],
                 Rect::new(Point { x: 45, y: 0 }, Size { cols: 35, rows: 1 })

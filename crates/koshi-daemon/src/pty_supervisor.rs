@@ -484,7 +484,7 @@ fn serve_request(
         } => match backend.spawn(pane_id, spec, size) {
             // The handle carries no channels: this backend delivers through the
             // sink, and the pane's own record holds the process id.
-            Ok(_handle) => match child_pid(backend, pane_id) {
+            Ok(_handle) => match backend.child_pid(pane_id) {
                 Some(pid) => SupervisorResult::Spawned { pid },
                 None => refused(format!("pane {pane_id} opened but reports no process id")),
             },
@@ -571,16 +571,6 @@ fn close_pane(
     let killed = backend.kill(pane, kill_policy);
     sink.forget(pane);
     killed
-}
-
-/// The process id of `pane`'s child, or `None` when the supervisor does not
-/// hold that pane.
-fn child_pid(backend: &PortablePtyBackend, pane: PaneId) -> Option<u32> {
-    backend
-        .carried_panes()
-        .into_iter()
-        .find(|held| held.pane_id == pane)
-        .map(|held| held.pid)
 }
 
 /// A refusal carrying `message`, under [`IpcErrorCode::Unknown`] — the code for

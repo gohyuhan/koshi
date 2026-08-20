@@ -204,8 +204,6 @@ fn a_pane_record_survives_a_serde_round_trip() {
     };
     record.exit_policy = PaneExitPolicy::RespawnShell;
     record.env = env;
-    record.exited_at = Some(SystemTime::UNIX_EPOCH);
-    record.exit_code = Some(0);
     // Drive to `Exited { code: Some(0), .. }` through legal events.
     record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)

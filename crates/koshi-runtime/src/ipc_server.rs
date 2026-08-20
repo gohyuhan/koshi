@@ -66,7 +66,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, IncomingRequest, IpcErrorCode, IpcErrorPayload, IpcRequestKind, IpcResponse,
     IpcResult, SessionPlane,
 };
-use koshi_ipc::transport::{Connection, Listener, ReadCloser};
+use koshi_ipc::transport::{self, Connection, Listener, ReadCloser};
 use koshi_ipc::validate::{
     reclaim_stale_socket, validate_shared_socket_addr, validate_socket_addr,
 };
@@ -335,7 +335,11 @@ impl IpcServer {
         };
         if let Err(error) = endpoint.write(&endpoint_path) {
             // Dropping the listener releases the address (and unlinks the
-            // socket file on Unix), so the failed start leaves nothing.
+            // socket file on Unix), so the failed start leaves nothing. The
+            // write is atomic, so what may remain at `endpoint_path` is an
+            // older run's file naming the socket just removed — taken away
+            // with it.
+            let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
             remove_socket_file(&addr);
             return Err(error);
@@ -550,36 +554,27 @@ fn accept_loop(
     still_on: Option<&OtherUsersSetting>,
     intake: &Arc<Intake>,
 ) {
-    loop {
-        let connection = listener.accept();
-        if shutting_down.load(Ordering::SeqCst) {
-            break;
-        }
-        match connection {
-            Ok(connection) => {
-                // The OS reports which user opened the connection, so a peer
-                // cannot claim to be another one.
-                let Ok(same_user) = connection.peer_is_same_user() else {
-                    continue;
-                };
-                let Some(served) = intake.accept(&connection) else {
-                    continue;
-                };
-                let peer = admit(same_user, still_on.is_some_and(|still_on| still_on()));
-                // Another local user's connection carries the setting with it,
-                // so each of their requests is checked against it again.
-                let live_setting = if same_user { None } else { still_on.cloned() };
-                // Read for each connection, so a token rotated after this
-                // server started is the one the next Hello is checked against.
-                let token = token.read().expect("token").clone();
-                let inbox_tx = inbox_tx.clone();
-                std::thread::spawn(move || {
-                    serve_connection(connection, token, &inbox_tx, peer, live_setting, &served);
-                });
-            }
-            Err(_) => std::thread::sleep(ACCEPT_RETRY_DELAY),
-        }
-    }
+    transport::accept_until_shutdown(listener, shutting_down, ACCEPT_RETRY_DELAY, |connection| {
+        // The OS reports which user opened the connection, so a peer
+        // cannot claim to be another one.
+        let Ok(same_user) = connection.peer_is_same_user() else {
+            return;
+        };
+        let Some(served) = intake.accept(&connection) else {
+            return;
+        };
+        let peer = admit(same_user, still_on.is_some_and(|still_on| still_on()));
+        // Another local user's connection carries the setting with it,
+        // so each of their requests is checked against it again.
+        let live_setting = if same_user { None } else { still_on.cloned() };
+        // Read for each connection, so a token rotated after this
+        // server started is the one the next Hello is checked against.
+        let token = token.read().expect("token").clone();
+        let inbox_tx = inbox_tx.clone();
+        std::thread::spawn(move || {
+            serve_connection(connection, token, &inbox_tx, peer, live_setting, &served);
+        });
+    });
 }
 
 /// Serve one connection until its peer hangs up or a fault closes it.

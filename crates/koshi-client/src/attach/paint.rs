@@ -75,7 +75,7 @@ fn to_slot(slot: &FrameSlot) -> PaneSlot {
         pane_id: slot.pane_id,
         rect: slot.rect,
         inner_rect: slot.inner_rect,
-        kind: slot.kind.clone(),
+        kind: slot.kind,
         visible: slot.visible,
         suppressed: slot.suppressed,
         dead: slot.dead,

@@ -154,7 +154,7 @@ fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
                     mode: LayoutMode::Tiled,
                     panes: vec![SolvedPane {
                         id: pane,
-                        rect: Rect::new(Point { x: 0, y: 0 }, TAB_VIEWPORT),
+                        rect: Rect::at_origin(TAB_VIEWPORT),
                     }],
                     suppressed: Vec::new(),
                     all_suppressed: false,
@@ -442,7 +442,7 @@ fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
             },
             SolvedPane {
                 id: right,
-                rect: Rect::new(Point { x: 0, y: 0 }, TAB_VIEWPORT),
+                rect: Rect::at_origin(TAB_VIEWPORT),
             },
         ],
     );
@@ -485,7 +485,7 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
         vec![
             SolvedPane {
                 id: left,
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 40, rows: 22 }),
+                rect: Rect::at_origin(Size { cols: 40, rows: 22 }),
             },
             SolvedPane {
                 id: right,
@@ -500,7 +500,7 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
         vec![
             SolvedPane {
                 id: left,
-                rect: Rect::new(Point { x: 0, y: 0 }, TAB_VIEWPORT),
+                rect: Rect::at_origin(TAB_VIEWPORT),
             },
             SolvedPane {
                 id: right,
@@ -549,7 +549,7 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
         solved[0].panes,
         vec![SolvedPane {
             id: pane,
-            rect: Rect::new(Point { x: 0, y: 0 }, TAB_VIEWPORT),
+            rect: Rect::at_origin(TAB_VIEWPORT),
         }],
     );
     assert_eq!(solved[1].client, big);
@@ -558,7 +558,7 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
         solved[1].panes,
         vec![SolvedPane {
             id: pane,
-            rect: Rect::new(Point { x: 0, y: 0 }, TAB_VIEWPORT),
+            rect: Rect::at_origin(TAB_VIEWPORT),
         }],
     );
 }
@@ -594,7 +594,7 @@ fn a_collapsed_stack_member_reports_its_header_strip() {
         vec![
             SolvedPane {
                 id: shown,
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 21 }),
+                rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
             },
             SolvedPane {
                 id: collapsed,
@@ -658,7 +658,7 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
         vec![
             SolvedPane {
                 id: first,
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 80, rows: 21 }),
+                rect: Rect::at_origin(Size { cols: 80, rows: 21 }),
             },
             SolvedPane {
                 id: second,
@@ -748,7 +748,7 @@ fn a_pane_that_no_longer_fits_beside_its_neighbour_is_the_only_one_suppressed() 
         vec![
             SolvedPane {
                 id: left,
-                rect: Rect::new(Point { x: 0, y: 0 }, Size { cols: 6, rows: 4 }),
+                rect: Rect::at_origin(Size { cols: 6, rows: 4 }),
             },
             SolvedPane {
                 id: right,

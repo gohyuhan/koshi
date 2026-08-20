@@ -15,18 +15,7 @@ use koshi_ipc::router::{
     ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Listener;
-use tempfile::TempDir;
-
-/// A fresh directory to stand in for the runtime dir, under a short base so
-/// the Unix socket path stays inside the OS path-length cap. Removed when the
-/// test drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// Serve one router Hello at `runtime_dir`, answering with `named` as the
 /// build. Binds and writes the endpoint file before returning, so a probe

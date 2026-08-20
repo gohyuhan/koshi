@@ -122,6 +122,16 @@ impl fmt::Display for ModFlags {
 /// capital or shifted variant.
 const NON_TEXT: ModFlags = ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
+impl ModFlags {
+    /// True when plain typing can produce a key held with exactly these
+    /// modifiers: none of Control, Alt, or Super is held. Shift alone still
+    /// types — it gives the key's capital or shifted variant.
+    #[must_use]
+    pub const fn is_typing(self) -> bool {
+        !self.intersects(NON_TEXT)
+    }
+}
+
 /// A key that is not a printable character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum NamedKey {
@@ -288,7 +298,7 @@ impl KeyChord {
     /// layer reads this to keep shipped defaults and the lock-mode unlock chord
     /// off keys plain typing would hit.
     pub fn is_typeable(&self) -> bool {
-        !self.mods.intersects(NON_TEXT)
+        self.mods.is_typing()
     }
 }
 

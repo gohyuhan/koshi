@@ -17,17 +17,7 @@ use koshi_ipc::router::{
     RouterResult, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use tempfile::TempDir;
-
-/// A fresh directory to stand in for the runtime dir, under a short base so
-/// the Unix socket path stays inside the OS path-length cap.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// Serve one Hello-only connection as a router would: bind the router's
 /// address, write the endpoint file advertising it, accept one caller, and
@@ -666,4 +656,37 @@ fn an_extracted_binary_is_left_runnable() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o755);
+}
+
+/// The pre-release picker takes the highest version by semver order, never
+/// the newest by publish date: a re-published older-versioned tag loses to a
+/// higher one wherever it sits in the list.
+#[test]
+fn highest_version_picks_semver_order_not_list_order() {
+    let releases = |tags: &[&str]| -> Vec<Release> {
+        tags.iter()
+            .map(|tag| Release {
+                tag_name: (*tag).to_string(),
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        highest_version(releases(&["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0"])).unwrap(),
+        "v0.3.0-rc.10"
+    );
+    // List order plays no part: the highest wins from the front too.
+    assert_eq!(
+        highest_version(releases(&["v0.4.0", "v0.3.0"])).unwrap(),
+        "v0.4.0"
+    );
+    // A tag that is not a version is skipped, not an error.
+    assert_eq!(
+        highest_version(releases(&["nightly", "v0.1.0"])).unwrap(),
+        "v0.1.0"
+    );
+    assert_eq!(
+        highest_version(Vec::new()).unwrap_err(),
+        "no releases found"
+    );
 }

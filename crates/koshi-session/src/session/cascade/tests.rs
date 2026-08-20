@@ -9,7 +9,7 @@
 use std::time::SystemTime;
 
 use koshi_core::event::{Event, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved};
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::MIN_PANE_SIZE;
@@ -28,7 +28,7 @@ const VIEWPORT: Size = Size { cols: 80, rows: 24 };
 
 /// Returns a rect covering the full viewport (80×24), used as the layout bounds when solving tab geometry.
 fn rect() -> Rect {
-    Rect::new(Point { x: 0, y: 0 }, VIEWPORT)
+    Rect::at_origin(VIEWPORT)
 }
 
 /// Creates a pane record with the specified lifecycle state and exit policy.
@@ -210,6 +210,46 @@ fn removing_a_focused_pane_focuses_a_survivor() {
 }
 
 #[test]
+fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
+    // Registry/layout desync: the registry holds A and B, the layout names
+    // only B. Removing A must still move focus and zoom off it, or the
+    // client keeps pointing at a pane with no registry record.
+    let tab_id = TabId::new();
+    let (a, b) = (PaneId::new(), PaneId::new());
+    let mut session = session_with(
+        vec![single_pane_tab(tab_id, b)],
+        vec![
+            record(a, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+            record(b, PaneLifecycle::Running, PaneExitPolicy::CloseOnExit),
+        ],
+    );
+    let mut client = focused_client(session.id, tab_id, a);
+    client.zoom_pane(tab_id, a);
+    let client_id = client.id();
+    session.attach_client(client);
+
+    let events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        a,
+        rect(),
+        MIN_PANE_SIZE,
+        EmptyTabPolicy::CloseTab,
+    );
+
+    let client = session.clients.get(client_id).unwrap();
+    assert_eq!(client.focused_pane(tab_id), Some(b));
+    assert_eq!(client.zoomed_pane(tab_id), None);
+    assert!(session.panes.get(a).is_none());
+    // The layout never held A, so no layout change is announced.
+    assert!(!events.iter().any(|e| matches!(e, Event::LayoutChanged(_))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::PaneFocused(p) if p.pane_id == b && p.client_id == client_id)));
+    assert_eq!(session.validate(), Ok(()));
+}
+
+#[test]
 fn removing_a_nonfocused_pane_leaves_focus_untouched() {
     let tab_id = TabId::new();
     let (a, b) = (PaneId::new(), PaneId::new());
@@ -321,7 +361,7 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
 
     // A rect narrower than `MIN_PANE_SIZE` suppresses the survivor, so focus
     // recovery finds no focusable pane though the tab still holds one.
-    let tiny = Rect::new(Point { x: 0, y: 0 }, Size { cols: 1, rows: 1 });
+    let tiny = Rect::at_origin(Size { cols: 1, rows: 1 });
     let events = remove_pane_cascade(
         &mut session,
         tab_id,

@@ -194,6 +194,13 @@ fn reverted_defaults_to_false() {
 }
 
 #[test]
+fn with_reverted_marks_every_modes_hints() {
+    let catalog = catalog().with_reverted();
+    assert!(catalog.hints_for(LockMode::Normal).reverted);
+    assert!(catalog.hints_for(LockMode::Locked).reverted);
+}
+
+#[test]
 fn frames_share_the_per_mode_data_by_reference() {
     let catalog = catalog();
     let first = catalog.hints_for(LockMode::Normal);

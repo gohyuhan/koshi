@@ -36,7 +36,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::registry::ActionRegistry;
 
-use crate::conflict::{is_firing, removal_index, removed_above, KeyMapLayer, LayerOrigin};
+use crate::conflict::{
+    is_firing, removal_index, removed_above, FiringRules, KeyMapLayer, LayerOrigin,
+};
 use crate::types::{BoundAction, KeybindingsConfig, ModeName};
 
 /// One merged binding: what fires on the key plus the layer that authored
@@ -104,6 +106,12 @@ pub fn merge_keymaps(
     let reserved = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
     let locked = ModeName::new("locked");
     let removals = removal_index(layers, known_modes);
+    let rules = FiringRules {
+        registry,
+        reserved,
+        locked: &locked,
+        max_chord_depth,
+    };
 
     let mut modes: BTreeMap<ModeName, MergedModeMap> = BTreeMap::new();
 
@@ -117,15 +125,7 @@ pub fn merge_keymaps(
             merged.removed_keys.extend(bindings.removed.iter().cloned());
 
             for (key, bound) in &bindings.keys {
-                if !is_firing(
-                    mode,
-                    key,
-                    bound,
-                    registry,
-                    reserved,
-                    &locked,
-                    max_chord_depth,
-                ) {
+                if !is_firing(mode, key, bound, &rules) {
                     continue;
                 }
                 if removed_above(&removals, mode, key, index) {

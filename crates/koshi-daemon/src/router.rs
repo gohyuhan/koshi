@@ -69,7 +69,7 @@ use koshi_ipc::router::{
     SessionServerReady, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::tls;
-use koshi_ipc::transport::{Connection, Listener};
+use koshi_ipc::transport::{self, Connection, Listener};
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_addr};
 
 use koshi_link::ipc_client;
@@ -576,27 +576,18 @@ fn start_accept_thread(
 }
 
 /// Accept connections until the shutdown flag is set, giving each its own
-/// serving thread. A failed accept pauses briefly and retries.
+/// serving thread.
 fn accept_loop(
     listener: &Listener,
     token: &ConnectionToken,
     events_tx: &Sender<RouterEvent>,
     shutting_down: &AtomicBool,
 ) {
-    loop {
-        let connection = listener.accept();
-        if shutting_down.load(Ordering::SeqCst) {
-            break;
-        }
-        match connection {
-            Ok(connection) => {
-                let token = token.clone();
-                let events_tx = events_tx.clone();
-                std::thread::spawn(move || serve_connection(connection, token, &events_tx));
-            }
-            Err(_) => std::thread::sleep(ACCEPT_RETRY_DELAY),
-        }
-    }
+    transport::accept_until_shutdown(listener, shutting_down, ACCEPT_RETRY_DELAY, |connection| {
+        let token = token.clone();
+        let events_tx = events_tx.clone();
+        std::thread::spawn(move || serve_connection(connection, token, &events_tx));
+    });
 }
 
 /// Serve one router connection until its peer hangs up or a fault closes it.

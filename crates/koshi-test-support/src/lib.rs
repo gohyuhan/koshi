@@ -2,8 +2,8 @@
 //!
 //! The crate holds an event-sequence recorder, an in-memory fake PTY
 //! (pseudo-terminal, the virtual terminal a shell process runs inside)
-//! backend, layout invariant assertions, and a rate-bounded byte pump.
-//! [`fixtures`] is empty.
+//! backend, layout invariant assertions, a rate-bounded byte pump, and the
+//! shared runtime-directory fixture.
 
 /// Deterministic event-sequence recorder for command-transaction tests.
 ///
@@ -18,7 +18,7 @@ pub mod event_queue;
 /// allowing tests to drive output and child-exit on demand.
 pub mod fake_pty;
 
-/// Test fixtures shared across the suite. The module is empty.
+/// Test fixtures shared across the suite: the temporary runtime directory.
 pub mod fixtures;
 
 /// Layout invariant assertions for pure-layout tests.

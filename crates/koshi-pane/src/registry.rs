@@ -31,7 +31,7 @@ impl PaneRegistry {
         if self.records.contains_key(&pane_record.id()) {
             return Err(PaneRegistryError::DuplicateId {
                 id: pane_record.id(),
-                kind: pane_record.kind().clone(),
+                kind: *pane_record.kind(),
             });
         }
         self.records.insert(pane_record.id(), pane_record);
@@ -52,7 +52,7 @@ impl PaneRegistry {
     }
 
     /// Returns a mutable reference to the record for `pane_id`. Use it to edit
-    /// fields in place, such as the lifecycle state or the exit code. Returns
+    /// fields in place, such as the policies or the working directory. Returns
     /// `None` when the id is not registered.
     ///
     /// The `id` field stays read-only, and [`PaneRecord::id`] reads it. To

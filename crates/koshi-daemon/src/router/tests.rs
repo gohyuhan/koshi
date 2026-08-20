@@ -23,24 +23,13 @@ use koshi_ipc::endpoint::{advert_path, shared_socket_addr};
 use koshi_ipc::protocol::{
     IncomingResponse, IpcRequest, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
-use koshi_ipc::remote_tokens::{hash_token, TokenEntry, TOKEN_STORE_FORMAT};
+use koshi_ipc::remote_tokens::{hash_token, TokenEntry, TokenRecord, TOKEN_STORE_FORMAT};
 use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
 };
 use koshi_link::remote_client::{self, DIAL_WAIT};
-use tempfile::TempDir;
-
-/// A fresh directory to stand in for the runtime dir, under a short base so
-/// the Unix socket path stays inside the OS path-length cap. Removed when the
-/// test drops it.
-fn test_runtime_dir() -> TempDir {
-    #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
-}
+use koshi_test_support::fixtures::test_runtime_dir;
 
 /// One list holding `entries`, each given as its id and its name.
 fn registry_of(entries: &[(SessionId, &str)]) -> Registry {
@@ -1818,6 +1807,96 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     );
     drop(stop_session);
     session_server.join().expect("the stand-in session ended");
+}
+
+#[test]
+fn a_grant_cuts_only_the_standing_connection_of_its_identity_and_scope() {
+    // Five records stand in the store; the grant for alice on `HostWide`
+    // replaces exactly the one that is live on that identity and scope.
+    // A revoked record, an expired one, another scope, and another identity
+    // keep their connections.
+    let runtime_dir = test_runtime_dir();
+    let data_dir = runtime_dir.path().join("data");
+    let token_path = store_path(&data_dir);
+    std::fs::create_dir_all(&data_dir).expect("create the data directory");
+
+    let now = SystemTime::now();
+    let hour = Duration::from_secs(3600);
+    let record = |identity: &str,
+                  hash: char,
+                  scope: TokenScope,
+                  expires_at: Option<SystemTime>,
+                  revoked_at: Option<SystemTime>| TokenRecord {
+        identity: identity.to_string(),
+        hash: hash.to_string().repeat(64),
+        scope,
+        issued_at: now - hour,
+        expires_at,
+        last_used_at: None,
+        revoked_at,
+    };
+    let other_session = SessionId::new();
+    let mut store = TokenStore::new();
+    store
+        .records
+        .push(record("alice", 'a', TokenScope::HostWide, None, None));
+    store
+        .records
+        .push(record("alice", 'b', TokenScope::HostWide, None, Some(now)));
+    store.records.push(record(
+        "alice",
+        'c',
+        TokenScope::HostWide,
+        Some(now - hour),
+        None,
+    ));
+    store.records.push(record(
+        "alice",
+        'd',
+        TokenScope::Session(other_session),
+        None,
+        None,
+    ));
+    store
+        .records
+        .push(record("bob", 'e', TokenScope::HostWide, None, None));
+    store.write(&token_path).expect("the store is written");
+
+    let mut remote = no_remote();
+    let mut held_callers = Vec::new();
+    for (index, hash) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+        let (caller, served) = loopback_pair();
+        held_callers.push(caller);
+        remote.live.push(LiveRemote {
+            hash: hash.to_string().repeat(64),
+            stream: served,
+            id: index as u64,
+        });
+    }
+
+    let result = grant_token(
+        Some(&token_path),
+        &mut remote,
+        "alice".to_string(),
+        TokenScope::HostWide,
+        None,
+    );
+
+    assert!(
+        matches!(result, RouterResult::Granted { replaced: true, .. }),
+        "the standing alice grant is reported replaced"
+    );
+    let kept: Vec<String> = remote.live.iter().map(|live| live.hash.clone()).collect();
+    assert_eq!(
+        kept,
+        vec![
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+        ],
+        "only the replaced token's connection was cut"
+    );
 }
 
 #[test]

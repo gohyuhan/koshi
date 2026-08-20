@@ -24,9 +24,6 @@ pub mod portable;
 /// PTY resize operations.
 pub mod resize;
 
-/// Shared type definitions.
-pub mod types;
-
 /// The `PtyBackend` trait and the `PtyHandle` a spawned pane is driven
 /// through; the concrete backend built on `portable-pty` lives in [`portable`].
 pub mod backend;

@@ -1037,6 +1037,7 @@ dependencies = [
  "koshi-paths",
  "koshi-renderer",
  "koshi-runtime",
+ "koshi-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -1196,7 +1197,9 @@ name = "koshi-test-support"
 version = "0.2.0"
 dependencies = [
  "koshi-core",
+ "koshi-ipc",
  "koshi-pty",
+ "tempfile",
 ]
 
 [[package]]

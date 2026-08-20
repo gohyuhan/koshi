@@ -258,7 +258,7 @@ pub fn min_size(node: &LayoutNode, default_min: Size) -> Size {
 
 /// The smallest rectangle a stack can be solved into: its widest member by
 /// one header row per collapsed member plus the active member's rows.
-fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
+pub(crate) fn stack_min_size(split: &SplitNode, default_min: Size) -> Size {
     let cols = split
         .children
         .iter()

@@ -294,3 +294,24 @@ fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
         )
     );
 }
+
+// The hidden-line reader over an in-memory stream: Enter ends the entry,
+// backspace removes the last byte, Ctrl-C empties it, and end of stream ends
+// the entry where it stands.
+#[test]
+fn read_hidden_line_edits_and_terminators() {
+    let mut plain = std::io::Cursor::new(b"secret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut plain).unwrap(), "secret");
+
+    let mut carriage = std::io::Cursor::new(b"secret\rrest".to_vec());
+    assert_eq!(read_hidden_line(&mut carriage).unwrap(), "secret");
+
+    let mut backspaced = std::io::Cursor::new(b"secrex\x7ft\n".to_vec());
+    assert_eq!(read_hidden_line(&mut backspaced).unwrap(), "secret");
+
+    let mut interrupted = std::io::Cursor::new(b"sec\x03ret\n".to_vec());
+    assert_eq!(read_hidden_line(&mut interrupted).unwrap(), "");
+
+    let mut ended = std::io::Cursor::new(b"secret".to_vec());
+    assert_eq!(read_hidden_line(&mut ended).unwrap(), "secret");
+}

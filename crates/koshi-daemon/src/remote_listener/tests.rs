@@ -12,6 +12,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use super::*;
 
+use koshi_core::ids::SessionId;
+
 /// The address `10.0.0.<last>`, for naming distinct callers in a test.
 fn caller(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
@@ -403,6 +405,128 @@ fn one_answer_goes_out_as_a_big_endian_length_and_then_its_json() {
         length.to_le_bytes(),
         "a {} byte payload names different bytes each way round",
         payload.len()
+    );
+}
+
+/// A `Vec`-backed writing half standing in for the TLS one: bytes are
+/// recorded, and a deadline is taken and ignored.
+struct RecordedWriter(Vec<u8>);
+
+impl Write for RecordedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for RecordedWriter {
+    fn set_deadline(&mut self, _at: Option<Instant>) {}
+}
+
+/// The server frames `bytes` holds, each read as a 4-byte big-endian length
+/// and then its JSON.
+fn server_frames(mut bytes: &[u8]) -> Vec<RemoteServerFrame> {
+    let mut frames = Vec::new();
+    while !bytes.is_empty() {
+        let (length, rest) = bytes.split_at(4);
+        let len = u32::from_be_bytes(length.try_into().expect("a 4-byte length")) as usize;
+        let (payload, rest) = rest.split_at(len);
+        frames.push(serde_json::from_slice(payload).expect("a server frame decodes"));
+        bytes = rest;
+    }
+    frames
+}
+
+#[test]
+fn one_admitted_connection_lists_and_then_attaches() {
+    // The frame loop answers a `List` and keeps reading, so the same
+    // connection may look at the sessions and then attach to one.
+    let session = SessionId::new();
+    let endpoint = PathBuf::from("endpoint-of-the-session");
+    let held_endpoint = endpoint.clone();
+    let (admissions, asked) = mpsc::channel();
+    let dispatcher = std::thread::spawn(move || loop {
+        match asked.recv() {
+            Ok(RouterEvent::Admission(AdmissionAsk::Rows { scope, reply })) => {
+                assert_eq!(scope, TokenScope::HostWide);
+                let _ = reply.send(vec![RemoteSessionRow {
+                    id: session,
+                    name: "S-quiet-lake".to_string(),
+                }]);
+            }
+            Ok(RouterEvent::Admission(AdmissionAsk::Locate {
+                scope,
+                id,
+                selector,
+                reply,
+            })) => {
+                assert_eq!(scope, TokenScope::HostWide);
+                assert_eq!(id, 7);
+                assert_eq!(selector, SessionSelector::Id(session));
+                let _ = reply.send(Some(held_endpoint.clone()));
+            }
+            _ => return,
+        }
+    });
+
+    let mut request = framed(&RemoteClientFrame::List);
+    request.extend(framed(&RemoteClientFrame::Attach {
+        session: SessionSelector::Id(session),
+    }));
+    let mut reader = Cursor::new(request);
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 7,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, Some(endpoint));
+    assert_eq!(
+        server_frames(&writer.0),
+        vec![RemoteServerFrame::Sessions {
+            rows: vec![RemoteSessionRow {
+                id: session,
+                name: "S-quiet-lake".to_string(),
+            }],
+        }],
+        "the list was answered and the attach wrote nothing itself"
+    );
+    drop(admissions);
+    dispatcher.join().expect("the stand-in dispatcher ended");
+}
+
+#[test]
+fn a_second_hello_on_an_admitted_connection_is_refused() {
+    // The Hello belongs to admission; an admitted connection sending another
+    // one is refused and the connection ends unattached.
+    let (admissions, _asked) = mpsc::channel();
+    let mut reader = Cursor::new(framed(&RemoteClientFrame::Hello {
+        min_remote_version: 1,
+        max_remote_version: 1,
+        min_protocol_version: 1,
+        max_protocol_version: 1,
+        token: ConnectionToken::new("alreadyAdmitted"),
+    }));
+    let mut writer = RecordedWriter(Vec::new());
+    let admitted = Admitted {
+        scope: TokenScope::HostWide,
+        id: 3,
+    };
+
+    let attached = admitted_frames(&mut reader, &mut writer, &admitted, &admissions);
+
+    assert_eq!(attached, None);
+    assert_eq!(
+        server_frames(&writer.0),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
     );
 }
 

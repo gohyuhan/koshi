@@ -275,6 +275,38 @@ fn coming_soon_seeds_are_pinned() {
     assert_eq!(coming_soon, expected);
 }
 
+/// Pins which seeds are continuous: exactly the resize-pane and focus-pane
+/// families. A new member of either family added without the `continuous`
+/// flag — or the flag appearing on any other action — changes this list and
+/// fails the assert.
+#[test]
+fn continuous_seeds_are_pinned() {
+    let mut continuous: Vec<String> = core_action_seeds()
+        .iter()
+        .filter(|(_, metadata)| metadata.continuous)
+        .map(|(action, _)| action.to_string())
+        .collect();
+    continuous.sort();
+
+    let mut expected = [
+        "core:resize-pane",
+        "core:resize-pane-left",
+        "core:resize-pane-down",
+        "core:resize-pane-up",
+        "core:resize-pane-right",
+        "core:focus-pane",
+        "core:focus-pane-left",
+        "core:focus-pane-down",
+        "core:focus-pane-up",
+        "core:focus-pane-right",
+    ]
+    .map(String::from)
+    .to_vec();
+    expected.sort();
+
+    assert_eq!(continuous, expected);
+}
+
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
 /// changes this list and fails the assert.
 #[test]

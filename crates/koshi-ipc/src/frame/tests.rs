@@ -99,7 +99,7 @@ fn frame() -> PaintedFrame {
             window: Some(FrameWindow {
                 cols: 2,
                 rows: vec![FrameRow::from_cells(
-                    &[
+                    [
                         cell('h', FrameColor::Default),
                         cell('i', FrameColor::Default),
                     ],
@@ -136,7 +136,7 @@ fn frame() -> PaintedFrame {
 fn an_eighty_column_blank_row_travels_as_one_run() {
     let cells: Vec<FrameCell> = std::iter::repeat_n(blank(), 80).collect();
 
-    let row = FrameRow::from_cells(&cells, FrameRowEnd::Hard);
+    let row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         row.runs,
@@ -161,7 +161,7 @@ fn stretches_of_two_styles_fold_into_one_run_each() {
         red.clone(),
     ];
 
-    let row = FrameRow::from_cells(&cells, FrameRowEnd::Hard);
+    let row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         row.runs,
@@ -187,7 +187,7 @@ fn stretches_of_two_styles_fold_into_one_run_each() {
 fn a_run_longer_than_a_count_can_hold_splits_at_the_cap() {
     let cells: Vec<FrameCell> = std::iter::repeat_n(blank(), 70_000).collect();
 
-    let row = FrameRow::from_cells(&cells, FrameRowEnd::Hard);
+    let row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         row.runs,
@@ -207,7 +207,7 @@ fn a_run_longer_than_a_count_can_hold_splits_at_the_cap() {
 
 #[test]
 fn an_empty_row_folds_to_no_runs_and_expands_to_no_cells() {
-    let row = FrameRow::from_cells(&[], FrameRowEnd::Hard);
+    let row = FrameRow::from_cells([], FrameRowEnd::Hard);
 
     assert_eq!(row.runs, Vec::new());
     assert_eq!(row.cells(), Vec::new());
@@ -388,7 +388,7 @@ fn a_cell_value_this_build_has_no_name_for_falls_back() {
 #[test]
 fn a_wrapped_row_carries_its_ending_and_an_ended_row_leaves_it_off() {
     let encoded =
-        |end| serde_json::to_value(FrameRow::from_cells(&[blank()], end)).expect("a row encodes");
+        |end| serde_json::to_value(FrameRow::from_cells([blank()], end)).expect("a row encodes");
 
     assert_eq!(encoded(FrameRowEnd::Soft)["end"], json!("Soft"));
     assert_eq!(encoded(FrameRowEnd::SoftWide)["end"], json!("SoftWide"));
@@ -399,7 +399,7 @@ fn a_wrapped_row_carries_its_ending_and_an_ended_row_leaves_it_off() {
 fn a_row_reads_back_with_the_ending_it_was_written_with() {
     for end in [FrameRowEnd::Hard, FrameRowEnd::Soft, FrameRowEnd::SoftWide] {
         let text =
-            serde_json::to_string(&FrameRow::from_cells(&[blank()], end)).expect("a row encodes");
+            serde_json::to_string(&FrameRow::from_cells([blank()], end)).expect("a row encodes");
 
         let read: FrameRow = serde_json::from_str(&text).expect("a row decodes");
 

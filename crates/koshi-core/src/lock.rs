@@ -32,6 +32,15 @@ pub enum LockMode {
 }
 
 impl LockMode {
+    /// Whether input that binds nothing reaches the pane in this mode.
+    /// `Normal` and `Locked` pass what they do not bind; the modal layers
+    /// (`Resize`, `PaneMode`, `TabMode`, `ScrollMode`) own the keyboard while
+    /// they are held and discard it.
+    #[must_use]
+    pub fn passes_to_pane(self) -> bool {
+        matches!(self, LockMode::Normal | LockMode::Locked)
+    }
+
     /// Every built-in mode, in declaration order. The startup mode
     /// registration and the keymap layers iterate this so the built-in set
     /// is defined once.

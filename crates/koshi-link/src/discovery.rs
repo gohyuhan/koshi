@@ -110,6 +110,17 @@ impl Discovered {
         self.unasked == 0
     }
 
+    /// Sort the sessions by name and then id, the order
+    /// [`sessions`](Self::sessions) documents.
+    pub fn sort_sessions(&mut self) {
+        self.sessions.sort_by(|a, b| {
+            a.session
+                .name
+                .cmp(&b.session.name)
+                .then(a.session.id.cmp(&b.session.id))
+        });
+    }
+
     /// The failure for a target that none of the answering sessions holds:
     /// genuinely not found when every session answered, otherwise a report
     /// that one of them could not be asked.
@@ -196,12 +207,7 @@ pub fn fetch_all(runtime_dir: &Path) -> Discovered {
             ipc_client::fetch_foreign_overview(session_id, &socket),
         );
     }
-    found.sessions.sort_by(|a, b| {
-        a.session
-            .name
-            .cmp(&b.session.name)
-            .then(a.session.id.cmp(&b.session.id))
-    });
+    found.sort_sessions();
     found
 }
 

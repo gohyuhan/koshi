@@ -74,6 +74,9 @@ pub(crate) fn register_running_pane(
 /// [`Event::TabFocused`] (only when a client was switched), then
 /// [`Event::PaneCreated`], [`Event::LayoutChanged`], and — only when
 /// `focus_client` applies — [`Event::PaneFocused`], in that order.
+///
+/// An unknown `tab_id` is a no-op with no events: nothing is registered and
+/// nothing is emitted.
 #[must_use]
 pub fn commit_new_pane(
     session: &mut Session,
@@ -84,6 +87,12 @@ pub fn commit_new_pane(
     spec: NewPaneSpec,
     created_at: SystemTime,
 ) -> (Option<TabId>, Vec<Event>) {
+    // An unknown tab is a no-op: registering the pane or emitting events
+    // against a tab the session does not hold would leave an orphaned record.
+    if !session.tabs.contains_key(&tab_id) {
+        return (None, Vec::new());
+    }
+
     // Only a still-attached client can be focused. Resolving it once here keeps
     // the tab switch, focus-MRU record, and `PaneFocused` event in agreement: a
     // stale id focuses nothing, exactly like `None`.

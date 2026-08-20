@@ -246,14 +246,22 @@ pub fn pane_cell_clamped(frame: FrameLayout<'_>, pane_id: PaneId, at: Point) -> 
 }
 
 /// The metadata index of the first tab currently visible in `frame`'s tabline
-/// window.
+/// window, or [`None`] when no tabline is drawn this frame — a zero-size
+/// viewport, or every pane suppressed for want of room.
 ///
 /// The mouse-routing layer reads this to anchor a peek-drag and to step the
 /// window on a wheel scroll. It resolves the same window the renderer draws and
 /// [`hit_test`] classifies.
 #[must_use]
-pub fn tabline_first_visible(frame: FrameLayout<'_>) -> usize {
-    tabline_layout(frame, viewport_area(frame)).first_visible
+pub fn tabline_first_visible(frame: FrameLayout<'_>) -> Option<usize> {
+    let area = viewport_area(frame);
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    if frame.session.active_tab.all_suppressed {
+        return None;
+    }
+    Some(tabline_layout(frame, area).first_visible)
 }
 
 /// The viewing client's whole viewport as a screen rect, origin `(0, 0)`. A
