@@ -595,8 +595,8 @@ pub fn run_remote(
 /// and the sessions on every saved server that answered.
 ///
 /// A saved server that answered and did not admit its secret prints one line
-/// naming the command that replaces that secret. A server not heard from inside
-/// [`REACH_WAIT`] is left off the list.
+/// on stderr naming the command that replaces that secret. A server not heard
+/// from inside [`REACH_WAIT`] prints one stderr line and is left off the list.
 fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
     let reached = reachable_rows();
     let offered = reached
@@ -628,8 +628,8 @@ fn attach_picked(runtime_dir: PathBuf) -> Result<(), CliError> {
 /// The sessions on every saved server that answered inside [`REACH_WAIT`], each
 /// beside the name of the server serving it.
 ///
-/// A refused secret prints the command that replaces it, since that server is
-/// there and only its secret is stale. A server not heard from is left out.
+/// A refused secret prints one stderr line naming the command that replaces
+/// it. A server not heard from prints one stderr line and contributes no rows.
 fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
     let mut offered = Vec::new();
     for reach in remote_client::reach_all(REACH_WAIT) {
@@ -641,7 +641,9 @@ fn reachable_rows() -> Vec<(String, RemoteSessionRow)> {
                 "{server}: the saved secret was refused; \
                  run `koshi remote set-secret {server}`"
             ),
-            Reach::Unreachable { .. } => {}
+            Reach::Unreachable { server } => {
+                eprintln!("koshi: {server} did not answer; its sessions are not listed");
+            }
         }
     }
     offered

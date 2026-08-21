@@ -506,7 +506,10 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
         koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
     assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
     assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
-    assert_eq!(String::from_utf8_lossy(&listed.stdout), "id  name\n");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        "id  name  server\n"
+    );
 
     let killed = koshi_output(
         koshi_under_as(&koshi, other_home.path(), uid, gid)
