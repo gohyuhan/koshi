@@ -158,10 +158,12 @@ fn session_rows_are_one_row_per_session() {
             SessionRow {
                 id: overviews[0].session.id,
                 name: "quiet-lake".to_string(),
+                server: None,
             },
             SessionRow {
                 id: overviews[1].session.id,
                 name: "amber-fox".to_string(),
+                server: None,
             },
         ]
     );
@@ -450,10 +452,12 @@ fn two_running_sessions_merge_into_one_listing() {
             SessionRow {
                 id: amber_id,
                 name: "amber-fox".to_string(),
+                server: None,
             },
             SessionRow {
                 id: quiet_id,
                 name: "quiet-lake".to_string(),
+                server: None,
             },
         ]
     );

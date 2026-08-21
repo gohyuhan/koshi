@@ -75,6 +75,7 @@ fn session_row() -> SessionRow {
     SessionRow {
         id: SessionId::from_uuid(fixed_uuid()),
         name: "quiet-lake".to_string(),
+        server: None,
     }
 }
 
@@ -143,15 +144,31 @@ fn session_json_schema_is_stable() {
 }
 
 #[test]
-fn session_list_json_is_an_array_of_id_and_name() {
+fn session_list_json_is_an_array_of_id_name_and_server() {
     let expected = r#"[
   {
     "id": "00000000-0000-0000-0000-000000000001",
-    "name": "quiet-lake"
+    "name": "quiet-lake",
+    "server": null
   }
 ]
 "#;
     assert_eq!(render_sessions(&[session_row()], FormatArg::Json), expected);
+}
+
+#[test]
+fn session_list_json_names_the_server_of_a_remote_row() {
+    let mut row = session_row();
+    row.server = Some("desk".to_string());
+    let expected = r#"[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "name": "quiet-lake",
+    "server": "desk"
+  }
+]
+"#;
+    assert_eq!(render_sessions(&[row], FormatArg::Json), expected);
 }
 
 #[test]
@@ -322,20 +339,23 @@ fn client_json_schema_is_stable() {
 // --- Table renderings ---
 
 #[test]
-fn session_table_aligns_columns() {
+fn session_table_marks_where_each_session_runs() {
+    let mut remote = session_row();
+    remote.server = Some("desk".to_string());
     let expected = "\
-id                                            name
-session-00000000-0000-0000-0000-000000000001  quiet-lake
+id                                            name        server
+session-00000000-0000-0000-0000-000000000001  quiet-lake  local
+session-00000000-0000-0000-0000-000000000001  quiet-lake  desk
 ";
     assert_eq!(
-        render_sessions(&[session_row()], FormatArg::Table),
+        render_sessions(&[session_row(), remote], FormatArg::Table),
         expected
     );
 }
 
 #[test]
 fn empty_list_table_is_just_the_header() {
-    assert_eq!(render_sessions(&[], FormatArg::Table), "id  name\n");
+    assert_eq!(render_sessions(&[], FormatArg::Table), "id  name  server\n");
 }
 
 #[test]

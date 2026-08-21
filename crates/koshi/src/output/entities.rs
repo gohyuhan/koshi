@@ -126,7 +126,7 @@ fn record<T: Serialize>(
 }
 
 /// Column headers for [`SessionRow`] listings, matching [`session_row_cells`].
-const SESSION_ROW_HEADERS: &[&str] = &["id", "name"];
+const SESSION_ROW_HEADERS: &[&str] = &["id", "name", "server"];
 
 /// Column headers for [`TabRow`] listings, matching [`tab_row_cells`].
 const TAB_ROW_HEADERS: &[&str] = &["id", "name", "session", "session_name"];
@@ -166,9 +166,18 @@ const CLIENT_HEADERS: &[&str] = &[
     "lock",
 ];
 
-/// One [`SessionRow`] as table cells, in [`SESSION_ROW_HEADERS`] order.
+/// One [`SessionRow`] as table cells, in [`SESSION_ROW_HEADERS`] order. The
+/// `server` cell is `local` for a session on this machine, else the saved
+/// server the session runs on.
 fn session_row_cells(session: &SessionRow) -> Vec<String> {
-    vec![session.id.to_string(), session.name.clone()]
+    vec![
+        session.id.to_string(),
+        session.name.clone(),
+        session
+            .server
+            .clone()
+            .unwrap_or_else(|| String::from("local")),
+    ]
 }
 
 /// One [`TabRow`] as table cells, in [`TAB_ROW_HEADERS`] order.

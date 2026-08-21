@@ -364,10 +364,12 @@ fn start_session_server_under(
 #[cfg(unix)]
 fn one_session_listing(session_id: SessionId) -> String {
     let id = session_id.to_string();
+    let name_width = SESSION_NAME.len().max("name".len());
     format!(
-        "{:width$}  name\n{id}  {SESSION_NAME}\n",
+        "{:id_width$}  {:name_width$}  server\n{id}  {SESSION_NAME:name_width$}  local\n",
         "id",
-        width = id.len()
+        "name",
+        id_width = id.len(),
     )
 }
 
@@ -504,7 +506,10 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
         koshi_output(koshi_under_as(&koshi, other_home.path(), uid, gid).arg("list-sessions"));
     assert_eq!(String::from_utf8_lossy(&listed.stderr), "");
     assert_eq!(listed.status.code(), Some(CliExitCode::Success.code()));
-    assert_eq!(String::from_utf8_lossy(&listed.stdout), "id  name\n");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        "id  name  server\n"
+    );
 
     let killed = koshi_output(
         koshi_under_as(&koshi, other_home.path(), uid, gid)

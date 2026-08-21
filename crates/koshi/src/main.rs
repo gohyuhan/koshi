@@ -24,10 +24,11 @@ use koshi_daemon::router;
 use koshi_daemon::session_server::{self, ResumeSupport};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_link::config;
-use koshi_link::discovery;
+use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
+use koshi_link::remote_client::{self, Reach, REACH_WAIT};
 
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
@@ -81,12 +82,19 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             .is_some()
     });
 
-    // `--remote` runs with `attach` and with an action verb. Every other verb,
-    // `--headless`, and a bare `koshi --remote <server>` are refused.
-    if cli.remote.is_some() && !is_action && !matches!(cli.command, Some(CliCommand::Attach { .. }))
+    // `--remote` runs with `attach`, with `list-sessions`, and with an action
+    // verb. Every other verb, `--headless`, and a bare `koshi --remote
+    // <server>` are refused.
+    if cli.remote.is_some()
+        && !is_action
+        && !matches!(
+            cli.command,
+            Some(CliCommand::Attach { .. }) | Some(CliCommand::ListSessions { .. })
+        )
     {
         return Err(CliError::InvalidArgs {
-            detail: "--remote needs a command, such as `koshi attach --remote <server>`"
+            detail: "--remote works with `attach`, `list-sessions`, and the action verbs, \
+                     such as `koshi attach --remote <server>`"
                 .to_string(),
         });
     }
@@ -246,7 +254,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         // The discovery queries read every running session's state and render
         // it here. They dispatch no command and never enter the routing layer
         // the action verbs use.
-        return run_discovery(command);
+        return run_discovery(command, cli.remote.as_deref());
     }
 
     if let Some(CliCommand::Debug { command }) = &cli.command {
@@ -389,14 +397,61 @@ fn finish_command(result: CommandResult) -> Result<(), CliError> {
 /// reports a session that could not answer as a failure. An `inspect` claims
 /// one entity: finding it proves it exists whatever the other sessions would
 /// have said, so a successful one is a success.
-fn run_discovery(command: &CliCommand) -> Result<(), CliError> {
+///
+/// `list-sessions` also lists the sessions on the saved servers: a bare one
+/// sweeps every saved server and appends each session that answered, named
+/// under its server in the `server` column; `--remote <server>` lists that one
+/// server's sessions alone. A saved server that refused the secret, or did
+/// not answer, is named on stderr and its sessions are left out; only a
+/// session on this machine that could not answer fails the listing.
+fn run_discovery(command: &CliCommand, remote: Option<&str>) -> Result<(), CliError> {
+    if let (CliCommand::ListSessions { format }, Some(server)) = (command, remote) {
+        let arg = remote_client::resolve_server(server)?;
+        let (mut link, _) =
+            remote_client::connect_saved(&arg, None, Some(remote_client::REPLY_WAIT))?;
+        let listed = remote_client::list_remote_sessions(&mut link)?;
+        let label = arg.label();
+        let rows: Vec<SessionRow> = listed
+            .into_iter()
+            .map(|row| SessionRow {
+                id: row.id,
+                name: row.name,
+                server: Some(label.clone()),
+            })
+            .collect();
+        print!("{}", output::render_sessions(&rows, *format));
+        return Ok(());
+    }
+
     let runtime_dir = ipc_client::runtime_dir()?;
     let found = targeting::scope_sessions(&runtime_dir, command.discovery_session())?;
     let sessions = found.sessions.as_slice();
 
     let rendered = match command {
         CliCommand::ListSessions { format } => {
-            output::render_sessions(&discovery::session_rows(sessions), *format)
+            let mut rows = discovery::session_rows(sessions);
+            for reach in remote_client::reach_all(REACH_WAIT) {
+                match reach {
+                    Reach::Reached {
+                        server,
+                        rows: listed,
+                    } => {
+                        rows.extend(listed.into_iter().map(|row| SessionRow {
+                            id: row.id,
+                            name: row.name,
+                            server: Some(server.clone()),
+                        }));
+                    }
+                    Reach::Refused { server } => eprintln!(
+                        "koshi: {server}: the saved secret was refused; \
+                         run `koshi remote set-secret {server}`"
+                    ),
+                    Reach::Unreachable { server } => {
+                        eprintln!("koshi: {server} did not answer; its sessions are not listed");
+                    }
+                }
+            }
+            output::render_sessions(&rows, *format)
         }
         CliCommand::ListTabs { format, .. } => {
             output::render_tabs(&discovery::tab_rows(sessions), *format)

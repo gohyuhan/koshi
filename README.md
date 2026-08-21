@@ -294,8 +294,8 @@ every matching id listed.
 
 | Command | Result |
 |---|---|
-| `koshi list-sessions` | List running sessions |
-| `koshi attach [NAME_OR_ID]` | Attach this terminal to that session, or choose from the running ones |
+| `koshi list-sessions` | List running sessions, here and on every saved server that answers |
+| `koshi attach [NAME_OR_ID]` | Attach this terminal to that session, or choose from the running ones, saved servers included |
 | `koshi detach [CLIENT_OR_SESSION] [--all]` | Detach one terminal, or with `--all` every terminal of a session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running session |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tabs |
@@ -376,6 +376,7 @@ invocation against the machine `SERVER` names instead of this one.
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi list-sessions --remote <SERVER>` | List the sessions on the machine `SERVER` names |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
