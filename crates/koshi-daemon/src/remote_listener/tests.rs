@@ -547,3 +547,362 @@ fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
         }
     );
 }
+
+mod bridge_round_trip {
+    //! One remote client served by [`serve_remote`] over real TLS on loopback,
+    //! bridged to a real session server, held open while the session keeps
+    //! emitting events. Every event must reach the remote client promptly and
+    //! the connection must stay up the whole time.
+
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
+    use std::time::SystemTime;
+
+    use super::*;
+
+    use koshi_core::command::{
+        Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, NewTabArgs, TabTarget,
+    };
+    use koshi_core::event::Event;
+    use koshi_core::geometry::Size;
+    use koshi_core::ids::CommandId;
+    use koshi_ipc::event::SessionEvent;
+    use koshi_ipc::protocol::{EventFilterSpec, IpcResponse, IpcResult};
+    use koshi_ipc::remote_state::CERT_FILE_FORMAT;
+    use koshi_ipc::router::SessionSelector;
+    use koshi_link::remote_client;
+    use koshi_pty::backend::state::PtyBackend;
+    use koshi_runtime::ipc_server::IpcServer;
+    use koshi_runtime::placeholder::{
+        NullSnapshotProvider, NullStorage, SnapshotProvider, Storage,
+    };
+    use koshi_runtime::runtime::event::RuntimeEvent;
+    use koshi_runtime::server::Server;
+    use koshi_test_support::fake_pty::FakePtyBackend;
+    use koshi_test_support::fixtures::test_runtime_dir;
+    use tempfile::TempDir;
+
+    const WAIT: Duration = Duration::from_secs(20);
+    const POLL: Duration = Duration::from_millis(10);
+    const VIEWPORT: Size = Size { cols: 80, rows: 24 };
+
+    /// How long the link is held open and driven.
+    const HOLD: Duration = Duration::from_secs(4);
+
+    /// How long one emitted event has to reach the remote client.
+    const EVENT_WAIT: Duration = Duration::from_secs(3);
+
+    /// One session server on its own thread, serving a real control socket in
+    /// its own runtime directory over a fake PTY backend.
+    struct RunningSession {
+        dir: TempDir,
+        id: SessionId,
+        inbox_tx: mpsc::Sender<RuntimeEvent>,
+        dispatcher: Option<JoinHandle<()>>,
+    }
+
+    impl RunningSession {
+        fn start() -> RunningSession {
+            let dir = test_runtime_dir();
+            let id = SessionId::new();
+            let pty = Arc::new(FakePtyBackend::new());
+            let (inbox_tx, inbox_rx) = mpsc::channel();
+
+            let serving_dir = dir.path().to_path_buf();
+            let serving_tx = inbox_tx.clone();
+            let dispatcher = std::thread::spawn(move || {
+                serve_session(&serving_dir, id, pty, inbox_rx, serving_tx);
+            });
+
+            let session = RunningSession {
+                dir,
+                id,
+                inbox_tx,
+                dispatcher: Some(dispatcher),
+            };
+            let deadline = Instant::now() + WAIT;
+            while EndpointFile::read(&EndpointFile::path(session.dir.path(), session.id)).is_err() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the session server never advertised its socket"
+                );
+                std::thread::sleep(POLL);
+            }
+            session
+        }
+
+        fn endpoint_path(&self) -> PathBuf {
+            EndpointFile::path(self.dir.path(), self.id)
+        }
+    }
+
+    impl Drop for RunningSession {
+        fn drop(&mut self) {
+            let _ = self.inbox_tx.send(RuntimeEvent::Quit);
+            if let Some(handle) = self.dispatcher.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn serve_session(
+        runtime_dir: &Path,
+        session_id: SessionId,
+        pty: Arc<FakePtyBackend>,
+        inbox_rx: mpsc::Receiver<RuntimeEvent>,
+        inbox_tx: mpsc::Sender<RuntimeEvent>,
+    ) {
+        let backend: Arc<dyn PtyBackend> = pty;
+        let snapshot_provider: Arc<dyn SnapshotProvider> = Arc::new(NullSnapshotProvider);
+        let storage: Arc<dyn Storage> = Arc::new(NullStorage);
+        let mut server = Server::new(
+            backend,
+            snapshot_provider,
+            storage,
+            inbox_rx,
+            inbox_tx.clone(),
+        );
+        server.load_startup_config(None);
+        server
+            .bootstrap_session(
+                session_id,
+                "quiet-lake".to_string(),
+                VIEWPORT,
+                SystemTime::now(),
+                None,
+            )
+            .expect("the session is seeded");
+
+        let ipc_server = IpcServer::start(runtime_dir, session_id, inbox_tx, None)
+            .expect("the control socket binds");
+        server.attach_ipc_server(ipc_server);
+
+        loop {
+            let now = Instant::now();
+            let event = match server.next_render_wakeup(now) {
+                Some(timeout) => match server.inbox_rx().recv_timeout(timeout) {
+                    Ok(event) => Some(event),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                None => match server.inbox_rx().recv() {
+                    Ok(event) => Some(event),
+                    Err(_) => break,
+                },
+            };
+            let mut quit = false;
+            if let Some(event) = event {
+                quit |= server.handle_runtime_event(event).is_break();
+            }
+            while let Ok(event) = server.inbox_rx().try_recv() {
+                quit |= server.handle_runtime_event(event).is_break();
+            }
+            server.resync_lagged();
+            if server.poll_render(Instant::now()) {
+                server.push_frames();
+            }
+            if quit || server.quit_requested() || !server.has_active_panes() {
+                break;
+            }
+        }
+        server.shutdown();
+    }
+
+    /// Serve one TLS connection on loopback with the real [`serve_remote`],
+    /// answering its admission questions the way the router does: the secret
+    /// is admitted host-wide and every locate answers `endpoint_path`.
+    ///
+    /// Returns the address the client dials.
+    fn start_listener(endpoint_path: PathBuf) -> String {
+        let made = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+            .expect("the test certificate generates");
+        let cert = CertFile {
+            format: CERT_FILE_FORMAT,
+            cert_der: made.cert.der().to_vec(),
+            key_der: made.signing_key.serialize_der(),
+        };
+        let tls = Arc::new(server_config(&cert).expect("the TLS config builds"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
+        let address = listener
+            .local_addr()
+            .expect("read the bound address")
+            .to_string();
+
+        let (admissions_tx, admissions_rx) = mpsc::channel::<RouterEvent>();
+        std::thread::spawn(move || {
+            while let Ok(event) = admissions_rx.recv() {
+                let RouterEvent::Admission(ask) = event else {
+                    continue;
+                };
+                match ask {
+                    AdmissionAsk::Admit { reply, .. } => {
+                        let _ = reply.send(Some(Admitted {
+                            scope: TokenScope::HostWide,
+                            id: 7,
+                        }));
+                    }
+                    AdmissionAsk::Rows { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    AdmissionAsk::Locate { reply, .. } => {
+                        let _ = reply.send(Some(endpoint_path.clone()));
+                    }
+                    AdmissionAsk::Ended { .. } => {}
+                }
+            }
+        });
+
+        std::thread::spawn(move || {
+            let (sock, _) = listener.accept().expect("the listener accepts the client");
+            let counted =
+                InAdmission::enter(&Arc::new(AtomicUsize::new(0))).expect("a fresh count admits");
+            serve_remote(sock, &tls, &admissions_tx, counted);
+        });
+
+        address
+    }
+
+    /// Submit `command` to the session over its own control connection, the
+    /// way `koshi <verb>` does from outside every pane.
+    fn submit(session: &RunningSession, command: Command) -> CommandResult {
+        let endpoint = EndpointFile::read(&session.endpoint_path())
+            .expect("the session server advertises its socket");
+        let mut connection =
+            Connection::connect(&endpoint.socket).expect("the control socket answers");
+        connection
+            .send(&IpcRequest {
+                request_id: 1,
+                kind: IpcRequestKind::Hello {
+                    min_protocol_version: agreed_min(),
+                    max_protocol_version: agreed_max(),
+                    token: endpoint.token.clone(),
+                    remote: false,
+                },
+            })
+            .expect("the server reads the Hello");
+        let hello: IpcResponse = connection.recv().expect("the server answers the Hello");
+        assert!(matches!(hello.result, IpcResult::Hello { .. }));
+
+        let envelope = CommandEnvelope::new(
+            CommandId::new(),
+            CommandSource::external_cli(Some(session.id)),
+            SystemTime::now(),
+            command,
+        );
+        connection
+            .send(&IpcRequest {
+                request_id: 2,
+                kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+            })
+            .expect("the server reads the command");
+        let reply: IpcResponse = connection.recv().expect("the server answers the command");
+        match reply.result {
+            IpcResult::CommandResult(result) => result,
+            other => panic!("the command was answered with {other:?}"),
+        }
+    }
+
+    fn agreed_min() -> u32 {
+        koshi_ipc::protocol::MIN_PROTOCOL_VERSION
+    }
+
+    fn agreed_max() -> u32 {
+        koshi_ipc::protocol::PROTOCOL_VERSION
+    }
+
+    #[test]
+    fn a_bridged_client_keeps_receiving_events_while_the_link_is_held_open() {
+        let session = RunningSession::start();
+        let address = start_listener(session.endpoint_path());
+
+        // Dial through the real TLS doorway and attach, the way
+        // `koshi attach --remote` does.
+        let link = remote_client::connect(
+            &address,
+            &ConnectionToken::new("testSecret"),
+            None,
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("the listener admits the client");
+        let (mut reader, mut writer) =
+            remote_client::attach_remote(link, SessionSelector::Id(session.id))
+                .expect("the attach request is written");
+
+        // The session server's own Hello answer arrives through the bridge.
+        let hello: IpcResponse = reader.recv().expect("the session answers the Hello");
+        assert!(matches!(hello.result, IpcResult::Hello { .. }));
+
+        writer
+            .send(&IpcRequest {
+                request_id: 2,
+                kind: IpcRequestKind::Attach {
+                    viewport: VIEWPORT,
+                    filter: EventFilterSpec::All,
+                    resume: None,
+                    resume_token: None,
+                },
+            })
+            .expect("the attach is written");
+        let reply: IpcResponse = reader.recv().expect("the session answers the attach");
+        let IpcResult::Attached { client_id, .. } = reply.result else {
+            panic!("expected an attach reply, got {:?}", reply.result);
+        };
+
+        // A second tab, so each focus change below moves focus and emits a
+        // critical event.
+        let created = submit(&session, Command::NewTab(NewTabArgs::default()));
+        assert!(
+            matches!(created, CommandResult::Ok { .. }),
+            "the second tab was refused: {created:?}"
+        );
+
+        // Drive the session for the whole hold, one focus change at a time,
+        // and require each one's event on the remote connection promptly.
+        let hold_until = Instant::now() + HOLD;
+        let mut rounds: u32 = 0;
+        while Instant::now() < hold_until {
+            let result = submit(
+                &session,
+                Command::FocusTab(FocusTabArgs {
+                    target: TabTarget::Next,
+                    client: Some(client_id),
+                }),
+            );
+            let focused_onto = match &result {
+                CommandResult::Ok { emitted_events, .. } => match emitted_events.as_slice() {
+                    [Event::TabFocused(payload), ..] => payload.tab_id,
+                    other => panic!("expected a focus event, got {other:?}"),
+                },
+                other => panic!("the focus change was refused: {other:?}"),
+            };
+
+            // Read frames until this round's focus event arrives. Painted
+            // frames and other structure events on the way are read past.
+            let event_deadline = Instant::now() + EVENT_WAIT;
+            loop {
+                reader.set_deadline(Some(event_deadline));
+                let event: SessionEvent = match reader.recv() {
+                    Ok(event) => event,
+                    Err(error) => panic!(
+                        "round {rounds}: the remote stream gave no frame within \
+                         {EVENT_WAIT:?}: {error}"
+                    ),
+                };
+                match event {
+                    SessionEvent::TabFocused { tab_id, .. } if tab_id == focused_onto => break,
+                    _ => {}
+                }
+            }
+            rounds += 1;
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        assert!(
+            rounds >= 12,
+            "the hold made only {rounds} rounds; the link was not exercised"
+        );
+    }
+}

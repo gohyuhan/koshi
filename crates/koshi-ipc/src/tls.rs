@@ -94,6 +94,8 @@ pub fn split_tls(conn: rustls::Connection, sock: TcpStream) -> io::Result<(TlsRe
             sock: read_sock,
             deadline: None,
             raw: Box::new([0u8; RAW_CHUNK]),
+            fed: 0,
+            filled: 0,
         },
         TlsWriter {
             conn: shared,
@@ -126,6 +128,12 @@ pub struct TlsReader {
     /// The buffer each socket read lands in before decryption, allocated once
     /// for the half's lifetime.
     raw: Box<[u8; RAW_CHUNK]>,
+    /// How many of `raw`'s first `filled` bytes the decryption state has
+    /// taken so far. The bytes between `fed` and `filled` are handed to it
+    /// before the socket is read again.
+    fed: usize,
+    /// How many bytes of `raw` the last socket read filled.
+    filled: usize,
 }
 
 impl fmt::Debug for TlsReader {
@@ -172,17 +180,37 @@ impl Read for TlsReader {
                     Err(error) => return Err(error),
                 }
             }
+            // Bytes already off the socket are decrypted before it is read
+            // again. `read_tls` reports how many bytes it took, and takes
+            // more of the rest on the next pass, once `process_new_packets`
+            // has made room.
+            if self.fed < self.filled {
+                let mut conn = self.conn.lock().expect("tls connection");
+                let mut remaining = &self.raw[self.fed..self.filled];
+                self.fed += conn.read_tls(&mut remaining)?;
+                conn.process_new_packets().map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
+                while conn.wants_write() {
+                    set_timeouts_until(&self.sock, self.deadline)?;
+                    conn.write_tls(&mut self.sock)?;
+                }
+                continue;
+            }
             set_timeouts_until(&self.sock, self.deadline)?;
             // The socket read blocks with no lock held, so the writing half
             // keeps working while this half waits.
-            let filled = self.sock.read(&mut self.raw[..])?;
-            let mut conn = self.conn.lock().expect("tls connection");
-            conn.read_tls(&mut &self.raw[..filled])?;
-            conn.process_new_packets()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            while conn.wants_write() {
-                set_timeouts_until(&self.sock, self.deadline)?;
-                conn.write_tls(&mut self.sock)?;
+            self.filled = self.sock.read(&mut self.raw[..])?;
+            self.fed = 0;
+            if self.filled == 0 {
+                // End of stream: hand the empty read to the decryption state,
+                // so the plaintext read above reports a clean close as `Ok(0)`
+                // and a cut stream as `UnexpectedEof`.
+                let mut conn = self.conn.lock().expect("tls connection");
+                conn.read_tls(&mut io::empty())?;
+                conn.process_new_packets().map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
             }
         }
     }
